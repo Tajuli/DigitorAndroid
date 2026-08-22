@@ -9,13 +9,11 @@ import com.tajuli.digitorandroid.editor.model.ColorNode
 import com.tajuli.digitorandroid.editor.model.ColorWheelValue
 import com.tajuli.digitorandroid.editor.model.Curve5
 import com.tajuli.digitorandroid.editor.model.HslQualifier
-import com.tajuli.digitorandroid.editor.model.LogWheels
 import com.tajuli.digitorandroid.editor.model.NodeCorrections
 import com.tajuli.digitorandroid.editor.model.NodeEdge
 import com.tajuli.digitorandroid.editor.model.NodeEffect
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.NodePosition
-import com.tajuli.digitorandroid.editor.model.PrimaryWheels
 import com.tajuli.digitorandroid.editor.model.RgbCurves
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
@@ -25,8 +23,12 @@ import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 @UnstableApi
 class EditorViewModelV4(application: Application) : AndroidViewModel(application) {
@@ -36,6 +38,7 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
         val selectedClipId: String? = null,
         val selectedClipIds: Set<String> = emptySet(),
         val status: String = "Ready",
+        val qualifierPickerActive: Boolean = false,
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -59,6 +62,7 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
             selectedTrackId = state.project.trackContaining(id)?.id ?: state.selectedTrackId,
             selectedClipId = primary,
             selectedClipIds = ids,
+            qualifierPickerActive = false,
         )
     }
 
@@ -118,7 +122,10 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
 
             when (selected.kind) {
                 TrackKind.VIDEO -> {
-                    if (!mime.startsWith("video/")) { skipped++; continue }
+                    if (!mime.startsWith("video/")) {
+                        skipped++
+                        continue
+                    }
                     val group = UUID.randomUUID().toString()
                     val video = TimelineClip(
                         uri = uri.toString(),
@@ -144,8 +151,12 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
                     if (firstSelection == null) firstSelection = ids
                     startUs += durationUs
                 }
+
                 TrackKind.AUDIO -> {
-                    if (!mime.startsWith("audio/")) { skipped++; continue }
+                    if (!mime.startsWith("audio/")) {
+                        skipped++
+                        continue
+                    }
                     val audio = TimelineClip(
                         uri = uri.toString(),
                         label = label,
@@ -161,7 +172,9 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
         }
 
         if (additions.isEmpty()) {
-            _state.value = state.copy(status = if (selected.kind == TrackKind.AUDIO) "A track accepts audio files only" else "V track accepts video files only")
+            _state.value = state.copy(
+                status = if (selected.kind == TrackKind.AUDIO) "A track accepts audio files only" else "V track accepts video files only",
+            )
             return
         }
         val tracks = project.tracks.map { track ->
@@ -192,7 +205,10 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
             val others = track.clips.filter { it.id !in movingIds }
             val previous = others.filter { it.timelineEndUs <= clip.timelineStartUs }.maxByOrNull { it.timelineEndUs }
             val next = others.filter { it.timelineStartUs >= clip.timelineEndUs }.minByOrNull { it.timelineStartUs }
-            lower = max(lower, max(-clip.timelineStartUs, previous?.let { it.timelineEndUs - clip.timelineStartUs } ?: Long.MIN_VALUE / 4))
+            lower = max(
+                lower,
+                max(-clip.timelineStartUs, previous?.let { it.timelineEndUs - clip.timelineStartUs } ?: Long.MIN_VALUE / 4),
+            )
             upper = min(upper, next?.let { it.timelineStartUs - clip.timelineEndUs } ?: Long.MAX_VALUE / 4)
         }
         if (lower > upper) return
@@ -213,41 +229,71 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
         val from = project.trackContaining(clipId) ?: return
         val target = project.track(targetTrackId) ?: return
         if (from.id == target.id || from.kind != target.kind) return
-        if (target.clips.any { other -> other.id != clip.id && clip.timelineStartUs < other.timelineEndUs && clip.timelineEndUs > other.timelineStartUs }) {
+        if (target.clips.any { other ->
+                other.id != clip.id && clip.timelineStartUs < other.timelineEndUs && clip.timelineEndUs > other.timelineStartUs
+            }
+        ) {
             _state.value = state.copy(status = "Cannot drop: target track overlaps")
             return
         }
-        val tracks = project.tracks.map { track -> when (track.id) {
-            from.id -> track.copy(clips = track.clips.filterNot { it.id == clip.id })
-            target.id -> track.copy(clips = track.clips + clip)
-            else -> track
-        } }
-        _state.value = state.copy(project = project.copy(tracks = tracks), selectedTrackId = target.id, status = "Moved to ${target.name}")
+        val tracks = project.tracks.map { track ->
+            when (track.id) {
+                from.id -> track.copy(clips = track.clips.filterNot { it.id == clip.id })
+                target.id -> track.copy(clips = track.clips + clip)
+                else -> track
+            }
+        }
+        _state.value = state.copy(
+            project = project.copy(tracks = tracks),
+            selectedTrackId = target.id,
+            status = "Moved to ${target.name}",
+        )
     }
 
     fun unlinkSelected() {
         val state = _state.value
         val groups = state.selectedClipIds.mapNotNull { state.project.clip(it)?.linkGroupId }.toSet()
-        if (groups.isEmpty()) { _state.value = state.copy(status = "Already unlinked"); return }
+        if (groups.isEmpty()) {
+            _state.value = state.copy(status = "Already unlinked")
+            return
+        }
         val tracks = state.project.tracks.map { track ->
-            track.copy(clips = track.clips.map { clip -> if (clip.linkGroupId in groups) clip.copy(linkGroupId = null) else clip })
+            track.copy(clips = track.clips.map { clip ->
+                if (clip.linkGroupId in groups) clip.copy(linkGroupId = null) else clip
+            })
         }
         val primary = state.selectedClipId
-        _state.value = state.copy(project = state.project.copy(tracks = tracks), selectedClipIds = primary?.let(::setOf).orEmpty(), status = "Unlinked")
+        _state.value = state.copy(
+            project = state.project.copy(tracks = tracks),
+            selectedClipIds = primary?.let(::setOf).orEmpty(),
+            status = "Unlinked",
+        )
     }
 
     fun deleteSelected() {
         val state = _state.value
-        val ids = state.selectedClipIds.ifEmpty { state.selectedClipId?.let { state.project.linkedClipIds(it) }.orEmpty() }
+        val ids = state.selectedClipIds.ifEmpty {
+            state.selectedClipId?.let { state.project.linkedClipIds(it) }.orEmpty()
+        }
         if (ids.isEmpty()) return
-        val tracks = state.project.tracks.map { track -> track.copy(clips = track.clips.filterNot { it.id in ids }) }
-        _state.value = state.copy(project = state.project.copy(tracks = tracks), selectedClipId = null, selectedClipIds = emptySet(), status = "Deleted")
+        val tracks = state.project.tracks.map { track ->
+            track.copy(clips = track.clips.filterNot { it.id in ids })
+        }
+        _state.value = state.copy(
+            project = state.project.copy(tracks = tracks),
+            selectedClipId = null,
+            selectedClipIds = emptySet(),
+            status = "Deleted",
+            qualifierPickerActive = false,
+        )
     }
 
     fun splitSelectedAt(timelineUs: Long) {
         val state = _state.value
         val project = state.project
-        val ids = state.selectedClipIds.ifEmpty { state.selectedClipId?.let { project.linkedClipIds(it) }.orEmpty() }
+        val ids = state.selectedClipIds.ifEmpty {
+            state.selectedClipId?.let { project.linkedClipIds(it) }.orEmpty()
+        }
         if (ids.isEmpty()) return
         val linked = ids.any { project.clip(it)?.linkGroupId != null }
         val leftGroup = if (linked) UUID.randomUUID().toString() else null
@@ -260,7 +306,10 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
                     rebuilt += clip
                 } else {
                     val sourceSplit = clip.sourceInUs + timelineUs - clip.timelineStartUs
-                    rebuilt += clip.copy(sourceOutUs = sourceSplit, linkGroupId = if (clip.linkGroupId == null) null else leftGroup)
+                    rebuilt += clip.copy(
+                        sourceOutUs = sourceSplit,
+                        linkGroupId = if (clip.linkGroupId == null) null else leftGroup,
+                    )
                     val right = clip.copy(
                         id = UUID.randomUUID().toString(),
                         timelineStartUs = timelineUs,
@@ -273,19 +322,31 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
             }
             track.copy(clips = rebuilt)
         }
-        if (rightIds.isEmpty()) { _state.value = state.copy(status = "Put cursor inside selected clip"); return }
+        if (rightIds.isEmpty()) {
+            _state.value = state.copy(status = "Put cursor inside selected clip")
+            return
+        }
         val next = project.copy(tracks = tracks)
         val primary = rightIds.firstOrNull { next.trackContaining(it)?.kind == TrackKind.VIDEO } ?: rightIds.first()
-        _state.value = state.copy(project = next, selectedClipId = primary, selectedClipIds = rightIds, selectedTrackId = next.trackContaining(primary)?.id, status = "Split")
+        _state.value = state.copy(
+            project = next,
+            selectedClipId = primary,
+            selectedClipIds = rightIds,
+            selectedTrackId = next.trackContaining(primary)?.id,
+            status = "Split",
+        )
     }
 
     fun selectNode(nodeId: String) = updatePrimaryClip { clip ->
-        if (clip.nodeGraph.nodes.none { it.id == nodeId }) clip else clip.copy(nodeGraph = clip.nodeGraph.copy(selectedNodeId = nodeId))
+        if (clip.nodeGraph.nodes.none { it.id == nodeId }) clip
+        else clip.copy(nodeGraph = clip.nodeGraph.copy(selectedNodeId = nodeId))
     }
 
     fun moveNode(nodeId: String, dx: Float, dy: Float) = updatePrimaryClip { clip ->
         clip.copy(nodeGraph = clip.nodeGraph.copy(nodes = clip.nodeGraph.nodes.map { node ->
-            if (node.id == nodeId) node.copy(position = NodePosition((node.position.x + dx).coerceAtLeast(8f), (node.position.y + dy).coerceAtLeast(8f))) else node
+            if (node.id == nodeId) {
+                node.copy(position = NodePosition((node.position.x + dx).coerceAtLeast(8f), (node.position.y + dy).coerceAtLeast(8f)))
+            } else node
         }))
     }
 
@@ -294,9 +355,17 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
         val anchor = graph.nodes.firstOrNull { it.id == afterNodeId } ?: return@updatePrimaryClip clip
         if (anchor.kind == NodeKind.OUTPUT) return@updatePrimaryClip clip
         val outgoing = graph.edges.firstOrNull { it.fromId == anchor.id }
-        val shifted = graph.nodes.map { node -> if (node.id != anchor.id && node.position.x > anchor.position.x + 24f) node.copy(position = node.position.copy(x = node.position.x + 126f)) else node }
+        val shifted = graph.nodes.map { node ->
+            if (node.id != anchor.id && node.position.x > anchor.position.x + 24f) {
+                node.copy(position = node.position.copy(x = node.position.x + 126f))
+            } else node
+        }
         val count = shifted.count { it.kind == NodeKind.SERIAL || it.kind == NodeKind.PARALLEL } + 1
-        val node = ColorNode(kind = NodeKind.SERIAL, label = count.toString().padStart(2, '0'), position = NodePosition(anchor.position.x + 126f, anchor.position.y))
+        val node = ColorNode(
+            kind = NodeKind.SERIAL,
+            label = count.toString().padStart(2, '0'),
+            position = NodePosition(anchor.position.x + 126f, anchor.position.y),
+        )
         val edges = graph.edges.filterNot { it == outgoing }.toMutableList()
         edges += NodeEdge(anchor.id, node.id)
         if (outgoing != null) edges += NodeEdge(node.id, outgoing.toId)
@@ -312,14 +381,36 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
             val mixId = graph.edges.firstOrNull { it.fromId == anchor.id }?.toId ?: return@updatePrimaryClip clip
             val mix = graph.nodes.firstOrNull { it.id == mixId && it.kind == NodeKind.MIX } ?: return@updatePrimaryClip clip
             val count = graph.edges.count { it.toId == mix.id }
-            val node = ColorNode(kind = NodeKind.PARALLEL, label = "P${count + 1}", position = NodePosition(anchor.position.x, anchor.position.y + 76f))
-            return@updatePrimaryClip clip.copy(nodeGraph = graph.copy(nodes = graph.nodes + node, edges = graph.edges + listOf(NodeEdge(incoming.fromId, node.id), NodeEdge(node.id, mix.id)), selectedNodeId = node.id))
+            val node = ColorNode(
+                kind = NodeKind.PARALLEL,
+                label = "P${count + 1}",
+                position = NodePosition(anchor.position.x, anchor.position.y + 76f),
+            )
+            return@updatePrimaryClip clip.copy(
+                nodeGraph = graph.copy(
+                    nodes = graph.nodes + node,
+                    edges = graph.edges + listOf(NodeEdge(incoming.fromId, node.id), NodeEdge(node.id, mix.id)),
+                    selectedNodeId = node.id,
+                ),
+            )
         }
         val incoming = graph.edges.firstOrNull { it.toId == anchor.id } ?: return@updatePrimaryClip clip
         val outgoing = graph.edges.firstOrNull { it.fromId == anchor.id } ?: return@updatePrimaryClip clip
-        val shifted = graph.nodes.map { node -> if (node.position.x > anchor.position.x + 20f) node.copy(position = node.position.copy(x = node.position.x + 154f)) else node }
-        val parallel = ColorNode(kind = NodeKind.PARALLEL, label = "P2", position = NodePosition(anchor.position.x, anchor.position.y + 76f))
-        val mixNode = ColorNode(kind = NodeKind.MIX, label = "Mix", position = NodePosition(anchor.position.x + 142f, anchor.position.y + 38f))
+        val shifted = graph.nodes.map { node ->
+            if (node.position.x > anchor.position.x + 20f) {
+                node.copy(position = node.position.copy(x = node.position.x + 154f))
+            } else node
+        }
+        val parallel = ColorNode(
+            kind = NodeKind.PARALLEL,
+            label = "P2",
+            position = NodePosition(anchor.position.x, anchor.position.y + 76f),
+        )
+        val mixNode = ColorNode(
+            kind = NodeKind.MIX,
+            label = "Mix",
+            position = NodePosition(anchor.position.x + 142f, anchor.position.y + 38f),
+        )
         val edges = graph.edges.filterNot { it == outgoing }.toMutableList()
         edges += NodeEdge(incoming.fromId, parallel.id)
         edges += NodeEdge(anchor.id, mixNode.id)
@@ -347,8 +438,13 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
 
     fun addEffectToSelectedNode(name: String, amount: Float = 1f) = updateSelectedEditableNode { node ->
         val existing = node.effects.indexOfFirst { it.name == name }
-        if (existing >= 0) node.copy(effects = node.effects.mapIndexed { index, effect -> if (index == existing) effect.copy(amount = amount, enabled = true) else effect })
-        else node.copy(effects = node.effects + NodeEffect(name = name, amount = amount))
+        if (existing >= 0) {
+            node.copy(effects = node.effects.mapIndexed { index, effect ->
+                if (index == existing) effect.copy(amount = amount, enabled = true) else effect
+            })
+        } else {
+            node.copy(effects = node.effects + NodeEffect(name = name, amount = amount))
+        }
     }
 
     fun setPrimaryWheel(wheel: String, component: String, value: Float) = updateSelectedEditableNode { node ->
@@ -363,12 +459,37 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
         node.copy(advancedColor = node.advancedColor.copy(primary = next))
     }
 
+    fun setPrimaryWheelPuck(wheel: String, x: Float, y: Float) = updateSelectedEditableNode { node ->
+        val p = node.advancedColor.primary
+        val next = when (wheel.lowercase()) {
+            "lift" -> p.copy(lift = p.lift.withPuck(x, y, .72f))
+            "gamma" -> p.copy(gamma = p.gamma.withPuck(x, y, .52f))
+            "gain" -> p.copy(gain = p.gain.withPuck(x, y, .72f))
+            "offset" -> p.copy(offset = p.offset.withPuck(x, y, .52f))
+            else -> p
+        }
+        node.copy(advancedColor = node.advancedColor.copy(primary = next))
+    }
+
     fun setLogWheel(zone: String, component: String, value: Float) = updateSelectedEditableNode { node ->
         val log = node.advancedColor.log
         val next = when (zone.lowercase()) {
             "shadows" -> log.copy(shadows = log.shadows.withComponent(component, value))
             "midtones" -> log.copy(midtones = log.midtones.withComponent(component, value))
             "highlights" -> log.copy(highlights = log.highlights.withComponent(component, value))
+            "global" -> log.copy(global = log.global.withComponent(component, value))
+            else -> log
+        }
+        node.copy(advancedColor = node.advancedColor.copy(log = next))
+    }
+
+    fun setLogWheelPuck(zone: String, x: Float, y: Float) = updateSelectedEditableNode { node ->
+        val log = node.advancedColor.log
+        val next = when (zone.lowercase()) {
+            "shadows" -> log.copy(shadows = log.shadows.withPuck(x, y, .90f))
+            "midtones" -> log.copy(midtones = log.midtones.withPuck(x, y, .90f))
+            "highlights" -> log.copy(highlights = log.highlights.withPuck(x, y, .90f))
+            "global" -> log.copy(global = log.global.withPuck(x, y, .75f))
             else -> log
         }
         node.copy(advancedColor = node.advancedColor.copy(log = next))
@@ -376,26 +497,39 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
 
     fun setLogRange(shadowRange: Float? = null, highlightRange: Float? = null) = updateSelectedEditableNode { node ->
         val log = node.advancedColor.log
-        node.copy(advancedColor = node.advancedColor.copy(log = log.copy(
-            shadowRange = (shadowRange ?: log.shadowRange).coerceIn(.05f, .48f),
-            highlightRange = (highlightRange ?: log.highlightRange).coerceIn(.52f, .95f),
-        )))
+        node.copy(
+            advancedColor = node.advancedColor.copy(
+                log = log.copy(
+                    shadowRange = (shadowRange ?: log.shadowRange).coerceIn(.05f, .48f),
+                    highlightRange = (highlightRange ?: log.highlightRange).coerceIn(.52f, .95f),
+                ),
+            ),
+        )
     }
 
-    fun setCurvePoint(channel: String, index: Int, value: Float) = updateSelectedEditableNode { node ->
-        val curves = node.advancedColor.curves
-        val next = when (channel.lowercase()) {
-            "master", "rgb" -> curves.copy(master = curves.master.withPoint(index, value))
-            "red", "r" -> curves.copy(red = curves.red.withPoint(index, value))
-            "green", "g" -> curves.copy(green = curves.green.withPoint(index, value))
-            "blue", "b" -> curves.copy(blue = curves.blue.withPoint(index, value))
-            else -> curves
-        }
-        node.copy(advancedColor = node.advancedColor.copy(curves = next))
+    /** Compatibility method used by older V4 UI. */
+    fun setCurvePoint(channel: String, index: Int, value: Float) = updateCurve(channel) { curve ->
+        curve.withPoint(index, value)
+    }
+
+    fun setCurvePoint(channel: String, index: Int, x: Float, y: Float) = updateCurve(channel) { curve ->
+        curve.withPoint(index, x, y)
+    }
+
+    fun insertCurvePoint(channel: String, x: Float, y: Float) = updateCurve(channel) { curve ->
+        curve.insertPoint(x, y)
+    }
+
+    fun deleteCurvePoint(channel: String, index: Int) = updateCurve(channel) { curve ->
+        curve.deletePoint(index)
     }
 
     fun setQualifierEnabled(enabled: Boolean) = updateSelectedEditableNode { node ->
-        node.copy(advancedColor = node.advancedColor.copy(qualifier = node.advancedColor.qualifier.copy(enabled = enabled)))
+        node.copy(
+            advancedColor = node.advancedColor.copy(
+                qualifier = node.advancedColor.qualifier.copy(enabled = enabled),
+            ),
+        )
     }
 
     fun setQualifier(parameter: String, value: Float) = updateSelectedEditableNode { node ->
@@ -416,6 +550,123 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
         node.copy(advancedColor = node.advancedColor.copy(qualifier = next))
     }
 
+    fun setQualifierPickerActive(active: Boolean) {
+        _state.value = _state.value.copy(
+            qualifierPickerActive = active,
+            status = if (active) "Qualifier picker: tap a color in Preview" else _state.value.status,
+        )
+    }
+
+    /**
+     * Samples the displayed source frame at the tapped preview location. PlayerView uses FIT, so
+     * letterbox bars are removed from the coordinate mapping before reading the source pixel.
+     */
+    fun pickQualifierFromPreview(
+        timelineUs: Long,
+        tapX: Float,
+        tapY: Float,
+        previewWidth: Float,
+        previewHeight: Float,
+    ) {
+        val state = _state.value
+        val clip = state.project.clip(state.selectedClipId) ?: return
+        if (state.project.trackContaining(clip.id)?.kind != TrackKind.VIDEO) {
+            _state.value = state.copy(status = "Select a video clip for qualifier picking")
+            return
+        }
+        if (previewWidth <= 0f || previewHeight <= 0f) return
+
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(getApplication<Application>(), Uri.parse(clip.uri))
+            val sourceUs = (clip.sourceInUs + (timelineUs - clip.timelineStartUs))
+                .coerceIn(clip.sourceInUs, clip.sourceOutUs.coerceAtLeast(clip.sourceInUs))
+            val bitmap = retriever.getFrameAtTime(sourceUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                ?: run {
+                    _state.value = state.copy(status = "Could not sample this frame")
+                    return
+                }
+            try {
+                val scale = min(previewWidth / bitmap.width.toFloat(), previewHeight / bitmap.height.toFloat())
+                val shownWidth = bitmap.width * scale
+                val shownHeight = bitmap.height * scale
+                val left = (previewWidth - shownWidth) * .5f
+                val top = (previewHeight - shownHeight) * .5f
+                if (tapX < left || tapX > left + shownWidth || tapY < top || tapY > top + shownHeight) {
+                    _state.value = state.copy(status = "Tap inside the video image")
+                    return
+                }
+                val imageX = (((tapX - left) / shownWidth) * bitmap.width).toInt().coerceIn(0, bitmap.width - 1)
+                val imageY = (((tapY - top) / shownHeight) * bitmap.height).toInt().coerceIn(0, bitmap.height - 1)
+
+                var rr = 0f
+                var gg = 0f
+                var bb = 0f
+                var samples = 0
+                for (dy in -1..1) {
+                    for (dx in -1..1) {
+                        val x = (imageX + dx).coerceIn(0, bitmap.width - 1)
+                        val y = (imageY + dy).coerceIn(0, bitmap.height - 1)
+                        val argb = bitmap.getPixel(x, y)
+                        rr += ((argb ushr 16) and 0xFF) / 255f
+                        gg += ((argb ushr 8) and 0xFF) / 255f
+                        bb += (argb and 0xFF) / 255f
+                        samples++
+                    }
+                }
+                val r = rr / samples
+                val g = gg / samples
+                val b = bb / samples
+                val hsl = rgbToHsl(r, g, b)
+                val hue = hsl[0] * 360f
+                val sat = hsl[1]
+                val lum = hsl[2]
+                updateSelectedEditableNode { node ->
+                    val old = node.advancedColor.qualifier
+                    val picked = old.copy(
+                        enabled = true,
+                        hueCenterDegrees = hue,
+                        hueWidthDegrees = 34f,
+                        saturationMin = (sat - .18f).coerceIn(0f, 1f),
+                        saturationMax = (sat + .18f).coerceIn(0f, 1f),
+                        luminanceMin = (lum - .18f).coerceIn(0f, 1f),
+                        luminanceMax = (lum + .18f).coerceIn(0f, 1f),
+                        softness = .12f,
+                        pickedRed = r,
+                        pickedGreen = g,
+                        pickedBlue = b,
+                    )
+                    node.copy(advancedColor = node.advancedColor.copy(qualifier = picked))
+                }
+                _state.value = _state.value.copy(
+                    qualifierPickerActive = false,
+                    status = "Qualifier color sampled",
+                )
+            } finally {
+                bitmap.recycle()
+            }
+        } catch (error: Throwable) {
+            _state.value = _state.value.copy(
+                qualifierPickerActive = false,
+                status = error.message ?: "Qualifier sampling failed",
+            )
+        } finally {
+            retriever.release()
+        }
+    }
+
+    private fun updateCurve(channel: String, transform: (Curve5) -> Curve5) = updateSelectedEditableNode { node ->
+        val curves = node.advancedColor.curves
+        val next: RgbCurves = when (channel.lowercase()) {
+            "master", "rgb", "y" -> curves.copy(master = transform(curves.master))
+            "red", "r" -> curves.copy(red = transform(curves.red))
+            "green", "g" -> curves.copy(green = transform(curves.green))
+            "blue", "b" -> curves.copy(blue = transform(curves.blue))
+            else -> curves
+        }
+        node.copy(advancedColor = node.advancedColor.copy(curves = next))
+    }
+
     private fun updateSelectedEditableNode(transform: (ColorNode) -> ColorNode) = updatePrimaryClip { clip ->
         val graph = clip.nodeGraph
         val selected = graph.selectedNodeId ?: return@updatePrimaryClip clip
@@ -427,7 +678,9 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
     private fun updatePrimaryClip(transform: (TimelineClip) -> TimelineClip) {
         val state = _state.value
         val id = state.selectedClipId ?: return
-        val tracks = state.project.tracks.map { track -> track.copy(clips = track.clips.map { clip -> if (clip.id == id) transform(clip) else clip }) }
+        val tracks = state.project.tracks.map { track ->
+            track.copy(clips = track.clips.map { clip -> if (clip.id == id) transform(clip) else clip })
+        }
         _state.value = state.copy(project = state.project.copy(tracks = tracks))
     }
 
@@ -437,6 +690,63 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
         "blue", "b" -> copy(blue = value.coerceIn(-1f, 1f))
         "luma", "y" -> copy(luma = value.coerceIn(-1f, 1f))
         else -> this
+    }
+
+    private fun ColorWheelValue.withPuck(x: Float, y: Float, scale: Float): ColorWheelValue {
+        var nx = x.coerceIn(-1f, 1f)
+        var ny = y.coerceIn(-1f, 1f)
+        val length = sqrt(nx * nx + ny * ny)
+        if (length > 1f) {
+            nx /= length
+            ny /= length
+        }
+        val radius = sqrt(nx * nx + ny * ny).coerceIn(0f, 1f)
+        if (radius < .0001f) {
+            return copy(red = 0f, green = 0f, blue = 0f, puckX = 0f, puckY = 0f)
+        }
+        var hue = atan2((-ny).toDouble(), nx.toDouble()) / (2.0 * PI)
+        if (hue < 0.0) hue += 1.0
+        val rgb = hueToRgb(hue.toFloat())
+        val average = (rgb[0] + rgb[1] + rgb[2]) / 3f
+        return copy(
+            red = ((rgb[0] - average) * radius * scale).coerceIn(-1f, 1f),
+            green = ((rgb[1] - average) * radius * scale).coerceIn(-1f, 1f),
+            blue = ((rgb[2] - average) * radius * scale).coerceIn(-1f, 1f),
+            puckX = nx,
+            puckY = ny,
+        )
+    }
+
+    private fun hueToRgb(h: Float): FloatArray {
+        val hh = ((h % 1f) + 1f) % 1f * 6f
+        val sector = hh.toInt().coerceIn(0, 5)
+        val f = hh - sector
+        return when (sector) {
+            0 -> floatArrayOf(1f, f, 0f)
+            1 -> floatArrayOf(1f - f, 1f, 0f)
+            2 -> floatArrayOf(0f, 1f, f)
+            3 -> floatArrayOf(0f, 1f - f, 1f)
+            4 -> floatArrayOf(f, 0f, 1f)
+            else -> floatArrayOf(1f, 0f, 1f - f)
+        }
+    }
+
+    private fun rgbToHsl(r0: Float, g0: Float, b0: Float): FloatArray {
+        val r = r0.coerceIn(0f, 1f)
+        val g = g0.coerceIn(0f, 1f)
+        val b = b0.coerceIn(0f, 1f)
+        val mx = max(r, max(g, b))
+        val mn = min(r, min(g, b))
+        val l = (mx + mn) * .5f
+        if (mx == mn) return floatArrayOf(0f, 0f, l)
+        val d = mx - mn
+        val s = if (l > .5f) d / (2f - mx - mn) else d / (mx + mn)
+        val h = when (mx) {
+            r -> ((g - b) / d + if (g < b) 6f else 0f) / 6f
+            g -> ((b - r) / d + 2f) / 6f
+            else -> ((r - g) / d + 4f) / 6f
+        }
+        return floatArrayOf(h, s, l)
     }
 
     private fun readDurationUs(uri: Uri): Long {
