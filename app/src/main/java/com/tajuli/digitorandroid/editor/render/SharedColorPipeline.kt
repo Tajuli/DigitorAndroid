@@ -9,22 +9,31 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 /**
  * Single source of truth for GPU color processing.
  *
- * Both ExoPlayer preview and Media3 Transformer export must call [effectsFor] with the same clip.
- * The LUT is generated from the same per-pixel reference math used by the CPU fallback.
+ * Export keeps the full 33^3 LUT. The interactive preview uses a smaller 17^3 LUT so UI edits
+ * don't spend several times more CPU work than needed before the GPU can display the next frame.
+ * Both paths still use the exact same AdvancedColorMath reference transform.
  */
 @UnstableApi
 object SharedColorPipeline {
-    private const val LUT_SIZE = 33
+    private const val EXPORT_LUT_SIZE = 33
+    private const val PREVIEW_LUT_SIZE = 17
 
     fun effectsFor(clip: TimelineClip): List<Effect> = listOf(
-        SingleColorLut.createFromCube(buildCube(clip)),
+        SingleColorLut.createFromCube(buildCube(clip, EXPORT_LUT_SIZE)),
     )
 
-    internal fun buildCube(clip: TimelineClip): Array<Array<IntArray>> {
-        val last = (LUT_SIZE - 1).toFloat()
-        return Array(LUT_SIZE) { rIndex ->
-            Array(LUT_SIZE) { gIndex ->
-                IntArray(LUT_SIZE) { bIndex ->
+    fun previewEffectsFor(clip: TimelineClip): List<Effect> = listOf(
+        SingleColorLut.createFromCube(buildCube(clip, PREVIEW_LUT_SIZE)),
+    )
+
+    internal fun buildCube(clip: TimelineClip): Array<Array<IntArray>> =
+        buildCube(clip, EXPORT_LUT_SIZE)
+
+    private fun buildCube(clip: TimelineClip, size: Int): Array<Array<IntArray>> {
+        val last = (size - 1).toFloat()
+        return Array(size) { rIndex ->
+            Array(size) { gIndex ->
+                IntArray(size) { bIndex ->
                     val rgb = AdvancedColorMath.applyClip(
                         clip = clip,
                         r = rIndex / last,
