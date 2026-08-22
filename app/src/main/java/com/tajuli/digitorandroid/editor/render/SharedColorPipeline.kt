@@ -3,7 +3,7 @@ package com.tajuli.digitorandroid.editor.render
 import androidx.media3.common.Effect
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.SingleColorLut
-import com.tajuli.digitorandroid.editor.model.AdvancedColorMath
+import com.tajuli.digitorandroid.editor.model.QualifiedColorMath
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 
 /**
@@ -11,7 +11,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
  *
  * Export keeps the full 33^3 LUT. The interactive preview uses a smaller 17^3 LUT so UI edits
  * don't spend several times more CPU work than needed before the GPU can display the next frame.
- * Both paths still use the exact same AdvancedColorMath reference transform.
+ * Both paths use the same Resolve-style qualified node transform.
  */
 @UnstableApi
 object SharedColorPipeline {
@@ -34,7 +34,7 @@ object SharedColorPipeline {
         return Array(size) { rIndex ->
             Array(size) { gIndex ->
                 IntArray(size) { bIndex ->
-                    val rgb = AdvancedColorMath.applyClip(
+                    val rgb = QualifiedColorMath.applyClip(
                         clip = clip,
                         r = rIndex / last,
                         g = gIndex / last,
