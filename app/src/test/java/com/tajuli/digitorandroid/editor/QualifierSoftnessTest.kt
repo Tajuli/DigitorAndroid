@@ -39,10 +39,9 @@ class QualifierSoftnessTest {
                 luminanceMax = 1f,
                 softness = 0f,
             ),
-            metadata = arrayOf(
-                NodeEffect(QualifierFinesseKeys.SAT_LOW_SOFT, .20f),
-                NodeEffect(QualifierFinesseKeys.SAT_HIGH_SOFT, 0f),
-            ),
+            NodeCorrections(),
+            NodeEffect(name = QualifierFinesseKeys.SAT_LOW_SOFT, amount = .20f),
+            NodeEffect(name = QualifierFinesseKeys.SAT_HIGH_SOFT, amount = 0f),
         )
 
         val atHardEdge = hslToRgb(120f, .50f, .50f)
@@ -66,7 +65,8 @@ class QualifierSoftnessTest {
                 luminanceMax = 1f,
                 softness = .10f, // 18 degrees of feather on each side.
             ),
-            metadata = arrayOf(NodeEffect(QualifierFinesseKeys.HUE_SYMMETRY, .5f)),
+            NodeCorrections(),
+            NodeEffect(name = QualifierFinesseKeys.HUE_SYMMETRY, amount = .5f),
         )
 
         val atHardEdge = hslToRgb(150f, 1f, .50f) // 30 degrees from center.
@@ -89,9 +89,9 @@ class QualifierSoftnessTest {
             softness = 0f,
         )
         val node = node(
-            qualifier = qualifier,
-            corrections = NodeCorrections(exposure = 1f),
-            metadata = arrayOf(NodeEffect(QualifierFinesseKeys.SAT_LOW_SOFT, .20f)),
+            qualifier,
+            NodeCorrections(exposure = 1f),
+            NodeEffect(name = QualifierFinesseKeys.SAT_LOW_SOFT, amount = .20f),
         )
         val source = hslToRgb(120f, .40f, .35f) // halfway through the low-soft feather.
         val matte = mask(node, source)
