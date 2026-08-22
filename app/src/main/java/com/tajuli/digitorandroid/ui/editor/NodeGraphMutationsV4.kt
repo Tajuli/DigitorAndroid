@@ -111,6 +111,7 @@ private fun ClipNodeGraph.nextSelectionAfterDelete(
     preferredId: String?,
     remainingNodes: Set<String>,
 ): String? {
-    if (selectedNodeId != deletedId && selectedNodeId in remainingNodes) return selectedNodeId
+    val current = selectedNodeId
+    if (current != null && current != deletedId && current in remainingNodes) return current
     return preferredId?.takeIf { it in remainingNodes }
 }
