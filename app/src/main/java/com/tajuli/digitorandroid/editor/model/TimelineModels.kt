@@ -59,9 +59,21 @@ data class ClipNodeGraph(
 ) {
     companion object {
         fun default(): ClipNodeGraph {
-            val input = ColorNode(NodeKind.IMPORT, "Import", NodePosition(36f, 88f))
-            val serial = ColorNode(NodeKind.SERIAL, "01", NodePosition(172f, 88f))
-            val output = ColorNode(NodeKind.OUTPUT, "Output", NodePosition(348f, 88f))
+            val input = ColorNode(
+                kind = NodeKind.IMPORT,
+                label = "Import",
+                position = NodePosition(36f, 88f),
+            )
+            val serial = ColorNode(
+                kind = NodeKind.SERIAL,
+                label = "01",
+                position = NodePosition(172f, 88f),
+            )
+            val output = ColorNode(
+                kind = NodeKind.OUTPUT,
+                label = "Output",
+                position = NodePosition(348f, 88f),
+            )
             return ClipNodeGraph(
                 nodes = listOf(input, serial, output),
                 edges = listOf(NodeEdge(input.id, serial.id), NodeEdge(serial.id, output.id)),
