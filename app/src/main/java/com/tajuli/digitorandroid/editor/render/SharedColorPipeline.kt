@@ -3,6 +3,8 @@ package com.tajuli.digitorandroid.editor.render
 import androidx.media3.common.Effect
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.SingleColorLut
+import com.tajuli.digitorandroid.editor.model.ColorGraphEvaluator
+import com.tajuli.digitorandroid.editor.model.ColorNode
 import com.tajuli.digitorandroid.editor.model.QualifiedColorMath
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 
@@ -11,7 +13,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
  *
  * Export keeps the full 33^3 LUT. The interactive preview uses a smaller 17^3 LUT so UI edits
  * don't spend several times more CPU work than needed before the GPU can display the next frame.
- * Both paths use the same Resolve-style qualified node transform.
+ * Both paths compile and execute the same graph topology and Resolve-style qualified node transform.
  */
 @UnstableApi
 object SharedColorPipeline {
@@ -31,14 +33,18 @@ object SharedColorPipeline {
 
     private fun buildCube(clip: TimelineClip, size: Int): Array<Array<IntArray>> {
         val last = (size - 1).toFloat()
+        val graphPlan = ColorGraphEvaluator.compile(clip.nodeGraph)
+        val nodeTransform: (ColorNode, Float, Float, Float) -> FloatArray = { node, r, g, b ->
+            QualifiedColorMath.applyNode(node, r, g, b)
+        }
         return Array(size) { rIndex ->
             Array(size) { gIndex ->
                 IntArray(size) { bIndex ->
-                    val rgb = QualifiedColorMath.applyClip(
-                        clip = clip,
+                    val rgb = graphPlan.apply(
                         r = rIndex / last,
                         g = gIndex / last,
                         b = bIndex / last,
+                        nodeTransform = nodeTransform,
                     )
                     val r = (rgb[0] * 255f + .5f).toInt().coerceIn(0, 255)
                     val g = (rgb[1] * 255f + .5f).toInt().coerceIn(0, 255)
