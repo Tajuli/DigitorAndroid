@@ -122,10 +122,23 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
     var pendingSeekUs by remember { mutableStateOf<Long?>(null) }
     var previewAnchorClipId by remember { mutableStateOf<String?>(null) }
     var previewAnchorTimelineStartUs by remember { mutableStateOf<Long?>(null) }
+    var loadedPreviewClipId by remember { mutableStateOf<String?>(null) }
+    var loadedPreviewUri by remember { mutableStateOf<String?>(null) }
+    var loadedPreviewSourceInUs by remember { mutableStateOf<Long?>(null) }
+    var loadedPreviewSourceOutUs by remember { mutableStateOf<Long?>(null) }
+    var loadedPreviewGradeHash by remember { mutableStateOf<Int?>(null) }
     var showExportDialog by remember { mutableStateOf(false) }
     var exportName by remember { mutableStateOf("Digitor_${System.currentTimeMillis()}") }
     var exportFraction by remember { mutableStateOf<Float?>(null) }
     var exportStatus by remember { mutableStateOf<String?>(null) }
+
+    // Preview follows the timeline cursor, not clip selection. Selection is only the editing target.
+    val previewClip = state.project.tracks
+        .filter { it.kind == TrackKind.VIDEO && !it.muted }
+        .asReversed()
+        .asSequence()
+        .flatMap { it.clips.asSequence() }
+        .firstOrNull { cursorUs in it.timelineStartUs until it.timelineEndUs }
 
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
         vm.importUris(uris)
@@ -172,59 +185,81 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
         if (uri != null) startExport(uri)
     }
 
-    // Reload the decoder only when the actual media source changes. Color/node edits and timeline
-    // moves must not tear down ExoPlayer because repeated decoder initialization creates black frames.
+    // Dynamic setVideoEffects() calls are unreliable on some Media3/device combinations. Instead,
+    // load effects before prepare(). Source/cursor clip changes are immediate; grading changes are
+    // debounced so rapid wheel/slider edits collapse into one safe preview rebuild.
     LaunchedEffect(
-        selectedClip?.id,
-        selectedClip?.uri,
-        selectedClip?.sourceInUs,
-        selectedClip?.sourceOutUs,
+        previewClip?.id,
+        previewClip?.uri,
+        previewClip?.sourceInUs,
+        previewClip?.sourceOutUs,
+        previewClip?.nodeGraph,
     ) {
-        player.stop()
-        player.clearMediaItems()
-        if (selectedClip != null) {
+        val clip = previewClip
+        if (clip == null) {
+            player.stop()
+            player.clearMediaItems()
             player.setVideoEffects(emptyList())
-            player.setMediaItem(
-                MediaItem.Builder()
-                    .setUri(selectedClip.uri)
-                    .setClippingConfiguration(
-                        MediaItem.ClippingConfiguration.Builder()
-                            .setStartPositionMs(selectedClip.sourceInUs / 1000L)
-                            .setEndPositionMs(selectedClip.sourceOutUs / 1000L)
-                            .build(),
-                    )
-                    .build(),
-            )
-            player.prepare()
-            pendingSeekUs?.let { timelineUs ->
-                val localUs = (timelineUs - selectedClip.timelineStartUs).coerceIn(0L, selectedClip.durationUs)
-                player.seekTo(localUs / 1000L)
-                pendingSeekUs = null
-            }
-        } else {
-            player.setVideoEffects(emptyList())
-        }
-    }
-
-    // Media3 can hang if setVideoEffects() is called continuously from a slider/wheel gesture.
-    // Debounce until the gesture has settled, then build a lighter preview LUT off the main
-    // thread and swap the effect once. Export still uses the full-resolution LUT.
-    LaunchedEffect(selectedClip?.id, selectedClip?.nodeGraph) {
-        val clip = selectedClip ?: return@LaunchedEffect
-        if (state.project.trackContaining(clip.id)?.kind != TrackKind.VIDEO) {
-            player.setVideoEffects(emptyList())
+            loadedPreviewClipId = null
+            loadedPreviewUri = null
+            loadedPreviewSourceInUs = null
+            loadedPreviewSourceOutUs = null
+            loadedPreviewGradeHash = null
+            pendingSeekUs = null
             return@LaunchedEffect
         }
-        delay(180)
+
+        val sourceChanged = loadedPreviewClipId != clip.id ||
+            loadedPreviewUri != clip.uri ||
+            loadedPreviewSourceInUs != clip.sourceInUs ||
+            loadedPreviewSourceOutUs != clip.sourceOutUs
+        val gradeHash = clip.nodeGraph.hashCode()
+        val gradeChanged = loadedPreviewGradeHash != gradeHash
+
+        if (!sourceChanged && gradeChanged) {
+            delay(320)
+        }
+
+        val requestedTimelineUs = pendingSeekUs ?: cursorUs
+        val maxLocalUs = (clip.durationUs - 1L).coerceAtLeast(0L)
+        val localUs = if (sourceChanged) {
+            (requestedTimelineUs - clip.timelineStartUs).coerceIn(0L, maxLocalUs)
+        } else {
+            (player.currentPosition.coerceAtLeast(0L) * 1000L).coerceIn(0L, maxLocalUs)
+        }
+        val resumePlayback = player.isPlaying
         val effects = withContext(Dispatchers.Default) {
             SharedColorPipeline.previewEffectsFor(clip)
         }
+
+        player.stop()
+        player.clearMediaItems()
         player.setVideoEffects(effects)
+        player.setMediaItem(
+            MediaItem.Builder()
+                .setUri(clip.uri)
+                .setClippingConfiguration(
+                    MediaItem.ClippingConfiguration.Builder()
+                        .setStartPositionMs(clip.sourceInUs / 1000L)
+                        .setEndPositionMs(clip.sourceOutUs / 1000L)
+                        .build(),
+                )
+                .build(),
+        )
+        player.prepare()
+        player.seekTo(localUs / 1000L)
+        if (resumePlayback) player.play()
+
+        loadedPreviewClipId = clip.id
+        loadedPreviewUri = clip.uri
+        loadedPreviewSourceInUs = clip.sourceInUs
+        loadedPreviewSourceOutUs = clip.sourceOutUs
+        loadedPreviewGradeHash = gradeHash
+        pendingSeekUs = null
     }
 
-    // A timeline move changes only timelineStartUs, never the source frame. Keep the viewer anchored
-    // to the same local source position and move the cursor with the selected clip. This prevents a
-    // long drag from leaving the cursor in the old gap or an end-of-stream frame that renders black.
+    // A timeline move changes only timelineStartUs. If the cursor was on the moving selected clip,
+    // preserve the same local source frame and move the cursor by the clip's actual movement.
     LaunchedEffect(selectedClip?.id, selectedClip?.timelineStartUs) {
         val clip = selectedClip
         if (clip == null) {
@@ -235,23 +270,28 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
         val previousId = previewAnchorClipId
         val previousStart = previewAnchorTimelineStartUs
         if (previousId == clip.id && previousStart != null && previousStart != clip.timelineStartUs) {
-            val maxLocalUs = (clip.durationUs - 1L).coerceAtLeast(0L)
-            val localUs = (player.currentPosition.coerceAtLeast(0L) * 1000L).coerceIn(0L, maxLocalUs)
-            cursorUs = (clip.timelineStartUs + localUs)
-                .coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
-            if (!player.isPlaying) {
-                player.seekTo((localUs / 1000L).coerceAtLeast(0L))
+            val previousEnd = previousStart + clip.durationUs
+            if (cursorUs in previousStart until previousEnd) {
+                val maxLocalUs = (clip.durationUs - 1L).coerceAtLeast(0L)
+                val localUs = (cursorUs - previousStart).coerceIn(0L, maxLocalUs)
+                cursorUs = (clip.timelineStartUs + localUs)
+                    .coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
+                pendingSeekUs = cursorUs
+                if (loadedPreviewClipId == clip.id) {
+                    player.seekTo(localUs / 1000L)
+                    pendingSeekUs = null
+                }
             }
         }
         previewAnchorClipId = clip.id
         previewAnchorTimelineStartUs = clip.timelineStartUs
     }
 
-    LaunchedEffect(player, selectedClip?.id) {
+    LaunchedEffect(player, previewClip?.id) {
         while (true) {
             isPlaying = player.isPlaying
-            if (selectedClip != null && player.isPlaying) {
-                cursorUs = (selectedClip.timelineStartUs + player.currentPosition.coerceAtLeast(0L) * 1000L)
+            if (previewClip != null && player.isPlaying) {
+                cursorUs = (previewClip.timelineStartUs + player.currentPosition.coerceAtLeast(0L) * 1000L)
                     .coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
             }
             delay(70)
@@ -270,12 +310,12 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
             .firstOrNull { target in it.timelineStartUs until it.timelineEndUs }
         if (activeVideo != null) {
             pendingSeekUs = target
-            if (activeVideo.id != selectedClip?.id) {
-                vm.selectClip(activeVideo.id)
-            } else {
+            if (activeVideo.id == loadedPreviewClipId) {
                 player.seekTo(((target - activeVideo.timelineStartUs).coerceIn(0L, activeVideo.durationUs)) / 1000L)
                 pendingSeekUs = null
             }
+        } else {
+            pendingSeekUs = null
         }
     }
 
@@ -315,7 +355,7 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
     Surface(Modifier.fillMaxSize(), color = E4Shell) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
             TopBarV4(
-                title = selectedClip?.label ?: "New project",
+                title = selectedClip?.label ?: previewClip?.label ?: "New project",
                 status = exportStatus ?: state.status,
                 exportFraction = exportFraction,
                 onImport = ::launchImport,
@@ -337,7 +377,7 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
             }
 
             PreviewV4(
-                clip = selectedClip,
+                clip = previewClip,
                 player = player,
                 onImport = ::launchImport,
                 qualifierPickerActive = state.qualifierPickerActive,
@@ -347,7 +387,7 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
                 modifier = Modifier.fillMaxWidth().weight(1f),
             )
             TransportV4(
-                enabled = selectedClip != null,
+                enabled = previewClip != null,
                 isPlaying = isPlaying,
                 cursorUs = cursorUs,
                 durationUs = state.project.durationUs,
@@ -467,18 +507,24 @@ private fun PreviewV4(
                     modifier = Modifier.size(40.dp),
                 )
                 Spacer(Modifier.height(8.dp))
-                Text("No media loaded", color = Color.White.copy(alpha = .55f), fontSize = 12.sp)
+                Text("No media at cursor", color = Color.White.copy(alpha = .55f), fontSize = 12.sp)
                 TextButton(onClick = onImport) { Text("Import media") }
             }
         } else {
             AndroidView(
-                factory = { ctx -> PlayerView(ctx).apply { useController = false; this.player = player } },
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        useController = false
+                        setKeepContentOnPlayerReset(true)
+                        this.player = player
+                    }
+                },
                 update = { it.player = player },
                 modifier = Modifier.fillMaxSize(),
             )
         }
         Text(
-            "Shared LUT Preview",
+            "Cursor Preview",
             modifier = Modifier.align(Alignment.TopStart).padding(10.dp)
                 .background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp))
                 .padding(horizontal = 7.dp, vertical = 4.dp),
