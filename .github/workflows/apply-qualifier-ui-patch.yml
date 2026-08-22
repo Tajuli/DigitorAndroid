@@ -1,0 +1,56 @@
+name: Apply qualifier UI patch
+
+on:
+  push:
+    branches: [feature/resolve-hsl-qualifier-ui]
+    paths: [.github/workflows/apply-qualifier-ui-patch.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/resolve-hsl-qualifier-ui
+          fetch-depth: 0
+      - name: Patch qualifier routing and hide internal finesse metadata
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          color = Path('app/src/main/java/com/tajuli/digitorandroid/ui/editor/ColorWorkspaceV4.kt')
+          text = color.read_text()
+          old = 'ColorPage.QUALIFIER -> QualifierPage(node, vm, Modifier.fillMaxSize())'
+          new = 'ColorPage.QUALIFIER -> ResolveQualifierPanelV4(node, vm, Modifier.fillMaxSize())'
+          if old not in text:
+              raise SystemExit('Qualifier routing anchor not found')
+          color.write_text(text.replace(old, new, 1))
+
+          nodes = Path('app/src/main/java/com/tajuli/digitorandroid/ui/editor/NodeWorkspacesV4.kt')
+          text = nodes.read_text()
+          import_anchor = 'import com.tajuli.digitorandroid.editor.model.TimelineClip\n'
+          if 'import com.tajuli.digitorandroid.editor.model.visibleEffects' not in text:
+              text = text.replace(import_anchor, import_anchor + 'import com.tajuli.digitorandroid.editor.model.visibleEffects\n', 1)
+
+          old_badge = 'if (node.effects.isNotEmpty()) Text("FX ${node.effects.size}", fontSize = 6.sp, color = N4Accent)'
+          new_badge = 'if (node.visibleEffects().isNotEmpty()) Text("FX ${node.visibleEffects().size}", fontSize = 6.sp, color = N4Accent)'
+          if old_badge not in text:
+              raise SystemExit('Node FX badge anchor not found')
+          text = text.replace(old_badge, new_badge, 1)
+
+          old_empty = 'if (node.effects.isEmpty()) Text("No effects on this node", fontSize = 9.sp, color = N4Muted)\n            node.effects.forEach { effect ->'
+          new_empty = 'val visibleEffects = node.visibleEffects()\n            if (visibleEffects.isEmpty()) Text("No effects on this node", fontSize = 9.sp, color = N4Muted)\n            visibleEffects.forEach { effect ->'
+          if old_empty not in text:
+              raise SystemExit('Effects list anchor not found')
+          nodes.write_text(text.replace(old_empty, new_empty, 1))
+          PY
+          rm .github/workflows/apply-qualifier-ui-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Wire Resolve qualifier UI into color workspace"
+          git push origin HEAD:feature/resolve-hsl-qualifier-ui
