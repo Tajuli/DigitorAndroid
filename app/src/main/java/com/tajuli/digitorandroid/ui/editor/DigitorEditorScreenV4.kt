@@ -310,6 +310,10 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
             .firstOrNull { target in it.timelineStartUs until it.timelineEndUs }
         if (activeVideo != null) {
             pendingSeekUs = target
+            // Keep the editing target aligned with the frame the user explicitly seeks to.
+            if (activeVideo.id != selectedClip?.id) {
+                vm.selectClip(activeVideo.id)
+            }
             if (activeVideo.id == loadedPreviewClipId) {
                 player.seekTo(((target - activeVideo.timelineStartUs).coerceIn(0L, activeVideo.durationUs)) / 1000L)
                 pendingSeekUs = null
@@ -426,6 +430,13 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
                 selected = workspace,
                 onSelected = {
                     workspace = it
+                    val editsClip = it == WorkspaceV4.COLOR ||
+                        it == WorkspaceV4.CORRECTION ||
+                        it == WorkspaceV4.NODES ||
+                        it == WorkspaceV4.EFFECTS
+                    if (editsClip && previewClip != null && previewClip.id != selectedClip?.id) {
+                        vm.selectClip(previewClip.id)
+                    }
                     if (it != WorkspaceV4.COLOR && state.qualifierPickerActive) {
                         vm.setQualifierPickerActive(false)
                     }
