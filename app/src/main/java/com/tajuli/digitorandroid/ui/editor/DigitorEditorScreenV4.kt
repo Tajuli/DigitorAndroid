@@ -206,17 +206,18 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
         }
     }
 
-    // Media3 supports changing video effects on a prepared player. Build the LUT off the main
-    // thread and apply only the latest edit after a tiny frame-sized debounce.
+    // Media3 can hang if setVideoEffects() is called continuously from a slider/wheel gesture.
+    // Debounce until the gesture has settled, then build a lighter preview LUT off the main
+    // thread and swap the effect once. Export still uses the full-resolution LUT.
     LaunchedEffect(selectedClip?.id, selectedClip?.nodeGraph) {
         val clip = selectedClip ?: return@LaunchedEffect
         if (state.project.trackContaining(clip.id)?.kind != TrackKind.VIDEO) {
             player.setVideoEffects(emptyList())
             return@LaunchedEffect
         }
-        delay(16)
+        delay(180)
         val effects = withContext(Dispatchers.Default) {
-            SharedColorPipeline.effectsFor(clip)
+            SharedColorPipeline.previewEffectsFor(clip)
         }
         player.setVideoEffects(effects)
     }
