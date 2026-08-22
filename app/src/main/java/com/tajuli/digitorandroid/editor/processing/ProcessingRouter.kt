@@ -18,17 +18,25 @@ class ProcessingRouter(context: Context) {
         onProgress: (ExportProgress) -> Unit,
     ): ExportResult {
         if (capabilities.supportsGpuEditing()) {
+            val gpuName = capabilities.gpuDescription()
+            onProgress(ExportProgress.Stage("GPU selected · $gpuName", 0f))
             try {
-                onProgress(ExportProgress.Stage("GPU selected", 0f))
                 return gpu.export(project, output, onProgress)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (gpuFailure: Throwable) {
-                onProgress(ExportProgress.Stage("GPU failed → CPU fallback", 0f))
+                // A GPU-capable device must not silently fall back to CPU. Hiding the
+                // GPU error made it look as if CPU was preferred. Surface the real
+                // failure so the GPU path can be fixed for that device/codec.
+                throw IllegalStateException(
+                    "GPU export failed on $gpuName. CPU fallback was not used because a GPU is available. " +
+                        (gpuFailure.message ?: gpuFailure::class.java.simpleName),
+                    gpuFailure,
+                )
             }
-        } else {
-            onProgress(ExportProgress.Stage("No suitable GPU → CPU fallback", 0f))
         }
+
+        onProgress(ExportProgress.Stage("No compatible GPU · CPU fallback", 0f))
         return cpu.export(project, output, onProgress)
     }
 }
