@@ -47,6 +47,7 @@ data class ColorNode(
     val label: String,
     val position: NodePosition,
     val corrections: NodeCorrections = NodeCorrections(),
+    val advancedColor: AdvancedColorGrade = AdvancedColorGrade(),
     val effects: List<NodeEffect> = emptyList(),
 )
 
@@ -84,9 +85,7 @@ data class ClipNodeGraph(
 
     fun selectedNode(): ColorNode? = nodes.firstOrNull { it.id == selectedNodeId }
 
-    /** Current renderer compatibility bridge. Node values stay per-node; the existing
-     * pixel pipeline receives a deterministic flattened grade until the render graph
-     * consumes node topology directly. */
+    /** Legacy compatibility bridge for processors that still consume ColorGrade. */
     fun effectiveColorGrade(): ColorGrade {
         val editable = nodes.filter { it.kind == NodeKind.SERIAL || it.kind == NodeKind.PARALLEL }
         if (editable.isEmpty()) return ColorGrade()
