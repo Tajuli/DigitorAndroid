@@ -57,6 +57,17 @@ data class Curve5(
         if (input <= p.first().x) return p.first().y
         if (input >= p.last().x) return p.last().y
 
+        // With only the default start/end handles, interpolation must be exactly linear. The old
+        // Catmull-Rom endpoint duplication bent this nominally neutral curve, so every fresh node
+        // changed midtones/highlights before the user touched any control.
+        if (p.size == 2) {
+            val a = p[0]
+            val b = p[1]
+            val span = (b.x - a.x).coerceAtLeast(0.000001f)
+            val t = ((input - a.x) / span).coerceIn(0f, 1f)
+            return (a.y + (b.y - a.y) * t).coerceIn(0f, 1f)
+        }
+
         val right = p.indexOfFirst { it.x >= input }.coerceAtLeast(1)
         val left = right - 1
         val a = p[left]
