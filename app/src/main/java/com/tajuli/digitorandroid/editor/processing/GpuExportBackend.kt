@@ -37,7 +37,13 @@ class GpuExportBackend(
                 override fun onCompleted(composition: Composition, exportResult: Media3ExportResult) {
                     if (continuation.isActive) {
                         onProgress(ExportProgress.Stage("GPU: complete", 1f))
-                        continuation.resume(ExportResult(output, Backend.GPU))
+                        continuation.resume(
+                            ExportResult(
+                                output = output,
+                                backend = Backend.GPU,
+                                note = "GPU export complete",
+                            ),
+                        )
                     }
                 }
 
