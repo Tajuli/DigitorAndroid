@@ -44,24 +44,8 @@ class NodeGraphMutationsV4Test {
     }
 
     @Test
-    fun deletingParallelFromPairCollapsesMixAndKeepsSerialPath() {
-        val graph = ClipNodeGraph(
-            nodes = listOf(
-                node("in", NodeKind.IMPORT),
-                node("a", NodeKind.SERIAL, "01"),
-                node("p2", NodeKind.PARALLEL, "P2"),
-                node("mix", NodeKind.MIX, "Mix"),
-                node("out", NodeKind.OUTPUT),
-            ),
-            edges = listOf(
-                NodeEdge("in", "a"),
-                NodeEdge("in", "p2"),
-                NodeEdge("a", "mix"),
-                NodeEdge("p2", "mix"),
-                NodeEdge("mix", "out"),
-            ),
-            selectedNodeId = "p2",
-        )
+    fun deletingAddedParallelFromPairCollapsesMixAndKeepsSerialPath() {
+        val graph = parallelPair(selected = "p2")
 
         val result = graph.deleteEditableNodeV4("p2")
 
@@ -71,6 +55,21 @@ class NodeGraphMutationsV4Test {
         assertFalse(result.edges.any { it.fromId == "mix" || it.toId == "mix" })
         assertEquals(NodeKind.SERIAL, result.nodes.first { it.id == "a" }.kind)
         assertEquals("a", result.selectedNodeId)
+    }
+
+    @Test
+    fun deletingOriginalSerialSideOfParallelPairPromotesRemainingBranchAndRemovesMix() {
+        val graph = parallelPair(selected = "a")
+
+        val result = graph.deleteEditableNodeV4("a")
+
+        assertFalse(result.nodes.any { it.id == "a" || it.id == "mix" })
+        assertEquals(NodeKind.SERIAL, result.nodes.first { it.id == "p2" }.kind)
+        assertEquals("02", result.nodes.first { it.id == "p2" }.label)
+        assertTrue(result.edges.contains(NodeEdge("in", "p2")))
+        assertTrue(result.edges.contains(NodeEdge("p2", "out")))
+        assertFalse(result.edges.any { it.fromId == "mix" || it.toId == "mix" })
+        assertEquals("p2", result.selectedNodeId)
     }
 
     @Test
@@ -103,4 +102,22 @@ class NodeGraphMutationsV4Test {
         assertTrue(result.edges.contains(NodeEdge("p2", "mix")))
         assertFalse(result.edges.any { it.fromId == "p3" || it.toId == "p3" })
     }
+
+    private fun parallelPair(selected: String): ClipNodeGraph = ClipNodeGraph(
+        nodes = listOf(
+            node("in", NodeKind.IMPORT),
+            node("a", NodeKind.SERIAL, "01"),
+            node("p2", NodeKind.PARALLEL, "P2"),
+            node("mix", NodeKind.MIX, "Mix"),
+            node("out", NodeKind.OUTPUT),
+        ),
+        edges = listOf(
+            NodeEdge("in", "a"),
+            NodeEdge("in", "p2"),
+            NodeEdge("a", "mix"),
+            NodeEdge("p2", "mix"),
+            NodeEdge("mix", "out"),
+        ),
+        selectedNodeId = selected,
+    )
 }
