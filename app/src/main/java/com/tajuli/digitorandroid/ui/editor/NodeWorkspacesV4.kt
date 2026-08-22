@@ -69,7 +69,7 @@ fun NodeGraphV4(clip: TimelineClip?, vm: EditorViewModelV4, modifier: Modifier =
         Row(Modifier.fillMaxWidth().height(34.dp).padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Node Graph · ${clip.label}", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
-            Text("Tap select · hold drag · hold/release add", fontSize = 7.sp, color = N4Muted)
+            Text("Tap select · hold drag · hold/release actions", fontSize = 7.sp, color = N4Muted)
         }
         HorizontalDivider(color = N4Divider)
         Box(Modifier.fillMaxSize().horizontalScroll(rememberScrollState())) {
@@ -125,6 +125,12 @@ fun NodeGraphV4(clip: TimelineClip?, vm: EditorViewModelV4, modifier: Modifier =
                                 text = { Text("Add Parallel") },
                                 enabled = node.kind == NodeKind.SERIAL || node.kind == NodeKind.PARALLEL,
                                 onClick = { menuNodeId = null; vm.addParallelNode(node.id) },
+                            )
+                            HorizontalDivider(color = N4Divider)
+                            DropdownMenuItem(
+                                text = { Text("Delete Node") },
+                                enabled = node.kind == NodeKind.SERIAL || node.kind == NodeKind.PARALLEL,
+                                onClick = { menuNodeId = null; vm.deleteNode(node.id) },
                             )
                         }
                     }

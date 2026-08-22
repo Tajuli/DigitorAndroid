@@ -419,6 +419,10 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
         clip.copy(nodeGraph = graph.copy(nodes = shifted + parallel + mixNode, edges = edges, selectedNodeId = parallel.id))
     }
 
+    fun deleteNode(nodeId: String) = updatePrimaryClip { clip ->
+        clip.copy(nodeGraph = clip.nodeGraph.deleteEditableNodeV4(nodeId))
+    }
+
     fun setSelectedNodeCorrection(parameter: String, value: Float) = updateSelectedEditableNode { node ->
         val c = node.corrections
         val next = when (parameter.lowercase()) {
