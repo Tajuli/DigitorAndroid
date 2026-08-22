@@ -40,7 +40,7 @@ class CpuExportBackend(private val context: Context) : ExportBackend {
                     if (frameIndex % 4 == 0 || frameIndex == frameCount - 1) {
                         onProgress(
                             ExportProgress.Stage(
-                                "CPU: multithread per-pixel render + AVC encode",
+                                "CPU: shared per-pixel color + AVC encode",
                                 (frameIndex + 1f) / frameCount,
                             )
                         )
@@ -82,7 +82,7 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
             else Bitmap.createScaledBitmap(bitmap, project.width, project.height, true)
             val overlay = IntArray(project.width * project.height)
             scaled.getPixels(overlay, 0, project.width, 0, 0, project.width, project.height)
-            color.processArgb8888(overlay, project.width, project.height, clip.colorGrade)
+            color.processClipArgb8888(overlay, project.width, project.height, clip)
             blend(canvas, overlay, project.width, project.height, clip.opacity)
             if (scaled !== bitmap) scaled.recycle()
             bitmap.recycle()
