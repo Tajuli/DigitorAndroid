@@ -1,17 +1,21 @@
 package com.tajuli.digitorandroid.editor.model
 
 import kotlin.math.abs
-import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 
-/** Channel values are signed control deltas. luma moves all RGB channels together. */
+/**
+ * Signed chromatic deltas plus a Y/master value. puckX/puckY persist the actual wheel puck so the
+ * UI can round-trip exactly when switching clips/nodes.
+ */
 data class ColorWheelValue(
     val red: Float = 0f,
     val green: Float = 0f,
     val blue: Float = 0f,
     val luma: Float = 0f,
+    val puckX: Float = 0f,
+    val puckY: Float = 0f,
 )
 
 data class PrimaryWheels(
@@ -25,43 +29,88 @@ data class LogWheels(
     val shadows: ColorWheelValue = ColorWheelValue(),
     val midtones: ColorWheelValue = ColorWheelValue(),
     val highlights: ColorWheelValue = ColorWheelValue(),
+    val global: ColorWheelValue = ColorWheelValue(),
     val shadowRange: Float = 0.30f,
     val highlightRange: Float = 0.70f,
 )
 
-/** Five fixed-x points at 0, .25, .5, .75 and 1.0. */
+data class CurvePoint(
+    val x: Float,
+    val y: Float,
+)
+
+/**
+ * Dynamic custom curve. It starts with only the start/end points, just like Resolve custom curves.
+ * The historic Curve5 name is kept so older call sites/source compatibility continue to compile.
+ */
 data class Curve5(
-    val p0: Float = 0f,
-    val p1: Float = 0.25f,
-    val p2: Float = 0.50f,
-    val p3: Float = 0.75f,
-    val p4: Float = 1f,
+    val points: List<CurvePoint> = listOf(CurvePoint(0f, 0f), CurvePoint(1f, 1f)),
 ) {
+    private fun ordered(): List<CurvePoint> = points
+        .map { CurvePoint(it.x.coerceIn(0f, 1f), it.y.coerceIn(0f, 1f)) }
+        .sortedBy { it.x }
+        .let { if (it.size >= 2) it else listOf(CurvePoint(0f, 0f), CurvePoint(1f, 1f)) }
+
     fun valueAt(x: Float): Float {
-        val clamped = x.coerceIn(0f, 1f)
-        val scaled = clamped * 4f
-        val i = floor(scaled.toDouble()).toInt().coerceIn(0, 3)
-        val t = scaled - i
-        val a = point(i)
-        val b = point(i + 1)
-        return (a + (b - a) * t).coerceIn(0f, 1f)
+        val p = ordered()
+        val input = x.coerceIn(0f, 1f)
+        if (input <= p.first().x) return p.first().y
+        if (input >= p.last().x) return p.last().y
+
+        val right = p.indexOfFirst { it.x >= input }.coerceAtLeast(1)
+        val left = right - 1
+        val a = p[left]
+        val b = p[right]
+        val span = (b.x - a.x).coerceAtLeast(0.000001f)
+        val t = ((input - a.x) / span).coerceIn(0f, 1f)
+
+        // Catmull-Rom-style smooth interpolation. Clamp keeps legal video-range normalized output.
+        val y0 = p.getOrElse(left - 1) { a }.y
+        val y1 = a.y
+        val y2 = b.y
+        val y3 = p.getOrElse(right + 1) { b }.y
+        val t2 = t * t
+        val t3 = t2 * t
+        val y = 0.5f * (
+            2f * y1 +
+                (-y0 + y2) * t +
+                (2f * y0 - 5f * y1 + 4f * y2 - y3) * t2 +
+                (-y0 + 3f * y1 - 3f * y2 + y3) * t3
+            )
+        return y.coerceIn(0f, 1f)
     }
 
-    fun withPoint(index: Int, value: Float): Curve5 = when (index) {
-        0 -> copy(p0 = value.coerceIn(0f, 1f))
-        1 -> copy(p1 = value.coerceIn(0f, 1f))
-        2 -> copy(p2 = value.coerceIn(0f, 1f))
-        3 -> copy(p3 = value.coerceIn(0f, 1f))
-        4 -> copy(p4 = value.coerceIn(0f, 1f))
-        else -> this
+    /** Compatibility helper used by older UI: updates only a point's output/Y. */
+    fun withPoint(index: Int, value: Float): Curve5 {
+        val p = ordered().toMutableList()
+        if (index !in p.indices) return this
+        p[index] = p[index].copy(y = value.coerceIn(0f, 1f))
+        return copy(points = p)
     }
 
-    private fun point(index: Int): Float = when (index) {
-        0 -> p0
-        1 -> p1
-        2 -> p2
-        3 -> p3
-        else -> p4
+    fun withPoint(index: Int, x: Float, y: Float): Curve5 {
+        val p = ordered().toMutableList()
+        if (index !in p.indices) return this
+        val gap = 0.002f
+        val minX = if (index == 0) 0f else p[index - 1].x + gap
+        val maxX = if (index == p.lastIndex) 1f else p[index + 1].x - gap
+        p[index] = CurvePoint(x.coerceIn(minX.coerceAtMost(maxX), maxX.coerceAtLeast(minX)), y.coerceIn(0f, 1f))
+        return copy(points = p.sortedBy { it.x })
+    }
+
+    fun insertPoint(x: Float, y: Float): Curve5 {
+        val p = ordered().toMutableList()
+        val nx = x.coerceIn(0f, 1f)
+        if (p.any { abs(it.x - nx) < 0.002f }) return this
+        p += CurvePoint(nx, y.coerceIn(0f, 1f))
+        return copy(points = p.sortedBy { it.x })
+    }
+
+    fun deletePoint(index: Int): Curve5 {
+        val p = ordered().toMutableList()
+        if (index <= 0 || index >= p.lastIndex) return this
+        p.removeAt(index)
+        return copy(points = p)
     }
 }
 
@@ -84,6 +133,9 @@ data class HslQualifier(
     val hueShiftDegrees: Float = 0f,
     val saturationShift: Float = 0f,
     val luminanceShift: Float = 0f,
+    val pickedRed: Float? = null,
+    val pickedGreen: Float? = null,
+    val pickedBlue: Float? = null,
 )
 
 data class AdvancedColorGrade(
@@ -134,7 +186,9 @@ object AdvancedColorMath {
         hsl[2] = (hsl[2] + c.highlights / 100f * .20f * highlightWeight + c.shadows / 100f * .20f * shadowWeight)
             .coerceIn(0f, 1f)
         val corrected = hslToRgb(hsl[0], hsl[1], hsl[2])
-        r = corrected[0]; g = corrected[1]; b = corrected[2]
+        r = corrected[0]
+        g = corrected[1]
+        b = corrected[2]
 
         val p = node.advancedColor.primary
         val lum0 = luma(r, g, b)
@@ -147,9 +201,24 @@ object AdvancedColorMath {
         val shadowW = 1f - smoothstep((log.shadowRange - .12f).coerceAtLeast(0f), (log.shadowRange + .12f).coerceAtMost(1f), lum)
         val highW = smoothstep((log.highlightRange - .12f).coerceAtLeast(0f), (log.highlightRange + .12f).coerceAtMost(1f), lum)
         val midW = (1f - shadowW - highW).coerceIn(0f, 1f)
-        r += .22f * (shadowW * (log.shadows.red + log.shadows.luma) + midW * (log.midtones.red + log.midtones.luma) + highW * (log.highlights.red + log.highlights.luma))
-        g += .22f * (shadowW * (log.shadows.green + log.shadows.luma) + midW * (log.midtones.green + log.midtones.luma) + highW * (log.highlights.green + log.highlights.luma))
-        b += .22f * (shadowW * (log.shadows.blue + log.shadows.luma) + midW * (log.midtones.blue + log.midtones.luma) + highW * (log.highlights.blue + log.highlights.luma))
+        r += .22f * (
+            shadowW * (log.shadows.red + log.shadows.luma) +
+                midW * (log.midtones.red + log.midtones.luma) +
+                highW * (log.highlights.red + log.highlights.luma) +
+                log.global.red + log.global.luma
+            )
+        g += .22f * (
+            shadowW * (log.shadows.green + log.shadows.luma) +
+                midW * (log.midtones.green + log.midtones.luma) +
+                highW * (log.highlights.green + log.highlights.luma) +
+                log.global.green + log.global.luma
+            )
+        b += .22f * (
+            shadowW * (log.shadows.blue + log.shadows.luma) +
+                midW * (log.midtones.blue + log.midtones.luma) +
+                highW * (log.highlights.blue + log.highlights.luma) +
+                log.global.blue + log.global.luma
+            )
 
         val curves = node.advancedColor.curves
         val masterR = curves.master.valueAt(r.coerceIn(0f, 1f))
@@ -174,7 +243,9 @@ object AdvancedColorMath {
             hsl[1] = (hsl[1] + q.saturationShift * mask).coerceIn(0f, 1f)
             hsl[2] = (hsl[2] + q.luminanceShift * mask).coerceIn(0f, 1f)
             val qualified = hslToRgb(hsl[0], hsl[1], hsl[2])
-            r = qualified[0]; g = qualified[1]; b = qualified[2]
+            r = qualified[0]
+            g = qualified[1]
+            b = qualified[2]
         }
 
         return floatArrayOf(r.coerceIn(0f, 1f), g.coerceIn(0f, 1f), b.coerceIn(0f, 1f))
@@ -199,16 +270,22 @@ object AdvancedColorMath {
     }
 
     private fun luma(r: Float, g: Float, b: Float): Float = (r * .2126f + g * .7152f + b * .0722f).coerceIn(0f, 1f)
+
     private fun smoothstep(edge0: Float, edge1: Float, x: Float): Float {
         if (edge0 == edge1) return if (x < edge0) 0f else 1f
         val t = ((x - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
         return t * t * (3f - 2f * t)
     }
+
     private fun wrap01(v: Float): Float = ((v % 1f) + 1f) % 1f
 
     private fun rgbToHsl(r0: Float, g0: Float, b0: Float): FloatArray {
-        val r = r0.coerceIn(0f, 1f); val g = g0.coerceIn(0f, 1f); val b = b0.coerceIn(0f, 1f)
-        val mx = max(r, max(g, b)); val mn = min(r, min(g, b)); val l = (mx + mn) * .5f
+        val r = r0.coerceIn(0f, 1f)
+        val g = g0.coerceIn(0f, 1f)
+        val b = b0.coerceIn(0f, 1f)
+        val mx = max(r, max(g, b))
+        val mn = min(r, min(g, b))
+        val l = (mx + mn) * .5f
         if (mx == mn) return floatArrayOf(0f, 0f, l)
         val d = mx - mn
         val s = if (l > .5f) d / (2f - mx - mn) else d / (mx + mn)
