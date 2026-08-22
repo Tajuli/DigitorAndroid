@@ -1,7 +1,9 @@
 package com.tajuli.digitorandroid.editor.processing
 
-import com.tajuli.digitorandroid.editor.model.AdvancedColorMath
 import com.tajuli.digitorandroid.editor.model.ColorGrade
+import com.tajuli.digitorandroid.editor.model.ColorGraphEvaluator
+import com.tajuli.digitorandroid.editor.model.ColorNode
+import com.tajuli.digitorandroid.editor.model.QualifiedColorMath
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
@@ -17,14 +19,18 @@ class CpuColorProcessor(
 
     fun processClipArgb8888(pixels: IntArray, width: Int, height: Int, clip: TimelineClip) {
         if (width <= 0 || height <= 0) return
+        val graphPlan = ColorGraphEvaluator.compile(clip.nodeGraph)
+        val nodeTransform: (ColorNode, Float, Float, Float) -> FloatArray = { node, r, g, b ->
+            QualifiedColorMath.applyNode(node, r, g, b)
+        }
         parallelRows(width, height) { index ->
             val argb = pixels[index]
             val a = (argb ushr 24) and 0xFF
-            val rgb = AdvancedColorMath.applyClip(
-                clip,
-                ((argb ushr 16) and 0xFF) / 255f,
-                ((argb ushr 8) and 0xFF) / 255f,
-                (argb and 0xFF) / 255f,
+            val rgb = graphPlan.apply(
+                r = ((argb ushr 16) and 0xFF) / 255f,
+                g = ((argb ushr 8) and 0xFF) / 255f,
+                b = (argb and 0xFF) / 255f,
+                nodeTransform = nodeTransform,
             )
             val r = (rgb[0] * 255f + .5f).toInt().coerceIn(0, 255)
             val g = (rgb[1] * 255f + .5f).toInt().coerceIn(0, 255)
