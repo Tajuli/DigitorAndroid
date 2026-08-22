@@ -6,7 +6,6 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.util.UnstableApi
-import com.tajuli.digitorandroid.editor.model.ClipNodeGraph
 import com.tajuli.digitorandroid.editor.model.ColorNode
 import com.tajuli.digitorandroid.editor.model.NodeCorrections
 import com.tajuli.digitorandroid.editor.model.NodeEdge
@@ -54,7 +53,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         _state.value = _state.value.copy(selectedTrackId = id)
     }
 
-    /** A normal tap follows the link group. Until Unlink, video + source audio act as one edit item. */
     fun selectClip(id: String) {
         val state = _state.value
         val project = state.project
@@ -78,13 +76,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
-    /** Importing video on a video track creates a linked video/audio pair. */
     fun importUris(uris: List<Uri>) {
         if (uris.isEmpty()) return
         val app = getApplication<Application>()
         var state = _state.value
         var project = state.project
-        var selected = project.track(state.selectedTrackId) ?: return
+        val selected = project.track(state.selectedTrackId) ?: return
 
         if (selected.kind == TrackKind.VIDEO && project.tracks.none { it.kind == TrackKind.AUDIO }) {
             val audio = TimelineTrack(name = "A1", kind = TrackKind.AUDIO)
@@ -123,21 +120,19 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 additions.getOrPut(selected.id) { mutableListOf() } += video
 
-                val audio = audioTrack?.let {
-                    TimelineClip(
+                val linkedIds = linkedSetOf(video.id)
+                audioTrack?.let { targetAudioTrack ->
+                    val audio = TimelineClip(
                         uri = uri.toString(),
                         label = "$label · audio",
                         timelineStartUs = startUs,
                         sourceOutUs = durationUs,
                         linkGroupId = groupId,
                     )
+                    additions.getOrPut(targetAudioTrack.id) { mutableListOf() } += audio
+                    linkedIds += audio.id
                 }
-                if (audio != null) {
-                    additions.getOrPut(audioTrack.id) { mutableListOf() } += audio
-                    if (firstSelection == null) firstSelection = linkedSetOf(video.id, audio.id)
-                } else if (firstSelection == null) {
-                    firstSelection = setOf(video.id)
-                }
+                if (firstSelection == null) firstSelection = linkedIds
                 if (firstPrimary == null) firstPrimary = video.id
                 startUs += durationUs
                 return@forEach
@@ -172,7 +167,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         _state.value = state
     }
 
-    /** Long-press drag calls this. A linked group is clamped and moved atomically. */
     fun moveClip(trackId: String, clipId: String, deltaUs: Long) {
         if (deltaUs == 0L) return
         val state = _state.value
@@ -188,7 +182,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val others = track.clips.filter { it.id !in movingIds }
             val previous = others.filter { it.timelineEndUs <= clip.timelineStartUs }.maxByOrNull { it.timelineEndUs }
             val next = others.filter { it.timelineStartUs >= clip.timelineEndUs }.minByOrNull { it.timelineStartUs }
-            val clipLower = max(-clip.timelineStartUs, previous?.let { it.timelineEndUs - clip.timelineStartUs } ?: Long.MIN_VALUE / 4)
+            val clipLower = max(
+                -clip.timelineStartUs,
+                previous?.let { it.timelineEndUs - clip.timelineStartUs } ?: Long.MIN_VALUE / 4,
+            )
             val clipUpper = next?.let { it.timelineStartUs - clip.timelineEndUs } ?: Long.MAX_VALUE / 4
             lower = max(lower, clipLower)
             upper = min(upper, clipUpper)
@@ -307,12 +304,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         updatePrimaryClip { clip ->
             val graph = clip.nodeGraph
             clip.copy(nodeGraph = graph.copy(nodes = graph.nodes.map { node ->
-                if (node.id == nodeId) node.copy(
-                    position = NodePosition(
-                        (node.position.x + dx).coerceAtLeast(8f),
-                        (node.position.y + dy).coerceAtLeast(8f),
-                    ),
-                ) else node
+                if (node.id == nodeId) {
+                    node.copy(
+                        position = NodePosition(
+                            (node.position.x + dx).coerceAtLeast(8f),
+                            (node.position.y + dy).coerceAtLeast(8f),
+                        ),
+                    )
+                } else node
             }))
         }
     }
@@ -366,16 +365,24 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 val nextGraph = graph.copy(
                     nodes = graph.nodes + parallel,
-                    edges = graph.edges + listOf(NodeEdge(incoming.fromId, parallel.id), NodeEdge(parallel.id, mix.id)),
+                    edges = graph.edges + listOf(
+                        NodeEdge(incoming.fromId, parallel.id),
+                        NodeEdge(parallel.id, mix.id),
+                    ),
                     selectedNodeId = parallel.id,
                 )
-                return@updatePrimaryClip clip.copy(nodeGraph = nextGraph, colorGrade = nextGraph.effectiveColorGrade())
+                return@updatePrimaryClip clip.copy(
+                    nodeGraph = nextGraph,
+                    colorGrade = nextGraph.effectiveColorGrade(),
+                )
             }
 
             val incoming = graph.edges.firstOrNull { it.toId == anchor.id } ?: return@updatePrimaryClip clip
             val outgoing = graph.edges.firstOrNull { it.fromId == anchor.id } ?: return@updatePrimaryClip clip
             val shiftedNodes = graph.nodes.map { node ->
-                if (node.position.x > anchor.position.x + 20f) node.copy(position = node.position.copy(x = node.position.x + 154f)) else node
+                if (node.position.x > anchor.position.x + 20f) {
+                    node.copy(position = node.position.copy(x = node.position.x + 154f))
+                } else node
             }
             val parallel = ColorNode(
                 kind = NodeKind.PARALLEL,
@@ -424,9 +431,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val nextGraph = graph.copy(nodes = graph.nodes.map { node ->
                 if (node.id == selectedId) {
                     val existing = node.effects.indexOfFirst { it.name == name }
-                    if (existing >= 0) node.copy(effects = node.effects.mapIndexed { index, effect ->
-                        if (index == existing) effect.copy(amount = amount, enabled = true) else effect
-                    }) else node.copy(effects = node.effects + NodeEffect(name = name, amount = amount))
+                    if (existing >= 0) {
+                        node.copy(effects = node.effects.mapIndexed { index, effect ->
+                            if (index == existing) effect.copy(amount = amount, enabled = true) else effect
+                        })
+                    } else {
+                        node.copy(effects = node.effects + NodeEffect(name = name, amount = amount))
+                    }
                 } else node
             })
             clip.copy(nodeGraph = nextGraph)
@@ -455,7 +466,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     lastOutput = result.output.absolutePath,
                 )
             }.onFailure { error ->
-                _state.value = _state.value.copy(status = error.message ?: "Export failed", exportFraction = null)
+                _state.value = _state.value.copy(
+                    status = error.message ?: "Export failed",
+                    exportFraction = null,
+                )
             }
         }
     }
