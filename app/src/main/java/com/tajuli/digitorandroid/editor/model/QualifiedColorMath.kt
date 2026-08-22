@@ -9,6 +9,9 @@ import kotlin.math.pow
  *
  * The key is calculated from RGB entering the node. All node grading is computed normally, then
  * blended over the node input by the refined H/S/L matte. Pixels outside the matte pass through.
+ *
+ * Softness is an OUTER feather: the hard H/S/L range stays at 100% matte, then the matte falls
+ * smoothly from 1 -> 0 outside that range. A hard boundary is therefore never reduced to 50%.
  */
 object QualifiedColorMath {
     fun applyClip(clip: TimelineClip, r: Float, g: Float, b: Float): FloatArray {
@@ -73,11 +76,12 @@ object QualifiedColorMath {
         if (!q.enabled) return 1f
 
         val hsl = rgbToHsl(r, g, b)
+
+        // Pre-filter/blur are only a LUT-space approximation until a neighborhood shader exists.
+        // Keep their contribution small and, importantly, do not move the hard 100% H/S/L edges.
         val preFilter = node.qualifierFinesse(QualifierFinesseKeys.PRE_FILTER, 0f).coerceIn(0f, 1f)
         val blurRadius = node.qualifierFinesse(QualifierFinesseKeys.BLUR_RADIUS, 0f).coerceIn(0f, 10f)
-        // Current renderer is a 3D LUT, so these two controls soften the matte in color space.
-        // A future neighborhood shader can replace this with true spatial prefilter/blur.
-        val extraSoft = (preFilter * .12f + blurRadius / 10f * .18f).coerceIn(0f, .30f)
+        val extraSoft = (preFilter * .03f + blurRadius / 10f * .05f).coerceIn(0f, .08f)
 
         val hueMask = hueMask(
             hueDegrees = hsl[0] * 360f,
@@ -106,6 +110,11 @@ object QualifiedColorMath {
         return matte.coerceIn(0f, 1f)
     }
 
+    /**
+     * Hue width defines the full-strength core. Softness extends OUTSIDE that core.
+     * q.softness is a 0..1 fraction of the hue circle; because there are two edges, each edge gets
+     * half of that total circle fraction (softness * 180 degrees).
+     */
     private fun hueMask(
         hueDegrees: Float,
         centerDegrees: Float,
@@ -117,14 +126,30 @@ object QualifiedColorMath {
         if (width >= 359.999f) return 1f
 
         val delta = signedHueDelta(hueDegrees, centerDegrees)
-        val leftSpan = (width * symmetry).coerceAtLeast(.5f)
-        val rightSpan = (width * (1f - symmetry)).coerceAtLeast(.5f)
-        val span = if (delta < 0f) leftSpan else rightSpan
+        val leftSpan = (width * symmetry).coerceIn(.5f, 180f)
+        val rightSpan = (width * (1f - symmetry)).coerceIn(.5f, 180f)
+        val hardSpan = if (delta < 0f) leftSpan else rightSpan
         val distance = kotlin.math.abs(delta)
-        val soft = (span * softness.coerceIn(0f, 1f)).coerceAtLeast(.25f)
-        return 1f - smoothstep((span - soft).coerceAtLeast(0f), span, distance)
+
+        // Everything inside the selected hard hue range gets the complete node effect.
+        if (distance <= hardSpan) return 1f
+
+        val feather = (softness.coerceIn(0f, 1f) * 180f)
+            .coerceAtMost((180f - hardSpan).coerceAtLeast(0f))
+        if (feather <= .0001f) return 0f
+        if (distance >= hardSpan + feather) return 0f
+
+        return 1f - smoothstep(hardSpan, hardSpan + feather, distance)
     }
 
+    /**
+     * Low/High are the 100% matte boundaries. Low Soft feathers only BELOW Low and High Soft
+     * feathers only ABOVE High. This gives a predictable 1 -> 0 falloff instead of centering the
+     * transition on Low/High (which incorrectly made the boundary itself 50%).
+     *
+     * Soft values are literal 0..1 fractions of the full S/L axis, so e.g. 0.10 means a 10-point
+     * feather on the 0..100 UI scale.
+     */
     private fun rangeMask(
         value: Float,
         minValue: Float,
@@ -136,11 +161,29 @@ object QualifiedColorMath {
         val hi = max(minValue, maxValue).coerceIn(0f, 1f)
         if (lo <= .0001f && hi >= .9999f) return 1f
 
-        val lowEdge = (lowSoftness.coerceIn(0f, 1f) * .25f).coerceAtLeast(.0001f)
-        val highEdge = (highSoftness.coerceIn(0f, 1f) * .25f).coerceAtLeast(.0001f)
-        val rise = if (lo <= .0001f) 1f else smoothstep(lo - lowEdge, lo + lowEdge, value)
-        val fall = if (hi >= .9999f) 1f else 1f - smoothstep(hi - highEdge, hi + highEdge, value)
-        return (rise * fall).coerceIn(0f, 1f)
+        val lowMask = when {
+            lo <= .0001f -> 1f
+            value >= lo -> 1f
+            lowSoftness <= .0001f -> 0f
+            else -> {
+                val feather = lowSoftness.coerceIn(0f, 1f).coerceAtMost(lo)
+                val outer = lo - feather
+                if (value <= outer) 0f else smoothstep(outer, lo, value)
+            }
+        }
+
+        val highMask = when {
+            hi >= .9999f -> 1f
+            value <= hi -> 1f
+            highSoftness <= .0001f -> 0f
+            else -> {
+                val feather = highSoftness.coerceIn(0f, 1f).coerceAtMost(1f - hi)
+                val outer = hi + feather
+                if (value >= outer) 0f else 1f - smoothstep(hi, outer, value)
+            }
+        }
+
+        return (lowMask * highMask).coerceIn(0f, 1f)
     }
 
     private fun applyMatteFinesse(node: ColorNode, input: Float): Float {
