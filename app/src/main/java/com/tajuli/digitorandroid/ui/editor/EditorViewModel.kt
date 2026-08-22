@@ -66,12 +66,20 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun addTrack(kind: TrackKind) {
-        val p = _state.value.project
-        val count = p.tracks.count { it.kind == kind } + 1
+        val state = _state.value
+        val project = state.project
+        val count = project.tracks.count { it.kind == kind } + 1
         val prefix = if (kind == TrackKind.VIDEO) "V" else "A"
         val track = TimelineTrack(name = "$prefix$count", kind = kind)
-        _state.value = _state.value.copy(
-            project = p.copy(tracks = p.tracks + track),
+        val tracks = if (kind == TrackKind.VIDEO) {
+            val firstAudio = project.tracks.indexOfFirst { it.kind == TrackKind.AUDIO }
+            if (firstAudio < 0) project.tracks + track
+            else project.tracks.toMutableList().apply { add(firstAudio, track) }
+        } else {
+            project.tracks + track
+        }
+        _state.value = state.copy(
+            project = project.copy(tracks = tracks),
             selectedTrackId = track.id,
         )
     }
@@ -84,8 +92,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val selected = project.track(state.selectedTrackId) ?: return
 
         if (selected.kind == TrackKind.VIDEO && project.tracks.none { it.kind == TrackKind.AUDIO }) {
-            val audio = TimelineTrack(name = "A1", kind = TrackKind.AUDIO)
-            project = project.copy(tracks = project.tracks + audio)
+            project = project.copy(tracks = project.tracks + TimelineTrack(name = "A1", kind = TrackKind.AUDIO))
         }
 
         val audioTrack = project.tracks.firstOrNull { it.kind == TrackKind.AUDIO }
@@ -119,7 +126,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     linkGroupId = groupId,
                 )
                 additions.getOrPut(selected.id) { mutableListOf() } += video
-
                 val linkedIds = linkedSetOf(video.id)
                 audioTrack?.let { targetAudioTrack ->
                     val audio = TimelineClip(
@@ -167,6 +173,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         _state.value = state
     }
 
+    /** Horizontal long-press drag. Linked clips move together and are collision-clamped. */
     fun moveClip(trackId: String, clipId: String, deltaUs: Long) {
         if (deltaUs == 0L) return
         val state = _state.value
@@ -200,6 +207,43 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             })
         }
         _state.value = state.copy(project = project.copy(tracks = tracks))
+    }
+
+    /**
+     * Vertical long-press drag. The dragged component may change to another track
+     * of the same type. If it is linked to source audio/video, the counterpart
+     * stays linked on its own track and keeps the same timeline timing.
+     */
+    fun moveClipToTrack(clipId: String, targetTrackId: String) {
+        val state = _state.value
+        val project = state.project
+        val clip = project.clip(clipId) ?: return
+        val source = project.trackContaining(clipId) ?: return
+        val target = project.track(targetTrackId) ?: return
+        if (source.id == target.id) return
+        if (source.kind != target.kind) {
+            _state.value = state.copy(status = "Video can move only to video tracks; audio only to audio tracks")
+            return
+        }
+        val collision = target.clips.any {
+            it.id != clip.id && it.timelineStartUs < clip.timelineEndUs && it.timelineEndUs > clip.timelineStartUs
+        }
+        if (collision) {
+            _state.value = state.copy(status = "Target track is occupied at this time")
+            return
+        }
+        val tracks = project.tracks.map { track ->
+            when (track.id) {
+                source.id -> track.copy(clips = track.clips.filterNot { it.id == clipId })
+                target.id -> track.copy(clips = track.clips + clip)
+                else -> track
+            }
+        }
+        _state.value = state.copy(
+            project = project.copy(tracks = tracks),
+            selectedTrackId = target.id,
+            status = "Moved to ${target.name}",
+        )
     }
 
     fun unlinkSelected() {
@@ -322,9 +366,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val anchor = graph.nodes.firstOrNull { it.id == afterNodeId } ?: return@updatePrimaryClip clip
             if (anchor.kind == NodeKind.OUTPUT) return@updatePrimaryClip clip
             val outgoing = graph.edges.firstOrNull { it.fromId == anchor.id }
-            val shiftStart = anchor.position.x + 24f
             val shifted = graph.nodes.map { node ->
-                if (node.id != anchor.id && node.position.x > shiftStart) {
+                if (node.id != anchor.id && node.position.x > anchor.position.x + 24f) {
                     node.copy(position = node.position.copy(x = node.position.x + 126f))
                 } else node
             }
@@ -337,11 +380,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val edges = graph.edges.filterNot { it == outgoing }.toMutableList()
             edges += NodeEdge(anchor.id, newNode.id)
             if (outgoing != null) edges += NodeEdge(newNode.id, outgoing.toId)
-            val nextGraph = graph.copy(
-                nodes = shifted + newNode,
-                edges = edges,
-                selectedNodeId = newNode.id,
-            )
+            val nextGraph = graph.copy(nodes = shifted + newNode, edges = edges, selectedNodeId = newNode.id)
             clip.copy(nodeGraph = nextGraph, colorGrade = nextGraph.effectiveColorGrade())
         }
     }
@@ -354,9 +393,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
             if (anchor.kind == NodeKind.PARALLEL) {
                 val incoming = graph.edges.firstOrNull { it.toId == anchor.id } ?: return@updatePrimaryClip clip
-                val mixEdge = graph.edges.firstOrNull { it.fromId == anchor.id }
-                val mix = mixEdge?.toId?.let { id -> graph.nodes.firstOrNull { it.id == id && it.kind == NodeKind.MIX } }
-                    ?: return@updatePrimaryClip clip
+                val mixId = graph.edges.firstOrNull { it.fromId == anchor.id }?.toId ?: return@updatePrimaryClip clip
+                val mix = graph.nodes.firstOrNull { it.id == mixId && it.kind == NodeKind.MIX } ?: return@updatePrimaryClip clip
                 val siblingCount = graph.edges.count { it.toId == mix.id }
                 val parallel = ColorNode(
                     kind = NodeKind.PARALLEL,
@@ -365,16 +403,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 val nextGraph = graph.copy(
                     nodes = graph.nodes + parallel,
-                    edges = graph.edges + listOf(
-                        NodeEdge(incoming.fromId, parallel.id),
-                        NodeEdge(parallel.id, mix.id),
-                    ),
+                    edges = graph.edges + listOf(NodeEdge(incoming.fromId, parallel.id), NodeEdge(parallel.id, mix.id)),
                     selectedNodeId = parallel.id,
                 )
-                return@updatePrimaryClip clip.copy(
-                    nodeGraph = nextGraph,
-                    colorGrade = nextGraph.effectiveColorGrade(),
-                )
+                return@updatePrimaryClip clip.copy(nodeGraph = nextGraph, colorGrade = nextGraph.effectiveColorGrade())
             }
 
             val incoming = graph.edges.firstOrNull { it.toId == anchor.id } ?: return@updatePrimaryClip clip
