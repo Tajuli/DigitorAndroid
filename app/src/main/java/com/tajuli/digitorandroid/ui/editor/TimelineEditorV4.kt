@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
@@ -59,9 +60,11 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.ln
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
@@ -71,9 +74,12 @@ private val T4Divider = Color(0xFF292930)
 private val T4Muted = Color(0xFF909098)
 private val T4Accent = Color(0xFF30E0C3)
 private val T4Playhead = Color(0xFFFF4D4D)
+private val T4Magnet = Color(0xFFFFC857)
 private val T4Video = Color(0xFF385B78)
 private val T4Audio = Color(0xFF315F57)
 private const val T4_TRACK_HEIGHT = 38f
+
+private data class T4SnapResult(val deltaUs: Long, val magnet: Boolean)
 
 @Composable
 fun TimelineEditorV4(
@@ -182,6 +188,7 @@ fun TimelineEditorV4(
                                     project = project,
                                     track = track,
                                     selectedClipIds = selectedClipIds,
+                                    cursorUs = cursorUs,
                                     pps = pps,
                                     width = contentWidth,
                                     onSelectClip = onSelectClip,
@@ -195,10 +202,15 @@ fun TimelineEditorV4(
                         Box(
                             Modifier.offset(x = cursorX - 12.dp).width(24.dp).fillMaxHeight()
                                 .pointerInput(pps) {
-                                    detectDragGestures { change, drag ->
+                                    var totalDragX = 0f
+                                    detectDragGestures(
+                                        onDragStart = { totalDragX = 0f },
+                                        onDragEnd = { totalDragX = 0f },
+                                        onDragCancel = { totalDragX = 0f },
+                                    ) { change, drag ->
                                         change.consume()
-                                        val next = cursorXPx + drag.x
-                                        onSeek(xToTime(next))
+                                        totalDragX += drag.x
+                                        onSeek(xToTime(cursorXPx + totalDragX))
                                     }
                                 },
                             contentAlignment = Alignment.Center,
@@ -309,6 +321,7 @@ private fun TimelineLaneV4(
     project: TimelineProject,
     track: TimelineTrack,
     selectedClipIds: Set<String>,
+    cursorUs: Long,
     pps: Float,
     width: Dp,
     onSelectClip: (String) -> Unit,
@@ -320,7 +333,19 @@ private fun TimelineLaneV4(
             .background(if (track.kind == TrackKind.VIDEO) Color(0xFF10141A) else Color(0xFF101713))
             .border(.5.dp, T4Divider),
     ) {
-        track.clips.forEach { clip -> ClipV4(project, track, clip, clip.id in selectedClipIds, pps, onSelectClip, onMoveClip, onMoveClipToTrack) }
+        track.clips.forEach { clip ->
+            ClipV4(
+                project = project,
+                track = track,
+                clip = clip,
+                selected = clip.id in selectedClipIds,
+                cursorUs = cursorUs,
+                pps = pps,
+                onSelectClip = onSelectClip,
+                onMoveClip = onMoveClip,
+                onMoveClipToTrack = onMoveClipToTrack,
+            )
+        }
     }
 }
 
@@ -330,6 +355,7 @@ private fun ClipV4(
     track: TimelineTrack,
     clip: TimelineClip,
     selected: Boolean,
+    cursorUs: Long,
     pps: Float,
     onSelectClip: (String) -> Unit,
     onMoveClip: (String, String, Long) -> Unit,
@@ -343,50 +369,73 @@ private fun ClipV4(
     val compatible = project.tracks.filter { it.kind == track.kind }
     val sourceIndex = compatible.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
     val trackPx = with(density) { T4_TRACK_HEIGHT.dp.toPx() }
-    var dragX by remember(clip.id) { mutableStateOf(0f) }
+    var rawDragX by remember(clip.id) { mutableStateOf(0f) }
     var dragY by remember(clip.id) { mutableStateOf(0f) }
+    var displayDeltaUs by remember(clip.id) { mutableStateOf(0L) }
+    var magnetActive by remember(clip.id) { mutableStateOf(false) }
 
     Box(
         Modifier.offset(x = start, y = 3.dp).width(width).height(31.dp)
             .graphicsLayer {
-                translationX = dragX
+                translationX = displayDeltaUs / US_PER_SECOND.toFloat() * pps
                 translationY = dragY
             }
             .clip(RoundedCornerShape(4.dp))
             .background(if (track.kind == TrackKind.VIDEO) T4Video else T4Audio)
-            .border(if (selected) 2.dp else .5.dp, if (selected) T4Accent else Color.White.copy(alpha = .14f), RoundedCornerShape(4.dp))
+            .border(
+                if (selected || magnetActive) 2.dp else .5.dp,
+                when {
+                    magnetActive -> T4Magnet
+                    selected -> T4Accent
+                    else -> Color.White.copy(alpha = .14f)
+                },
+                RoundedCornerShape(4.dp),
+            )
             .clickable { onSelectClip(clip.id) }
-            .pointerInput(clip.id, track.id, pps, project.frameRate) {
-                detectDragGestures(
+            .pointerInput(clip.id, track.id, pps, project, cursorUs) {
+                detectDragGesturesAfterLongPress(
                     onDragStart = {
-                        dragX = 0f
+                        rawDragX = 0f
                         dragY = 0f
+                        displayDeltaUs = 0L
+                        magnetActive = false
                         onSelectClip(clip.id)
                     },
                     onDragEnd = {
-                        val rawUs = dragX / pps * US_PER_SECOND
-                        val frames = (rawUs / frameUs).roundToLong()
-                        val delta = frames * frameUs
-                        if (delta != 0L) {
-                            onMoveClip(track.id, clip.id, delta)
-                        }
+                        val delta = displayDeltaUs
+                        if (delta != 0L) onMoveClip(track.id, clip.id, delta)
 
                         val shift = (dragY / trackPx).roundToInt()
                         if (shift != 0 && compatible.isNotEmpty()) {
                             val target = compatible[(sourceIndex + shift).coerceIn(0, compatible.lastIndex)]
                             if (target.id != track.id) onMoveClipToTrack(clip.id, target.id)
                         }
-                        dragX = 0f
+                        rawDragX = 0f
                         dragY = 0f
+                        displayDeltaUs = 0L
+                        magnetActive = false
                     },
                     onDragCancel = {
-                        dragX = 0f
+                        rawDragX = 0f
                         dragY = 0f
+                        displayDeltaUs = 0L
+                        magnetActive = false
                     },
                 ) { change, drag ->
                     change.consume()
-                    dragX += drag.x
+                    rawDragX += drag.x
                     dragY += drag.y
+                    val rawUs = rawDragX / pps * US_PER_SECOND
+                    val result = resolveMagneticDelta(
+                        project = project,
+                        clipId = clip.id,
+                        rawDeltaUs = rawUs.roundToLong(),
+                        cursorUs = cursorUs,
+                        pps = pps,
+                        frameUs = frameUs,
+                    )
+                    displayDeltaUs = result.deltaUs
+                    magnetActive = result.magnet
                 }
             }
             .padding(horizontal = 3.dp),
@@ -395,8 +444,80 @@ private fun ClipV4(
         if (width > 24.dp) {
             Column {
                 Text(clip.label, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 8.sp, color = Color.White.copy(alpha = .9f))
-                if (clip.linkGroupId != null) Text("linked", fontSize = 6.sp, color = Color.White.copy(alpha = .5f))
+                Text(
+                    when {
+                        magnetActive -> "SNAP"
+                        clip.linkGroupId != null -> "linked"
+                        else -> ""
+                    },
+                    fontSize = 6.sp,
+                    color = if (magnetActive) T4Magnet else Color.White.copy(alpha = .5f),
+                )
             }
         }
     }
+}
+
+private fun resolveMagneticDelta(
+    project: TimelineProject,
+    clipId: String,
+    rawDeltaUs: Long,
+    cursorUs: Long,
+    pps: Float,
+    frameUs: Long,
+): T4SnapResult {
+    val target = project.clip(clipId) ?: return T4SnapResult(0L, false)
+    val movingIds = if (target.linkGroupId == null) setOf(target.id) else project.linkedClipIds(target.id)
+    val movingClips = movingIds.mapNotNull(project::clip)
+    if (movingClips.isEmpty()) return T4SnapResult(0L, false)
+
+    var lower = Long.MIN_VALUE / 4
+    var upper = Long.MAX_VALUE / 4
+    for (moving in movingClips) {
+        val owner = project.trackContaining(moving.id) ?: continue
+        val others = owner.clips.filter { it.id !in movingIds }
+        val previous = others.filter { it.timelineEndUs <= moving.timelineStartUs }.maxByOrNull { it.timelineEndUs }
+        val next = others.filter { it.timelineStartUs >= moving.timelineEndUs }.minByOrNull { it.timelineStartUs }
+        lower = max(
+            lower,
+            max(-moving.timelineStartUs, previous?.let { it.timelineEndUs - moving.timelineStartUs } ?: Long.MIN_VALUE / 4),
+        )
+        upper = min(upper, next?.let { it.timelineStartUs - moving.timelineEndUs } ?: Long.MAX_VALUE / 4)
+    }
+    if (lower > upper) return T4SnapResult(0L, false)
+
+    val frameDelta = ((rawDeltaUs.toDouble() / frameUs).roundToLong() * frameUs).coerceIn(lower, upper)
+    val thresholdUs = ((14f / pps.coerceAtLeast(.001f)) * US_PER_SECOND)
+        .roundToLong()
+        .coerceIn(frameUs, 500_000L)
+
+    val anchors = linkedSetOf<Long>()
+    anchors += 0L
+    anchors += cursorUs.coerceAtLeast(0L)
+    project.tracks.flatMap { it.clips }.filter { it.id !in movingIds }.forEach { other ->
+        anchors += other.timelineStartUs
+        anchors += other.timelineEndUs
+    }
+
+    var best = frameDelta
+    var bestDistance = Long.MAX_VALUE
+    movingClips.forEach { moving ->
+        val edges = longArrayOf(moving.timelineStartUs, moving.timelineEndUs)
+        edges.forEach { edge ->
+            anchors.forEach { anchor ->
+                val candidate = anchor - edge
+                if (candidate < lower || candidate > upper) return@forEach
+                val distance = abs(candidate - frameDelta)
+                if (distance <= thresholdUs && distance < bestDistance) {
+                    best = candidate
+                    bestDistance = distance
+                }
+            }
+        }
+    }
+
+    return T4SnapResult(
+        deltaUs = best.coerceIn(lower, upper),
+        magnet = bestDistance != Long.MAX_VALUE && best != frameDelta,
+    )
 }
