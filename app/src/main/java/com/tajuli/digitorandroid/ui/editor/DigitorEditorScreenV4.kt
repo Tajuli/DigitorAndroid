@@ -5,6 +5,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.Audiotrack
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Colorize
 import androidx.compose.material.icons.rounded.ContentCut
 import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.Palette
@@ -63,8 +65,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -272,7 +277,10 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
             )
             if (exportFraction != null && exportFraction!! < 1f) {
                 Column {
-                    LinearProgressIndicator(progress = { exportFraction!!.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth().height(3.dp))
+                    LinearProgressIndicator(
+                        progress = { exportFraction!!.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth().height(3.dp),
+                    )
                     Text(
                         "${((exportFraction ?: 0f) * 100).roundToInt()}%  ${exportStatus.orEmpty()}",
                         fontSize = 9.sp,
@@ -282,7 +290,16 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
                 }
             }
 
-            PreviewV4(selectedClip, player, ::launchImport, Modifier.fillMaxWidth().weight(1f))
+            PreviewV4(
+                clip = selectedClip,
+                player = player,
+                onImport = ::launchImport,
+                qualifierPickerActive = state.qualifierPickerActive,
+                onPickColor = { x, y, width, height ->
+                    vm.pickQualifierFromPreview(cursorUs, x, y, width, height)
+                },
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            )
             TransportV4(
                 enabled = selectedClip != null,
                 isPlaying = isPlaying,
@@ -319,25 +336,61 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
                     )
                 }
             }
-            WorkspaceBarV4(workspace, { workspace = it }, Modifier.fillMaxWidth().height(66.dp))
+            WorkspaceBarV4(
+                selected = workspace,
+                onSelected = {
+                    workspace = it
+                    if (it != WorkspaceV4.COLOR && state.qualifierPickerActive) {
+                        vm.setQualifierPickerActive(false)
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().height(66.dp),
+            )
         }
     }
 }
 
 @Composable
-private fun TopBarV4(title: String, status: String, exportFraction: Float?, onImport: () -> Unit, onExport: () -> Unit) {
+private fun TopBarV4(
+    title: String,
+    status: String,
+    exportFraction: Float?,
+    onImport: () -> Unit,
+    onExport: () -> Unit,
+) {
     val exporting = exportFraction != null && exportFraction < 1f
-    Row(Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onImport, modifier = Modifier.size(40.dp)) { Icon(Icons.Rounded.Add, "Import") }
+    Row(
+        Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onImport, modifier = Modifier.size(40.dp)) {
+            Icon(Icons.Rounded.Add, "Import")
+        }
         Column(Modifier.weight(1f)) {
-            Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                title,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(6.dp).clip(CircleShape).background(E4Accent))
                 Spacer(Modifier.width(5.dp))
-                Text(if (status == "Ready") "GPU-first · Preview = Export LUT" else status, fontSize = 9.sp, color = Color.White.copy(alpha = .55f), maxLines = 1)
+                Text(
+                    if (status == "Ready") "GPU-first · Preview = Export LUT" else status,
+                    fontSize = 9.sp,
+                    color = Color.White.copy(alpha = .55f),
+                    maxLines = 1,
+                )
             }
         }
-        Button(onClick = onExport, enabled = !exporting, modifier = Modifier.height(34.dp), shape = RoundedCornerShape(7.dp)) {
+        Button(
+            onClick = onExport,
+            enabled = !exporting,
+            modifier = Modifier.height(34.dp),
+            shape = RoundedCornerShape(7.dp),
+        ) {
             Icon(Icons.Rounded.Share, null, modifier = Modifier.size(15.dp))
             Spacer(Modifier.width(5.dp))
             Text(if (exporting) "${((exportFraction ?: 0f) * 100).roundToInt()}%" else "Export", fontSize = 11.sp)
@@ -346,11 +399,27 @@ private fun TopBarV4(title: String, status: String, exportFraction: Float?, onIm
 }
 
 @Composable
-private fun PreviewV4(clip: TimelineClip?, player: ExoPlayer, onImport: () -> Unit, modifier: Modifier) {
-    Box(modifier.background(Color(0xFF030304)), contentAlignment = Alignment.Center) {
+private fun PreviewV4(
+    clip: TimelineClip?,
+    player: ExoPlayer,
+    onImport: () -> Unit,
+    qualifierPickerActive: Boolean,
+    onPickColor: (Float, Float, Float, Float) -> Unit,
+    modifier: Modifier,
+) {
+    var previewSize by remember { mutableStateOf(IntSize.Zero) }
+    Box(
+        modifier.background(Color(0xFF030304)).onSizeChanged { previewSize = it },
+        contentAlignment = Alignment.Center,
+    ) {
         if (clip == null) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Rounded.AddPhotoAlternate, null, tint = Color.White.copy(alpha = .35f), modifier = Modifier.size(40.dp))
+                Icon(
+                    Icons.Rounded.AddPhotoAlternate,
+                    null,
+                    tint = Color.White.copy(alpha = .35f),
+                    modifier = Modifier.size(40.dp),
+                )
                 Spacer(Modifier.height(8.dp))
                 Text("No media loaded", color = Color.White.copy(alpha = .55f), fontSize = 12.sp)
                 TextButton(onClick = onImport) { Text("Import media") }
@@ -364,26 +433,79 @@ private fun PreviewV4(clip: TimelineClip?, player: ExoPlayer, onImport: () -> Un
         }
         Text(
             "Shared LUT Preview",
-            modifier = Modifier.align(Alignment.TopStart).padding(10.dp).background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 4.dp),
+            modifier = Modifier.align(Alignment.TopStart).padding(10.dp)
+                .background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp))
+                .padding(horizontal = 7.dp, vertical = 4.dp),
             fontSize = 9.sp,
             color = Color.White.copy(alpha = .72f),
         )
+
+        if (qualifierPickerActive && clip != null) {
+            Box(
+                Modifier.fillMaxSize()
+                    .background(Color.Black.copy(alpha = .05f))
+                    .pointerInput(previewSize) {
+                        detectTapGestures { pos ->
+                            onPickColor(
+                                pos.x,
+                                pos.y,
+                                previewSize.width.toFloat(),
+                                previewSize.height.toFloat(),
+                            )
+                        }
+                    },
+                contentAlignment = Alignment.TopCenter,
+            ) {
+                Row(
+                    Modifier.padding(top = 9.dp)
+                        .background(Color.Black.copy(alpha = .76f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 9.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Rounded.Colorize, null, modifier = Modifier.size(15.dp), tint = E4Accent)
+                    Spacer(Modifier.width(5.dp))
+                    Text("Tap the color to qualify", fontSize = 9.sp, color = Color.White)
+                }
+            }
+        }
     }
 }
 
 @Composable
-private fun TransportV4(enabled: Boolean, isPlaying: Boolean, cursorUs: Long, durationUs: Long, onBack: () -> Unit, onPlayPause: () -> Unit, onForward: () -> Unit) {
-    Row(Modifier.fillMaxWidth().height(42.dp).background(Color(0xFF0D0D11)), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+private fun TransportV4(
+    enabled: Boolean,
+    isPlaying: Boolean,
+    cursorUs: Long,
+    durationUs: Long,
+    onBack: () -> Unit,
+    onPlayPause: () -> Unit,
+    onForward: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().height(42.dp).background(Color(0xFF0D0D11)),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
         Text(timeV4(cursorUs), color = E4Muted, fontSize = 9.sp, modifier = Modifier.width(66.dp))
-        IconButton(onClick = onBack, enabled = enabled, modifier = Modifier.size(34.dp)) { Icon(Icons.Rounded.Replay10, null, modifier = Modifier.size(18.dp)) }
-        IconButton(onClick = onPlayPause, enabled = enabled, modifier = Modifier.size(38.dp)) { Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, modifier = Modifier.size(23.dp)) }
-        IconButton(onClick = onForward, enabled = enabled, modifier = Modifier.size(34.dp)) { Icon(Icons.Rounded.Forward10, null, modifier = Modifier.size(18.dp)) }
+        IconButton(onClick = onBack, enabled = enabled, modifier = Modifier.size(34.dp)) {
+            Icon(Icons.Rounded.Replay10, null, modifier = Modifier.size(18.dp))
+        }
+        IconButton(onClick = onPlayPause, enabled = enabled, modifier = Modifier.size(38.dp)) {
+            Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, modifier = Modifier.size(23.dp))
+        }
+        IconButton(onClick = onForward, enabled = enabled, modifier = Modifier.size(34.dp)) {
+            Icon(Icons.Rounded.Forward10, null, modifier = Modifier.size(18.dp))
+        }
         Text(timeV4(durationUs), color = E4Muted, fontSize = 9.sp, modifier = Modifier.width(66.dp))
     }
 }
 
 @Composable
-private fun WorkspaceBarV4(selected: WorkspaceV4, onSelected: (WorkspaceV4) -> Unit, modifier: Modifier) {
+private fun WorkspaceBarV4(
+    selected: WorkspaceV4,
+    onSelected: (WorkspaceV4) -> Unit,
+    modifier: Modifier,
+) {
     Row(
         modifier.background(Color(0xFF0A0A0D)).horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -397,9 +519,18 @@ private fun WorkspaceBarV4(selected: WorkspaceV4, onSelected: (WorkspaceV4) -> U
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {
-                Icon(item.icon, item.label, modifier = Modifier.size(18.dp), tint = if (active) E4Accent else Color.White.copy(alpha = .55f))
+                Icon(
+                    item.icon,
+                    item.label,
+                    modifier = Modifier.size(18.dp),
+                    tint = if (active) E4Accent else Color.White.copy(alpha = .55f),
+                )
                 Spacer(Modifier.height(3.dp))
-                Text(item.label, fontSize = 8.sp, color = if (active) E4Accent else Color.White.copy(alpha = .55f))
+                Text(
+                    item.label,
+                    fontSize = 8.sp,
+                    color = if (active) E4Accent else Color.White.copy(alpha = .55f),
+                )
             }
         }
     }
@@ -410,5 +541,6 @@ private fun timeV4(us: Long): String {
     val hours = totalSeconds / 3600
     val minutes = (totalSeconds % 3600) / 60
     val seconds = totalSeconds % 60
-    return if (hours > 0) "%02d:%02d:%02d".format(hours, minutes, seconds) else "%02d:%02d".format(minutes, seconds)
+    return if (hours > 0) "%02d:%02d:%02d".format(hours, minutes, seconds)
+    else "%02d:%02d".format(minutes, seconds)
 }
