@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.visibleEffects
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -112,7 +113,7 @@ fun NodeGraphV4(clip: TimelineClip?, vm: EditorViewModelV4, modifier: Modifier =
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(node.label, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                             Text(node.kind.name, fontSize = 6.sp, color = Color.White.copy(alpha = .52f))
-                            if (node.effects.isNotEmpty()) Text("FX ${node.effects.size}", fontSize = 6.sp, color = N4Accent)
+                            if (node.visibleEffects().isNotEmpty()) Text("FX ${node.visibleEffects().size}", fontSize = 6.sp, color = N4Accent)
                         }
                         DropdownMenu(expanded = menuNodeId == node.id, onDismissRequest = { menuNodeId = null }) {
                             DropdownMenuItem(
@@ -168,8 +169,9 @@ fun EffectsWorkspaceV4(clip: TimelineClip?, vm: EditorViewModelV4, modifier: Mod
         }
         HorizontalDivider(color = N4Divider)
         Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            if (node.effects.isEmpty()) Text("No effects on this node", fontSize = 9.sp, color = N4Muted)
-            node.effects.forEach { effect ->
+            val visibleEffects = node.visibleEffects()
+            if (visibleEffects.isEmpty()) Text("No effects on this node", fontSize = 9.sp, color = N4Muted)
+            visibleEffects.forEach { effect ->
                 Row(Modifier.fillMaxWidth().background(N4Raised, RoundedCornerShape(5.dp)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(effect.name, fontSize = 9.sp, modifier = Modifier.weight(1f))
                     Text("${(effect.amount * 100).toInt()}%", fontSize = 8.sp, color = N4Accent)

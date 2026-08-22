@@ -1,15 +1,14 @@
 package com.tajuli.digitorandroid.editor.model
 
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 
 /**
  * Applies a Resolve-style HSL qualifier as a mask for the whole node.
  *
- * When the qualifier is enabled, the H/S/L key is calculated from the RGB entering that node.
- * All node grading is then computed normally, but the graded result is blended back over the
- * original node input using the qualifier mask. Pixels outside the key remain untouched.
+ * The key is calculated from RGB entering the node. All node grading is computed normally, then
+ * blended over the node input by the refined H/S/L matte. Pixels outside the matte pass through.
  */
 object QualifiedColorMath {
     fun applyClip(clip: TimelineClip, r: Float, g: Float, b: Float): FloatArray {
@@ -33,8 +32,8 @@ object QualifiedColorMath {
             return AdvancedColorMath.applyNode(node, sourceR, sourceG, sourceB)
         }
 
-        // Calculate the whole node grade without the legacy qualifier-only masking. The qualifier
-        // below will gate the entire node result instead.
+        // Compute the node grade without the legacy qualifier-only shift masking. The refined matte
+        // below gates the entire node, matching Resolve's qualifier-on-node behavior.
         val unmaskedNode = node.copy(
             advancedColor = node.advancedColor.copy(
                 qualifier = q.copy(enabled = false),
@@ -42,8 +41,6 @@ object QualifiedColorMath {
         )
         var processed = AdvancedColorMath.applyNode(unmaskedNode, sourceR, sourceG, sourceB)
 
-        // Preserve the existing qualified H/S/L shift controls as part of this node's processed
-        // result. They are also limited by the same final node mask.
         if (q.hueShiftDegrees != 0f || q.saturationShift != 0f || q.luminanceShift != 0f) {
             val hsl = rgbToHsl(processed[0], processed[1], processed[2])
             hsl[0] = wrap01(hsl[0] + q.hueShiftDegrees / 360f)
@@ -52,7 +49,7 @@ object QualifiedColorMath {
             processed = hslToRgb(hsl[0], hsl[1], hsl[2])
         }
 
-        val mask = qualifierMask(q, sourceR, sourceG, sourceB)
+        val mask = qualifierMask(node, sourceR, sourceG, sourceB)
         return floatArrayOf(
             lerp(sourceR, processed[0].coerceIn(0f, 1f), mask),
             lerp(sourceG, processed[1].coerceIn(0f, 1f), mask),
@@ -60,33 +57,121 @@ object QualifiedColorMath {
         )
     }
 
+    /** Compatibility overload retained for existing tests/callers. */
     internal fun qualifierMask(q: HslQualifier, r: Float, g: Float, b: Float): Float {
-        if (!q.enabled) return 1f
-        val hsl = rgbToHsl(r, g, b)
-        val hueDeg = hsl[0] * 360f
-        val hueWidth = q.hueWidthDegrees.coerceIn(1f, 360f)
-        val hueMask = if (hueWidth >= 359.999f) {
-            1f
-        } else {
-            val hueDistance = min(abs(hueDeg - q.hueCenterDegrees), 360f - abs(hueDeg - q.hueCenterDegrees))
-            val hueHalf = (hueWidth * .5f).coerceIn(.5f, 180f)
-            val hueSoft = max(.5f, hueHalf * q.softness.coerceIn(0f, 1f))
-            1f - smoothstep((hueHalf - hueSoft).coerceAtLeast(0f), hueHalf, hueDistance)
-        }
-        val satMask = rangeMask(hsl[1], q.saturationMin, q.saturationMax, q.softness)
-        val lumMask = rangeMask(hsl[2], q.luminanceMin, q.luminanceMax, q.softness)
-        return (hueMask * satMask * lumMask).coerceIn(0f, 1f)
+        val node = ColorNode(
+            kind = NodeKind.SERIAL,
+            label = "qualifier-mask",
+            position = NodePosition(0f, 0f),
+            advancedColor = AdvancedColorGrade(qualifier = q),
+        )
+        return qualifierMask(node, r, g, b)
     }
 
-    private fun rangeMask(value: Float, minValue: Float, maxValue: Float, softness: Float): Float {
+    internal fun qualifierMask(node: ColorNode, r: Float, g: Float, b: Float): Float {
+        val q = node.advancedColor.qualifier
+        if (!q.enabled) return 1f
+
+        val hsl = rgbToHsl(r, g, b)
+        val preFilter = node.qualifierFinesse(QualifierFinesseKeys.PRE_FILTER, 0f).coerceIn(0f, 1f)
+        val blurRadius = node.qualifierFinesse(QualifierFinesseKeys.BLUR_RADIUS, 0f).coerceIn(0f, 10f)
+        // Current renderer is a 3D LUT, so these two controls soften the matte in color space.
+        // A future neighborhood shader can replace this with true spatial prefilter/blur.
+        val extraSoft = (preFilter * .12f + blurRadius / 10f * .18f).coerceIn(0f, .30f)
+
+        val hueMask = hueMask(
+            hueDegrees = hsl[0] * 360f,
+            centerDegrees = q.hueCenterDegrees,
+            widthDegrees = q.hueWidthDegrees,
+            softness = (q.softness + extraSoft).coerceIn(0f, 1f),
+            symmetry = node.qualifierFinesse(QualifierFinesseKeys.HUE_SYMMETRY, .5f).coerceIn(0f, 1f),
+        )
+        val satMask = rangeMask(
+            value = hsl[1],
+            minValue = q.saturationMin,
+            maxValue = q.saturationMax,
+            lowSoftness = (node.qualifierFinesse(QualifierFinesseKeys.SAT_LOW_SOFT, .08f) + extraSoft).coerceIn(0f, 1f),
+            highSoftness = (node.qualifierFinesse(QualifierFinesseKeys.SAT_HIGH_SOFT, .08f) + extraSoft).coerceIn(0f, 1f),
+        )
+        val lumMask = rangeMask(
+            value = hsl[2],
+            minValue = q.luminanceMin,
+            maxValue = q.luminanceMax,
+            lowSoftness = (node.qualifierFinesse(QualifierFinesseKeys.LUM_LOW_SOFT, .08f) + extraSoft).coerceIn(0f, 1f),
+            highSoftness = (node.qualifierFinesse(QualifierFinesseKeys.LUM_HIGH_SOFT, .08f) + extraSoft).coerceIn(0f, 1f),
+        )
+
+        var matte = (hueMask * satMask * lumMask).coerceIn(0f, 1f)
+        matte = applyMatteFinesse(node, matte)
+        return matte.coerceIn(0f, 1f)
+    }
+
+    private fun hueMask(
+        hueDegrees: Float,
+        centerDegrees: Float,
+        widthDegrees: Float,
+        softness: Float,
+        symmetry: Float,
+    ): Float {
+        val width = widthDegrees.coerceIn(1f, 360f)
+        if (width >= 359.999f) return 1f
+
+        val delta = signedHueDelta(hueDegrees, centerDegrees)
+        val leftSpan = (width * symmetry).coerceAtLeast(.5f)
+        val rightSpan = (width * (1f - symmetry)).coerceAtLeast(.5f)
+        val span = if (delta < 0f) leftSpan else rightSpan
+        val distance = kotlin.math.abs(delta)
+        val soft = (span * softness.coerceIn(0f, 1f)).coerceAtLeast(.25f)
+        return 1f - smoothstep((span - soft).coerceAtLeast(0f), span, distance)
+    }
+
+    private fun rangeMask(
+        value: Float,
+        minValue: Float,
+        maxValue: Float,
+        lowSoftness: Float,
+        highSoftness: Float,
+    ): Float {
         val lo = min(minValue, maxValue).coerceIn(0f, 1f)
         val hi = max(minValue, maxValue).coerceIn(0f, 1f)
         if (lo <= .0001f && hi >= .9999f) return 1f
-        val edge = (softness.coerceIn(0f, 1f) * .25f).coerceAtLeast(.0001f)
-        val rise = smoothstep(lo - edge, lo + edge, value)
-        val fall = 1f - smoothstep(hi - edge, hi + edge, value)
+
+        val lowEdge = (lowSoftness.coerceIn(0f, 1f) * .25f).coerceAtLeast(.0001f)
+        val highEdge = (highSoftness.coerceIn(0f, 1f) * .25f).coerceAtLeast(.0001f)
+        val rise = if (lo <= .0001f) 1f else smoothstep(lo - lowEdge, lo + lowEdge, value)
+        val fall = if (hi >= .9999f) 1f else 1f - smoothstep(hi - highEdge, hi + highEdge, value)
         return (rise * fall).coerceIn(0f, 1f)
     }
+
+    private fun applyMatteFinesse(node: ColorNode, input: Float): Float {
+        var matte = input.coerceIn(0f, 1f)
+        val blackClip = node.qualifierFinesse(QualifierFinesseKeys.BLACK_CLIP, 0f).coerceIn(0f, 1f)
+        val whiteClip = node.qualifierFinesse(QualifierFinesseKeys.WHITE_CLIP, 1f).coerceIn(0f, 1f)
+        val lo = min(blackClip, whiteClip - .001f).coerceIn(0f, .999f)
+        val hi = max(whiteClip, lo + .001f).coerceIn(.001f, 1f)
+        matte = smoothstep(lo, hi, matte)
+
+        val cleanBlack = node.qualifierFinesse(QualifierFinesseKeys.CLEAN_BLACK, 0f).coerceIn(0f, 1f)
+        if (cleanBlack > 0f) {
+            matte = matte.pow(1f + cleanBlack * 5f)
+        }
+
+        val cleanWhite = node.qualifierFinesse(QualifierFinesseKeys.CLEAN_WHITE, 0f).coerceIn(0f, 1f)
+        if (cleanWhite > 0f) {
+            matte = 1f - (1f - matte).coerceIn(0f, 1f).pow(1f + cleanWhite * 5f)
+        }
+
+        val ratio = node.qualifierFinesse(QualifierFinesseKeys.IN_OUT_RATIO, 0f).coerceIn(-1f, 1f)
+        matte = if (ratio >= 0f) {
+            matte + (1f - matte) * ratio * .35f
+        } else {
+            matte * (1f + ratio * .35f)
+        }
+        return matte.coerceIn(0f, 1f)
+    }
+
+    private fun signedHueDelta(hue: Float, center: Float): Float =
+        ((hue - center + 540f) % 360f) - 180f
 
     private fun lerp(a: Float, b: Float, t: Float): Float = a + (b - a) * t.coerceIn(0f, 1f)
 
