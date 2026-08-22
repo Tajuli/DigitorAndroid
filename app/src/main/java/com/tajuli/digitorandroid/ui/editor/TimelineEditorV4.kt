@@ -5,7 +5,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
@@ -46,6 +45,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -59,7 +59,6 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
-import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.ln
 import kotlin.math.max
@@ -341,44 +340,53 @@ private fun ClipV4(
     val start = (clip.timelineStartUs / US_PER_SECOND.toFloat() * ppsDp).dp
     val width = (clip.durationUs / US_PER_SECOND.toFloat() * ppsDp).coerceAtLeast(3f).dp
     val frameUs = (US_PER_SECOND.toDouble() / project.frameRate.coerceAtLeast(1)).roundToLong().coerceAtLeast(1L)
-    val framePx = pps / project.frameRate.coerceAtLeast(1)
     val compatible = project.tracks.filter { it.kind == track.kind }
     val sourceIndex = compatible.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
     val trackPx = with(density) { T4_TRACK_HEIGHT.dp.toPx() }
-    var carriedX by remember(clip.id) { mutableStateOf(0f) }
-    var totalY by remember(clip.id) { mutableStateOf(0f) }
+    var dragX by remember(clip.id) { mutableStateOf(0f) }
+    var dragY by remember(clip.id) { mutableStateOf(0f) }
 
     Box(
         Modifier.offset(x = start, y = 3.dp).width(width).height(31.dp)
+            .graphicsLayer {
+                translationX = dragX
+                translationY = dragY
+            }
             .clip(RoundedCornerShape(4.dp))
             .background(if (track.kind == TrackKind.VIDEO) T4Video else T4Audio)
             .border(if (selected) 2.dp else .5.dp, if (selected) T4Accent else Color.White.copy(alpha = .14f), RoundedCornerShape(4.dp))
             .clickable { onSelectClip(clip.id) }
-            .pointerInput(clip.id, track.id, pps) {
-                detectDragGesturesAfterLongPress(
-                    onDragStart = { carriedX = 0f; totalY = 0f; onSelectClip(clip.id) },
-                    onDragEnd = {
-                        val shift = (totalY / trackPx).roundToInt()
-                        if (shift != 0 && compatible.isNotEmpty()) {
-                            val target = compatible[(sourceIndex + shift).coerceIn(0, compatible.lastIndex)]
-                            if (target.id != track.id) onMoveClipToTrack(clip.id, target.id)
-                        }
-                        carriedX = 0f; totalY = 0f
+            .pointerInput(clip.id, track.id, pps, project.frameRate) {
+                detectDragGestures(
+                    onDragStart = {
+                        dragX = 0f
+                        dragY = 0f
+                        onSelectClip(clip.id)
                     },
-                    onDragCancel = { carriedX = 0f; totalY = 0f },
-                ) { change, drag ->
-                    change.consume()
-                    carriedX += drag.x
-                    totalY += drag.y
-                    if (abs(carriedX) >= max(1f, framePx * .5f)) {
-                        val rawUs = carriedX / pps * US_PER_SECOND
+                    onDragEnd = {
+                        val rawUs = dragX / pps * US_PER_SECOND
                         val frames = (rawUs / frameUs).roundToLong()
                         val delta = frames * frameUs
                         if (delta != 0L) {
                             onMoveClip(track.id, clip.id, delta)
-                            carriedX -= delta / US_PER_SECOND.toFloat() * pps
                         }
-                    }
+
+                        val shift = (dragY / trackPx).roundToInt()
+                        if (shift != 0 && compatible.isNotEmpty()) {
+                            val target = compatible[(sourceIndex + shift).coerceIn(0, compatible.lastIndex)]
+                            if (target.id != track.id) onMoveClipToTrack(clip.id, target.id)
+                        }
+                        dragX = 0f
+                        dragY = 0f
+                    },
+                    onDragCancel = {
+                        dragX = 0f
+                        dragY = 0f
+                    },
+                ) { change, drag ->
+                    change.consume()
+                    dragX += drag.x
+                    dragY += drag.y
                 }
             }
             .padding(horizontal = 3.dp),
