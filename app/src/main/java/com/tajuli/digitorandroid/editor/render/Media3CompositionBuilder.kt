@@ -63,13 +63,16 @@ class Media3CompositionBuilder {
 
     private fun buildVideoEffects(grade: ColorGrade): Effects {
         val video = mutableListOf<Effect>()
-        if (grade.redScale != 1f || grade.greenScale != 1f || grade.blueScale != 1f) {
-            video += RgbAdjustment.Builder()
-                .setRedScale(grade.redScale.coerceAtLeast(0f))
-                .setGreenScale(grade.greenScale.coerceAtLeast(0f))
-                .setBlueScale(grade.blueScale.coerceAtLeast(0f))
-                .build()
-        }
+
+        // Always install one RGB GL effect, even for an identity grade. This prevents
+        // an untouched clip from bypassing the graphical effects pipeline and keeps
+        // every video frame on the OpenGL path on GPU-capable devices.
+        video += RgbAdjustment.Builder()
+            .setRedScale(grade.redScale.coerceAtLeast(0f))
+            .setGreenScale(grade.greenScale.coerceAtLeast(0f))
+            .setBlueScale(grade.blueScale.coerceAtLeast(0f))
+            .build()
+
         if (grade.hueDegrees != 0f || grade.saturationDelta != 0f || grade.lightnessDelta != 0f) {
             video += HslAdjustment.Builder()
                 .adjustHue(grade.hueDegrees)
