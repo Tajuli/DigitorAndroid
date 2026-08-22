@@ -120,6 +120,8 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
     var isPlaying by remember { mutableStateOf(false) }
     var cursorUs by remember { mutableStateOf(0L) }
     var pendingSeekUs by remember { mutableStateOf<Long?>(null) }
+    var previewAnchorClipId by remember { mutableStateOf<String?>(null) }
+    var previewAnchorTimelineStartUs by remember { mutableStateOf<Long?>(null) }
     var showExportDialog by remember { mutableStateOf(false) }
     var exportName by remember { mutableStateOf("Digitor_${System.currentTimeMillis()}") }
     var exportFraction by remember { mutableStateOf<Float?>(null) }
@@ -170,9 +172,8 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
         if (uri != null) startExport(uri)
     }
 
-    // Reload the decoder only when the actual media source changes. Color/node edits must not
-    // stop, clear and prepare ExoPlayer because doing that on every pointer update causes black
-    // frames and can leave the preview waiting on repeated decoder/effect initialization.
+    // Reload the decoder only when the actual media source changes. Color/node edits and timeline
+    // moves must not tear down ExoPlayer because repeated decoder initialization creates black frames.
     LaunchedEffect(
         selectedClip?.id,
         selectedClip?.uri,
@@ -206,8 +207,7 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
     }
 
     // Media3 supports changing video effects on a prepared player. Build the LUT off the main
-    // thread and apply only the latest edit after a tiny frame-sized debounce. Recomposition no
-    // longer tears down the decoder while a wheel/curve/qualifier is being dragged.
+    // thread and apply only the latest edit after a tiny frame-sized debounce.
     LaunchedEffect(selectedClip?.id, selectedClip?.nodeGraph) {
         val clip = selectedClip ?: return@LaunchedEffect
         if (state.project.trackContaining(clip.id)?.kind != TrackKind.VIDEO) {
@@ -219,6 +219,31 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
             SharedColorPipeline.effectsFor(clip)
         }
         player.setVideoEffects(effects)
+    }
+
+    // A timeline move changes only timelineStartUs, never the source frame. Keep the viewer anchored
+    // to the same local source position and move the cursor with the selected clip. This prevents a
+    // long drag from leaving the cursor in the old gap or an end-of-stream frame that renders black.
+    LaunchedEffect(selectedClip?.id, selectedClip?.timelineStartUs) {
+        val clip = selectedClip
+        if (clip == null) {
+            previewAnchorClipId = null
+            previewAnchorTimelineStartUs = null
+            return@LaunchedEffect
+        }
+        val previousId = previewAnchorClipId
+        val previousStart = previewAnchorTimelineStartUs
+        if (previousId == clip.id && previousStart != null && previousStart != clip.timelineStartUs) {
+            val maxLocalUs = (clip.durationUs - 1L).coerceAtLeast(0L)
+            val localUs = (player.currentPosition.coerceAtLeast(0L) * 1000L).coerceIn(0L, maxLocalUs)
+            cursorUs = (clip.timelineStartUs + localUs)
+                .coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
+            if (!player.isPlaying) {
+                player.seekTo((localUs / 1000L).coerceAtLeast(0L))
+            }
+        }
+        previewAnchorClipId = clip.id
+        previewAnchorTimelineStartUs = clip.timelineStartUs
     }
 
     LaunchedEffect(player, selectedClip?.id) {
