@@ -170,15 +170,19 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
         if (uri != null) startExport(uri)
     }
 
-    LaunchedEffect(selectedClip?.id, selectedClip?.nodeGraph) {
+    // Reload the decoder only when the actual media source changes. Color/node edits must not
+    // stop, clear and prepare ExoPlayer because doing that on every pointer update causes black
+    // frames and can leave the preview waiting on repeated decoder/effect initialization.
+    LaunchedEffect(
+        selectedClip?.id,
+        selectedClip?.uri,
+        selectedClip?.sourceInUs,
+        selectedClip?.sourceOutUs,
+    ) {
         player.stop()
         player.clearMediaItems()
         if (selectedClip != null) {
-            if (state.project.trackContaining(selectedClip.id)?.kind == TrackKind.VIDEO) {
-                player.setVideoEffects(SharedColorPipeline.effectsFor(selectedClip))
-            } else {
-                player.setVideoEffects(emptyList())
-            }
+            player.setVideoEffects(emptyList())
             player.setMediaItem(
                 MediaItem.Builder()
                     .setUri(selectedClip.uri)
@@ -199,6 +203,22 @@ fun DigitorEditorScreenV4(vm: EditorViewModelV4 = viewModel()) {
         } else {
             player.setVideoEffects(emptyList())
         }
+    }
+
+    // Media3 supports changing video effects on a prepared player. Build the LUT off the main
+    // thread and apply only the latest edit after a tiny frame-sized debounce. Recomposition no
+    // longer tears down the decoder while a wheel/curve/qualifier is being dragged.
+    LaunchedEffect(selectedClip?.id, selectedClip?.nodeGraph) {
+        val clip = selectedClip ?: return@LaunchedEffect
+        if (state.project.trackContaining(clip.id)?.kind != TrackKind.VIDEO) {
+            player.setVideoEffects(emptyList())
+            return@LaunchedEffect
+        }
+        delay(16)
+        val effects = withContext(Dispatchers.Default) {
+            SharedColorPipeline.effectsFor(clip)
+        }
+        player.setVideoEffects(effects)
     }
 
     LaunchedEffect(player, selectedClip?.id) {
