@@ -32,6 +32,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -66,6 +67,8 @@ private val CWRaised = Color(0xFF17171C)
 private val CWDivider = Color(0xFF292930)
 private val CWMuted = Color(0xFF909098)
 private val CWAccent = Color(0xFF30E0C3)
+private val CWWheelCardWidth = 184.dp
+private val CWWheelSize = 148.dp
 
 private enum class ColorPage(val title: String) {
     PRIMARY("Primary Wheels"),
@@ -124,50 +127,57 @@ fun ColorWorkspaceV4(
 @Composable
 private fun PrimaryPage(node: ColorNode, vm: EditorViewModelV4, modifier: Modifier) {
     val p = node.advancedColor.primary
-    Row(
-        modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 7.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(7.dp),
-    ) {
-        ResolveWheelCard(
-            title = "Lift",
-            value = p.lift,
-            onPuck = { x, y -> vm.setPrimaryWheelPuck("Lift", x, y) },
-            onY = { vm.setPrimaryWheel("Lift", "luma", it) },
-            onReset = {
-                vm.setPrimaryWheelPuck("Lift", 0f, 0f)
-                vm.setPrimaryWheel("Lift", "luma", 0f)
-            },
-        )
-        ResolveWheelCard(
-            title = "Gamma",
-            value = p.gamma,
-            onPuck = { x, y -> vm.setPrimaryWheelPuck("Gamma", x, y) },
-            onY = { vm.setPrimaryWheel("Gamma", "luma", it) },
-            onReset = {
-                vm.setPrimaryWheelPuck("Gamma", 0f, 0f)
-                vm.setPrimaryWheel("Gamma", "luma", 0f)
-            },
-        )
-        ResolveWheelCard(
-            title = "Gain",
-            value = p.gain,
-            onPuck = { x, y -> vm.setPrimaryWheelPuck("Gain", x, y) },
-            onY = { vm.setPrimaryWheel("Gain", "luma", it) },
-            onReset = {
-                vm.setPrimaryWheelPuck("Gain", 0f, 0f)
-                vm.setPrimaryWheel("Gain", "luma", 0f)
-            },
-        )
-        ResolveWheelCard(
-            title = "Offset",
-            value = p.offset,
-            onPuck = { x, y -> vm.setPrimaryWheelPuck("Offset", x, y) },
-            onY = { vm.setPrimaryWheel("Offset", "luma", it) },
-            onReset = {
-                vm.setPrimaryWheelPuck("Offset", 0f, 0f)
-                vm.setPrimaryWheel("Offset", "luma", 0f)
-            },
-        )
+    Column(modifier.verticalScroll(rememberScrollState())) {
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val sideSpace = ((maxWidth - CWWheelCardWidth) / 2).coerceAtLeast(20.dp)
+            Row(
+                Modifier.fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = sideSpace, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                ResolveWheelCard(
+                    title = "Lift",
+                    value = p.lift,
+                    onPuck = { x, y -> vm.setPrimaryWheelPuck("Lift", x, y) },
+                    onComponent = { component, value -> vm.setPrimaryWheel("Lift", component, value) },
+                    onReset = {
+                        vm.setPrimaryWheelPuck("Lift", 0f, 0f)
+                        vm.setPrimaryWheel("Lift", "luma", 0f)
+                    },
+                )
+                ResolveWheelCard(
+                    title = "Gamma",
+                    value = p.gamma,
+                    onPuck = { x, y -> vm.setPrimaryWheelPuck("Gamma", x, y) },
+                    onComponent = { component, value -> vm.setPrimaryWheel("Gamma", component, value) },
+                    onReset = {
+                        vm.setPrimaryWheelPuck("Gamma", 0f, 0f)
+                        vm.setPrimaryWheel("Gamma", "luma", 0f)
+                    },
+                )
+                ResolveWheelCard(
+                    title = "Gain",
+                    value = p.gain,
+                    onPuck = { x, y -> vm.setPrimaryWheelPuck("Gain", x, y) },
+                    onComponent = { component, value -> vm.setPrimaryWheel("Gain", component, value) },
+                    onReset = {
+                        vm.setPrimaryWheelPuck("Gain", 0f, 0f)
+                        vm.setPrimaryWheel("Gain", "luma", 0f)
+                    },
+                )
+                ResolveWheelCard(
+                    title = "Offset",
+                    value = p.offset,
+                    onPuck = { x, y -> vm.setPrimaryWheelPuck("Offset", x, y) },
+                    onComponent = { component, value -> vm.setPrimaryWheel("Offset", component, value) },
+                    onReset = {
+                        vm.setPrimaryWheelPuck("Offset", 0f, 0f)
+                        vm.setPrimaryWheel("Offset", "luma", 0f)
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -175,46 +185,55 @@ private fun PrimaryPage(node: ColorNode, vm: EditorViewModelV4, modifier: Modifi
 private fun LogPage(node: ColorNode, vm: EditorViewModelV4, modifier: Modifier) {
     val log = node.advancedColor.log
     Column(modifier.verticalScroll(rememberScrollState())) {
-        Row(
-            Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 7.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
-        ) {
-            ResolveWheelCard(
-                "Shadows", log.shadows,
-                { x, y -> vm.setLogWheelPuck("Shadows", x, y) },
-                { vm.setLogWheel("Shadows", "luma", it) },
-                {
-                    vm.setLogWheelPuck("Shadows", 0f, 0f)
-                    vm.setLogWheel("Shadows", "luma", 0f)
-                },
-            )
-            ResolveWheelCard(
-                "Midtones", log.midtones,
-                { x, y -> vm.setLogWheelPuck("Midtones", x, y) },
-                { vm.setLogWheel("Midtones", "luma", it) },
-                {
-                    vm.setLogWheelPuck("Midtones", 0f, 0f)
-                    vm.setLogWheel("Midtones", "luma", 0f)
-                },
-            )
-            ResolveWheelCard(
-                "Highlights", log.highlights,
-                { x, y -> vm.setLogWheelPuck("Highlights", x, y) },
-                { vm.setLogWheel("Highlights", "luma", it) },
-                {
-                    vm.setLogWheelPuck("Highlights", 0f, 0f)
-                    vm.setLogWheel("Highlights", "luma", 0f)
-                },
-            )
-            ResolveWheelCard(
-                "Global", log.global,
-                { x, y -> vm.setLogWheelPuck("Global", x, y) },
-                { vm.setLogWheel("Global", "luma", it) },
-                {
-                    vm.setLogWheelPuck("Global", 0f, 0f)
-                    vm.setLogWheel("Global", "luma", 0f)
-                },
-            )
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val sideSpace = ((maxWidth - CWWheelCardWidth) / 2).coerceAtLeast(20.dp)
+            Row(
+                Modifier.fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = sideSpace, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                ResolveWheelCard(
+                    title = "Shadows",
+                    value = log.shadows,
+                    onPuck = { x, y -> vm.setLogWheelPuck("Shadows", x, y) },
+                    onComponent = { component, value -> vm.setLogWheel("Shadows", component, value) },
+                    onReset = {
+                        vm.setLogWheelPuck("Shadows", 0f, 0f)
+                        vm.setLogWheel("Shadows", "luma", 0f)
+                    },
+                )
+                ResolveWheelCard(
+                    title = "Midtones",
+                    value = log.midtones,
+                    onPuck = { x, y -> vm.setLogWheelPuck("Midtones", x, y) },
+                    onComponent = { component, value -> vm.setLogWheel("Midtones", component, value) },
+                    onReset = {
+                        vm.setLogWheelPuck("Midtones", 0f, 0f)
+                        vm.setLogWheel("Midtones", "luma", 0f)
+                    },
+                )
+                ResolveWheelCard(
+                    title = "Highlights",
+                    value = log.highlights,
+                    onPuck = { x, y -> vm.setLogWheelPuck("Highlights", x, y) },
+                    onComponent = { component, value -> vm.setLogWheel("Highlights", component, value) },
+                    onReset = {
+                        vm.setLogWheelPuck("Highlights", 0f, 0f)
+                        vm.setLogWheel("Highlights", "luma", 0f)
+                    },
+                )
+                ResolveWheelCard(
+                    title = "Global",
+                    value = log.global,
+                    onPuck = { x, y -> vm.setLogWheelPuck("Global", x, y) },
+                    onComponent = { component, value -> vm.setLogWheel("Global", component, value) },
+                    onReset = {
+                        vm.setLogWheelPuck("Global", 0f, 0f)
+                        vm.setLogWheel("Global", "luma", 0f)
+                    },
+                )
+            }
         }
         CompactSlider("Shadow range", log.shadowRange, .05f..48f / 100f) { vm.setLogRange(shadowRange = it) }
         CompactSlider("Highlight range", log.highlightRange, .52f..95f / 100f) { vm.setLogRange(highlightRange = it) }
@@ -226,38 +245,56 @@ private fun ResolveWheelCard(
     title: String,
     value: ColorWheelValue,
     onPuck: (Float, Float) -> Unit,
-    onY: (Float) -> Unit,
+    onComponent: (String, Float) -> Unit,
     onReset: () -> Unit,
 ) {
     Column(
-        Modifier.width(136.dp)
-            .background(CWRaised, RoundedCornerShape(9.dp))
-            .border(1.dp, CWDivider, RoundedCornerShape(9.dp))
-            .padding(horizontal = 7.dp, vertical = 6.dp),
+        Modifier.width(CWWheelCardWidth)
+            .background(CWRaised, RoundedCornerShape(10.dp))
+            .border(1.dp, CWDivider, RoundedCornerShape(10.dp))
+            .padding(horizontal = 9.dp, vertical = 7.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(title, fontWeight = FontWeight.SemiBold, fontSize = 9.sp, modifier = Modifier.weight(1f))
-            IconButton(onClick = onReset, modifier = Modifier.size(24.dp)) {
-                Icon(Icons.Rounded.RestartAlt, contentDescription = "Reset $title", modifier = Modifier.size(13.dp), tint = CWMuted)
+            Text(title, fontWeight = FontWeight.SemiBold, fontSize = 10.sp, modifier = Modifier.weight(1f))
+            IconButton(onClick = onReset, modifier = Modifier.size(26.dp)) {
+                Icon(Icons.Rounded.RestartAlt, contentDescription = "Reset $title", modifier = Modifier.size(14.dp), tint = CWMuted)
             }
         }
         ColorWheel(
             value = value,
             onPuck = onPuck,
-            modifier = Modifier.size(104.dp),
+            modifier = Modifier.size(CWWheelSize),
         )
-        Spacer(Modifier.height(2.dp))
-        Row(Modifier.fillMaxWidth().height(28.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Y", Modifier.width(13.dp), fontSize = 8.sp, color = CWMuted)
-            Slider(
-                value = value.luma.coerceIn(-1f, 1f),
-                onValueChange = onY,
-                valueRange = -1f..1f,
-                modifier = Modifier.weight(1f),
-            )
-            Text(fmt(value.luma), Modifier.width(32.dp), fontSize = 6.sp, color = CWMuted)
-        }
+        Spacer(Modifier.height(4.dp))
+        WheelChannelSlider("Y", value.luma, Color.White.copy(alpha = .82f)) { onComponent("luma", it) }
+        WheelChannelSlider("R", value.red, channelColor("R")) { onComponent("red", it) }
+        WheelChannelSlider("G", value.green, channelColor("G")) { onComponent("green", it) }
+        WheelChannelSlider("B", value.blue, channelColor("B")) { onComponent("blue", it) }
+    }
+}
+
+@Composable
+private fun WheelChannelSlider(
+    label: String,
+    value: Float,
+    channelTint: Color,
+    onValue: (Float) -> Unit,
+) {
+    Row(Modifier.fillMaxWidth().height(25.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.width(14.dp), fontSize = 8.sp, color = channelTint, fontWeight = FontWeight.SemiBold)
+        Slider(
+            value = value.coerceIn(-1f, 1f),
+            onValueChange = onValue,
+            valueRange = -1f..1f,
+            modifier = Modifier.weight(1f),
+            colors = SliderDefaults.colors(
+                thumbColor = channelTint,
+                activeTrackColor = channelTint,
+                inactiveTrackColor = channelTint.copy(alpha = .18f),
+            ),
+        )
+        Text(fmt(value), Modifier.width(38.dp), fontSize = 6.sp, color = CWMuted)
     }
 }
 
@@ -304,14 +341,17 @@ private fun ColorWheel(
     ) {
         val radius = size.minDimension * .45f
         val center = Offset(size.width * .5f, size.height * .5f)
+        // Android/Compose sweep gradients advance clockwise on screen, while the persisted wheel
+        // puck math interprets +Y as the opposite mathematical direction. Mirror the visual hue
+        // order so the color under the puck is exactly the color the grading math applies.
         val hueBrush = Brush.sweepGradient(
             listOf(
                 Color.Red,
-                Color.Yellow,
-                Color.Green,
-                Color.Cyan,
-                Color.Blue,
                 Color.Magenta,
+                Color.Blue,
+                Color.Cyan,
+                Color.Green,
+                Color.Yellow,
                 Color.Red,
             ),
             center,
@@ -330,8 +370,8 @@ private fun ColorWheel(
         drawLine(Color.White.copy(alpha = .10f), Offset(center.x - radius, center.y), Offset(center.x + radius, center.y))
         drawLine(Color.White.copy(alpha = .10f), Offset(center.x, center.y - radius), Offset(center.x, center.y + radius))
         val puck = Offset(center.x + value.puckX * radius, center.y + value.puckY * radius)
-        drawCircle(Color.Black.copy(alpha = .75f), radius = 6.2f, center = puck)
-        drawCircle(Color.White, radius = 4.5f, center = puck, style = androidx.compose.ui.graphics.drawscope.Stroke(2f))
+        drawCircle(Color.Black.copy(alpha = .75f), radius = 7.2f, center = puck)
+        drawCircle(Color.White, radius = 5.4f, center = puck, style = androidx.compose.ui.graphics.drawscope.Stroke(2.2f))
     }
 }
 
