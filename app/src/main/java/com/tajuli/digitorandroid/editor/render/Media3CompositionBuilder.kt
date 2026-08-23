@@ -13,15 +13,45 @@ import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.visibleVideoSegments
 
 /**
+ * Coalesces adjacent clips that are still presentation-identical fragments of the same source.
+ *
+ * A timeline split creates exactly this shape: left.sourceOut == right.sourceIn and the copied
+ * grading state is identical. Keeping that artificial boundary in CompositionPlayer is risky on
+ * current Media3 releases because video items with non-zero start offsets can fail during preview.
+ * The timeline model stays split; only the preview sequence is simplified back to a continuous
+ * media item until the user makes the halves meaningfully different.
+ */
+internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip> {
+    if (clips.size < 2) return clips
+    val sorted = clips.sortedBy { it.timelineStartUs }
+    val result = mutableListOf<TimelineClip>()
+    sorted.forEach { clip ->
+        val previous = result.lastOrNull()
+        val canMerge = previous != null &&
+            previous.uri == clip.uri &&
+            previous.timelineEndUs == clip.timelineStartUs &&
+            previous.sourceOutUs == clip.sourceInUs &&
+            previous.opacity == clip.opacity &&
+            previous.colorGrade == clip.colorGrade &&
+            previous.nodeGraph == clip.nodeGraph
+        if (canMerge) {
+            result[result.lastIndex] = previous!!.copy(sourceOutUs = clip.sourceOutUs)
+        } else {
+            result += clip
+        }
+    }
+    return result
+}
+
+/**
  * Builds Media3 compositions for preview and export.
  *
  * Export flattens overlapping video tracks into one topmost visible stream. This keeps Transformer
  * from decoding hidden lower videos and reduces decoder/compositor pressure on phones.
  *
- * Preview deliberately keeps original video clips/sequences. CompositionPlayer has had runtime
- * issues with sequences made from synthetic overlap fragments that start at non-zero source
- * offsets. Using the original clip boundaries avoids the black/frozen preview regression while
- * preserving normal top-to-bottom video compositing and mixed A-track audio.
+ * Preview keeps original track ordering, but coalesces presentation-identical split fragments so
+ * CompositionPlayer does not see an unnecessary clipped/start-offset boundary immediately after a
+ * split. A tracks remain independent so simultaneous audio is still mixed.
  */
 @UnstableApi
 class Media3CompositionBuilder {
@@ -63,14 +93,14 @@ class Media3CompositionBuilder {
 
         val sequences = mutableListOf<EditedMediaItemSequence>()
 
-        // Keep original clip boundaries for CompositionPlayer. Project track order is UI order
-        // (top to bottom), so the first active video sequence remains visually topmost.
+        // Project track order is UI order (top to bottom), so the first active video sequence is
+        // visually topmost. Coalesce untouched split halves before giving them to CompositionPlayer.
         project.tracks
             .filter { it.kind == TrackKind.VIDEO && !it.muted && it.clips.isNotEmpty() }
             .forEach { track ->
                 val videoBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
                 var cursorUs = 0L
-                track.sortedClips().forEach { clip ->
+                coalescePreviewClips(track.clips).forEach { clip ->
                     if (clip.timelineStartUs > cursorUs) {
                         videoBuilder.addGap(clip.timelineStartUs - cursorUs)
                     }
@@ -91,13 +121,13 @@ class Media3CompositionBuilder {
         sequences: MutableList<EditedMediaItemSequence>,
         forPreview: Boolean,
     ) {
-        // Keep every A track independent so simultaneous A1/A2/etc. are mixed by Media3.
         project.tracks
             .filter { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
             .forEach { track ->
                 val audioBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
                 var cursorUs = 0L
-                track.sortedClips().forEach { clip ->
+                val clips = if (forPreview) coalescePreviewClips(track.clips) else track.sortedClips()
+                clips.forEach { clip ->
                     if (clip.timelineStartUs > cursorUs) {
                         audioBuilder.addGap(clip.timelineStartUs - cursorUs)
                     }
