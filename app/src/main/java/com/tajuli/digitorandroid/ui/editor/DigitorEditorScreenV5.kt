@@ -91,6 +91,7 @@ import com.tajuli.digitorandroid.editor.processing.ProcessingRouter
 import com.tajuli.digitorandroid.editor.render.Media3CompositionBuilder
 import com.tajuli.digitorandroid.editor.render.SharedColorPipeline
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -102,6 +103,18 @@ import kotlin.math.roundToInt
 private val E5Shell = Color(0xFF08080A)
 private val E5Muted = Color(0xFF909098)
 private val E5Accent = Color(0xFF30E0C3)
+
+private fun TimelineClip.previewSourcePositionMs(timelineUs: Long): Long {
+    val maxLocalUs = (durationUs - 1L).coerceAtLeast(0L)
+    val localUs = (timelineUs - timelineStartUs).coerceIn(0L, maxLocalUs)
+    return (sourceInUs + localUs).coerceAtLeast(0L) / 1000L
+}
+
+private fun TimelineClip.previewTimelinePositionUs(sourcePositionMs: Long): Long {
+    val sourceUs = sourcePositionMs.coerceAtLeast(0L) * 1000L
+    val localUs = (sourceUs - sourceInUs).coerceIn(0L, durationUs.coerceAtLeast(0L))
+    return timelineStartUs + localUs
+}
 
 private enum class WorkspaceV5(val label: String, val icon: ImageVector) {
     EDIT("Edit", Icons.Rounded.ContentCut),
@@ -119,8 +132,10 @@ private enum class WorkspaceV5(val label: String, val icon: ImageVector) {
  * - all active A tracks are mixed by a separate audio-only CompositionPlayer;
  * - export still uses the shared Media3 Transformer composition.
  *
- * Keeping video out of CompositionPlayer avoids device-specific black/frozen preview failures when
- * a second video source is imported, clips overlap, or split clips introduce non-zero source trims.
+ * Video preview deliberately decodes the full source and seeks to source timestamps instead of
+ * using MediaItem clipping. This avoids device-specific black frames after a split leaves a clip
+ * with a non-zero sourceIn. Audio composition rebuilds are cancellation-safe so rapid
+ * split/delete/import edits cannot apply an obsolete composition after a newer project state.
  */
 @UnstableApi
 @Composable
@@ -152,6 +167,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
     var loadedPreviewSourceOutUs by remember { mutableStateOf<Long?>(null) }
     var loadedPreviewGradeHash by remember { mutableStateOf<Int?>(null) }
     var audioPreviewReady by remember { mutableStateOf(false) }
+    var previousProjectDurationUs by remember { mutableStateOf(state.project.durationUs) }
     var showExportDialog by remember { mutableStateOf(false) }
     var exportName by remember { mutableStateOf("Digitor_${System.currentTimeMillis()}") }
     var exportFraction by remember { mutableStateOf<Float?>(null) }
@@ -213,8 +229,19 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         if (uri != null) startExport(uri)
     }
 
-    // Video preview: one topmost source only. Grade updates are debounced, but importing another
-    // video elsewhere on the timeline does not rebuild the currently visible decoder at all.
+    // If deleting a tail fragment shortens the project exactly to the cursor, keep the cursor on
+    // the last real frame instead of leaving it at an exclusive timeline end with no preview clip.
+    LaunchedEffect(state.project.durationUs) {
+        val durationUs = state.project.durationUs.coerceAtLeast(0L)
+        if (durationUs < previousProjectDurationUs && cursorUs >= durationUs) {
+            cursorUs = if (durationUs > 0L) durationUs - 1L else 0L
+            pendingSeekUs = cursorUs.takeIf { durationUs > 0L }
+        }
+        previousProjectDurationUs = durationUs
+    }
+
+    // Video preview: decode the complete source and seek by absolute source time. Avoiding
+    // MediaItem clipping keeps split-right fragments (sourceIn > 0) on the normal ExoPlayer path.
     LaunchedEffect(
         previewClip?.id,
         previewClip?.uri,
@@ -245,11 +272,12 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         if (!sourceChanged && gradeChanged) delay(320)
 
         val requestedTimelineUs = pendingSeekUs ?: cursorUs
-        val maxLocalUs = (clip.durationUs - 1L).coerceAtLeast(0L)
-        val localUs = if (sourceChanged) {
-            (requestedTimelineUs - clip.timelineStartUs).coerceIn(0L, maxLocalUs)
+        val sourcePositionMs = if (sourceChanged) {
+            clip.previewSourcePositionMs(requestedTimelineUs)
         } else {
-            (videoPlayer.currentPosition.coerceAtLeast(0L) * 1000L).coerceIn(0L, maxLocalUs)
+            val minMs = clip.sourceInUs.coerceAtLeast(0L) / 1000L
+            val maxMs = (clip.sourceOutUs - 1L).coerceAtLeast(clip.sourceInUs) / 1000L
+            videoPlayer.currentPosition.coerceIn(minMs, maxMs)
         }
         val resumePlayback = isPlaying
         val effects = withContext(Dispatchers.Default) {
@@ -259,19 +287,9 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         videoPlayer.stop()
         videoPlayer.clearMediaItems()
         videoPlayer.setVideoEffects(effects)
-        videoPlayer.setMediaItem(
-            MediaItem.Builder()
-                .setUri(clip.uri)
-                .setClippingConfiguration(
-                    MediaItem.ClippingConfiguration.Builder()
-                        .setStartPositionMs(clip.sourceInUs / 1000L)
-                        .setEndPositionMs(clip.sourceOutUs / 1000L)
-                        .build(),
-                )
-                .build(),
-        )
+        videoPlayer.setMediaItem(MediaItem.fromUri(clip.uri))
         videoPlayer.prepare()
-        videoPlayer.seekTo(localUs / 1000L)
+        videoPlayer.seekTo(sourcePositionMs)
         if (resumePlayback) videoPlayer.play()
 
         loadedPreviewClipId = clip.id
@@ -282,30 +300,39 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         pendingSeekUs = null
     }
 
-    // Audio preview is independent from video. Import/move/split of A tracks rebuilds only this
-    // audio-only composition; adding a second video can no longer create another video decoder.
+    // Audio preview is independent from video. Stop the old composition immediately, debounce
+    // structural edits, and never swallow coroutine cancellation. That prevents an obsolete audio
+    // build from racing a newer split/delete/import state and touching CompositionPlayer late.
     LaunchedEffect(audioPreviewKey, hasAudio) {
-        if (!hasAudio) {
+        audioPreviewReady = false
+        runCatching {
             audioPlayer.pause()
             audioPlayer.stop()
-            audioPreviewReady = false
+        }
+        if (!hasAudio) {
             previewStatus = null
             return@LaunchedEffect
         }
+
+        val projectSnapshot = state.project
         val resumePlayback = isPlaying
-        delay(120)
-        val startPositionMs = cursorUs.coerceIn(0L, state.project.durationUs) / 1000L
-        runCatching {
-            withContext(Dispatchers.Default) {
-                compositionBuilder.buildAudioPreview(state.project)
+        delay(140)
+        val maxStartUs = (projectSnapshot.durationUs - 1L).coerceAtLeast(0L)
+        val startPositionMs = cursorUs.coerceIn(0L, maxStartUs) / 1000L
+        try {
+            val composition = withContext(Dispatchers.Default) {
+                compositionBuilder.buildAudioPreview(projectSnapshot)
             }
-        }.onSuccess { composition ->
+            audioPlayer.stop()
             audioPlayer.setComposition(composition, startPositionMs)
             audioPlayer.prepare()
             if (resumePlayback) audioPlayer.play()
             audioPreviewReady = true
             previewStatus = null
-        }.onFailure { error ->
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            runCatching { audioPlayer.stop() }
             audioPreviewReady = false
             previewStatus = "Audio preview: ${error.message ?: "unavailable"}"
         }
@@ -331,7 +358,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
                 if (hasAudio && audioPreviewReady) audioPlayer.seekTo(cursorUs / 1000L)
                 pendingSeekUs = cursorUs
                 if (loadedPreviewClipId == clip.id) {
-                    videoPlayer.seekTo(localUs / 1000L)
+                    videoPlayer.seekTo(clip.previewSourcePositionMs(cursorUs))
                     pendingSeekUs = null
                 }
             }
@@ -347,8 +374,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             val durationUs = state.project.durationUs.coerceAtLeast(0L)
             val nextUs = when {
                 hasAudio && audioPreviewReady -> audioPlayer.currentPosition.coerceAtLeast(0L) * 1000L
-                previewClip != null -> previewClip.timelineStartUs +
-                    videoPlayer.currentPosition.coerceAtLeast(0L) * 1000L
+                previewClip != null -> previewClip.previewTimelinePositionUs(videoPlayer.currentPosition)
                 else -> cursorUs + 70_000L
             }.coerceIn(0L, durationUs)
 
@@ -357,8 +383,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             // Keep the single video decoder aligned to the mixed-audio master without continuous
             // seeking. Correct only visible drift large enough to notice.
             if (hasAudio && audioPreviewReady && previewClip != null && loadedPreviewClipId == previewClip.id) {
-                val desiredMs = ((nextUs - previewClip.timelineStartUs)
-                    .coerceIn(0L, previewClip.durationUs) / 1000L)
+                val desiredMs = previewClip.previewSourcePositionMs(nextUs)
                 if (abs(videoPlayer.currentPosition - desiredMs) > 180L) {
                     videoPlayer.seekTo(desiredMs)
                 }
@@ -391,10 +416,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             pendingSeekUs = target
             if (activeVideo.id != selectedClip?.id) vm.selectClip(activeVideo.id)
             if (activeVideo.id == loadedPreviewClipId) {
-                videoPlayer.seekTo(
-                    ((target - activeVideo.timelineStartUs)
-                        .coerceIn(0L, activeVideo.durationUs) / 1000L),
-                )
+                videoPlayer.seekTo(activeVideo.previewSourcePositionMs(target))
                 pendingSeekUs = null
             }
         } else {
