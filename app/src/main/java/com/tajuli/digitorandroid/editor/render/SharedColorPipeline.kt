@@ -11,10 +11,14 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 /**
  * Single source of truth for GPU color processing.
  *
- * Export keeps the full 33^3 LUT. Normal interactive preview uses a smaller 17^3 LUT so UI edits
- * stay responsive. Qualifier preview uses a finer 25^3 LUT because soft H/S/L mattes, especially
- * near neutral colors, otherwise quantize into visible islands/bands on flat walls and gradients.
- * Both paths compile and execute the same graph topology and Resolve-style qualified node transform.
+ * Qualifier softness has two layers:
+ * 1) a neighborhood-aware GPU pre-filter that removes spatial H/S/L matte steps and compression
+ *    islands without globally blurring the frame, and
+ * 2) the graph/LUT color transform that applies the refined qualified node grade.
+ *
+ * Preview and export use the same spatial qualifier pass. Export keeps the full 33^3 LUT. Normal
+ * preview uses 17^3; qualifier preview uses 25^3 to keep interactive edits responsive while
+ * reducing color-space quantization.
  */
 @UnstableApi
 object SharedColorPipeline {
@@ -22,14 +26,22 @@ object SharedColorPipeline {
     private const val PREVIEW_LUT_SIZE = 17
     private const val QUALIFIER_PREVIEW_LUT_SIZE = 25
 
-    fun effectsFor(clip: TimelineClip): List<Effect> = listOf(
-        SingleColorLut.createFromCube(buildCube(clip, EXPORT_LUT_SIZE)),
-    )
+    fun effectsFor(clip: TimelineClip): List<Effect> = buildList {
+        addSpatialQualifierEffects(clip)
+        add(SingleColorLut.createFromCube(buildCube(clip, EXPORT_LUT_SIZE)))
+    }
 
-    fun previewEffectsFor(clip: TimelineClip): List<Effect> {
+    fun previewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         val hasQualifier = clip.nodeGraph.nodes.any { it.advancedColor.qualifier.enabled }
+        addSpatialQualifierEffects(clip)
         val size = if (hasQualifier) QUALIFIER_PREVIEW_LUT_SIZE else PREVIEW_LUT_SIZE
-        return listOf(SingleColorLut.createFromCube(buildCube(clip, size)))
+        add(SingleColorLut.createFromCube(buildCube(clip, size)))
+    }
+
+    private fun MutableList<Effect>.addSpatialQualifierEffects(clip: TimelineClip) {
+        clip.nodeGraph.nodes.forEach { node ->
+            QualifierSpatialFeatherEffect.fromNode(node)?.let(::add)
+        }
     }
 
     internal fun buildCube(clip: TimelineClip): Array<Array<IntArray>> =
