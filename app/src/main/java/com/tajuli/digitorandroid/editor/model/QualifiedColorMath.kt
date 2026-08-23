@@ -83,13 +83,22 @@ object QualifiedColorMath {
         val blurRadius = node.qualifierFinesse(QualifierFinesseKeys.BLUR_RADIUS, 0f).coerceIn(0f, 10f)
         val extraSoft = (preFilter * .03f + blurRadius / 10f * .05f).coerceIn(0f, .08f)
 
-        val hueMask = hueMask(
+        val rawHueMask = hueMask(
             hueDegrees = hsl[0] * 360f,
             centerDegrees = q.hueCenterDegrees,
             widthDegrees = q.hueWidthDegrees,
             softness = (q.softness + extraSoft).coerceIn(0f, 1f),
             symmetry = node.qualifierFinesse(QualifierFinesseKeys.HUE_SYMMETRY, .5f).coerceIn(0f, 1f),
         )
+
+        // Hue is mathematically unstable close to the neutral axis: tiny RGB sensor/compression
+        // noise can swing a nearly white/gray pixel through a large hue angle. Using that noisy hue
+        // as a hard selector produces the familiar colored islands/patches on walls and skin-neutral
+        // highlights. Fade hue's authority in only as chroma becomes reliable; S/L still constrain
+        // the neutral key, so this does not make low-saturation pixels globally selected.
+        val hueReliability = smootherstep(.035f, .18f, hsl[1])
+        val hueMask = lerp(1f, rawHueMask, hueReliability)
+
         val satMask = rangeMask(
             value = hsl[1],
             minValue = q.saturationMin,
@@ -105,7 +114,10 @@ object QualifiedColorMath {
             highSoftness = (node.qualifierFinesse(QualifierFinesseKeys.LUM_HIGH_SOFT, .08f) + extraSoft).coerceIn(0f, 1f),
         )
 
-        var matte = (hueMask * satMask * lumMask).coerceIn(0f, 1f)
+        // Multiplying three partial mattes makes a visually soft 50% H edge + 50% S edge collapse
+        // to 25%, which reads as a sudden boundary. A fuzzy AND uses the weakest channel instead:
+        // any rejected dimension still rejects the pixel, while overlapping feathers stay gradual.
+        var matte = min(hueMask, min(satMask, lumMask)).coerceIn(0f, 1f)
         matte = applyMatteFinesse(node, matte)
         return matte.coerceIn(0f, 1f)
     }
@@ -139,7 +151,7 @@ object QualifiedColorMath {
         if (feather <= .0001f) return 0f
         if (distance >= hardSpan + feather) return 0f
 
-        return 1f - smoothstep(hardSpan, hardSpan + feather, distance)
+        return 1f - smootherstep(hardSpan, hardSpan + feather, distance)
     }
 
     /**
@@ -168,7 +180,7 @@ object QualifiedColorMath {
             else -> {
                 val feather = lowSoftness.coerceIn(0f, 1f).coerceAtMost(lo)
                 val outer = lo - feather
-                if (value <= outer) 0f else smoothstep(outer, lo, value)
+                if (value <= outer) 0f else smootherstep(outer, lo, value)
             }
         }
 
@@ -179,11 +191,11 @@ object QualifiedColorMath {
             else -> {
                 val feather = highSoftness.coerceIn(0f, 1f).coerceAtMost(1f - hi)
                 val outer = hi + feather
-                if (value >= outer) 0f else 1f - smoothstep(hi, outer, value)
+                if (value >= outer) 0f else 1f - smootherstep(hi, outer, value)
             }
         }
 
-        return (lowMask * highMask).coerceIn(0f, 1f)
+        return min(lowMask, highMask).coerceIn(0f, 1f)
     }
 
     private fun applyMatteFinesse(node: ColorNode, input: Float): Float {
@@ -222,6 +234,12 @@ object QualifiedColorMath {
         if (edge0 == edge1) return if (x < edge0) 0f else 1f
         val t = ((x - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
         return t * t * (3f - 2f * t)
+    }
+
+    private fun smootherstep(edge0: Float, edge1: Float, x: Float): Float {
+        if (edge0 == edge1) return if (x < edge0) 0f else 1f
+        val t = ((x - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
+        return t * t * t * (t * (t * 6f - 15f) + 10f)
     }
 
     private fun wrap01(v: Float): Float = ((v % 1f) + 1f) % 1f
