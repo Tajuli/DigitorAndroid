@@ -11,22 +11,26 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 /**
  * Single source of truth for GPU color processing.
  *
- * Export keeps the full 33^3 LUT. The interactive preview uses a smaller 17^3 LUT so UI edits
- * don't spend several times more CPU work than needed before the GPU can display the next frame.
+ * Export keeps the full 33^3 LUT. Normal interactive preview uses a smaller 17^3 LUT so UI edits
+ * stay responsive. Qualifier preview uses a finer 25^3 LUT because soft H/S/L mattes, especially
+ * near neutral colors, otherwise quantize into visible islands/bands on flat walls and gradients.
  * Both paths compile and execute the same graph topology and Resolve-style qualified node transform.
  */
 @UnstableApi
 object SharedColorPipeline {
     private const val EXPORT_LUT_SIZE = 33
     private const val PREVIEW_LUT_SIZE = 17
+    private const val QUALIFIER_PREVIEW_LUT_SIZE = 25
 
     fun effectsFor(clip: TimelineClip): List<Effect> = listOf(
         SingleColorLut.createFromCube(buildCube(clip, EXPORT_LUT_SIZE)),
     )
 
-    fun previewEffectsFor(clip: TimelineClip): List<Effect> = listOf(
-        SingleColorLut.createFromCube(buildCube(clip, PREVIEW_LUT_SIZE)),
-    )
+    fun previewEffectsFor(clip: TimelineClip): List<Effect> {
+        val hasQualifier = clip.nodeGraph.nodes.any { it.advancedColor.qualifier.enabled }
+        val size = if (hasQualifier) QUALIFIER_PREVIEW_LUT_SIZE else PREVIEW_LUT_SIZE
+        return listOf(SingleColorLut.createFromCube(buildCube(clip, size)))
+    }
 
     internal fun buildCube(clip: TimelineClip): Array<Array<IntArray>> =
         buildCube(clip, EXPORT_LUT_SIZE)
