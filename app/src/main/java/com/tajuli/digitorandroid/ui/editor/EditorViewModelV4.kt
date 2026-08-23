@@ -77,32 +77,47 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
 
     fun addTrack(kind: TrackKind) {
         val project = _state.value.project
-        val count = project.tracks.count { it.kind == kind } + 1
         val prefix = if (kind == TrackKind.VIDEO) "V" else "A"
-        val track = TimelineTrack(name = "$prefix$count", kind = kind)
+        val nextNumber = project.tracks
+            .asSequence()
+            .filter { it.kind == kind && it.name.startsWith(prefix) }
+            .mapNotNull { it.name.removePrefix(prefix).toIntOrNull() }
+            .maxOrNull()
+            ?.plus(1)
+            ?: 1
+        val track = TimelineTrack(name = "$prefix$nextNumber", kind = kind)
+        val tracks = if (kind == TrackKind.VIDEO) {
+            listOf(track) + project.tracks
+        } else {
+            project.tracks + track
+        }
         _state.value = _state.value.copy(
-            project = project.copy(tracks = project.tracks + track),
+            project = project.copy(tracks = tracks),
             selectedTrackId = track.id,
             status = "${track.name} added",
         )
     }
 
-    /** V tracks accept video only. A tracks accept audio only. Video imports create linked source audio. */
+    /**
+     * V tracks accept video only and A tracks accept audio only. Embedded source audio is linked
+     * to the matching numbered audio track (V1 -> A1, V2 -> A2, ...). A matching A track is
+     * created lazily only when the imported video actually contains an audio stream.
+     */
     fun importUris(uris: List<Uri>) {
         if (uris.isEmpty()) return
         val app = getApplication<Application>()
         var state = _state.value
         var project = state.project
         val selected = project.track(state.selectedTrackId) ?: return
-
-        if (selected.kind == TrackKind.VIDEO && project.tracks.none { it.kind == TrackKind.AUDIO }) {
-            project = project.copy(tracks = project.tracks + TimelineTrack(name = "A1", kind = TrackKind.AUDIO))
+        val videoTrackNumber = if (selected.kind == TrackKind.VIDEO && selected.name.startsWith("V")) {
+            selected.name.removePrefix("V").toIntOrNull()
+        } else {
+            null
         }
-        val sourceAudioTrack = project.tracks.firstOrNull { it.kind == TrackKind.AUDIO }
+        var sourceAudioTrack = videoTrackNumber?.let { number ->
+            project.tracks.firstOrNull { it.kind == TrackKind.AUDIO && it.name == "A$number" }
+        }
         var startUs = selected.clips.maxOfOrNull { it.timelineEndUs } ?: 0L
-        if (selected.kind == TrackKind.VIDEO && sourceAudioTrack != null) {
-            startUs = max(startUs, sourceAudioTrack.clips.maxOfOrNull { it.timelineEndUs } ?: 0L)
-        }
 
         val additions = mutableMapOf<String, MutableList<TimelineClip>>()
         var firstPrimary: String? = null
@@ -126,7 +141,23 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
                         skipped++
                         continue
                     }
-                    val group = UUID.randomUUID().toString()
+
+                    val embeddedAudio = hasEmbeddedAudio(uri)
+                    if (embeddedAudio && sourceAudioTrack == null && videoTrackNumber != null) {
+                        val audioTrack = TimelineTrack(name = "A$videoTrackNumber", kind = TrackKind.AUDIO)
+                        project = project.copy(tracks = project.tracks + audioTrack)
+                        sourceAudioTrack = audioTrack
+                    }
+                    val pairedAudioTrack = if (embeddedAudio) sourceAudioTrack else null
+                    if (pairedAudioTrack != null) {
+                        val existingEndUs = pairedAudioTrack.clips.maxOfOrNull { it.timelineEndUs } ?: 0L
+                        val pendingEndUs = additions[pairedAudioTrack.id]
+                            ?.maxOfOrNull { it.timelineEndUs }
+                            ?: 0L
+                        startUs = max(startUs, max(existingEndUs, pendingEndUs))
+                    }
+
+                    val group = pairedAudioTrack?.let { UUID.randomUUID().toString() }
                     val video = TimelineClip(
                         uri = uri.toString(),
                         label = label,
@@ -136,7 +167,7 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
                     )
                     additions.getOrPut(selected.id) { mutableListOf() } += video
                     val ids = linkedSetOf(video.id)
-                    sourceAudioTrack?.let { audioTrack ->
+                    if (pairedAudioTrack != null && group != null) {
                         val audio = TimelineClip(
                             uri = uri.toString(),
                             label = "$label · audio",
@@ -144,7 +175,7 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
                             sourceOutUs = durationUs,
                             linkGroupId = group,
                         )
-                        additions.getOrPut(audioTrack.id) { mutableListOf() } += audio
+                        additions.getOrPut(pairedAudioTrack.id) { mutableListOf() } += audio
                         ids += audio.id
                     }
                     if (firstPrimary == null) firstPrimary = video.id
@@ -759,6 +790,19 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
             retriever.setDataSource(getApplication<Application>(), uri)
             val ms = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 1000L
             ms * 1000L
+        } finally {
+            retriever.release()
+        }
+    }
+
+    private fun hasEmbeddedAudio(uri: Uri): Boolean {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(getApplication<Application>(), uri)
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+                ?.equals("yes", ignoreCase = true) == true
+        } catch (_: Throwable) {
+            false
         } finally {
             retriever.release()
         }

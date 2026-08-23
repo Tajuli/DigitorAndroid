@@ -139,7 +139,6 @@ data class TimelineProject(
     val height: Int = 1080,
     val frameRate: Int = 30,
     val tracks: List<TimelineTrack> = listOf(
-        TimelineTrack(name = "V2", kind = TrackKind.VIDEO),
         TimelineTrack(name = "V1", kind = TrackKind.VIDEO),
         TimelineTrack(name = "A1", kind = TrackKind.AUDIO),
     ),
