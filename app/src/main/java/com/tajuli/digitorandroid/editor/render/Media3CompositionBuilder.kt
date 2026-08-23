@@ -11,9 +11,19 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
 
+/**
+ * Builds the Media3 multitrack composition used by both preview and export.
+ *
+ * TimelineProject.tracks is deliberately kept in UI order (top to bottom). Media3's video
+ * compositor treats the first video source as topmost, while separate audio sequences are mixed.
+ */
 @UnstableApi
 class Media3CompositionBuilder {
-    fun build(project: TimelineProject): Composition {
+    fun build(project: TimelineProject): Composition = buildInternal(project, forPreview = false)
+
+    fun buildPreview(project: TimelineProject): Composition = buildInternal(project, forPreview = true)
+
+    private fun buildInternal(project: TimelineProject, forPreview: Boolean): Composition {
         val problems = project.validate()
         require(problems.isEmpty()) { problems.joinToString("; ") }
 
@@ -30,7 +40,7 @@ class Media3CompositionBuilder {
                     if (clip.timelineStartUs > cursorUs) {
                         builder.addGap(clip.timelineStartUs - cursorUs)
                     }
-                    builder.addItem(toEditedMediaItem(clip, track.kind))
+                    builder.addItem(toEditedMediaItem(clip, track.kind, forPreview))
                     cursorUs = clip.timelineEndUs
                 }
                 builder.build()
@@ -40,7 +50,11 @@ class Media3CompositionBuilder {
         return Composition.Builder(sequences).build()
     }
 
-    private fun toEditedMediaItem(clip: TimelineClip, kind: TrackKind): EditedMediaItem {
+    private fun toEditedMediaItem(
+        clip: TimelineClip,
+        kind: TrackKind,
+        forPreview: Boolean,
+    ): EditedMediaItem {
         val clipping = MediaItem.ClippingConfiguration.Builder()
             .setStartPositionMs(clip.sourceInUs / 1000L)
             .setEndPositionMs(clip.sourceOutUs / 1000L)
@@ -53,12 +67,12 @@ class Media3CompositionBuilder {
         val builder = EditedMediaItem.Builder(mediaItem)
             .setDurationUs(clip.durationUs)
         if (kind == TrackKind.VIDEO) {
-            builder.setEffects(
-                Effects(
-                    emptyList(),
-                    SharedColorPipeline.effectsFor(clip),
-                ),
-            )
+            val videoEffects = if (forPreview) {
+                SharedColorPipeline.previewEffectsFor(clip)
+            } else {
+                SharedColorPipeline.effectsFor(clip)
+            }
+            builder.setEffects(Effects(emptyList(), videoEffects))
         }
         return builder.build()
     }

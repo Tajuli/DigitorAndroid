@@ -4,7 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import com.tajuli.digitorandroid.ui.editor.DigitorEditorScreenV4
+import com.tajuli.digitorandroid.ui.editor.DigitorEditorScreenV5
 import com.tajuli.digitorandroid.ui.theme.DigitorTheme
 
 class MainActivity : ComponentActivity() {
@@ -13,7 +13,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             DigitorTheme {
-                DigitorEditorScreenV4()
+                DigitorEditorScreenV5()
             }
         }
     }
