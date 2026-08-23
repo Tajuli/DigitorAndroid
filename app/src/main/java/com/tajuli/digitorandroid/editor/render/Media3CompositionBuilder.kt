@@ -10,12 +10,17 @@ import androidx.media3.transformer.Effects
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.visibleVideoSegments
 
 /**
- * Builds the Media3 multitrack composition used by both preview and export.
+ * Builds the Media3 composition used by both preview and export.
  *
- * TimelineProject.tracks is deliberately kept in UI order (top to bottom). Media3's video
- * compositor treats the first video source as topmost, while separate audio sequences are mixed.
+ * Video is flattened to one non-overlapping visible sequence before it reaches Media3: project
+ * track order is top-to-bottom, so an active upper clip hides lower clips for that interval. This
+ * avoids simultaneously decoding/rendering video that can never be seen and prevents overlap-heavy
+ * timelines from exhausting decoder/compositor resources on mobile devices.
+ *
+ * Audio stays as one sequence per unmuted A track, so overlapping audio tracks are mixed by Media3.
  */
 @UnstableApi
 class Media3CompositionBuilder {
@@ -27,23 +32,38 @@ class Media3CompositionBuilder {
         val problems = project.validate()
         require(problems.isEmpty()) { problems.joinToString("; ") }
 
-        val sequences = project.tracks
-            .filter { !it.muted && it.clips.isNotEmpty() }
-            .map { track ->
-                val trackTypes = when (track.kind) {
-                    TrackKind.VIDEO -> setOf(C.TRACK_TYPE_VIDEO)
-                    TrackKind.AUDIO -> setOf(C.TRACK_TYPE_AUDIO)
+        val sequences = mutableListOf<EditedMediaItemSequence>()
+
+        // One decoder-visible video stream. Hidden lower tracks are trimmed out at overlap bounds.
+        val visibleVideo = project.visibleVideoSegments()
+        if (visibleVideo.isNotEmpty()) {
+            val videoBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
+            var cursorUs = 0L
+            visibleVideo.forEach { segment ->
+                if (segment.timelineStartUs > cursorUs) {
+                    videoBuilder.addGap(segment.timelineStartUs - cursorUs)
                 }
-                val builder = EditedMediaItemSequence.Builder(trackTypes)
+                val fragment = segment.asTimelineClip()
+                videoBuilder.addItem(toEditedMediaItem(fragment, TrackKind.VIDEO, forPreview))
+                cursorUs = segment.timelineEndUs
+            }
+            sequences += videoBuilder.build()
+        }
+
+        // Keep every audio track independent. Media3 mixes simultaneous audio sequences.
+        project.tracks
+            .filter { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
+            .forEach { track ->
+                val audioBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
                 var cursorUs = 0L
                 track.sortedClips().forEach { clip ->
                     if (clip.timelineStartUs > cursorUs) {
-                        builder.addGap(clip.timelineStartUs - cursorUs)
+                        audioBuilder.addGap(clip.timelineStartUs - cursorUs)
                     }
-                    builder.addItem(toEditedMediaItem(clip, track.kind, forPreview))
+                    audioBuilder.addItem(toEditedMediaItem(clip, TrackKind.AUDIO, forPreview))
                     cursorUs = clip.timelineEndUs
                 }
-                builder.build()
+                sequences += audioBuilder.build()
             }
 
         require(sequences.isNotEmpty()) { "Timeline is empty" }
