@@ -59,7 +59,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -75,9 +74,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.MultipleInputVideoGraph
+import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.transformer.CompositionPlayer
 import androidx.media3.ui.PlayerView
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -89,11 +89,13 @@ import com.tajuli.digitorandroid.editor.model.topmostVideoClipAt
 import com.tajuli.digitorandroid.editor.processing.ExportProgress
 import com.tajuli.digitorandroid.editor.processing.ProcessingRouter
 import com.tajuli.digitorandroid.editor.render.Media3CompositionBuilder
+import com.tajuli.digitorandroid.editor.render.SharedColorPipeline
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -112,9 +114,13 @@ private enum class WorkspaceV5(val label: String, val icon: ImageVector) {
 }
 
 /**
- * Multitrack editor preview. Unlike V4's single-asset ExoPlayer preview, this screen previews the
- * same Media3 Composition used for export. Video track order therefore follows the timeline's
- * top-to-bottom order and all active audio sequences are mixed on the shared composition clock.
+ * Stable editor preview architecture:
+ * - exactly one topmost video clip is decoded by ExoPlayer at any time;
+ * - all active A tracks are mixed by a separate audio-only CompositionPlayer;
+ * - export still uses the shared Media3 Transformer composition.
+ *
+ * Keeping video out of CompositionPlayer avoids device-specific black/frozen preview failures when
+ * a second video source is imported, clips overlap, or split clips introduce non-zero source trims.
  */
 @UnstableApi
 @Composable
@@ -124,19 +130,28 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
     val scope = rememberCoroutineScope()
     val router = remember { ProcessingRouter(context.applicationContext) }
     val compositionBuilder = remember { Media3CompositionBuilder() }
-    val player = remember {
-        CompositionPlayer.Builder(context.applicationContext)
-            .setVideoGraphFactory(MultipleInputVideoGraph.Factory())
-            .build()
+    val videoPlayer = remember {
+        ExoPlayer.Builder(context.applicationContext).build().apply {
+            volume = 0f // A tracks own preview audio; never double-play embedded video audio.
+        }
+    }
+    val audioPlayer = remember {
+        CompositionPlayer.Builder(context.applicationContext).build()
     }
     val selectedClip = state.project.clip(state.selectedClipId)
 
     var workspace by remember { mutableStateOf(WorkspaceV5.EDIT) }
     var isPlaying by remember { mutableStateOf(false) }
     var cursorUs by remember { mutableStateOf(0L) }
-    val latestCursorUs by rememberUpdatedState(cursorUs)
+    var pendingSeekUs by remember { mutableStateOf<Long?>(null) }
     var previewAnchorClipId by remember { mutableStateOf<String?>(null) }
     var previewAnchorTimelineStartUs by remember { mutableStateOf<Long?>(null) }
+    var loadedPreviewClipId by remember { mutableStateOf<String?>(null) }
+    var loadedPreviewUri by remember { mutableStateOf<String?>(null) }
+    var loadedPreviewSourceInUs by remember { mutableStateOf<Long?>(null) }
+    var loadedPreviewSourceOutUs by remember { mutableStateOf<Long?>(null) }
+    var loadedPreviewGradeHash by remember { mutableStateOf<Int?>(null) }
+    var audioPreviewReady by remember { mutableStateOf(false) }
     var showExportDialog by remember { mutableStateOf(false) }
     var exportName by remember { mutableStateOf("Digitor_${System.currentTimeMillis()}") }
     var exportFraction by remember { mutableStateOf<Float?>(null) }
@@ -146,6 +161,12 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
     val previewClip = state.project.topmostVideoClipAt(cursorUs)
     val hasMedia = state.project.hasPlayableMedia()
     val hasVideo = state.project.hasPlayableVideo()
+    val hasAudio = state.project.tracks.any {
+        it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty()
+    }
+    val audioPreviewKey = state.project.tracks
+        .filter { it.kind == TrackKind.AUDIO }
+        .hashCode()
 
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
         vm.importUris(uris)
@@ -192,28 +213,101 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         if (uri != null) startExport(uri)
     }
 
-    // Rebuild on actual timeline/grade changes. Rapid wheel and drag updates cancel the previous
-    // coroutine and collapse into one preview composition rebuild.
-    LaunchedEffect(state.project) {
-        val project = state.project
-        if (!project.hasPlayableMedia()) {
-            player.pause()
-            player.stop()
+    // Video preview: one topmost source only. Grade updates are debounced, but importing another
+    // video elsewhere on the timeline does not rebuild the currently visible decoder at all.
+    LaunchedEffect(
+        previewClip?.id,
+        previewClip?.uri,
+        previewClip?.sourceInUs,
+        previewClip?.sourceOutUs,
+        previewClip?.nodeGraph,
+    ) {
+        val clip = previewClip
+        if (clip == null) {
+            videoPlayer.stop()
+            videoPlayer.clearMediaItems()
+            videoPlayer.setVideoEffects(emptyList())
+            loadedPreviewClipId = null
+            loadedPreviewUri = null
+            loadedPreviewSourceInUs = null
+            loadedPreviewSourceOutUs = null
+            loadedPreviewGradeHash = null
+            pendingSeekUs = null
+            return@LaunchedEffect
+        }
+
+        val sourceChanged = loadedPreviewClipId != clip.id ||
+            loadedPreviewUri != clip.uri ||
+            loadedPreviewSourceInUs != clip.sourceInUs ||
+            loadedPreviewSourceOutUs != clip.sourceOutUs
+        val gradeHash = clip.nodeGraph.hashCode()
+        val gradeChanged = loadedPreviewGradeHash != gradeHash
+        if (!sourceChanged && gradeChanged) delay(320)
+
+        val requestedTimelineUs = pendingSeekUs ?: cursorUs
+        val maxLocalUs = (clip.durationUs - 1L).coerceAtLeast(0L)
+        val localUs = if (sourceChanged) {
+            (requestedTimelineUs - clip.timelineStartUs).coerceIn(0L, maxLocalUs)
+        } else {
+            (videoPlayer.currentPosition.coerceAtLeast(0L) * 1000L).coerceIn(0L, maxLocalUs)
+        }
+        val resumePlayback = isPlaying
+        val effects = withContext(Dispatchers.Default) {
+            SharedColorPipeline.previewEffectsFor(clip)
+        }
+
+        videoPlayer.stop()
+        videoPlayer.clearMediaItems()
+        videoPlayer.setVideoEffects(effects)
+        videoPlayer.setMediaItem(
+            MediaItem.Builder()
+                .setUri(clip.uri)
+                .setClippingConfiguration(
+                    MediaItem.ClippingConfiguration.Builder()
+                        .setStartPositionMs(clip.sourceInUs / 1000L)
+                        .setEndPositionMs(clip.sourceOutUs / 1000L)
+                        .build(),
+                )
+                .build(),
+        )
+        videoPlayer.prepare()
+        videoPlayer.seekTo(localUs / 1000L)
+        if (resumePlayback) videoPlayer.play()
+
+        loadedPreviewClipId = clip.id
+        loadedPreviewUri = clip.uri
+        loadedPreviewSourceInUs = clip.sourceInUs
+        loadedPreviewSourceOutUs = clip.sourceOutUs
+        loadedPreviewGradeHash = gradeHash
+        pendingSeekUs = null
+    }
+
+    // Audio preview is independent from video. Import/move/split of A tracks rebuilds only this
+    // audio-only composition; adding a second video can no longer create another video decoder.
+    LaunchedEffect(audioPreviewKey, hasAudio) {
+        if (!hasAudio) {
+            audioPlayer.pause()
+            audioPlayer.stop()
+            audioPreviewReady = false
             previewStatus = null
             return@LaunchedEffect
         }
-        val resumePlayback = player.isPlaying
-        delay(160)
-        val startPositionMs = (latestCursorUs.coerceIn(0L, project.durationUs) / 1000L)
+        val resumePlayback = isPlaying
+        delay(120)
+        val startPositionMs = cursorUs.coerceIn(0L, state.project.durationUs) / 1000L
         runCatching {
-            withContext(Dispatchers.Default) { compositionBuilder.buildPreview(project) }
+            withContext(Dispatchers.Default) {
+                compositionBuilder.buildAudioPreview(state.project)
+            }
         }.onSuccess { composition ->
-            player.setComposition(composition, startPositionMs)
-            player.prepare()
-            if (resumePlayback) player.play()
+            audioPlayer.setComposition(composition, startPositionMs)
+            audioPlayer.prepare()
+            if (resumePlayback) audioPlayer.play()
+            audioPreviewReady = true
             previewStatus = null
         }.onFailure { error ->
-            previewStatus = error.message ?: "Preview composition failed"
+            audioPreviewReady = false
+            previewStatus = "Audio preview: ${error.message ?: "unavailable"}"
         }
     }
 
@@ -234,34 +328,93 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
                 val localUs = (cursorUs - previousStart).coerceIn(0L, maxLocalUs)
                 cursorUs = (clip.timelineStartUs + localUs)
                     .coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
-                if (hasMedia) player.seekTo(cursorUs / 1000L)
+                if (hasAudio && audioPreviewReady) audioPlayer.seekTo(cursorUs / 1000L)
+                pendingSeekUs = cursorUs
+                if (loadedPreviewClipId == clip.id) {
+                    videoPlayer.seekTo(localUs / 1000L)
+                    pendingSeekUs = null
+                }
             }
         }
         previewAnchorClipId = clip.id
         previewAnchorTimelineStartUs = clip.timelineStartUs
     }
 
-    // CompositionPlayer position is already the global timeline position, so no clip-local offset
-    // conversion is needed. Audio and video stay on this one clock.
-    LaunchedEffect(player) {
-        while (true) {
-            isPlaying = player.isPlaying
-            if (player.isPlaying) {
-                cursorUs = (player.currentPosition.coerceAtLeast(0L) * 1000L)
-                    .coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
+    // One global editor clock. Mixed audio is the master when available; otherwise the visible
+    // ExoPlayer clip drives time. Empty video gaps without audio advance on the editor ticker.
+    LaunchedEffect(videoPlayer, audioPlayer, isPlaying, hasAudio, audioPreviewReady, previewClip?.id) {
+        while (isPlaying) {
+            val durationUs = state.project.durationUs.coerceAtLeast(0L)
+            val nextUs = when {
+                hasAudio && audioPreviewReady -> audioPlayer.currentPosition.coerceAtLeast(0L) * 1000L
+                previewClip != null -> previewClip.timelineStartUs +
+                    videoPlayer.currentPosition.coerceAtLeast(0L) * 1000L
+                else -> cursorUs + 70_000L
+            }.coerceIn(0L, durationUs)
+
+            cursorUs = nextUs
+
+            // Keep the single video decoder aligned to the mixed-audio master without continuous
+            // seeking. Correct only visible drift large enough to notice.
+            if (hasAudio && audioPreviewReady && previewClip != null && loadedPreviewClipId == previewClip.id) {
+                val desiredMs = ((nextUs - previewClip.timelineStartUs)
+                    .coerceIn(0L, previewClip.durationUs) / 1000L)
+                if (abs(videoPlayer.currentPosition - desiredMs) > 180L) {
+                    videoPlayer.seekTo(desiredMs)
+                }
+            }
+
+            if (durationUs > 0L && nextUs >= durationUs) {
+                videoPlayer.pause()
+                audioPlayer.pause()
+                isPlaying = false
+                break
             }
             delay(70)
         }
     }
-    DisposableEffect(player) { onDispose { player.release() } }
+
+    DisposableEffect(videoPlayer, audioPlayer) {
+        onDispose {
+            videoPlayer.release()
+            audioPlayer.release()
+        }
+    }
 
     fun seekTimeline(requestUs: Long) {
         val target = requestUs.coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
         cursorUs = target
-        if (hasMedia) player.seekTo(target / 1000L)
+        if (hasAudio && audioPreviewReady) audioPlayer.seekTo(target / 1000L)
+
         val activeVideo = state.project.topmostVideoClipAt(target)
-        if (activeVideo != null && activeVideo.id != selectedClip?.id) {
-            vm.selectClip(activeVideo.id)
+        if (activeVideo != null) {
+            pendingSeekUs = target
+            if (activeVideo.id != selectedClip?.id) vm.selectClip(activeVideo.id)
+            if (activeVideo.id == loadedPreviewClipId) {
+                videoPlayer.seekTo(
+                    ((target - activeVideo.timelineStartUs)
+                        .coerceIn(0L, activeVideo.durationUs) / 1000L),
+                )
+                pendingSeekUs = null
+            }
+        } else {
+            pendingSeekUs = null
+        }
+    }
+
+    fun togglePlayback() {
+        if (!hasMedia) return
+        if (isPlaying) {
+            isPlaying = false
+            videoPlayer.pause()
+            audioPlayer.pause()
+        } else {
+            if (cursorUs >= state.project.durationUs && state.project.durationUs > 0L) {
+                seekTimeline(0L)
+            }
+            isPlaying = true
+            if (previewClip != null) videoPlayer.play()
+            if (hasAudio && audioPreviewReady) audioPlayer.play()
         }
     }
 
@@ -325,7 +478,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             PreviewV5(
                 activeVideoClip = previewClip,
                 hasVideo = hasVideo,
-                player = player,
+                player = videoPlayer,
                 onImport = ::launchImport,
                 qualifierPickerActive = state.qualifierPickerActive,
                 onPickColor = { x, y, width, height ->
@@ -342,7 +495,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
                 cursorUs = cursorUs,
                 durationUs = state.project.durationUs,
                 onBack = { seekTimeline(cursorUs - 10 * US_PER_SECOND) },
-                onPlayPause = { if (player.isPlaying) player.pause() else player.play() },
+                onPlayPause = ::togglePlayback,
                 onForward = { seekTimeline(cursorUs + 10 * US_PER_SECOND) },
             )
 
@@ -419,7 +572,7 @@ private fun TopBarV5(
                 Box(Modifier.size(6.dp).clip(CircleShape).background(E5Accent))
                 Spacer(Modifier.width(5.dp))
                 Text(
-                    if (status == "Ready") "Multitrack preview · mixed audio" else status,
+                    if (status == "Ready") "Stable preview · mixed audio" else status,
                     fontSize = 9.sp,
                     color = Color.White.copy(alpha = .55f),
                     maxLines = 1,
@@ -489,7 +642,7 @@ private fun PreviewV5(
             }
         }
         Text(
-            "Multitrack Preview",
+            "Top-track Preview",
             modifier = Modifier.align(Alignment.TopStart).padding(10.dp)
                 .background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp))
                 .padding(horizontal = 7.dp, vertical = 4.dp),
