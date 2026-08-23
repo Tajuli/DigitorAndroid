@@ -111,6 +111,53 @@ class QualifierSoftnessTest {
         assertTrue(output[1] < full[1])
     }
 
+    @Test fun neutralPixelsDoNotBreakApartBecauseOfHueNoise() {
+        val node = node(
+            HslQualifier(
+                enabled = true,
+                hueCenterDegrees = 20f,
+                hueWidthDegrees = 30f,
+                saturationMin = 0f,
+                saturationMax = .25f,
+                luminanceMin = .40f,
+                luminanceMax = .90f,
+                softness = .15f,
+            ),
+        )
+
+        // Both samples are almost gray and differ mainly by a mathematically unstable hue angle.
+        // A neutral wall must remain one continuous matte instead of becoming colored islands.
+        val warmNeutral = hslToRgb(20f, .03f, .70f)
+        val coolNeutral = hslToRgb(200f, .03f, .70f)
+
+        assertTrue(mask(node, warmNeutral) > .98f)
+        assertTrue(mask(node, coolNeutral) > .98f)
+    }
+
+    @Test fun overlappingSoftEdgesKeepAGentleHalfStrengthMatte() {
+        val node = node(
+            HslQualifier(
+                enabled = true,
+                hueCenterDegrees = 120f,
+                hueWidthDegrees = 60f,
+                saturationMin = .50f,
+                saturationMax = 1f,
+                luminanceMin = 0f,
+                luminanceMax = 1f,
+                softness = .10f,
+            ),
+            NodeCorrections(),
+            NodeEffect(name = QualifierFinesseKeys.HUE_SYMMETRY, amount = .5f),
+            NodeEffect(name = QualifierFinesseKeys.SAT_LOW_SOFT, amount = .20f),
+            NodeEffect(name = QualifierFinesseKeys.SAT_HIGH_SOFT, amount = 0f),
+        )
+
+        // 159 degrees is halfway through the hue feather and S=.40 is halfway through the
+        // saturation feather. The combined key should remain ~50%, not collapse to 25%.
+        val source = hslToRgb(159f, .40f, .50f)
+        assertEquals(.5f, mask(node, source), .03f)
+    }
+
     private fun mask(node: ColorNode, rgb: FloatArray): Float =
         QualifiedColorMath.qualifierMask(node, rgb[0], rgb[1], rgb[2])
 
