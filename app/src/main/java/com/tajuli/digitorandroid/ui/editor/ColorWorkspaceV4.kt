@@ -341,9 +341,6 @@ private fun ColorWheel(
     ) {
         val radius = size.minDimension * .45f
         val center = Offset(size.width * .5f, size.height * .5f)
-        // Android/Compose sweep gradients advance clockwise on screen, while the persisted wheel
-        // puck math interprets +Y as the opposite mathematical direction. Mirror the visual hue
-        // order so the color under the puck is exactly the color the grading math applies.
         val hueBrush = Brush.sweepGradient(
             listOf(
                 Color.Red,
@@ -388,7 +385,10 @@ private fun CurvesPage(node: ColorNode, vm: EditorViewModelV4, modifier: Modifie
     }
     val currentCurve by rememberUpdatedState(curve)
     val density = LocalDensity.current
-    val hitRadiusPx = with(density) { 20.dp.toPx() }
+    val hitRadiusPx = with(density) { 24.dp.toPx() }
+    val pointRadiusPx = with(density) { 5.5.dp.toPx() }
+    val selectedPointRadiusPx = with(density) { 7.5.dp.toPx() }
+    val canDeleteSelected = selectedIndex?.let { it > 0 && it < curve.points.lastIndex } == true
 
     Column(modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -407,18 +407,24 @@ private fun CurvesPage(node: ColorNode, vm: EditorViewModelV4, modifier: Modifie
                 )
             }
             Spacer(Modifier.weight(1f))
-            IconButton(
-                onClick = {
-                    val index = selectedIndex
-                    if (index != null && index > 0 && index < currentCurve.points.lastIndex) {
-                        vm.deleteCurvePoint(channel, index)
-                        selectedIndex = null
-                    }
-                },
-                enabled = selectedIndex?.let { it > 0 && it < curve.points.lastIndex } == true,
-                modifier = Modifier.size(30.dp),
-            ) {
-                Icon(Icons.Rounded.DeleteOutline, "Delete selected point", modifier = Modifier.size(17.dp))
+            if (canDeleteSelected) {
+                FilledTonalButton(
+                    onClick = {
+                        val index = selectedIndex
+                        if (index != null && index > 0 && index < currentCurve.points.lastIndex) {
+                            vm.deleteCurvePoint(channel, index)
+                            selectedIndex = null
+                        }
+                    },
+                    modifier = Modifier.height(30.dp),
+                    shape = RoundedCornerShape(6.dp),
+                ) {
+                    Icon(Icons.Rounded.DeleteOutline, "Delete selected point", modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Delete point", fontSize = 8.sp)
+                }
+            } else if (selectedIndex != null) {
+                Text("End point", fontSize = 7.sp, color = CWMuted)
             }
         }
         Spacer(Modifier.height(6.dp))
@@ -434,17 +440,24 @@ private fun CurvesPage(node: ColorNode, vm: EditorViewModelV4, modifier: Modifie
                 selectedIndex = selectedIndex,
                 onSelected = { selectedIndex = it },
                 onInsert = { x, y ->
+                    val insertedIndex = currentCurve.points.count { it.x < x }
+                        .coerceIn(1, currentCurve.points.lastIndex)
                     vm.insertCurvePoint(channel, x, y)
-                    selectedIndex = null
+                    selectedIndex = insertedIndex
                 },
-                onMove = { index, x, y -> vm.setCurvePoint(channel, index, x, y) },
+                onMoveFinished = { index, x, y -> vm.setCurvePoint(channel, index, x, y) },
                 hitRadiusPx = hitRadiusPx,
+                pointRadiusPx = pointRadiusPx,
+                selectedPointRadiusPx = selectedPointRadiusPx,
                 modifier = Modifier.width(graphWidth).height(170.dp),
             )
         }
         Text(
-            if (selectedIndex == null) "Tap point to select · press & hold empty area to add · drag point to move"
-            else "Selected point ${selectedIndex!! + 1} · drag to move · trash to delete",
+            when {
+                selectedIndex == null -> "Tap or drag a point · press & hold empty area to add"
+                canDeleteSelected -> "Selected point ${selectedIndex!! + 1} · drag smoothly · Delete point removes it"
+                else -> "Start/end point selected · movable, but cannot be deleted"
+            },
             fontSize = 7.sp,
             color = CWMuted,
             modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 3.dp),
@@ -459,20 +472,25 @@ private fun CurveEditorGraph(
     selectedIndex: Int?,
     onSelected: (Int?) -> Unit,
     onInsert: (Float, Float) -> Unit,
-    onMove: (Int, Float, Float) -> Unit,
+    onMoveFinished: (Int, Float, Float) -> Unit,
     hitRadiusPx: Float,
+    pointRadiusPx: Float,
+    selectedPointRadiusPx: Float,
     modifier: Modifier = Modifier,
 ) {
     val currentCurve by rememberUpdatedState(curve)
-    var dragIndex by remember { mutableStateOf<Int?>(null) }
+    var dragIndex by remember(channel) { mutableStateOf<Int?>(null) }
+    var dragCurve by remember(channel) { mutableStateOf<Curve5?>(null) }
 
     fun pointOffset(point: CurvePoint, width: Float, height: Float): Offset =
         Offset(point.x * width, (1f - point.y) * height)
 
+    fun displayedCurve(): Curve5 = dragCurve ?: currentCurve
+
     fun nearest(position: Offset, width: Float, height: Float): Int? {
         var best: Int? = null
         var bestDistance = Float.MAX_VALUE
-        currentCurve.points.forEachIndexed { index, point ->
+        displayedCurve().points.forEachIndexed { index, point ->
             val p = pointOffset(point, width, height)
             val d = hypot((p.x - position.x).toDouble(), (p.y - position.y).toDouble()).toFloat()
             if (d <= hitRadiusPx && d < bestDistance) {
@@ -483,11 +501,22 @@ private fun CurveEditorGraph(
         return best
     }
 
+    fun commitDrag() {
+        val index = dragIndex
+        val finalCurve = dragCurve
+        if (index != null && finalCurve != null && index in finalCurve.points.indices) {
+            val point = finalCurve.points[index]
+            onMoveFinished(index, point.x, point.y)
+        }
+        dragIndex = null
+        dragCurve = null
+    }
+
     Canvas(
         modifier
             .background(Color(0xFF101014), RoundedCornerShape(5.dp))
             .border(1.dp, CWDivider, RoundedCornerShape(5.dp))
-            .pointerInput(channel) {
+            .pointerInput(channel, hitRadiusPx) {
                 detectTapGestures(
                     onTap = { pos -> onSelected(nearest(pos, size.width.toFloat(), size.height.toFloat())) },
                     onLongPress = { pos ->
@@ -499,26 +528,31 @@ private fun CurveEditorGraph(
                     },
                 )
             }
-            .pointerInput(channel) {
+            .pointerInput(channel, hitRadiusPx) {
                 detectDragGestures(
                     onDragStart = { pos ->
                         dragIndex = nearest(pos, size.width.toFloat(), size.height.toFloat())
+                        dragCurve = if (dragIndex != null) currentCurve else null
                         onSelected(dragIndex)
                     },
-                    onDragEnd = { dragIndex = null },
-                    onDragCancel = { dragIndex = null },
+                    onDragEnd = { commitDrag() },
+                    onDragCancel = {
+                        dragIndex = null
+                        dragCurve = null
+                    },
                 ) { change, _ ->
                     val index = dragIndex ?: return@detectDragGestures
                     change.consume()
                     var x = (change.position.x / size.width).coerceIn(0f, 1f)
                     var y = (1f - change.position.y / size.height).coerceIn(0f, 1f)
-                    val points = currentCurve.points
+                    val baseCurve = dragCurve ?: currentCurve
+                    val points = baseCurve.points
                     if (index == 0) {
                         if (x <= y) x = 0f else y = 0f
                     } else if (index == points.lastIndex) {
                         if (1f - x <= 1f - y) x = 1f else y = 1f
                     }
-                    onMove(index, x, y)
+                    dragCurve = baseCurve.withPoint(index, x, y)
                 }
             },
     ) {
@@ -530,23 +564,24 @@ private fun CurveEditorGraph(
         }
         drawLine(Color.White.copy(alpha = .12f), Offset(0f, size.height), Offset(size.width, 0f), strokeWidth = 1f)
 
+        val display = dragCurve ?: curve
         val lineColor = channelColor(channel)
-        var previous = Offset(0f, size.height * (1f - curve.valueAt(0f)))
+        var previous = Offset(0f, size.height * (1f - display.valueAt(0f)))
         for (i in 1..160) {
             val xNorm = i / 160f
-            val point = Offset(size.width * xNorm, size.height * (1f - curve.valueAt(xNorm)))
+            val point = Offset(size.width * xNorm, size.height * (1f - display.valueAt(xNorm)))
             drawLine(lineColor, previous, point, strokeWidth = 2.2f)
             previous = point
         }
-        curve.points.forEachIndexed { index, point ->
+        display.points.forEachIndexed { index, point ->
             val pos = pointOffset(point, size.width, size.height)
             if (selectedIndex == index) {
-                drawCircle(Color.Black.copy(alpha = .8f), radius = 7f, center = pos)
-                drawCircle(Color.White, radius = 5.2f, center = pos)
-                drawCircle(lineColor, radius = 3.2f, center = pos)
+                drawCircle(Color.Black.copy(alpha = .82f), radius = selectedPointRadiusPx + 2.5f, center = pos)
+                drawCircle(Color.White, radius = selectedPointRadiusPx, center = pos)
+                drawCircle(lineColor, radius = pointRadiusPx, center = pos)
             } else {
-                drawCircle(Color.Black.copy(alpha = .7f), radius = 5.4f, center = pos)
-                drawCircle(lineColor, radius = 3.7f, center = pos)
+                drawCircle(Color.Black.copy(alpha = .72f), radius = pointRadiusPx + 2.5f, center = pos)
+                drawCircle(lineColor, radius = pointRadiusPx, center = pos)
             }
         }
     }
