@@ -49,15 +49,26 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
  * Export flattens overlapping video tracks into one topmost visible stream. This keeps Transformer
  * from decoding hidden lower videos and reduces decoder/compositor pressure on phones.
  *
- * Preview keeps original track ordering, but coalesces presentation-identical split fragments so
- * CompositionPlayer does not see an unnecessary clipped/start-offset boundary immediately after a
- * split. A tracks remain independent so simultaneous audio is still mixed.
+ * The current editor uses a single-clip ExoPlayer for video preview. CompositionPlayer is retained
+ * only for audio preview, where independent A tracks are mixed without creating multiple video
+ * decoders/compositors. [buildPreview] remains available for compatibility, while
+ * [buildAudioPreview] is the stable editor playback path.
  */
 @UnstableApi
 class Media3CompositionBuilder {
     fun build(project: TimelineProject): Composition = buildExport(project)
 
     fun buildPreview(project: TimelineProject): Composition = buildPreviewInternal(project)
+
+    fun buildAudioPreview(project: TimelineProject): Composition {
+        val problems = project.validate()
+        require(problems.isEmpty()) { problems.joinToString("; ") }
+
+        val sequences = mutableListOf<EditedMediaItemSequence>()
+        addAudioSequences(project, sequences, forPreview = true)
+        require(sequences.isNotEmpty()) { "Timeline has no playable audio" }
+        return Composition.Builder(sequences).build()
+    }
 
     private fun buildExport(project: TimelineProject): Composition {
         val problems = project.validate()
@@ -93,8 +104,7 @@ class Media3CompositionBuilder {
 
         val sequences = mutableListOf<EditedMediaItemSequence>()
 
-        // Project track order is UI order (top to bottom), so the first active video sequence is
-        // visually topmost. Coalesce untouched split halves before giving them to CompositionPlayer.
+        // Compatibility multitrack preview path. The editor itself no longer uses this for video.
         project.tracks
             .filter { it.kind == TrackKind.VIDEO && !it.muted && it.clips.isNotEmpty() }
             .forEach { track ->
