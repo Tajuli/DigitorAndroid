@@ -9,6 +9,7 @@ import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -101,6 +102,7 @@ fun TimelineEditorV4(
     modifier: Modifier = Modifier,
 ) {
     val scroll = rememberScrollState()
+    val verticalScroll = rememberScrollState()
     val density = LocalDensity.current
     var zoom by remember { mutableStateOf(.18f) }
 
@@ -145,7 +147,13 @@ fun TimelineEditorV4(
                     Box(Modifier.fillMaxWidth().height(24.dp).background(Color(0xFF111116)), contentAlignment = Alignment.Center) {
                         Text("TC", fontSize = 8.sp, color = T4Muted)
                     }
-                    project.tracks.forEach { track -> TrackHeaderV4(track, track.id == selectedTrackId, onSelectTrack) }
+                    Column(
+                        Modifier.fillMaxHeight().verticalScroll(verticalScroll),
+                    ) {
+                        project.tracks.forEach { track ->
+                            TrackHeaderV4(track, track.id == selectedTrackId, onSelectTrack)
+                        }
+                    }
                 }
 
                 Column(
@@ -182,7 +190,9 @@ fun TimelineEditorV4(
                     }
 
                     Box(Modifier.requiredWidth(contentWidth).weight(1f)) {
-                        Column(Modifier.fillMaxSize()) {
+                        Column(
+                            Modifier.fillMaxSize().verticalScroll(verticalScroll),
+                        ) {
                             project.tracks.forEach { track ->
                                 TimelineLaneV4(
                                     project = project,
