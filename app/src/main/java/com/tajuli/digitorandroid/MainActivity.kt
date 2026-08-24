@@ -1,6 +1,9 @@
 package com.tajuli.digitorandroid
 
 import android.os.Bundle
+import android.util.Log
+import android.view.SurfaceView
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import androidx.activity.ComponentActivity
@@ -13,6 +16,7 @@ import com.tajuli.digitorandroid.ui.theme.DigitorTheme
 
 class MainActivity : ComponentActivity() {
     private var recoverPreviewOnResume = false
+    private var previewRecoveryGeneration = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -25,10 +29,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
-        // External activities such as the system document picker can destroy the SurfaceView while
-        // keeping the Compose/ExoPlayer state alive. Remember that the next resume needs a codec
-        // re-bind even when the visible timeline clip itself did not change.
+        // External activities such as the system document picker can tear down the preview
+        // SurfaceView while Compose and ExoPlayer themselves stay alive.
         recoverPreviewOnResume = true
+        previewRecoveryGeneration++ // invalidate any recovery loop from an older resume
         super.onPause()
     }
 
@@ -37,25 +41,75 @@ class MainActivity : ComponentActivity() {
         if (!recoverPreviewOnResume) return
         recoverPreviewOnResume = false
 
-        // Let Compose/AndroidView attach the replacement PlayerView/SurfaceView first. On some
-        // Unisoc devices ExoPlayer stays READY against the old, disconnected producer otherwise,
-        // leaving a permanently black preview until the media item changes.
-        window.decorView.postDelayed({
-            val playerView = findPlayerView(window.decorView) ?: return@postDelayed
-            recoverVideoDecoder(playerView.player)
-        }, PREVIEW_SURFACE_RECOVERY_DELAY_MS)
+        // Do not use a fixed delay here. Real devices can take >2 seconds to recreate the
+        // SurfaceView after returning from DocumentsUI. Retry until the replacement video surface
+        // is actually attached, visible and valid, then rebind the player exactly once.
+        val generation = ++previewRecoveryGeneration
+        schedulePreviewRecovery(generation, attempt = 0)
     }
 
-    private fun recoverVideoDecoder(player: Player?) {
-        player ?: return
+    private fun schedulePreviewRecovery(generation: Int, attempt: Int) {
+        if (generation != previewRecoveryGeneration || isFinishing || isDestroyed) return
+
+        window.decorView.postDelayed({
+            if (generation != previewRecoveryGeneration || isFinishing || isDestroyed) {
+                return@postDelayed
+            }
+
+            val playerView = findPlayerView(window.decorView)
+            val player = playerView?.player
+            val ready = playerView != null &&
+                player != null &&
+                player.mediaItemCount > 0 &&
+                window.decorView.hasWindowFocus() &&
+                playerView.isAttachedToWindow &&
+                playerView.isShown &&
+                isVideoSurfaceReady(playerView)
+
+            if (!ready) {
+                if (attempt < MAX_PREVIEW_RECOVERY_ATTEMPTS) {
+                    schedulePreviewRecovery(generation, attempt + 1)
+                } else {
+                    Log.w(
+                        PREVIEW_RECOVERY_TAG,
+                        "Timed out waiting for a valid preview surface; playerView=${playerView != null}, " +
+                            "mediaItems=${player?.mediaItemCount ?: 0}, focus=${window.decorView.hasWindowFocus()}",
+                    )
+                }
+                return@postDelayed
+            }
+
+            recoverVideoDecoder(playerView)
+        }, if (attempt == 0) 0L else PREVIEW_RECOVERY_RETRY_MS)
+    }
+
+    private fun isVideoSurfaceReady(playerView: PlayerView): Boolean {
+        return when (val surface = playerView.videoSurfaceView) {
+            is SurfaceView -> surface.isAttachedToWindow && surface.holder.surface.isValid
+            is TextureView -> surface.isAttachedToWindow && surface.isAvailable
+            null -> false
+            else -> surface.isAttachedToWindow && surface.isShown
+        }
+    }
+
+    private fun recoverVideoDecoder(playerView: PlayerView) {
+        val player = playerView.player ?: return
         if (player.mediaItemCount == 0) return
 
         val positionMs = player.currentPosition.coerceAtLeast(0L)
         val resumePlayback = player.playWhenReady
 
-        // Force MediaCodec to drop the stale output surface and bind to PlayerView's newly-created
-        // surface. stop() keeps the playlist; prepare()+seek restores the exact preview frame.
+        Log.d(
+            PREVIEW_RECOVERY_TAG,
+            "Recovering video on valid replacement surface at ${positionMs}ms; " +
+                "state=${player.playbackState}, playing=$resumePlayback",
+        )
+
+        // Explicitly detach/reattach PlayerView first so ExoPlayer receives the new Surface object,
+        // then restart the codec while preserving the exact timeline frame and play/pause state.
         player.pause()
+        playerView.player = null
+        playerView.player = player
         player.stop()
         player.prepare()
         player.seekTo(positionMs)
@@ -72,6 +126,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private companion object {
-        const val PREVIEW_SURFACE_RECOVERY_DELAY_MS = 180L
+        const val PREVIEW_RECOVERY_TAG = "DigitorPreviewRecovery"
+        const val PREVIEW_RECOVERY_RETRY_MS = 100L
+        const val MAX_PREVIEW_RECOVERY_ATTEMPTS = 60 // up to about six seconds on slow devices
     }
 }
