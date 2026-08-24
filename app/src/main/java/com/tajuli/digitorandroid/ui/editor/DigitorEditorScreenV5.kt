@@ -1,6 +1,9 @@
 package com.tajuli.digitorandroid.ui.editor
 
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -56,6 +59,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -75,6 +79,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -103,6 +108,7 @@ import kotlin.math.roundToInt
 private val E5Shell = Color(0xFF08080A)
 private val E5Muted = Color(0xFF909098)
 private val E5Accent = Color(0xFF30E0C3)
+private const val VIDEO_PREVIEW_TAG = "DigitorVideoPreview"
 
 private fun TimelineClip.previewSourcePositionMs(timelineUs: Long): Long {
     val maxLocalUs = (durationUs - 1L).coerceAtLeast(0L)
@@ -133,9 +139,10 @@ private enum class WorkspaceV5(val label: String, val icon: ImageVector) {
  * - export still uses the shared Media3 Transformer composition.
  *
  * Video preview deliberately decodes the full source and seeks to source timestamps instead of
- * using MediaItem clipping. This avoids device-specific black frames after a split leaves a clip
- * with a non-zero sourceIn. Audio composition rebuilds are cancellation-safe so rapid
- * split/delete/import edits cannot apply an obsolete composition after a newer project state.
+ * using MediaItem clipping. A successful document-picker import rotates to a fresh video-player
+ * generation. This avoids carrying an OEM MediaCodec/Surface state that became wedged while the
+ * picker owned the foreground window. Audio composition rebuilds are independent and
+ * cancellation-safe.
  */
 @UnstableApi
 @Composable
@@ -145,10 +152,15 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
     val scope = rememberCoroutineScope()
     val router = remember { ProcessingRouter(context.applicationContext) }
     val compositionBuilder = remember { Media3CompositionBuilder() }
-    val videoPlayer = remember {
-        ExoPlayer.Builder(context.applicationContext).build().apply {
-            volume = 0f // A tracks own preview audio; never double-play embedded video audio.
-        }
+    var videoPlayerGeneration by remember { mutableStateOf(0) }
+    val videoPlayer = remember(videoPlayerGeneration) {
+        ExoPlayer.Builder(context.applicationContext)
+            .setDetachSurfaceTimeoutMs(350L)
+            .setReleaseTimeoutMs(500L)
+            .build()
+            .apply {
+                volume = 0f // A tracks own preview audio; never double-play embedded video audio.
+            }
     }
     val audioPlayer = remember {
         CompositionPlayer.Builder(context.applicationContext).build()
@@ -166,6 +178,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
     var loadedPreviewSourceInUs by remember { mutableStateOf<Long?>(null) }
     var loadedPreviewSourceOutUs by remember { mutableStateOf<Long?>(null) }
     var loadedPreviewGradeHash by remember { mutableStateOf<Int?>(null) }
+    var loadedPreviewGeneration by remember { mutableStateOf(-1) }
     var audioPreviewReady by remember { mutableStateOf(false) }
     var previousProjectDurationUs by remember { mutableStateOf(state.project.durationUs) }
     var showExportDialog by remember { mutableStateOf(false) }
@@ -185,9 +198,69 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         .hashCode()
 
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
-        vm.importUris(uris)
+        if (uris.isNotEmpty()) {
+            // Do not try to revive the player that survived DocumentsUI. Real-device logs show
+            // that this player can stay IDLE forever without creating a video decoder. Rotate the
+            // player/view generation instead, while leaving the old surface pair untouched.
+            isPlaying = false
+            runCatching { audioPlayer.pause() }
+            pendingSeekUs = cursorUs
+            videoPlayerGeneration += 1
+            Log.d(
+                VIDEO_PREVIEW_TAG,
+                "Fresh video player requested after media import; generation=$videoPlayerGeneration",
+            )
+            vm.importUris(uris)
+        }
     }
     fun launchImport() = mediaPicker.launch(vm.selectedImportMimeTypes())
+
+    DisposableEffect(videoPlayer, videoPlayerGeneration) {
+        val generation = videoPlayerGeneration
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                Log.d(
+                    VIDEO_PREVIEW_TAG,
+                    "generation=$generation state=$playbackState mediaItems=${videoPlayer.mediaItemCount} " +
+                        "position=${videoPlayer.currentPosition}ms",
+                )
+            }
+
+            override fun onRenderedFirstFrame() {
+                Log.d(
+                    VIDEO_PREVIEW_TAG,
+                    "generation=$generation rendered first frame at ${videoPlayer.currentPosition}ms",
+                )
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                Log.e(
+                    VIDEO_PREVIEW_TAG,
+                    "generation=$generation player error: ${error.errorCodeName}: ${error.message}",
+                    error,
+                )
+            }
+        }
+        videoPlayer.addListener(listener)
+
+        onDispose {
+            videoPlayer.removeListener(listener)
+            // Never synchronously detach a retired player's surface while Compose is replacing
+            // PlayerView. On affected Unisoc devices that detach can block. Give the new view/player
+            // time to become active, then release the retired generation with short Media3 timeouts.
+            val retiredPlayer = videoPlayer
+            Handler(Looper.getMainLooper()).postDelayed({
+                runCatching { retiredPlayer.release() }
+                    .onFailure { error ->
+                        Log.w(VIDEO_PREVIEW_TAG, "Retired generation=$generation release failed", error)
+                    }
+            }, 900L)
+        }
+    }
+
+    DisposableEffect(audioPlayer) {
+        onDispose { audioPlayer.release() }
+    }
 
     fun startExport(destination: Uri) {
         if (state.project.durationUs <= 0L) {
@@ -243,6 +316,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
     // Video preview: decode the complete source and seek by absolute source time. Avoiding
     // MediaItem clipping keeps split-right fragments (sourceIn > 0) on the normal ExoPlayer path.
     LaunchedEffect(
+        videoPlayerGeneration,
         previewClip?.id,
         previewClip?.uri,
         previewClip?.sourceInUs,
@@ -259,11 +333,13 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             loadedPreviewSourceInUs = null
             loadedPreviewSourceOutUs = null
             loadedPreviewGradeHash = null
+            loadedPreviewGeneration = videoPlayerGeneration
             pendingSeekUs = null
             return@LaunchedEffect
         }
 
-        val sourceChanged = loadedPreviewClipId != clip.id ||
+        val sourceChanged = loadedPreviewGeneration != videoPlayerGeneration ||
+            loadedPreviewClipId != clip.id ||
             loadedPreviewUri != clip.uri ||
             loadedPreviewSourceInUs != clip.sourceInUs ||
             loadedPreviewSourceOutUs != clip.sourceOutUs
@@ -284,6 +360,10 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             SharedColorPipeline.previewEffectsFor(clip)
         }
 
+        Log.d(
+            VIDEO_PREVIEW_TAG,
+            "Loading generation=$videoPlayerGeneration clip=${clip.id} source=${sourcePositionMs}ms",
+        )
         videoPlayer.stop()
         videoPlayer.clearMediaItems()
         videoPlayer.setVideoEffects(effects)
@@ -297,6 +377,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         loadedPreviewSourceInUs = clip.sourceInUs
         loadedPreviewSourceOutUs = clip.sourceOutUs
         loadedPreviewGradeHash = gradeHash
+        loadedPreviewGeneration = videoPlayerGeneration
         pendingSeekUs = null
     }
 
@@ -399,13 +480,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         }
     }
 
-    DisposableEffect(videoPlayer, audioPlayer) {
-        onDispose {
-            videoPlayer.release()
-            audioPlayer.release()
-        }
-    }
-
     fun seekTimeline(requestUs: Long) {
         val target = requestUs.coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
         cursorUs = target
@@ -501,6 +575,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
                 activeVideoClip = previewClip,
                 hasVideo = hasVideo,
                 player = videoPlayer,
+                generation = videoPlayerGeneration,
                 onImport = ::launchImport,
                 qualifierPickerActive = state.qualifierPickerActive,
                 onPickColor = { x, y, width, height ->
@@ -619,6 +694,7 @@ private fun PreviewV5(
     activeVideoClip: TimelineClip?,
     hasVideo: Boolean,
     player: Player,
+    generation: Int,
     onImport: () -> Unit,
     qualifierPickerActive: Boolean,
     onPickColor: (Float, Float, Float, Float) -> Unit,
@@ -630,17 +706,18 @@ private fun PreviewV5(
         contentAlignment = Alignment.Center,
     ) {
         if (hasVideo) {
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        useController = false
-                        setKeepContentOnPlayerReset(true)
-                        this.player = player
-                    }
-                },
-                update = { it.player = player },
-                modifier = Modifier.fillMaxSize(),
-            )
+            key(generation) {
+                AndroidView(
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            useController = false
+                            setKeepContentOnPlayerReset(true)
+                            this.player = player
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             if (activeVideoClip == null) {
                 Text(
                     "No video at cursor · audio can continue",
