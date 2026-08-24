@@ -153,26 +153,19 @@ class MainActivity : ComponentActivity() {
 
         Log.d(
             PREVIEW_RECOVERY_TAG,
-            "Recovering video and waiting for first frame; attempt=${frameAttempt + 1}, " +
+            "Restarting decoder without touching video surface; attempt=${frameAttempt + 1}, " +
                 "position=${rawPositionMs}ms safePosition=${safePositionMs}ms, " +
                 "duration=${knownDurationMs}ms state=${player.playbackState}, playing=$resumePlayback",
         )
 
+        // Do not detach/re-attach PlayerView or call setVideoSurfaceView/setVideoTextureView here.
+        // On some Unisoc devices Media3 can block while detaching the old Surface and throw
+        // ExoTimeoutException("Detaching surface timed out"). PlayerView already owns the valid
+        // replacement surface, so leave that connection untouched and only restart the decoder.
         player.pause()
-        playerView.player = null
-        playerView.player = player
-
-        // Bind the actual replacement surface explicitly. PlayerView normally does this too, but
-        // direct binding avoids OEM races where the new SurfaceView is visible while the codec is
-        // still attached to the producer from the old picker lifecycle.
-        when (val surface = playerView.videoSurfaceView) {
-            is SurfaceView -> player.setVideoSurfaceView(surface)
-            is TextureView -> player.setVideoTextureView(surface)
-        }
-
         player.stop()
-        player.prepare()
         player.seekTo(safePositionMs)
+        player.prepare()
         if (resumePlayback) player.play()
 
         window.decorView.postDelayed({
@@ -186,10 +179,8 @@ class MainActivity : ComponentActivity() {
             if (frameAttempt < MAX_FRAME_RECOVERY_ATTEMPTS) {
                 Log.w(
                     PREVIEW_RECOVERY_TAG,
-                    "No rendered first frame after ${FIRST_FRAME_TIMEOUT_MS}ms; retrying",
+                    "No rendered first frame after ${FIRST_FRAME_TIMEOUT_MS}ms; retrying decoder restart",
                 )
-                // Re-resolve PlayerView and its surface because the project import may have caused
-                // another Compose/PlayerView update while this attempt was waiting.
                 schedulePreviewRecovery(
                     generation = generation,
                     surfaceAttempt = 0,
@@ -227,7 +218,7 @@ class MainActivity : ComponentActivity() {
         const val PREVIEW_RECOVERY_TAG = "DigitorPreviewRecovery"
         const val SURFACE_WAIT_RETRY_MS = 100L
         const val MAX_SURFACE_WAIT_ATTEMPTS = 60
-        const val FIRST_FRAME_TIMEOUT_MS = 700L
-        const val MAX_FRAME_RECOVERY_ATTEMPTS = 6
+        const val FIRST_FRAME_TIMEOUT_MS = 1200L
+        const val MAX_FRAME_RECOVERY_ATTEMPTS = 3
     }
 }
