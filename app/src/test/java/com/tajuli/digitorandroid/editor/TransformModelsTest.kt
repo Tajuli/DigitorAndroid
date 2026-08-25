@@ -2,6 +2,7 @@ package com.tajuli.digitorandroid.editor
 
 import com.tajuli.digitorandroid.editor.model.AnimatedFloat
 import com.tajuli.digitorandroid.editor.model.ClipTransform
+import com.tajuli.digitorandroid.editor.model.KeyframeInterpolation
 import com.tajuli.digitorandroid.editor.model.TransformProperty
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -27,8 +28,8 @@ class TransformModelsTest {
     @Test
     fun easeInOutInterpolatesBetweenKeyframes() {
         val animated = AnimatedFloat(0f)
-            .upsertKeyframe(0L, 0f)
-            .upsertKeyframe(1_000_000L, 1f)
+            .upsertKeyframe(0L, 0f, KeyframeInterpolation.EASE_IN_OUT)
+            .upsertKeyframe(1_000_000L, 1f, KeyframeInterpolation.EASE_IN_OUT)
 
         assertEquals(0.15625f, animated.valueAt(250_000L), 0.0001f)
         assertEquals(0.5f, animated.valueAt(500_000L), 0.0001f)
@@ -36,7 +37,7 @@ class TransformModelsTest {
     }
 
     @Test
-    fun splitRebasesRightHandKeyframesWithoutVisualJump() {
+    fun splitRebasesLinearKeyframesWithoutChangingMotion() {
         val animated = AnimatedFloat(0f)
             .upsertKeyframe(0L, 0f)
             .upsertKeyframe(2_000_000L, 1f)
