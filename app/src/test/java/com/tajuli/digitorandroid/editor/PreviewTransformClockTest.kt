@@ -45,6 +45,7 @@ class PreviewTransformClockTest {
         val clip = TimelineClip(
             uri = "video",
             label = "video",
+            timelineStartUs = 0L,
             sourceOutUs = 2_000_000L,
         )
         val project = TimelineProject(
