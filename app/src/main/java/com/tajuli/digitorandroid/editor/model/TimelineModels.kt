@@ -118,6 +118,7 @@ data class TimelineClip(
     val colorGrade: ColorGrade = ColorGrade(),
     val linkGroupId: String? = null,
     val nodeGraph: ClipNodeGraph = ClipNodeGraph.default(),
+    val transform: ClipTransform = ClipTransform(),
 ) {
     val durationUs: Long get() = (sourceOutUs - sourceInUs).coerceAtLeast(1L)
     val timelineEndUs: Long get() = timelineStartUs + durationUs
