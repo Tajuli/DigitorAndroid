@@ -99,5 +99,7 @@ class TransformModelsTest {
         assertTrue(removed.hasKeyframeAt(5_000_000L))
         assertTrue(removed.hasKeyframeAt(20_000_000L))
         assertEquals(2, removed.keyframes.size)
+        assertEquals(1.20f, removed.valueAt(5_000_000L), 0.0001f)
+        assertEquals(0.90f, removed.valueAt(20_000_000L), 0.0001f)
     }
 }
