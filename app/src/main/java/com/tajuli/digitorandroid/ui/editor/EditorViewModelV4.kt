@@ -19,6 +19,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.TransformProperty
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,6 +29,7 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToLong
 import kotlin.math.sqrt
 
 @UnstableApi
@@ -336,16 +338,20 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
                 if (clip.id !in ids || timelineUs <= clip.timelineStartUs || timelineUs >= clip.timelineEndUs) {
                     rebuilt += clip
                 } else {
-                    val sourceSplit = clip.sourceInUs + timelineUs - clip.timelineStartUs
+                    val splitLocalUs = timelineUs - clip.timelineStartUs
+                    val sourceSplit = clip.sourceInUs + splitLocalUs
+                    val (leftTransform, rightTransform) = clip.transform.splitAt(splitLocalUs)
                     rebuilt += clip.copy(
                         sourceOutUs = sourceSplit,
                         linkGroupId = if (clip.linkGroupId == null) null else leftGroup,
+                        transform = leftTransform,
                     )
                     val right = clip.copy(
                         id = UUID.randomUUID().toString(),
                         timelineStartUs = timelineUs,
                         sourceInUs = sourceSplit,
                         linkGroupId = if (clip.linkGroupId == null) null else rightGroup,
+                        transform = rightTransform,
                     )
                     rebuilt += right
                     rightIds += right.id
@@ -366,6 +372,54 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
             selectedTrackId = next.trackContaining(primary)?.id,
             status = "Split",
         )
+    }
+
+    fun setTransformProperty(property: TransformProperty, value: Float, timelineUs: Long) {
+        val state = _state.value
+        val frameRate = state.project.frameRate
+        updatePrimaryClip { clip ->
+            val localUs = snappedTransformTimeUs(clip, timelineUs, frameRate)
+            clip.copy(transform = clip.transform.setEditorValue(property, localUs, value))
+        }
+    }
+
+    fun toggleTransformKeyframe(property: TransformProperty, timelineUs: Long) {
+        val state = _state.value
+        val frameRate = state.project.frameRate
+        updatePrimaryClip { clip ->
+            val localUs = snappedTransformTimeUs(clip, timelineUs, frameRate)
+            clip.copy(transform = clip.transform.toggleKeyframe(property, localUs))
+        }
+        _state.value = _state.value.copy(status = "Transform keyframe updated")
+    }
+
+    fun toggleAllTransformKeyframes(timelineUs: Long) {
+        val state = _state.value
+        val frameRate = state.project.frameRate
+        updatePrimaryClip { clip ->
+            val localUs = snappedTransformTimeUs(clip, timelineUs, frameRate)
+            clip.copy(transform = clip.transform.toggleAllKeyframes(localUs))
+        }
+        _state.value = _state.value.copy(status = "Transform keyframes updated")
+    }
+
+    fun resetTransformAt(timelineUs: Long) {
+        val state = _state.value
+        val frameRate = state.project.frameRate
+        updatePrimaryClip { clip ->
+            val localUs = snappedTransformTimeUs(clip, timelineUs, frameRate)
+            clip.copy(transform = clip.transform.resetAt(localUs))
+        }
+        _state.value = _state.value.copy(status = "Transform reset")
+    }
+
+    fun transformKeyframeLocalUs(clip: TimelineClip, timelineUs: Long): Long =
+        snappedTransformTimeUs(clip, timelineUs, _state.value.project.frameRate)
+
+    private fun snappedTransformTimeUs(clip: TimelineClip, timelineUs: Long, frameRate: Int): Long {
+        val raw = (timelineUs - clip.timelineStartUs).coerceIn(0L, clip.durationUs)
+        val frameUs = (1_000_000.0 / frameRate.coerceAtLeast(1)).roundToLong().coerceAtLeast(1L)
+        return ((raw.toDouble() / frameUs).roundToLong() * frameUs).coerceIn(0L, clip.durationUs)
     }
 
     fun selectNode(nodeId: String) = updatePrimaryClip { clip ->

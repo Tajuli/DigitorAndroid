@@ -16,10 +16,9 @@ import com.tajuli.digitorandroid.editor.model.visibleVideoSegments
  * Coalesces adjacent clips that are still presentation-identical fragments of the same source.
  *
  * A timeline split creates exactly this shape: left.sourceOut == right.sourceIn and the copied
- * grading state is identical. Keeping that artificial boundary in CompositionPlayer is risky on
- * current Media3 releases because video items with non-zero start offsets can fail during preview.
- * The timeline model stays split; only the preview sequence is simplified back to a continuous
- * media item until the user makes the halves meaningfully different.
+ * grading/transform state is identical. Keeping that artificial boundary in CompositionPlayer is
+ * risky on current Media3 releases because video items with non-zero start offsets can fail during
+ * preview. Animated transforms intentionally prevent coalescing once their rebased keyframes differ.
  */
 internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip> {
     if (clips.size < 2) return clips
@@ -33,7 +32,8 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
             previous.sourceOutUs == clip.sourceInUs &&
             previous.opacity == clip.opacity &&
             previous.colorGrade == clip.colorGrade &&
-            previous.nodeGraph == clip.nodeGraph
+            previous.nodeGraph == clip.nodeGraph &&
+            previous.transform == clip.transform
         if (canMerge) {
             result[result.lastIndex] = previous!!.copy(sourceOutUs = clip.sourceOutUs)
         } else {
@@ -166,9 +166,9 @@ class Media3CompositionBuilder {
             .setDurationUs(clip.durationUs)
         if (kind == TrackKind.VIDEO) {
             val videoEffects = if (forPreview) {
-                SharedColorPipeline.previewEffectsFor(clip)
+                SharedVideoPipeline.previewEffectsFor(clip)
             } else {
-                SharedColorPipeline.effectsFor(clip)
+                SharedVideoPipeline.effectsFor(clip)
             }
             builder.setEffects(Effects(emptyList(), videoEffects))
         }

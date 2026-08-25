@@ -1,0 +1,105 @@
+package com.tajuli.digitorandroid.editor
+
+import com.tajuli.digitorandroid.editor.model.AnimatedFloat
+import com.tajuli.digitorandroid.editor.model.ClipTransform
+import com.tajuli.digitorandroid.editor.model.KeyframeInterpolation
+import com.tajuli.digitorandroid.editor.model.TransformProperty
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class TransformModelsTest {
+    @Test
+    fun staticValueBecomesAutoKeyframedAfterFirstDiamond() {
+        var transform = ClipTransform()
+            .setEditorValue(TransformProperty.SCALE_X, 0L, 1.25f)
+        assertTrue(transform.scaleX.keyframes.isEmpty())
+        assertEquals(1.25f, transform.scaleX.baseValue, 0.0001f)
+
+        transform = transform.toggleKeyframe(TransformProperty.SCALE_X, 0L)
+        transform = transform.setEditorValue(TransformProperty.SCALE_X, 1_000_000L, 2f)
+
+        assertEquals(2, transform.scaleX.keyframes.size)
+        assertEquals(1.25f, transform.scaleX.valueAt(0L), 0.0001f)
+        assertEquals(2f, transform.scaleX.valueAt(1_000_000L), 0.0001f)
+    }
+
+    @Test
+    fun scaleInterpolatesAcrossTimelineTime() {
+        val transform = ClipTransform()
+            .withChannel(
+                TransformProperty.SCALE_X,
+                AnimatedFloat(1f)
+                    .upsertKeyframe(5_000_000L, 1.20f)
+                    .upsertKeyframe(20_000_000L, 0.90f),
+            )
+
+        assertEquals(1.20f, transform.evaluate(5_000_000L).scaleX, 0.0001f)
+        assertEquals(1.05f, transform.evaluate(12_500_000L).scaleX, 0.0001f)
+        assertEquals(0.90f, transform.evaluate(20_000_000L).scaleX, 0.0001f)
+    }
+
+    @Test
+    fun scaleXAndScaleYAreIndependent() {
+        val transform = ClipTransform()
+            .setEditorValue(TransformProperty.SCALE_X, 0L, 1.5f)
+            .setEditorValue(TransformProperty.SCALE_Y, 0L, .75f)
+        val value = transform.evaluate(0L)
+
+        assertEquals(1.5f, value.scaleX, 0.0001f)
+        assertEquals(.75f, value.scaleY, 0.0001f)
+    }
+
+    @Test
+    fun easeInOutInterpolatesBetweenKeyframes() {
+        val animated = AnimatedFloat(0f)
+            .upsertKeyframe(0L, 0f, KeyframeInterpolation.EASE_IN_OUT)
+            .upsertKeyframe(1_000_000L, 1f, KeyframeInterpolation.EASE_IN_OUT)
+
+        assertEquals(0.15625f, animated.valueAt(250_000L), 0.0001f)
+        assertEquals(0.5f, animated.valueAt(500_000L), 0.0001f)
+        assertEquals(0.84375f, animated.valueAt(750_000L), 0.0001f)
+    }
+
+    @Test
+    fun splitRebasesLinearKeyframesWithoutChangingMotion() {
+        val animated = AnimatedFloat(0f)
+            .upsertKeyframe(0L, 0f)
+            .upsertKeyframe(2_000_000L, 1f)
+            .upsertKeyframe(4_000_000L, 0f)
+
+        val originalAtSplit = animated.valueAt(2_500_000L)
+        val (left, right) = animated.splitAt(2_500_000L)
+
+        assertEquals(originalAtSplit, left.valueAt(2_500_000L), 0.0001f)
+        assertEquals(originalAtSplit, right.valueAt(0L), 0.0001f)
+        assertEquals(animated.valueAt(3_500_000L), right.valueAt(1_000_000L), 0.0001f)
+    }
+
+    @Test
+    fun allKeyframeToggleAddsThenRemovesAtSamePlayhead() {
+        val added = ClipTransform().toggleAllKeyframes(333_333L)
+        assertTrue(TransformProperty.entries.all { added.hasKeyframeAt(it, 333_333L) })
+
+        val removed = added.toggleAllKeyframes(333_333L)
+        assertFalse(removed.hasAnimation)
+    }
+
+    @Test
+    fun deletingOneKeyframePreservesOtherKeyframes() {
+        val animated = AnimatedFloat(1f)
+            .upsertKeyframe(5_000_000L, 1.20f)
+            .upsertKeyframe(10_000_000L, 1.10f)
+            .upsertKeyframe(20_000_000L, 0.90f)
+
+        val removed = animated.removeKeyframeAt(10_000_000L)
+
+        assertFalse(removed.hasKeyframeAt(10_000_000L))
+        assertTrue(removed.hasKeyframeAt(5_000_000L))
+        assertTrue(removed.hasKeyframeAt(20_000_000L))
+        assertEquals(2, removed.keyframes.size)
+        assertEquals(1.20f, removed.valueAt(5_000_000L), 0.0001f)
+        assertEquals(0.90f, removed.valueAt(20_000_000L), 0.0001f)
+    }
+}

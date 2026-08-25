@@ -17,9 +17,16 @@ class CpuColorProcessor(
     private val workerCount = workerCount.coerceIn(1, 16)
     private val workers = Executors.newFixedThreadPool(this.workerCount)
 
-    fun processClipArgb8888(pixels: IntArray, width: Int, height: Int, clip: TimelineClip) {
+    fun processClipArgb8888(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        clip: TimelineClip,
+        sourceTimeUs: Long = clip.sourceInUs,
+    ) {
         if (width <= 0 || height <= 0) return
-        val graphPlan = ColorGraphEvaluator.compile(clip.nodeGraph)
+        val evaluatedGraph = clip.nodeAnimations.evaluateGraph(clip.nodeGraph, sourceTimeUs)
+        val graphPlan = ColorGraphEvaluator.compile(evaluatedGraph)
         val nodeTransform: (ColorNode, Float, Float, Float) -> FloatArray = { node, r, g, b ->
             QualifiedColorMath.applyNode(node, r, g, b)
         }

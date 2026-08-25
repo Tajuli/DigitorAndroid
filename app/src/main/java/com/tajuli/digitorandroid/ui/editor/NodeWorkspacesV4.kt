@@ -41,6 +41,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.visibleEffects
@@ -162,25 +163,71 @@ fun CorrectionWorkspaceV4(clip: TimelineClip?, vm: EditorViewModelV4, modifier: 
 }
 
 @Composable
-fun EffectsWorkspaceV4(clip: TimelineClip?, vm: EditorViewModelV4, modifier: Modifier = Modifier) {
+fun EffectsWorkspaceV4(
+    clip: TimelineClip?,
+    vm: EditorViewModelV4,
+    modifier: Modifier = Modifier,
+    animationSourceTimeUs: Long? = null,
+) {
     val node = clip?.nodeGraph?.selectedNode()
     if (clip == null || node == null) { NodeEmptyV4("Select a clip and node", modifier); return }
     if (node.kind != NodeKind.SERIAL && node.kind != NodeKind.PARALLEL) { NodeEmptyV4("Select Serial or Parallel node", modifier); return }
     Column(modifier.background(N4Panel)) {
-        WorkspaceTitleV4("Effects · ${node.label}", "Selected node only")
-        Row(Modifier.fillMaxWidth().padding(10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        WorkspaceTitleV4("Effects · ${node.label}", "GPU preview + export")
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 7.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             listOf("Blur", "Sharpen", "Glow", "Film Grain").forEach { name ->
                 FilledTonalButton(onClick = { vm.addEffectToSelectedNode(name) }) { Text(name, fontSize = 8.sp) }
             }
         }
         HorizontalDivider(color = N4Divider)
-        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             val visibleEffects = node.visibleEffects()
-            if (visibleEffects.isEmpty()) Text("No effects on this node", fontSize = 9.sp, color = N4Muted)
+            if (visibleEffects.isEmpty()) {
+                Text("No effects on this node", fontSize = 9.sp, color = N4Muted)
+            } else {
+                Text(
+                    "After the first Effects keyframe, changing an amount creates/updates the keyframe at this frame.",
+                    fontSize = 7.sp,
+                    color = N4Muted,
+                )
+            }
             visibleEffects.forEach { effect ->
-                Row(Modifier.fillMaxWidth().background(N4Raised, RoundedCornerShape(5.dp)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(effect.name, fontSize = 9.sp, modifier = Modifier.weight(1f))
-                    Text("${(effect.amount * 100).toInt()}%", fontSize = 8.sp, color = N4Accent)
+                Column(
+                    Modifier.fillMaxWidth().background(N4Raised, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 6.dp),
+                ) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(effect.name, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        Text("${(effect.amount.coerceIn(0f, 1f) * 100).toInt()}%", fontSize = 8.sp, color = N4Accent)
+                    }
+                    Slider(
+                        value = effect.amount.coerceIn(0f, 1f),
+                        onValueChange = { amount ->
+                            val safe = amount.coerceIn(0f, 1f)
+                            if (animationSourceTimeUs != null &&
+                                clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
+                            ) {
+                                val keyedNode = node.copy(
+                                    effects = node.effects.map { current ->
+                                        if (current.id == effect.id) current.copy(amount = safe, enabled = true) else current
+                                    },
+                                )
+                                clip.nodeAnimations.upsertIfAnimated(
+                                    keyedNode,
+                                    NodeAnimationDomain.EFFECTS,
+                                    animationSourceTimeUs,
+                                )
+                            }
+                            vm.addEffectToSelectedNode(effect.name, safe)
+                        },
+                        valueRange = 0f..1f,
+                        modifier = Modifier.fillMaxWidth().height(28.dp),
+                    )
                 }
             }
         }

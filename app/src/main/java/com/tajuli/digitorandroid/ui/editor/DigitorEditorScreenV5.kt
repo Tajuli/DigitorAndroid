@@ -94,7 +94,7 @@ import com.tajuli.digitorandroid.editor.model.topmostVideoClipAt
 import com.tajuli.digitorandroid.editor.processing.ExportProgress
 import com.tajuli.digitorandroid.editor.processing.ProcessingRouter
 import com.tajuli.digitorandroid.editor.render.Media3CompositionBuilder
-import com.tajuli.digitorandroid.editor.render.SharedColorPipeline
+import com.tajuli.digitorandroid.editor.render.SharedVideoPipeline
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -159,7 +159,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             .setReleaseTimeoutMs(500L)
             .build()
             .apply {
-                volume = 0f // A tracks own preview audio; never double-play embedded video audio.
+                volume = 0f
             }
     }
     val audioPlayer = remember {
@@ -199,17 +199,11 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
 
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
-            // Do not try to revive the player that survived DocumentsUI. Real-device logs show
-            // that this player can stay IDLE forever without creating a video decoder. Rotate the
-            // player/view generation instead, while leaving the old surface pair untouched.
             isPlaying = false
             runCatching { audioPlayer.pause() }
             pendingSeekUs = cursorUs
             videoPlayerGeneration += 1
-            Log.d(
-                VIDEO_PREVIEW_TAG,
-                "Fresh video player requested after media import; generation=$videoPlayerGeneration",
-            )
+            Log.d(VIDEO_PREVIEW_TAG, "Fresh video player requested after media import; generation=$videoPlayerGeneration")
             vm.importUris(uris)
         }
     }
@@ -219,48 +213,27 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         val generation = videoPlayerGeneration
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
-                Log.d(
-                    VIDEO_PREVIEW_TAG,
-                    "generation=$generation state=$playbackState mediaItems=${videoPlayer.mediaItemCount} " +
-                        "position=${videoPlayer.currentPosition}ms",
-                )
+                Log.d(VIDEO_PREVIEW_TAG, "generation=$generation state=$playbackState mediaItems=${videoPlayer.mediaItemCount} position=${videoPlayer.currentPosition}ms")
             }
-
             override fun onRenderedFirstFrame() {
-                Log.d(
-                    VIDEO_PREVIEW_TAG,
-                    "generation=$generation rendered first frame at ${videoPlayer.currentPosition}ms",
-                )
+                Log.d(VIDEO_PREVIEW_TAG, "generation=$generation rendered first frame at ${videoPlayer.currentPosition}ms")
             }
-
             override fun onPlayerError(error: PlaybackException) {
-                Log.e(
-                    VIDEO_PREVIEW_TAG,
-                    "generation=$generation player error: ${error.errorCodeName}: ${error.message}",
-                    error,
-                )
+                Log.e(VIDEO_PREVIEW_TAG, "generation=$generation player error: ${error.errorCodeName}: ${error.message}", error)
             }
         }
         videoPlayer.addListener(listener)
-
         onDispose {
             videoPlayer.removeListener(listener)
-            // Never synchronously detach a retired player's surface while Compose is replacing
-            // PlayerView. On affected Unisoc devices that detach can block. Give the new view/player
-            // time to become active, then release the retired generation with short Media3 timeouts.
             val retiredPlayer = videoPlayer
             Handler(Looper.getMainLooper()).postDelayed({
                 runCatching { retiredPlayer.release() }
-                    .onFailure { error ->
-                        Log.w(VIDEO_PREVIEW_TAG, "Retired generation=$generation release failed", error)
-                    }
+                    .onFailure { error -> Log.w(VIDEO_PREVIEW_TAG, "Retired generation=$generation release failed", error) }
             }, 900L)
         }
     }
 
-    DisposableEffect(audioPlayer) {
-        onDispose { audioPlayer.release() }
-    }
+    DisposableEffect(audioPlayer) { onDispose { audioPlayer.release() } }
 
     fun startExport(destination: Uri) {
         if (state.project.durationUs <= 0L) {
@@ -302,8 +275,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         if (uri != null) startExport(uri)
     }
 
-    // If deleting a tail fragment shortens the project exactly to the cursor, keep the cursor on
-    // the last real frame instead of leaving it at an exclusive timeline end with no preview clip.
     LaunchedEffect(state.project.durationUs) {
         val durationUs = state.project.durationUs.coerceAtLeast(0L)
         if (durationUs < previousProjectDurationUs && cursorUs >= durationUs) {
@@ -313,8 +284,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         previousProjectDurationUs = durationUs
     }
 
-    // Video preview: decode the complete source and seek by absolute source time. Avoiding
-    // MediaItem clipping keeps split-right fragments (sourceIn > 0) on the normal ExoPlayer path.
     LaunchedEffect(
         videoPlayerGeneration,
         previewClip?.id,
@@ -322,6 +291,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         previewClip?.sourceInUs,
         previewClip?.sourceOutUs,
         previewClip?.nodeGraph,
+        previewClip?.transform,
     ) {
         val clip = previewClip
         if (clip == null) {
@@ -337,15 +307,12 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             pendingSeekUs = null
             return@LaunchedEffect
         }
-
         val sourceChanged = loadedPreviewGeneration != videoPlayerGeneration ||
-            loadedPreviewClipId != clip.id ||
-            loadedPreviewUri != clip.uri ||
-            loadedPreviewSourceInUs != clip.sourceInUs ||
-            loadedPreviewSourceOutUs != clip.sourceOutUs
-        val gradeHash = clip.nodeGraph.hashCode()
+            loadedPreviewClipId != clip.id || loadedPreviewUri != clip.uri ||
+            loadedPreviewSourceInUs != clip.sourceInUs || loadedPreviewSourceOutUs != clip.sourceOutUs
+        val gradeHash = 31 * clip.nodeGraph.hashCode() + clip.transform.hashCode()
         val gradeChanged = loadedPreviewGradeHash != gradeHash
-        if (!sourceChanged && gradeChanged) delay(320)
+        if (!sourceChanged && gradeChanged) delay(120)
 
         val requestedTimelineUs = pendingSeekUs ?: cursorUs
         val sourcePositionMs = if (sourceChanged) {
@@ -356,14 +323,8 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             videoPlayer.currentPosition.coerceIn(minMs, maxMs)
         }
         val resumePlayback = isPlaying
-        val effects = withContext(Dispatchers.Default) {
-            SharedColorPipeline.previewEffectsFor(clip)
-        }
-
-        Log.d(
-            VIDEO_PREVIEW_TAG,
-            "Loading generation=$videoPlayerGeneration clip=${clip.id} source=${sourcePositionMs}ms",
-        )
+        val effects = withContext(Dispatchers.Default) { SharedVideoPipeline.previewEffectsFor(clip) }
+        Log.d(VIDEO_PREVIEW_TAG, "Loading generation=$videoPlayerGeneration clip=${clip.id} source=${sourcePositionMs}ms")
         videoPlayer.stop()
         videoPlayer.clearMediaItems()
         videoPlayer.setVideoEffects(effects)
@@ -381,29 +342,17 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         pendingSeekUs = null
     }
 
-    // Audio preview is independent from video. Stop the old composition immediately, debounce
-    // structural edits, and never swallow coroutine cancellation. That prevents an obsolete audio
-    // build from racing a newer split/delete/import state and touching CompositionPlayer late.
     LaunchedEffect(audioPreviewKey, hasAudio) {
         audioPreviewReady = false
-        runCatching {
-            audioPlayer.pause()
-            audioPlayer.stop()
-        }
-        if (!hasAudio) {
-            previewStatus = null
-            return@LaunchedEffect
-        }
-
+        runCatching { audioPlayer.pause(); audioPlayer.stop() }
+        if (!hasAudio) { previewStatus = null; return@LaunchedEffect }
         val projectSnapshot = state.project
         val resumePlayback = isPlaying
         delay(140)
         val maxStartUs = (projectSnapshot.durationUs - 1L).coerceAtLeast(0L)
         val startPositionMs = cursorUs.coerceIn(0L, maxStartUs) / 1000L
         try {
-            val composition = withContext(Dispatchers.Default) {
-                compositionBuilder.buildAudioPreview(projectSnapshot)
-            }
+            val composition = withContext(Dispatchers.Default) { compositionBuilder.buildAudioPreview(projectSnapshot) }
             audioPlayer.stop()
             audioPlayer.setComposition(composition, startPositionMs)
             audioPlayer.prepare()
@@ -419,7 +368,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         }
     }
 
-    // Preserve the same local frame when a selected clip is moved on the timeline.
     LaunchedEffect(selectedClip?.id, selectedClip?.timelineStartUs) {
         val clip = selectedClip
         if (clip == null) {
@@ -434,8 +382,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             if (cursorUs in previousStart until previousEnd) {
                 val maxLocalUs = (clip.durationUs - 1L).coerceAtLeast(0L)
                 val localUs = (cursorUs - previousStart).coerceIn(0L, maxLocalUs)
-                cursorUs = (clip.timelineStartUs + localUs)
-                    .coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
+                cursorUs = (clip.timelineStartUs + localUs).coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
                 if (hasAudio && audioPreviewReady) audioPlayer.seekTo(cursorUs / 1000L)
                 pendingSeekUs = cursorUs
                 if (loadedPreviewClipId == clip.id) {
@@ -448,8 +395,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         previewAnchorTimelineStartUs = clip.timelineStartUs
     }
 
-    // One global editor clock. Mixed audio is the master when available; otherwise the visible
-    // ExoPlayer clip drives time. Empty video gaps without audio advance on the editor ticker.
     LaunchedEffect(videoPlayer, audioPlayer, isPlaying, hasAudio, audioPreviewReady, previewClip?.id) {
         while (isPlaying) {
             val durationUs = state.project.durationUs.coerceAtLeast(0L)
@@ -458,23 +403,13 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
                 previewClip != null -> previewClip.previewTimelinePositionUs(videoPlayer.currentPosition)
                 else -> cursorUs + 70_000L
             }.coerceIn(0L, durationUs)
-
             cursorUs = nextUs
-
-            // Keep the single video decoder aligned to the mixed-audio master without continuous
-            // seeking. Correct only visible drift large enough to notice.
             if (hasAudio && audioPreviewReady && previewClip != null && loadedPreviewClipId == previewClip.id) {
                 val desiredMs = previewClip.previewSourcePositionMs(nextUs)
-                if (abs(videoPlayer.currentPosition - desiredMs) > 180L) {
-                    videoPlayer.seekTo(desiredMs)
-                }
+                if (abs(videoPlayer.currentPosition - desiredMs) > 180L) videoPlayer.seekTo(desiredMs)
             }
-
             if (durationUs > 0L && nextUs >= durationUs) {
-                videoPlayer.pause()
-                audioPlayer.pause()
-                isPlaying = false
-                break
+                videoPlayer.pause(); audioPlayer.pause(); isPlaying = false; break
             }
             delay(70)
         }
@@ -484,7 +419,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         val target = requestUs.coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
         cursorUs = target
         if (hasAudio && audioPreviewReady) audioPlayer.seekTo(target / 1000L)
-
         val activeVideo = state.project.topmostVideoClipAt(target)
         if (activeVideo != null) {
             pendingSeekUs = target
@@ -493,21 +427,15 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
                 videoPlayer.seekTo(activeVideo.previewSourcePositionMs(target))
                 pendingSeekUs = null
             }
-        } else {
-            pendingSeekUs = null
-        }
+        } else pendingSeekUs = null
     }
 
     fun togglePlayback() {
         if (!hasMedia) return
         if (isPlaying) {
-            isPlaying = false
-            videoPlayer.pause()
-            audioPlayer.pause()
+            isPlaying = false; videoPlayer.pause(); audioPlayer.pause()
         } else {
-            if (cursorUs >= state.project.durationUs && state.project.durationUs > 0L) {
-                seekTimeline(0L)
-            }
+            if (cursorUs >= state.project.durationUs && state.project.durationUs > 0L) seekTimeline(0L)
             isPlaying = true
             if (previewClip != null) videoPlayer.play()
             if (hasAudio && audioPreviewReady) audioPlayer.play()
@@ -520,13 +448,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             title = { Text("Export video") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
-                        value = exportName,
-                        onValueChange = { exportName = it },
-                        label = { Text("File name") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    OutlinedTextField(value = exportName, onValueChange = { exportName = it }, label = { Text("File name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     Text("File type", fontSize = 10.sp, color = E5Muted)
                     AssistChip(onClick = {}, label = { Text("MP4 · H.264 / AAC") })
                     Text("Choose location on the next screen.", fontSize = 9.sp, color = E5Muted)
@@ -538,9 +460,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
                     showExportDialog = false
                     saveDocument.launch("$base.mp4")
                 }) {
-                    Icon(Icons.Rounded.Save, null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("Choose location")
+                    Icon(Icons.Rounded.Save, null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(5.dp)); Text("Choose location")
                 }
             },
             dismissButton = { TextButton(onClick = { showExportDialog = false }) { Text("Cancel") } },
@@ -558,16 +478,8 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             )
             if (exportFraction != null && exportFraction!! < 1f) {
                 Column {
-                    LinearProgressIndicator(
-                        progress = { exportFraction!!.coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth().height(3.dp),
-                    )
-                    Text(
-                        "${((exportFraction ?: 0f) * 100).roundToInt()}%  ${exportStatus.orEmpty()}",
-                        fontSize = 9.sp,
-                        color = E5Muted,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp),
-                    )
+                    LinearProgressIndicator(progress = { exportFraction!!.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth().height(3.dp))
+                    Text("${((exportFraction ?: 0f) * 100).roundToInt()}%  ${exportStatus.orEmpty()}", fontSize = 9.sp, color = E5Muted, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp))
                 }
             }
 
@@ -598,10 +510,30 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
 
             Box(Modifier.fillMaxWidth().height(290.dp)) {
                 when (workspace) {
-                    WorkspaceV5.COLOR -> ColorWorkspaceV4(selectedClip, vm, Modifier.fillMaxSize())
+                    WorkspaceV5.EDIT -> EditWorkspaceV5(
+                        project = state.project,
+                        selectedTrackId = state.selectedTrackId,
+                        selectedClipIds = state.selectedClipIds,
+                        selectedClip = selectedClip,
+                        cursorUs = cursorUs,
+                        vm = vm,
+                        onSeek = ::seekTimeline,
+                        onSelectTrack = vm::selectTrack,
+                        onSelectClip = vm::selectClip,
+                        onMoveClip = vm::moveClip,
+                        onMoveClipToTrack = vm::moveClipToTrack,
+                        onAddVideoTrack = { vm.addTrack(TrackKind.VIDEO) },
+                        onAddAudioTrack = { vm.addTrack(TrackKind.AUDIO) },
+                        onSplit = { vm.splitSelectedAt(cursorUs) },
+                        onDelete = vm::deleteSelected,
+                        onUnlink = vm::unlinkSelected,
+                        onImport = ::launchImport,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    WorkspaceV5.COLOR -> KeyframedColorWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
                     WorkspaceV5.NODES -> NodeGraphV4(selectedClip, vm, Modifier.fillMaxSize())
-                    WorkspaceV5.CORRECTION -> CorrectionWorkspaceV4(selectedClip, vm, Modifier.fillMaxSize())
-                    WorkspaceV5.EFFECTS -> EffectsWorkspaceV4(selectedClip, vm, Modifier.fillMaxSize())
+                    WorkspaceV5.CORRECTION -> KeyframedCorrectionWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
+                    WorkspaceV5.EFFECTS -> KeyframedEffectsWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
                     else -> TimelineEditorV4(
                         project = state.project,
                         selectedTrackId = state.selectedTrackId,
@@ -626,16 +558,10 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
                 selected = workspace,
                 onSelected = {
                     workspace = it
-                    val editsClip = it == WorkspaceV5.COLOR ||
-                        it == WorkspaceV5.CORRECTION ||
-                        it == WorkspaceV5.NODES ||
-                        it == WorkspaceV5.EFFECTS
-                    if (editsClip && previewClip != null && previewClip.id != selectedClip?.id) {
-                        vm.selectClip(previewClip.id)
-                    }
-                    if (it != WorkspaceV5.COLOR && state.qualifierPickerActive) {
-                        vm.setQualifierPickerActive(false)
-                    }
+                    val editsClip = it == WorkspaceV5.EDIT || it == WorkspaceV5.COLOR ||
+                        it == WorkspaceV5.CORRECTION || it == WorkspaceV5.NODES || it == WorkspaceV5.EFFECTS
+                    if (editsClip && previewClip != null && previewClip.id != selectedClip?.id) vm.selectClip(previewClip.id)
+                    if (it != WorkspaceV5.COLOR && state.qualifierPickerActive) vm.setQualifierPickerActive(false)
                 },
                 modifier = Modifier.fillMaxWidth().height(66.dp),
             )
@@ -652,38 +578,17 @@ private fun TopBarV5(
     onExport: () -> Unit,
 ) {
     val exporting = exportFraction != null && exportFraction < 1f
-    Row(
-        Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    Row(Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onImport, modifier = Modifier.size(40.dp)) { Icon(Icons.Rounded.Add, "Import") }
         Column(Modifier.weight(1f)) {
-            Text(
-                title,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(6.dp).clip(CircleShape).background(E5Accent))
-                Spacer(Modifier.width(5.dp))
-                Text(
-                    if (status == "Ready") "Stable preview · mixed audio" else status,
-                    fontSize = 9.sp,
-                    color = Color.White.copy(alpha = .55f),
-                    maxLines = 1,
-                )
+                Box(Modifier.size(6.dp).clip(CircleShape).background(E5Accent)); Spacer(Modifier.width(5.dp))
+                Text(if (status == "Ready") "Stable preview · mixed audio" else status, fontSize = 9.sp, color = Color.White.copy(alpha = .55f), maxLines = 1)
             }
         }
-        Button(
-            onClick = onExport,
-            enabled = !exporting,
-            modifier = Modifier.height(34.dp),
-            shape = RoundedCornerShape(7.dp),
-        ) {
-            Icon(Icons.Rounded.Share, null, modifier = Modifier.size(15.dp))
-            Spacer(Modifier.width(5.dp))
+        Button(onClick = onExport, enabled = !exporting, modifier = Modifier.height(34.dp), shape = RoundedCornerShape(7.dp)) {
+            Icon(Icons.Rounded.Share, null, modifier = Modifier.size(15.dp)); Spacer(Modifier.width(5.dp))
             Text(if (exporting) "${((exportFraction ?: 0f) * 100).roundToInt()}%" else "Export", fontSize = 11.sp)
         }
     }
@@ -701,78 +606,38 @@ private fun PreviewV5(
     modifier: Modifier,
 ) {
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
-    Box(
-        modifier.background(Color(0xFF030304)).onSizeChanged { previewSize = it },
-        contentAlignment = Alignment.Center,
-    ) {
+    Box(modifier.background(Color(0xFF030304)).onSizeChanged { previewSize = it }, contentAlignment = Alignment.Center) {
         if (hasVideo) {
             key(generation) {
                 AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            useController = false
-                            setKeepContentOnPlayerReset(true)
-                            this.player = player
-                        }
-                    },
+                    factory = { ctx -> PlayerView(ctx).apply { useController = false; setKeepContentOnPlayerReset(true); this.player = player } },
                     modifier = Modifier.fillMaxSize(),
                 )
             }
             if (activeVideoClip == null) {
-                Text(
-                    "No video at cursor · audio can continue",
-                    color = Color.White.copy(alpha = .55f),
-                    fontSize = 11.sp,
-                    modifier = Modifier.background(Color.Black.copy(alpha = .62f), RoundedCornerShape(5.dp))
-                        .padding(horizontal = 9.dp, vertical = 6.dp),
-                )
+                Text("No video at cursor · audio can continue", color = Color.White.copy(alpha = .55f), fontSize = 11.sp,
+                    modifier = Modifier.background(Color.Black.copy(alpha = .62f), RoundedCornerShape(5.dp)).padding(horizontal = 9.dp, vertical = 6.dp))
             }
         } else {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(
-                    Icons.Rounded.AddPhotoAlternate,
-                    null,
-                    tint = Color.White.copy(alpha = .35f),
-                    modifier = Modifier.size(40.dp),
-                )
-                Spacer(Modifier.height(8.dp))
-                Text("No video media", color = Color.White.copy(alpha = .55f), fontSize = 12.sp)
+                Icon(Icons.Rounded.AddPhotoAlternate, null, tint = Color.White.copy(alpha = .35f), modifier = Modifier.size(40.dp))
+                Spacer(Modifier.height(8.dp)); Text("No video media", color = Color.White.copy(alpha = .55f), fontSize = 12.sp)
                 TextButton(onClick = onImport) { Text("Import media") }
             }
         }
-        Text(
-            "Top-track Preview",
-            modifier = Modifier.align(Alignment.TopStart).padding(10.dp)
-                .background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp))
-                .padding(horizontal = 7.dp, vertical = 4.dp),
-            fontSize = 9.sp,
-            color = Color.White.copy(alpha = .72f),
-        )
+        Text("Top-track Preview", modifier = Modifier.align(Alignment.TopStart).padding(10.dp)
+            .background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 4.dp),
+            fontSize = 9.sp, color = Color.White.copy(alpha = .72f))
 
         if (qualifierPickerActive && activeVideoClip != null) {
             Box(
-                Modifier.fillMaxSize()
-                    .background(Color.Black.copy(alpha = .05f))
-                    .pointerInput(previewSize) {
-                        detectTapGestures { pos ->
-                            onPickColor(
-                                pos.x,
-                                pos.y,
-                                previewSize.width.toFloat(),
-                                previewSize.height.toFloat(),
-                            )
-                        }
-                    },
-                contentAlignment = Alignment.TopCenter,
+                Modifier.fillMaxSize().background(Color.Black.copy(alpha = .05f)).pointerInput(previewSize) {
+                    detectTapGestures { pos -> onPickColor(pos.x, pos.y, previewSize.width.toFloat(), previewSize.height.toFloat()) }
+                }, contentAlignment = Alignment.TopCenter,
             ) {
-                Row(
-                    Modifier.padding(top = 9.dp)
-                        .background(Color.Black.copy(alpha = .76f), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 9.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(Icons.Rounded.Colorize, null, modifier = Modifier.size(15.dp), tint = E5Accent)
-                    Spacer(Modifier.width(5.dp))
+                Row(Modifier.padding(top = 9.dp).background(Color.Black.copy(alpha = .76f), RoundedCornerShape(6.dp)).padding(horizontal = 9.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.Colorize, null, modifier = Modifier.size(15.dp), tint = E5Accent); Spacer(Modifier.width(5.dp))
                     Text("Tap the color to qualify", fontSize = 9.sp, color = Color.White)
                 }
             }
@@ -790,56 +655,26 @@ private fun TransportV5(
     onPlayPause: () -> Unit,
     onForward: () -> Unit,
 ) {
-    Row(
-        Modifier.fillMaxWidth().height(42.dp).background(Color(0xFF0D0D11)),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-    ) {
+    Row(Modifier.fillMaxWidth().height(42.dp).background(Color(0xFF0D0D11)), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
         Text(timeV5(cursorUs), color = E5Muted, fontSize = 9.sp, modifier = Modifier.width(66.dp))
-        IconButton(onClick = onBack, enabled = enabled, modifier = Modifier.size(34.dp)) {
-            Icon(Icons.Rounded.Replay10, null, modifier = Modifier.size(18.dp))
-        }
-        IconButton(onClick = onPlayPause, enabled = enabled, modifier = Modifier.size(38.dp)) {
-            Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, modifier = Modifier.size(23.dp))
-        }
-        IconButton(onClick = onForward, enabled = enabled, modifier = Modifier.size(34.dp)) {
-            Icon(Icons.Rounded.Forward10, null, modifier = Modifier.size(18.dp))
-        }
+        IconButton(onClick = onBack, enabled = enabled, modifier = Modifier.size(34.dp)) { Icon(Icons.Rounded.Replay10, null, modifier = Modifier.size(18.dp)) }
+        IconButton(onClick = onPlayPause, enabled = enabled, modifier = Modifier.size(38.dp)) { Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, modifier = Modifier.size(23.dp)) }
+        IconButton(onClick = onForward, enabled = enabled, modifier = Modifier.size(34.dp)) { Icon(Icons.Rounded.Forward10, null, modifier = Modifier.size(18.dp)) }
         Text(timeV5(durationUs), color = E5Muted, fontSize = 9.sp, modifier = Modifier.width(66.dp))
     }
 }
 
 @Composable
-private fun WorkspaceBarV5(
-    selected: WorkspaceV5,
-    onSelected: (WorkspaceV5) -> Unit,
-    modifier: Modifier,
-) {
-    Row(
-        modifier.background(Color(0xFF0A0A0D)).horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
+private fun WorkspaceBarV5(selected: WorkspaceV5, onSelected: (WorkspaceV5) -> Unit, modifier: Modifier) {
+    Row(modifier.background(Color(0xFF0A0A0D)).horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         WorkspaceV5.entries.forEach { item ->
             val active = item == selected
-            Column(
-                Modifier.width(68.dp).fillMaxHeight().clickable { onSelected(item) }
-                    .background(if (active) E5Accent.copy(alpha = .10f) else Color.Transparent),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                Icon(
-                    item.icon,
-                    item.label,
-                    modifier = Modifier.size(18.dp),
-                    tint = if (active) E5Accent else Color.White.copy(alpha = .55f),
-                )
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    item.label,
-                    fontSize = 8.sp,
-                    color = if (active) E5Accent else Color.White.copy(alpha = .55f),
-                )
+            Column(Modifier.width(68.dp).fillMaxHeight().clickable { onSelected(item) }
+                .background(if (active) E5Accent.copy(alpha = .10f) else Color.Transparent),
+                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                Icon(item.icon, item.label, modifier = Modifier.size(18.dp), tint = if (active) E5Accent else Color.White.copy(alpha = .55f))
+                Spacer(Modifier.height(3.dp)); Text(item.label, fontSize = 8.sp, color = if (active) E5Accent else Color.White.copy(alpha = .55f))
             }
         }
     }
@@ -850,6 +685,5 @@ private fun timeV5(us: Long): String {
     val hours = totalSeconds / 3600
     val minutes = (totalSeconds % 3600) / 60
     val seconds = totalSeconds % 60
-    return if (hours > 0) "%02d:%02d:%02d".format(hours, minutes, seconds)
-    else "%02d:%02d".format(minutes, seconds)
+    return if (hours > 0) "%02d:%02d:%02d".format(hours, minutes, seconds) else "%02d:%02d".format(minutes, seconds)
 }
