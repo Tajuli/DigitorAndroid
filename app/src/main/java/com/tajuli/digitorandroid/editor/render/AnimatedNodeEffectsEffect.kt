@@ -165,7 +165,8 @@ internal class AnimatedNodeEffectsEffect private constructor(
 
                 float hash21(vec2 p) {
                     p = fract(p * vec2(123.34, 345.45));
-                    p += dot(p, p + 34.345 + uTime * 0.173);
+                    float bias = 34.345 + uTime * 0.173;
+                    p += dot(p, p + vec2(bias));
                     return fract(p.x * p.y);
                 }
 
