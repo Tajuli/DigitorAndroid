@@ -6,7 +6,8 @@ import kotlin.math.min
 enum class TransformProperty {
     POSITION_X,
     POSITION_Y,
-    SCALE,
+    SCALE_X,
+    SCALE_Y,
     ROTATION,
 }
 
@@ -113,27 +114,31 @@ data class AnimatedFloat(
 data class EvaluatedClipTransform(
     val positionX: Float,
     val positionY: Float,
-    val scale: Float,
+    val scaleX: Float,
+    val scaleY: Float,
     val rotationDegrees: Float,
 )
 
 data class ClipTransform(
     val positionX: AnimatedFloat = AnimatedFloat(0f),
     val positionY: AnimatedFloat = AnimatedFloat(0f),
-    val scale: AnimatedFloat = AnimatedFloat(1f),
+    val scaleX: AnimatedFloat = AnimatedFloat(1f),
+    val scaleY: AnimatedFloat = AnimatedFloat(1f),
     val rotationDegrees: AnimatedFloat = AnimatedFloat(0f),
 ) {
     fun evaluate(timeUs: Long): EvaluatedClipTransform = EvaluatedClipTransform(
         positionX = positionX.valueAt(timeUs).coerceIn(-2f, 2f),
         positionY = positionY.valueAt(timeUs).coerceIn(-2f, 2f),
-        scale = scale.valueAt(timeUs).coerceIn(.05f, 8f),
+        scaleX = scaleX.valueAt(timeUs).coerceIn(.05f, 8f),
+        scaleY = scaleY.valueAt(timeUs).coerceIn(.05f, 8f),
         rotationDegrees = rotationDegrees.valueAt(timeUs),
     )
 
     fun channel(property: TransformProperty): AnimatedFloat = when (property) {
         TransformProperty.POSITION_X -> positionX
         TransformProperty.POSITION_Y -> positionY
-        TransformProperty.SCALE -> scale
+        TransformProperty.SCALE_X -> scaleX
+        TransformProperty.SCALE_Y -> scaleY
         TransformProperty.ROTATION -> rotationDegrees
     }
 
@@ -145,14 +150,15 @@ data class ClipTransform(
     fun withChannel(property: TransformProperty, value: AnimatedFloat): ClipTransform = when (property) {
         TransformProperty.POSITION_X -> copy(positionX = value)
         TransformProperty.POSITION_Y -> copy(positionY = value)
-        TransformProperty.SCALE -> copy(scale = value)
+        TransformProperty.SCALE_X -> copy(scaleX = value)
+        TransformProperty.SCALE_Y -> copy(scaleY = value)
         TransformProperty.ROTATION -> copy(rotationDegrees = value)
     }
 
     fun setEditorValue(property: TransformProperty, timeUs: Long, value: Float): ClipTransform {
         val safe = when (property) {
             TransformProperty.POSITION_X, TransformProperty.POSITION_Y -> value.coerceIn(-2f, 2f)
-            TransformProperty.SCALE -> value.coerceIn(.05f, 8f)
+            TransformProperty.SCALE_X, TransformProperty.SCALE_Y -> value.coerceIn(.05f, 8f)
             TransformProperty.ROTATION -> value.coerceIn(-1080f, 1080f)
         }
         return withChannel(property, channel(property).setEditorValue(timeUs, safe))
@@ -178,25 +184,38 @@ data class ClipTransform(
     fun resetAt(timeUs: Long): ClipTransform =
         setEditorValue(TransformProperty.POSITION_X, timeUs, 0f)
             .setEditorValue(TransformProperty.POSITION_Y, timeUs, 0f)
-            .setEditorValue(TransformProperty.SCALE, timeUs, 1f)
+            .setEditorValue(TransformProperty.SCALE_X, timeUs, 1f)
+            .setEditorValue(TransformProperty.SCALE_Y, timeUs, 1f)
             .setEditorValue(TransformProperty.ROTATION, timeUs, 0f)
 
     fun splitAt(splitUs: Long): Pair<ClipTransform, ClipTransform> {
         val x = positionX.splitAt(splitUs)
         val y = positionY.splitAt(splitUs)
-        val s = scale.splitAt(splitUs)
+        val sx = scaleX.splitAt(splitUs)
+        val sy = scaleY.splitAt(splitUs)
         val r = rotationDegrees.splitAt(splitUs)
-        return copy(positionX = x.first, positionY = y.first, scale = s.first, rotationDegrees = r.first) to
-            copy(positionX = x.second, positionY = y.second, scale = s.second, rotationDegrees = r.second)
+        return copy(
+            positionX = x.first,
+            positionY = y.first,
+            scaleX = sx.first,
+            scaleY = sy.first,
+            rotationDegrees = r.first,
+        ) to copy(
+            positionX = x.second,
+            positionY = y.second,
+            scaleX = sx.second,
+            scaleY = sy.second,
+            rotationDegrees = r.second,
+        )
     }
 
     val hasAnimation: Boolean
         get() = positionX.keyframes.isNotEmpty() || positionY.keyframes.isNotEmpty() ||
-            scale.keyframes.isNotEmpty() || rotationDegrees.keyframes.isNotEmpty()
+            scaleX.keyframes.isNotEmpty() || scaleY.keyframes.isNotEmpty() || rotationDegrees.keyframes.isNotEmpty()
 
     val isStaticIdentity: Boolean
         get() = !hasAnimation && positionX.baseValue == 0f && positionY.baseValue == 0f &&
-            scale.baseValue == 1f && rotationDegrees.baseValue == 0f
+            scaleX.baseValue == 1f && scaleY.baseValue == 1f && rotationDegrees.baseValue == 0f
 
     companion object {
         fun normalizedPositionPixels(normalized: Float, dimensionPx: Int): Float =
