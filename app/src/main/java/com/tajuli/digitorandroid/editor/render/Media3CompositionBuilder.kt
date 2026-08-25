@@ -51,6 +51,11 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
  * composition input, so overlapping clips are decoded, transformed, graded and alpha-composited in
  * real time. The same sequence topology and compositor settings are shared by CompositionPlayer
  * preview and Transformer export.
+ *
+ * Every sequence is padded to the full Digitor project duration. This is important for unequal
+ * track lengths: without a trailing gap, a shorter video sequence can reach EOS while another video
+ * input is still producing frames. Some multi-input compositor paths then retain/wait on the ended
+ * input. Explicit transparent/silent tail gaps keep all streams on the same composition timeline.
  */
 @UnstableApi
 class Media3CompositionBuilder {
@@ -105,6 +110,9 @@ class Media3CompositionBuilder {
             videoBuilder.addItem(toEditedMediaItem(project, clip, TrackKind.VIDEO, forPreview))
             cursorUs = clip.timelineEndUs
         }
+        if (project.durationUs > cursorUs) {
+            videoBuilder.addGap(project.durationUs - cursorUs)
+        }
         return videoBuilder.build()
     }
 
@@ -125,6 +133,9 @@ class Media3CompositionBuilder {
                     }
                     audioBuilder.addItem(toEditedMediaItem(project, clip, TrackKind.AUDIO, forPreview))
                     cursorUs = clip.timelineEndUs
+                }
+                if (project.durationUs > cursorUs) {
+                    audioBuilder.addGap(project.durationUs - cursorUs)
                 }
                 sequences += audioBuilder.build()
             }
