@@ -32,7 +32,7 @@ object CpuTransformProcessor {
         canvas.save()
         canvas.translate(cx + translateX, cy + translateY)
         canvas.rotate(value.rotationDegrees)
-        canvas.scale(value.scale, value.scale)
+        canvas.scale(value.scaleX, value.scaleY)
         canvas.translate(-cx, -cy)
         canvas.drawBitmap(
             source,
