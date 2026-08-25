@@ -57,6 +57,7 @@ data class ClipNodeGraph(
     val nodes: List<ColorNode>,
     val edges: List<NodeEdge>,
     val selectedNodeId: String?,
+    val revision: Long = 0L,
 ) {
     companion object {
         fun default(): ClipNodeGraph {
@@ -119,6 +120,7 @@ data class TimelineClip(
     val linkGroupId: String? = null,
     val nodeGraph: ClipNodeGraph = ClipNodeGraph.default(),
     val transform: ClipTransform = ClipTransform(),
+    val nodeAnimations: NodeAnimations = NodeAnimations(),
 ) {
     val durationUs: Long get() = (sourceOutUs - sourceInUs).coerceAtLeast(1L)
     val timelineEndUs: Long get() = timelineStartUs + durationUs
