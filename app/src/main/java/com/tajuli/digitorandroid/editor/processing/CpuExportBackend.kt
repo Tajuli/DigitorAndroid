@@ -88,7 +88,7 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
             )
             val overlay = IntArray(project.width * project.height)
             transformed.getPixels(overlay, 0, project.width, 0, 0, project.width, project.height)
-            color.processClipArgb8888(overlay, project.width, project.height, clip)
+            color.processClipArgb8888(overlay, project.width, project.height, clip, sourceUs)
             blend(canvas, overlay, project.width, project.height, clip.opacity)
             if (transformed !== bitmap) transformed.recycle()
             bitmap.recycle()
