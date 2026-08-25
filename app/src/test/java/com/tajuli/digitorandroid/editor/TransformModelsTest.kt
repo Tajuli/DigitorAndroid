@@ -13,16 +13,27 @@ class TransformModelsTest {
     @Test
     fun staticValueBecomesAutoKeyframedAfterFirstDiamond() {
         var transform = ClipTransform()
-            .setEditorValue(TransformProperty.SCALE, 0L, 1.25f)
-        assertTrue(transform.scale.keyframes.isEmpty())
-        assertEquals(1.25f, transform.scale.baseValue, 0.0001f)
+            .setEditorValue(TransformProperty.SCALE_X, 0L, 1.25f)
+        assertTrue(transform.scaleX.keyframes.isEmpty())
+        assertEquals(1.25f, transform.scaleX.baseValue, 0.0001f)
 
-        transform = transform.toggleKeyframe(TransformProperty.SCALE, 0L)
-        transform = transform.setEditorValue(TransformProperty.SCALE, 1_000_000L, 2f)
+        transform = transform.toggleKeyframe(TransformProperty.SCALE_X, 0L)
+        transform = transform.setEditorValue(TransformProperty.SCALE_X, 1_000_000L, 2f)
 
-        assertEquals(2, transform.scale.keyframes.size)
-        assertEquals(1.25f, transform.scale.valueAt(0L), 0.0001f)
-        assertEquals(2f, transform.scale.valueAt(1_000_000L), 0.0001f)
+        assertEquals(2, transform.scaleX.keyframes.size)
+        assertEquals(1.25f, transform.scaleX.valueAt(0L), 0.0001f)
+        assertEquals(2f, transform.scaleX.valueAt(1_000_000L), 0.0001f)
+    }
+
+    @Test
+    fun scaleXAndScaleYAreIndependent() {
+        val transform = ClipTransform()
+            .setEditorValue(TransformProperty.SCALE_X, 0L, 1.5f)
+            .setEditorValue(TransformProperty.SCALE_Y, 0L, .75f)
+        val value = transform.evaluate(0L)
+
+        assertEquals(1.5f, value.scaleX, 0.0001f)
+        assertEquals(.75f, value.scaleY, 0.0001f)
     }
 
     @Test
