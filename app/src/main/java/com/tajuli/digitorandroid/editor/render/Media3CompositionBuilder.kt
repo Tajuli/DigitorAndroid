@@ -45,15 +45,31 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
 }
 
 /**
+ * Media3 EditedMediaItem duration means source-media duration before clipping, not the duration of
+ * the clipped timeline fragment. A split/trimmed clip can start far inside the source, so declaring
+ * only (sourceOut - sourceIn) makes its clipping range inconsistent and can fail video processing.
+ *
+ * Digitor does not persist a separate source-duration field yet. Clips created from the same URI do
+ * preserve source coordinates, so the furthest known sourceOut is the safest source-duration value.
+ */
+internal fun sourceDurationUsFor(project: TimelineProject, clip: TimelineClip): Long =
+    project.tracks.asSequence()
+        .flatMap { track -> track.clips.asSequence() }
+        .filter { candidate -> candidate.uri == clip.uri }
+        .maxOfOrNull { candidate -> candidate.sourceOutUs }
+        ?.coerceAtLeast(clip.sourceOutUs)
+        ?.coerceAtLeast(1L)
+        ?: clip.sourceOutUs.coerceAtLeast(1L)
+
+/**
  * Builds one Media3 sequence per Digitor timeline track.
  *
  * Video tracks are deliberately NOT flattened. Every active V track is registered as an independent
  * composition input, so overlapping clips are decoded, transformed, graded and alpha-composited.
- * Preview and export use the same sequence topology and compositor settings.
  *
- * Every sequence is padded to the full Digitor project duration. With unequal track lengths this
- * prevents a shorter input from ending the multi-input composition while a longer background still
- * has frames to render. The compositor separately makes gap intervals fully transparent.
+ * Export sequences are padded to project duration so a shorter overlay cannot terminate a longer
+ * background render. CompositionPlayer preview intentionally does not add artificial tail gaps:
+ * real-device multi-input preview is more stable when a finished stream reaches its natural end.
  */
 @UnstableApi
 class Media3CompositionBuilder {
@@ -108,7 +124,7 @@ class Media3CompositionBuilder {
             videoBuilder.addItem(toEditedMediaItem(project, clip, TrackKind.VIDEO, forPreview))
             cursorUs = clip.timelineEndUs
         }
-        if (project.durationUs > cursorUs) {
+        if (!forPreview && project.durationUs > cursorUs) {
             videoBuilder.addGap(project.durationUs - cursorUs)
         }
         return videoBuilder.build()
@@ -132,7 +148,7 @@ class Media3CompositionBuilder {
                     audioBuilder.addItem(toEditedMediaItem(project, clip, TrackKind.AUDIO, forPreview))
                     cursorUs = clip.timelineEndUs
                 }
-                if (project.durationUs > cursorUs) {
+                if (!forPreview && project.durationUs > cursorUs) {
                     audioBuilder.addGap(project.durationUs - cursorUs)
                 }
                 sequences += audioBuilder.build()
@@ -155,7 +171,7 @@ class Media3CompositionBuilder {
             .build()
 
         val builder = EditedMediaItem.Builder(mediaItem)
-            .setDurationUs(clip.durationUs)
+            .setDurationUs(sourceDurationUsFor(project, clip))
         if (kind == TrackKind.VIDEO) {
             val videoEffects = buildList {
                 add(
