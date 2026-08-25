@@ -26,6 +26,21 @@ class TransformModelsTest {
     }
 
     @Test
+    fun scaleInterpolatesAcrossTimelineTime() {
+        val transform = ClipTransform()
+            .withChannel(
+                TransformProperty.SCALE_X,
+                AnimatedFloat(1f)
+                    .upsertKeyframe(5_000_000L, 1.20f)
+                    .upsertKeyframe(20_000_000L, 0.90f),
+            )
+
+        assertEquals(1.20f, transform.evaluate(5_000_000L).scaleX, 0.0001f)
+        assertEquals(1.05f, transform.evaluate(12_500_000L).scaleX, 0.0001f)
+        assertEquals(0.90f, transform.evaluate(20_000_000L).scaleX, 0.0001f)
+    }
+
+    @Test
     fun scaleXAndScaleYAreIndependent() {
         val transform = ClipTransform()
             .setEditorValue(TransformProperty.SCALE_X, 0L, 1.5f)
