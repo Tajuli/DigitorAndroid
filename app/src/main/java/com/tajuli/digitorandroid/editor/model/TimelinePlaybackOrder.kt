@@ -33,10 +33,13 @@ data class VisibleVideoSegment(
     /** Returns a source-trimmed fragment positioned at this segment's timeline start. */
     fun asTimelineClip(): TimelineClip {
         val sourceOffsetUs = timelineStartUs - clip.timelineStartUs
+        val (_, rebasedTransform) = clip.transform.splitAt(sourceOffsetUs)
+        val (segmentTransform, _) = rebasedTransform.splitAt(durationUs)
         return clip.copy(
             timelineStartUs = timelineStartUs,
             sourceInUs = clip.sourceInUs + sourceOffsetUs,
             sourceOutUs = clip.sourceInUs + sourceOffsetUs + durationUs,
+            transform = segmentTransform,
         )
     }
 }
