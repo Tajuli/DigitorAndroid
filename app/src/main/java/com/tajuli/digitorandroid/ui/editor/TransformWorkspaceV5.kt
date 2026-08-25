@@ -350,7 +350,7 @@ private fun KeyframeStripV5(
                 } ?: return@detectTapGestures
                 val nearestX = (nearest.timeUs.toDouble() / durationUs.coerceAtLeast(1L).toDouble())
                     .toFloat().coerceIn(0f, 1f) * width
-                val hitRadius = maxOf(18f, width * .035f)
+                val hitRadius = maxOf(14f, width * .025f)
                 if (abs(nearestX - tap.x) <= hitRadius) onKeyframeTap(nearest.timeUs)
             }
         },
