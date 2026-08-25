@@ -2,8 +2,8 @@ package com.tajuli.digitorandroid.ui.editor
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -112,6 +115,7 @@ fun EditWorkspaceV5(
                 onImport = onImport,
                 modifier = Modifier.fillMaxSize(),
             )
+
             EditPageV5.TRANSFORM -> {
                 if (selectedClip != null && canTransform) {
                     TransformWorkspaceV5(selectedClip, cursorUs, project.frameRate, vm, onSeek, Modifier.fillMaxSize())
@@ -135,9 +139,18 @@ private fun TransformWorkspaceV5(
     val duration = clip.durationUs.coerceAtLeast(1L)
     val fraction = (rawLocalUs.toDouble() / duration.toDouble()).toFloat().coerceIn(0f, 1f)
     val evaluated = clip.transform.evaluate(rawLocalUs)
+    val scrollState = rememberScrollState()
 
-    Column(modifier.background(X5Panel).padding(horizontal = 8.dp, vertical = 4.dp)) {
-        Row(Modifier.fillMaxWidth().height(28.dp), verticalAlignment = Alignment.CenterVertically) {
+    Column(
+        modifier
+            .background(X5Panel)
+            .verticalScroll(scrollState)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Column(Modifier.weight(1f)) {
                 Text("Transform · ${clip.label}", fontSize = 9.sp, color = Color.White)
                 Text(
@@ -146,10 +159,25 @@ private fun TransformWorkspaceV5(
                     color = X5Muted,
                 )
             }
-            TextButton(onClick = { vm.resetTransformAt(cursorUs) }) { Text("Reset", fontSize = 7.sp) }
-            TextButton(onClick = { vm.toggleAllTransformKeyframes(cursorUs) }) {
-                Text("◆ All", fontSize = 7.sp, color = X5Accent)
-            }
+            Text(
+                "Reset",
+                fontSize = 8.sp,
+                color = X5Muted,
+                modifier = Modifier
+                    .background(X5Raised, RoundedCornerShape(5.dp))
+                    .clickable { vm.resetTransformAt(cursorUs) }
+                    .padding(horizontal = 9.dp, vertical = 6.dp),
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(
+                "◆ All",
+                fontSize = 8.sp,
+                color = X5Accent,
+                modifier = Modifier
+                    .background(X5Raised, RoundedCornerShape(5.dp))
+                    .clickable { vm.toggleAllTransformKeyframes(cursorUs) }
+                    .padding(horizontal = 9.dp, vertical = 6.dp),
+            )
         }
 
         Slider(
@@ -157,12 +185,11 @@ private fun TransformWorkspaceV5(
             onValueChange = { amount ->
                 onSeek(clip.timelineStartUs + (duration * amount.coerceIn(0f, 1f)).toLong())
             },
-            modifier = Modifier.fillMaxWidth().height(24.dp),
+            modifier = Modifier.fillMaxWidth().height(28.dp),
         )
 
         TransformRowV5(
             label = "Position X",
-            property = TransformProperty.POSITION_X,
             value = evaluated.positionX,
             range = -1f..1f,
             display = { "${(it * 100f).roundToInt()}%" },
@@ -174,7 +201,6 @@ private fun TransformWorkspaceV5(
         )
         TransformRowV5(
             label = "Position Y",
-            property = TransformProperty.POSITION_Y,
             value = evaluated.positionY,
             range = -1f..1f,
             display = { "${(it * 100f).roundToInt()}%" },
@@ -185,20 +211,29 @@ private fun TransformWorkspaceV5(
             onKeyframe = { vm.toggleTransformKeyframe(TransformProperty.POSITION_Y, cursorUs) },
         )
         TransformRowV5(
-            label = "Scale",
-            property = TransformProperty.SCALE,
-            value = evaluated.scale,
+            label = "Scale X",
+            value = evaluated.scaleX,
             range = .1f..4f,
             display = { "${(it * 100f).roundToInt()}%" },
-            channel = clip.transform.scale,
+            channel = clip.transform.scaleX,
             durationUs = duration,
             keyframeLocalUs = keyframeLocalUs,
-            onValue = { vm.setTransformProperty(TransformProperty.SCALE, it, cursorUs) },
-            onKeyframe = { vm.toggleTransformKeyframe(TransformProperty.SCALE, cursorUs) },
+            onValue = { vm.setTransformProperty(TransformProperty.SCALE_X, it, cursorUs) },
+            onKeyframe = { vm.toggleTransformKeyframe(TransformProperty.SCALE_X, cursorUs) },
+        )
+        TransformRowV5(
+            label = "Scale Y",
+            value = evaluated.scaleY,
+            range = .1f..4f,
+            display = { "${(it * 100f).roundToInt()}%" },
+            channel = clip.transform.scaleY,
+            durationUs = duration,
+            keyframeLocalUs = keyframeLocalUs,
+            onValue = { vm.setTransformProperty(TransformProperty.SCALE_Y, it, cursorUs) },
+            onKeyframe = { vm.toggleTransformKeyframe(TransformProperty.SCALE_Y, cursorUs) },
         )
         TransformRowV5(
             label = "Rotation",
-            property = TransformProperty.ROTATION,
             value = evaluated.rotationDegrees.coerceIn(-180f, 180f),
             range = -180f..180f,
             display = { "${it.roundToInt()}°" },
@@ -208,13 +243,14 @@ private fun TransformWorkspaceV5(
             onValue = { vm.setTransformProperty(TransformProperty.ROTATION, it, cursorUs) },
             onKeyframe = { vm.toggleTransformKeyframe(TransformProperty.ROTATION, cursorUs) },
         )
+
+        Spacer(Modifier.height(8.dp))
     }
 }
 
 @Composable
 private fun TransformRowV5(
     label: String,
-    property: TransformProperty,
     value: Float,
     range: ClosedFloatingPointRange<Float>,
     display: (Float) -> String,
@@ -226,30 +262,40 @@ private fun TransformRowV5(
 ) {
     val activeKeyframe = channel.hasKeyframeAt(keyframeLocalUs)
     Column(Modifier.fillMaxWidth().background(X5Raised).padding(horizontal = 6.dp, vertical = 2.dp)) {
-        Row(Modifier.fillMaxWidth().height(26.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().height(30.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(label, Modifier.width(70.dp), fontSize = 7.sp, color = Color.White.copy(alpha = .76f))
             Slider(
                 value = value.coerceIn(range.start, range.endInclusive),
                 onValueChange = onValue,
                 valueRange = range,
-                modifier = Modifier.weight(1f).height(24.dp),
+                modifier = Modifier.weight(1f).height(28.dp),
             )
             Text(display(value), Modifier.width(45.dp), fontSize = 7.sp, color = X5Muted)
-            TextButton(onClick = onKeyframe, modifier = Modifier.width(34.dp)) {
-                Text(if (activeKeyframe) "◆" else "◇", fontSize = 14.sp, color = if (activeKeyframe) X5Accent else X5Muted)
-            }
+            Text(
+                if (activeKeyframe) "◆" else "◇",
+                fontSize = 14.sp,
+                color = if (activeKeyframe) X5Accent else X5Muted,
+                modifier = Modifier
+                    .clickable(onClick = onKeyframe)
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+            )
         }
         if (channel.keyframes.isNotEmpty()) {
             KeyframeStripV5(channel, durationUs, Modifier.fillMaxWidth().height(5.dp))
         }
     }
-    Spacer(Modifier.height(3.dp))
+    Spacer(Modifier.height(4.dp))
 }
 
 @Composable
 private fun KeyframeStripV5(channel: AnimatedFloat, durationUs: Long, modifier: Modifier) {
     Canvas(modifier) {
-        drawLine(X5Divider, start = androidx.compose.ui.geometry.Offset(0f, size.height * .5f), end = androidx.compose.ui.geometry.Offset(size.width, size.height * .5f), strokeWidth = 1f)
+        drawLine(
+            X5Divider,
+            start = androidx.compose.ui.geometry.Offset(0f, size.height * .5f),
+            end = androidx.compose.ui.geometry.Offset(size.width, size.height * .5f),
+            strokeWidth = 1f,
+        )
         channel.keyframes.forEach { keyframe ->
             val x = (keyframe.timeUs.toDouble() / durationUs.coerceAtLeast(1L).toDouble()).toFloat()
                 .coerceIn(0f, 1f) * size.width
