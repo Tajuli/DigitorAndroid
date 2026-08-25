@@ -41,7 +41,6 @@ private val KFMuted = Color(0xFF9696A0)
 private val KFAccent = Color(0xFF30E0C3)
 private val KFDanger = Color(0xFFFF7474)
 
-/** Current source timestamp, snapped to the project's frame grid. */
 @Composable
 private fun nodeKeyframeSourceTimeUs(clip: TimelineClip, frameRate: Int): Long {
     val clock by PreviewTransformClock.flow.collectAsState()
@@ -52,12 +51,6 @@ private fun nodeKeyframeSourceTimeUs(clip: TimelineClip, frameRate: Int): Long {
     return (clip.sourceInUs + snappedLocal).coerceIn(clip.sourceInUs, clip.sourceOutUs)
 }
 
-/**
- * Shared Correction / Color / Effects keyframe bar.
- *
- * A domain key stores a snapshot of that node domain at the current source frame. Keyframe markers
- * are individually selectable; the selected marker gets a full-width, always-visible delete row.
- */
 @Composable
 fun NodeDomainKeyframeBarV5(
     clip: TimelineClip,
@@ -72,7 +65,6 @@ fun NodeDomainKeyframeBarV5(
     val track = clip.nodeAnimations.track(node.id, domain)
     val keys = track.keyframes.sortedBy { it.sourceTimeUs }
     val active = track.hasKeyframeAt(sourceUs)
-    val duration = clip.durationUs.coerceAtLeast(1L)
     @Suppress("UNUSED_VARIABLE") val revisionRead = localRevision + clip.nodeAnimations.revision
 
     if (active && selectedSourceUs != sourceUs) selectedSourceUs = sourceUs
@@ -80,11 +72,7 @@ fun NodeDomainKeyframeBarV5(
 
     Column(modifier.fillMaxWidth().background(KFPanel).padding(horizontal = 8.dp, vertical = 5.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                domainTitle(domain),
-                fontSize = 8.sp,
-                color = Color.White.copy(alpha = .82f),
-            )
+            Text(domainTitle(domain), fontSize = 8.sp, color = Color.White.copy(alpha = .82f))
             Spacer(Modifier.weight(1f))
             if (keys.isNotEmpty()) {
                 Text("${keys.size} key${if (keys.size == 1) "" else "s"}", fontSize = 7.sp, color = KFMuted)
@@ -97,8 +85,16 @@ fun NodeDomainKeyframeBarV5(
                 modifier = Modifier
                     .background(KFRaised, RoundedCornerShape(5.dp))
                     .clickable {
-                        clip.nodeAnimations.toggle(node, domain, sourceUs)
-                        selectedSourceUs = if (active) null else sourceUs
+                        if (active) {
+                            clip.nodeAnimations.toggle(node, domain, sourceUs)
+                            selectedSourceUs = null
+                        } else {
+                            clip.nodeAnimations.toggle(node, domain, sourceUs)
+                            // toggle() seeds the continuity value; overwrite the new key with the
+                            // actual editor value so a user can edit, then press diamond to capture.
+                            clip.nodeAnimations.upsertIfAnimated(node, domain, sourceUs)
+                            selectedSourceUs = sourceUs
+                        }
                         localRevision++
                     }
                     .padding(horizontal = 9.dp, vertical = 6.dp),
@@ -177,11 +173,7 @@ private fun NodeKeyframeStripV5(
             val local = (sourceUs - clip.sourceInUs).coerceIn(0L, clip.durationUs)
             val x = local.toFloat() / clip.durationUs.coerceAtLeast(1L).toFloat() * size.width
             val selected = sourceUs == selectedSourceUs
-            drawCircle(
-                if (selected) Color.White else KFAccent,
-                radius = if (selected) 5f else 3.2f,
-                center = Offset(x, size.height * .5f),
-            )
+            drawCircle(if (selected) Color.White else KFAccent, radius = if (selected) 5f else 3.2f, center = Offset(x, size.height * .5f))
         }
     }
 }
