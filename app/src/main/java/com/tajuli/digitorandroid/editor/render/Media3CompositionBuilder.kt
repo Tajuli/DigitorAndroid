@@ -48,14 +48,12 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
  * Builds one Media3 sequence per Digitor timeline track.
  *
  * Video tracks are deliberately NOT flattened. Every active V track is registered as an independent
- * composition input, so overlapping clips are decoded, transformed, graded and alpha-composited in
- * real time. The same sequence topology and compositor settings are shared by CompositionPlayer
- * preview and Transformer export.
+ * composition input, so overlapping clips are decoded, transformed, graded and alpha-composited.
+ * Preview and export use the same sequence topology and compositor settings.
  *
- * Every sequence is padded to the full Digitor project duration. This is important for unequal
- * track lengths: without a trailing gap, a shorter video sequence can reach EOS while another video
- * input is still producing frames. Some multi-input compositor paths then retain/wait on the ended
- * input. Explicit transparent/silent tail gaps keep all streams on the same composition timeline.
+ * Every sequence is padded to the full Digitor project duration. With unequal track lengths this
+ * prevents a shorter input from ending the multi-input composition while a longer background still
+ * has frames to render. The compositor separately makes gap intervals fully transparent.
  */
 @UnstableApi
 class Media3CompositionBuilder {
@@ -160,8 +158,6 @@ class Media3CompositionBuilder {
             .setDurationUs(clip.durationUs)
         if (kind == TrackKind.VIDEO) {
             val videoEffects = buildList {
-                // Give every compositor input the same transparent project-sized canvas first.
-                // The following ClipTransformEffect then operates in normalized project space.
                 add(
                     Presentation.createForWidthAndHeight(
                         project.width,
