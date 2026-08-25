@@ -141,6 +141,12 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
     val player = remember(playerGeneration) {
         CompositionPlayer.Builder(context.applicationContext)
             .setVideoGraphFactory(MultipleInputVideoGraph.Factory())
+            // Media3 recommends replayable cache when editor effects must update accurately while
+            // paused. It lets us explicitly redraw after a transform/color change.
+            .experimentalSetEnableReplayableCache(true)
+            // Multi-input preview streams are allowed to progress independently, so a shorter
+            // overlay reaching a gap/EOS cannot stall the longer background stream.
+            .setPerStreamMediaProgressionEnabled(true)
             .build()
     }
 
@@ -151,6 +157,7 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
     var previousProjectDurationUs by remember { mutableStateOf(state.project.durationUs) }
     var previewReady by remember { mutableStateOf(false) }
     var previewStatus by remember { mutableStateOf<String?>(null) }
+    var scrubRevision by remember { mutableStateOf(0) }
     var showExportDialog by remember { mutableStateOf(false) }
     var exportName by remember { mutableStateOf("Digitor_${System.currentTimeMillis()}") }
     var exportFraction by remember { mutableStateOf<Float?>(null) }
@@ -175,6 +182,25 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                when (playbackState) {
+                    Player.STATE_READY -> {
+                        previewReady = true
+                        previewStatus = null
+                    }
+                    Player.STATE_IDLE -> previewReady = false
+                    Player.STATE_ENDED -> {
+                        isPlaying = false
+                        previewReady = true
+                    }
+                }
+            }
+
+            override fun onRenderedFirstFrame() {
+                previewReady = true
+                previewStatus = null
+            }
+
             override fun onPlayerError(error: PlaybackException) {
                 previewReady = false
                 previewStatus = "Preview: ${error.message ?: error.errorCodeName}"
@@ -216,14 +242,32 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
             player.setComposition(composition, startMs)
             player.prepare()
             if (resume) player.play()
-            previewReady = true
-            previewStatus = null
+            previewStatus = "Preview: preparing…"
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
             runCatching { player.stop() }
             previewReady = false
             previewStatus = "Preview: ${error.message ?: "composition unavailable"}"
+        }
+    }
+
+    // Once Media3 has a replayable frame, force a paused redraw after seeks or project/effect edits.
+    // This fixes the old behavior where cursor and Scale/Transform state changed but PlayerView kept
+    // displaying the previous cached compositor output.
+    LaunchedEffect(player, previewReady, isPlaying, cursorUs, state.project) {
+        if (previewReady && !isPlaying) {
+            delay(20)
+            runCatching { player.experimentalRedrawLastFrame() }
+        }
+    }
+
+    // Scrubbing mode is enabled only around bursts of timeline seeks. Media3 then prioritizes exact
+    // seek frames instead of waiting for normal playback progression.
+    LaunchedEffect(player, scrubRevision, isPlaying) {
+        if (scrubRevision > 0 && !isPlaying) {
+            delay(220)
+            runCatching { player.setScrubbingModeEnabled(false) }
         }
     }
 
@@ -254,7 +298,11 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
     fun seekTimeline(requestUs: Long) {
         val target = requestUs.coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
         cursorUs = target
-        if (previewReady) player.seekTo(target / 1000L)
+        if (previewReady) {
+            runCatching { player.setScrubbingModeEnabled(true) }
+            player.seekTo(target / 1000L)
+            scrubRevision += 1
+        }
         val activeVideo = state.project.topmostVideoClipAt(target)
         if (activeVideo != null && activeVideo.id != selectedClip?.id) vm.selectClip(activeVideo.id)
     }
@@ -266,6 +314,7 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
             player.pause()
         } else {
             if (cursorUs >= state.project.durationUs && state.project.durationUs > 0L) seekTimeline(0L)
+            runCatching { player.setScrubbingModeEnabled(false) }
             isPlaying = true
             player.play()
         }
