@@ -1,15 +1,16 @@
 package com.tajuli.digitorandroid.editor.model
 
-import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Lock-free bridge between the editor playhead and the Media3 video-effect thread.
+ * Thread-safe bridge between the editor playhead, Compose parameter panels, and Media3 effects.
  *
  * ExoPlayer can restart the effect timestamp origin after a seek or after video effects are
- * rebuilt. Transform keyframes are stored in clip-local timeline time, so preview must not depend
- * on Media3's timestamp origin alone. The editor updates this clock whenever it resolves the
- * visible clip at the current playhead. ClipTransformEffect uses the revision as a fresh anchor
- * and advances smoothly from Media3 frame timestamps between editor clock updates.
+ * rebuilt. Keyframes are evaluated from the real clip-local editor playhead instead of trusting
+ * Media3's timestamp origin alone. The StateFlow also lets Correction/Color/Effects panels update
+ * their displayed animated value while playback or scrubbing moves through keyframes.
  */
 object PreviewTransformClock {
     data class Snapshot(
@@ -18,7 +19,8 @@ object PreviewTransformClock {
         val revision: Long,
     )
 
-    private val state = AtomicReference(Snapshot(null, 0L, 0L))
+    private val mutableState = MutableStateFlow(Snapshot(null, 0L, 0L))
+    val flow: StateFlow<Snapshot> = mutableState.asStateFlow()
 
     fun update(clip: TimelineClip?, timelineUs: Long) {
         val clipId = clip?.id
@@ -31,23 +33,17 @@ object PreviewTransformClock {
                 timelineUs = timelineUs,
             )
         }
-
-        while (true) {
-            val current = state.get()
-            if (current.clipId == clipId && current.localUs == localUs) return
-            val next = Snapshot(clipId, localUs, current.revision + 1L)
-            if (state.compareAndSet(current, next)) return
-        }
+        val current = mutableState.value
+        if (current.clipId == clipId && current.localUs == localUs) return
+        mutableState.value = Snapshot(clipId, localUs, current.revision + 1L)
     }
 
     fun snapshotFor(clipId: String): Snapshot? =
-        state.get().takeIf { it.clipId == clipId }
+        mutableState.value.takeIf { it.clipId == clipId }
 
     fun clear() {
-        while (true) {
-            val current = state.get()
-            if (current.clipId == null && current.localUs == 0L) return
-            if (state.compareAndSet(current, Snapshot(null, 0L, current.revision + 1L))) return
-        }
+        val current = mutableState.value
+        if (current.clipId == null && current.localUs == 0L) return
+        mutableState.value = Snapshot(null, 0L, current.revision + 1L)
     }
 }
