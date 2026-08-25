@@ -14,12 +14,20 @@ internal fun compositionVideoTracks(project: TimelineProject): List<TimelineTrac
         track.kind == TrackKind.VIDEO && !track.muted && track.clips.isNotEmpty()
     }
 
+/**
+ * Alpha for one Digitor video track at a composition timestamp.
+ *
+ * A Media3 video input may keep its most recently rendered texture while the sequence is inside a
+ * gap or has reached the end of its last clip. Returning 1 outside an active clip therefore leaves
+ * that stale texture visible and can make a shorter overlay appear frozen over the layers below it.
+ * A track with no clip at this timestamp must be fully transparent.
+ */
 internal fun compositionOpacityAt(track: TimelineTrack, timelineUs: Long): Float =
     track.clips
         .firstOrNull { clip -> timelineUs in clip.timelineStartUs until clip.timelineEndUs }
         ?.opacity
         ?.coerceIn(0f, 1f)
-        ?: 1f
+        ?: 0f
 
 /**
  * Shared layer settings for Media3 preview and Transformer export.
@@ -44,7 +52,7 @@ internal class DigitorVideoCompositorSettings(
 
     override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
         val track = videoTracks.getOrNull(inputId)
-        val alpha = if (track == null) 1f else compositionOpacityAt(track, presentationTimeUs)
+        val alpha = if (track == null) 0f else compositionOpacityAt(track, presentationTimeUs)
         return StaticOverlaySettings.Builder()
             .setAlphaScale(alpha)
             .build()
