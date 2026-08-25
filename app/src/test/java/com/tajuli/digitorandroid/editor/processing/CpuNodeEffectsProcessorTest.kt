@@ -27,16 +27,20 @@ class CpuNodeEffectsProcessorTest {
             sourceOutUs = 1_000_000L,
             nodeGraph = gradedGraph,
         )
-        val pixels = IntArray(9) { 0xFF000000.toInt() }
-        pixels[4] = 0xFFFFFFFF.toInt()
+        val width = 15
+        val height = 15
+        val centerX = 7
+        val centerY = 7
+        val pixels = IntArray(width * height) { 0xFF000000.toInt() }
+        pixels[centerY * width + centerX] = 0xFFFFFFFF.toInt()
 
         CpuNodeEffectsProcessor(workerCount = 1).use { processor ->
-            processor.processClipArgb8888(pixels, 3, 3, clip, 0L)
+            processor.processClipArgb8888(pixels, width, height, clip, 0L)
         }
 
-        val center = (pixels[4] ushr 16) and 0xFF
-        val edge = (pixels[1] ushr 16) and 0xFF
+        val center = (pixels[centerY * width + centerX] ushr 16) and 0xFF
+        val spread = (pixels[(centerY - 5) * width + centerX] ushr 16) and 0xFF
         assertTrue("blur should reduce the isolated white center", center < 255)
-        assertTrue("blur should spread light into a neighboring pixel", edge > 0)
+        assertTrue("blur should spread light along its sampling radius", spread > 0)
     }
 }
