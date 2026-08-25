@@ -123,10 +123,11 @@ private fun TimelineProject.activeVideoClipsAt(timelineUs: Long): List<TimelineC
 /**
  * V6 is the true multilayer editor preview.
  *
- * A single CompositionPlayer now receives the same track-per-sequence Composition used by export.
- * MultipleInputVideoGraph decodes/composites all simultaneous V tracks, while CompositionPlayer
- * also mixes all active A tracks. The old V5 topmost-only ExoPlayer path remains in the repository
- * as a rollback/debug reference, but MainActivity switches to this screen.
+ * A single CompositionPlayer receives the same track-per-sequence Composition used by export.
+ * MultipleInputVideoGraph decodes/composites simultaneous V tracks, while CompositionPlayer also
+ * mixes active A tracks. Preview deliberately avoids experimental replayable-cache/redraw APIs:
+ * current Media3 multi-video preview is still experimental on real devices, and those cache APIs
+ * caused native/runtime crashes on import on some OEMs. Paused refresh uses normal prepare/seek.
  */
 @UnstableApi
 @Composable
@@ -141,12 +142,6 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
     val player = remember(playerGeneration) {
         CompositionPlayer.Builder(context.applicationContext)
             .setVideoGraphFactory(MultipleInputVideoGraph.Factory())
-            // Media3 recommends replayable cache when editor effects must update accurately while
-            // paused. It lets us explicitly redraw after a transform/color change.
-            .experimentalSetEnableReplayableCache(true)
-            // Multi-input preview streams are allowed to progress independently, so a shorter
-            // overlay reaching a gap/EOS cannot stall the longer background stream.
-            .setPerStreamMediaProgressionEnabled(true)
             .build()
     }
 
@@ -157,7 +152,6 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
     var previousProjectDurationUs by remember { mutableStateOf(state.project.durationUs) }
     var previewReady by remember { mutableStateOf(false) }
     var previewStatus by remember { mutableStateOf<String?>(null) }
-    var scrubRevision by remember { mutableStateOf(0) }
     var showExportDialog by remember { mutableStateOf(false) }
     var exportName by remember { mutableStateOf("Digitor_${System.currentTimeMillis()}") }
     var exportFraction by remember { mutableStateOf<Float?>(null) }
@@ -173,8 +167,8 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
             isPlaying = false
             runCatching { player.pause() }
             vm.importUris(uris)
-            // Some OEM pickers recreate the PlayerView surface. Rotating the CompositionPlayer
-            // gives the new multi-input graph a fresh output surface without retaining stale codecs.
+            // Picker foreground/surface transitions have wedged codecs on some OEMs. A fresh player
+            // generation is safer than reusing the graph that existed before the picker returned.
             playerGeneration += 1
         }
     }
@@ -221,8 +215,8 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
         previousProjectDurationUs = durationUs
     }
 
-    // Rebuild only when immutable project structure/effect values change or a fresh player is made.
-    // A short debounce keeps slider drags responsive while still preserving preview/export parity.
+    // Project edits (including Scale/Transform/Color) rebuild the composition at the current cursor.
+    // We keep the refresh on supported prepare/seek APIs instead of replayable-cache redraw calls.
     LaunchedEffect(player, state.project, hasMedia) {
         previewReady = false
         if (!hasMedia) {
@@ -231,7 +225,8 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
             return@LaunchedEffect
         }
         val resume = isPlaying
-        val startMs = (cursorUs.coerceIn(0L, state.project.durationUs.coerceAtLeast(0L)) / 1000L)
+        val durationUs = state.project.durationUs.coerceAtLeast(0L)
+        val startMs = cursorUs.coerceIn(0L, durationUs) / 1000L
         delay(70)
         try {
             val composition = withContext(Dispatchers.Default) {
@@ -241,6 +236,9 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
             player.stop()
             player.setComposition(composition, startMs)
             player.prepare()
+            // Explicitly repeat the normal seek after prepare so paused previews request the current
+            // composite frame even on devices that ignore the initial setComposition position.
+            player.seekTo(startMs)
             if (resume) player.play()
             previewStatus = "Preview: preparing…"
         } catch (cancelled: CancellationException) {
@@ -252,26 +250,7 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
         }
     }
 
-    // Once Media3 has a replayable frame, force a paused redraw after seeks or project/effect edits.
-    // This fixes the old behavior where cursor and Scale/Transform state changed but PlayerView kept
-    // displaying the previous cached compositor output.
-    LaunchedEffect(player, previewReady, isPlaying, cursorUs, state.project) {
-        if (previewReady && !isPlaying) {
-            delay(20)
-            runCatching { player.experimentalRedrawLastFrame() }
-        }
-    }
-
-    // Scrubbing mode is enabled only around bursts of timeline seeks. Media3 then prioritizes exact
-    // seek frames instead of waiting for normal playback progression.
-    LaunchedEffect(player, scrubRevision, isPlaying) {
-        if (scrubRevision > 0 && !isPlaying) {
-            delay(220)
-            runCatching { player.setScrubbingModeEnabled(false) }
-        }
-    }
-
-    // CompositionPlayer is the authoritative timeline clock for both mixed audio and multilayer video.
+    // CompositionPlayer is the authoritative timeline clock for mixed audio and multilayer video.
     LaunchedEffect(player, isPlaying, previewReady) {
         while (isPlaying && previewReady) {
             val durationUs = state.project.durationUs.coerceAtLeast(0L)
@@ -299,9 +278,8 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
         val target = requestUs.coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
         cursorUs = target
         if (previewReady) {
-            runCatching { player.setScrubbingModeEnabled(true) }
-            player.seekTo(target / 1000L)
-            scrubRevision += 1
+            runCatching { player.seekTo(target / 1000L) }
+                .onFailure { previewStatus = "Preview seek: ${it.message ?: "unavailable"}" }
         }
         val activeVideo = state.project.topmostVideoClipAt(target)
         if (activeVideo != null && activeVideo.id != selectedClip?.id) vm.selectClip(activeVideo.id)
@@ -314,7 +292,6 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
             player.pause()
         } else {
             if (cursorUs >= state.project.durationUs && state.project.durationUs > 0L) seekTimeline(0L)
-            runCatching { player.setScrubbingModeEnabled(false) }
             isPlaying = true
             player.play()
         }
