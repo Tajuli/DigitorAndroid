@@ -13,6 +13,7 @@ import kotlin.math.sin
  *
  * Position is stored in normalized canvas units: X/Y = +/-1 moves the clip by half a frame.
  * UI Y grows downward, while Media3's normalized-device Y grows upward, so Y is inverted here.
+ * Scale X and Scale Y are independent so the editor can stretch width and height separately.
  */
 @UnstableApi
 object ClipTransformEffect {
@@ -30,16 +31,17 @@ object ClipTransformEffect {
                 .coerceIn(0L, clip.durationUs.coerceAtLeast(0L))
             val value = clip.transform.evaluate(localUs)
             val radians = Math.toRadians(value.rotationDegrees.toDouble())
-            val c = cos(radians).toFloat() * value.scale
-            val s = sin(radians).toFloat() * value.scale
+            val cos = cos(radians).toFloat()
+            val sin = sin(radians).toFloat()
             val tx = value.positionX
             val ty = -value.positionY
 
             Matrix().apply {
+                // Rotation * non-uniform scale, then translation.
                 setValues(
                     floatArrayOf(
-                        c, -s, tx,
-                        s, c, ty,
+                        cos * value.scaleX, -sin * value.scaleY, tx,
+                        sin * value.scaleX, cos * value.scaleY, ty,
                         0f, 0f, 1f,
                     ),
                 )
