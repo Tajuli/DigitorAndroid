@@ -28,7 +28,7 @@ data class AnimatedFloat(
     private fun ordered(): List<FloatKeyframe> = keyframes
         .map { it.copy(timeUs = it.timeUs.coerceAtLeast(0L)) }
         .sortedBy { it.timeUs }
-        .fold(mutableListOf()) { out, keyframe ->
+        .fold(mutableListOf<FloatKeyframe>()) { out, keyframe ->
             if (out.lastOrNull()?.timeUs == keyframe.timeUs) out[out.lastIndex] = keyframe else out += keyframe
             out
         }
