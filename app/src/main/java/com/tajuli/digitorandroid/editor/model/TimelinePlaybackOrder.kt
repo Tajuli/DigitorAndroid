@@ -1,14 +1,24 @@
 package com.tajuli.digitorandroid.editor.model
 
-/**
- * Returns the visible video clip at [timeUs]. TimelineProject.tracks is stored in the same order
- * it is drawn in the editor: first track is visually highest, so the first active video clip wins.
- */
-fun TimelineProject.topmostVideoClipAt(timeUs: Long): TimelineClip? = tracks
+private fun TimelineProject.findTopmostVideoClipAt(timeUs: Long): TimelineClip? = tracks
     .asSequence()
     .filter { it.kind == TrackKind.VIDEO && !it.muted }
     .flatMap { it.clips.asSequence() }
     .firstOrNull { timeUs in it.timelineStartUs until it.timelineEndUs }
+
+/**
+ * Returns the visible video clip at [timeUs]. TimelineProject.tracks is stored in the same order
+ * it is drawn in the editor: first track is visually highest, so the first active video clip wins.
+ *
+ * This public preview lookup also updates [PreviewTransformClock]. Keeping the playhead clock here
+ * means every seek and playback cursor update reaches the Media3 transform effect without coupling
+ * the editor screen directly to render-thread timing state.
+ */
+fun TimelineProject.topmostVideoClipAt(timeUs: Long): TimelineClip? {
+    val clip = findTopmostVideoClipAt(timeUs)
+    PreviewTransformClock.update(clip, timeUs)
+    return clip
+}
 
 /**
  * A non-overlapping interval of the video timeline where exactly one topmost clip is visible.
@@ -68,7 +78,8 @@ fun TimelineProject.visibleVideoSegments(): List<VisibleVideoSegment> {
         val startUs = boundaries[index]
         val endUs = boundaries[index + 1]
         if (endUs <= startUs) continue
-        val visible = topmostVideoClipAt(startUs) ?: continue
+        // Export segmentation must stay pure and must not move the live preview clock.
+        val visible = findTopmostVideoClipAt(startUs) ?: continue
         val previous = segments.lastOrNull()
         if (previous != null && previous.clip.id == visible.id && previous.timelineEndUs == startUs) {
             segments[segments.lastIndex] = previous.copy(timelineEndUs = endUs)
