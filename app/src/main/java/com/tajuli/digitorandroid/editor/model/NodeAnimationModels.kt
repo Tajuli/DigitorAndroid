@@ -1,7 +1,7 @@
 package com.tajuli.digitorandroid.editor.model
 
-import kotlin.math.max
-import kotlin.math.min
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 enum class NodeAnimationDomain {
     CORRECTION,
@@ -68,9 +68,18 @@ data class NodeAnimationTrack(
     }
 }
 
-data class NodeAnimations(
-    val tracks: Map<String, NodeAnimationTrack> = emptyMap(),
-) {
+/**
+ * Mutable keyframe store intentionally lives on TimelineClip. Compose can add/delete a domain
+ * keyframe without rebuilding the whole immutable timeline project, while preview/export read the
+ * same thread-safe store. Source-time keys survive trim/split fragments because they are anchored
+ * to the original media timestamps rather than a temporary clip-local origin.
+ */
+class NodeAnimations {
+    private val tracks = ConcurrentHashMap<String, NodeAnimationTrack>()
+    private val revisionCounter = AtomicLong(0L)
+
+    val revision: Long get() = revisionCounter.get()
+
     private fun key(nodeId: String, domain: NodeAnimationDomain): String = "$nodeId|${domain.name}"
 
     fun track(nodeId: String, domain: NodeAnimationDomain): NodeAnimationTrack =
@@ -93,31 +102,42 @@ data class NodeAnimations(
     fun evaluateGraph(graph: ClipNodeGraph, sourceTimeUs: Long): ClipNodeGraph =
         graph.copy(nodes = graph.nodes.map { evaluateNode(it, sourceTimeUs) })
 
-    fun toggle(node: ColorNode, domain: NodeAnimationDomain, sourceTimeUs: Long): NodeAnimations {
+    /** Add or remove exactly one domain keyframe at [sourceTimeUs]. */
+    fun toggle(node: ColorNode, domain: NodeAnimationDomain, sourceTimeUs: Long) {
         val t = sourceTimeUs.coerceAtLeast(0L)
-        val current = track(node.id, domain)
+        val k = key(node.id, domain)
+        val current = tracks[k] ?: NodeAnimationTrack()
         val next = if (current.hasKeyframeAt(t)) {
             current.removeAt(t)
         } else {
             current.upsert(t, evaluateNode(node, t))
         }
-        return withTrack(node.id, domain, next)
+        if (next.keyframes.isEmpty()) tracks.remove(k) else tracks[k] = next
+        revisionCounter.incrementAndGet()
     }
 
-    fun upsertIfAnimated(
-        node: ColorNode,
-        domain: NodeAnimationDomain,
-        sourceTimeUs: Long,
-    ): NodeAnimations {
-        val current = track(node.id, domain)
-        if (current.keyframes.isEmpty()) return this
-        return withTrack(node.id, domain, current.upsert(sourceTimeUs, node))
+    fun remove(nodeId: String, domain: NodeAnimationDomain, sourceTimeUs: Long) {
+        val k = key(nodeId, domain)
+        val current = tracks[k] ?: return
+        val next = current.removeAt(sourceTimeUs)
+        if (next == current) return
+        if (next.keyframes.isEmpty()) tracks.remove(k) else tracks[k] = next
+        revisionCounter.incrementAndGet()
     }
 
-    fun remove(nodeId: String, domain: NodeAnimationDomain, sourceTimeUs: Long): NodeAnimations =
-        withTrack(nodeId, domain, track(nodeId, domain).removeAt(sourceTimeUs))
+    /**
+     * If this domain is already animated, replace/create the key at [sourceTimeUs] with [node].
+     * This is useful for effect amount sliders and future auto-key editing.
+     */
+    fun upsertIfAnimated(node: ColorNode, domain: NodeAnimationDomain, sourceTimeUs: Long) {
+        val k = key(node.id, domain)
+        val current = tracks[k] ?: return
+        if (current.keyframes.isEmpty()) return
+        tracks[k] = current.upsert(sourceTimeUs, node)
+        revisionCounter.incrementAndGet()
+    }
 
-    fun hasColorAnimation: Boolean
+    val hasColorAnimation: Boolean
         get() = tracks.any { (key, track) ->
             track.keyframes.isNotEmpty() &&
                 (key.endsWith("|${NodeAnimationDomain.CORRECTION.name}") ||
@@ -128,13 +148,6 @@ data class NodeAnimations(
         val keys = track(nodeId, NodeAnimationDomain.COLOR).keyframes
         if (keys.size < 2) return false
         return keys.map { it.node.advancedColor.qualifier }.distinct().size > 1
-    }
-
-    private fun withTrack(nodeId: String, domain: NodeAnimationDomain, track: NodeAnimationTrack): NodeAnimations {
-        val mutable = tracks.toMutableMap()
-        val key = key(nodeId, domain)
-        if (track.keyframes.isEmpty()) mutable.remove(key) else mutable[key] = track
-        return copy(tracks = mutable)
     }
 }
 
@@ -151,15 +164,9 @@ private fun interpolateDomain(
     domain: NodeAnimationDomain,
     amount: Float,
 ): ColorNode = when (domain) {
-    NodeAnimationDomain.CORRECTION -> base.copy(
-        corrections = lerpCorrections(left.corrections, right.corrections, amount),
-    )
-    NodeAnimationDomain.COLOR -> base.copy(
-        advancedColor = lerpAdvancedColor(left.advancedColor, right.advancedColor, amount),
-    )
-    NodeAnimationDomain.EFFECTS -> base.copy(
-        effects = lerpEffects(left.effects, right.effects, amount),
-    )
+    NodeAnimationDomain.CORRECTION -> base.copy(corrections = lerpCorrections(left.corrections, right.corrections, amount))
+    NodeAnimationDomain.COLOR -> base.copy(advancedColor = lerpAdvancedColor(left.advancedColor, right.advancedColor, amount))
+    NodeAnimationDomain.EFFECTS -> base.copy(effects = lerpEffects(left.effects, right.effects, amount))
 }
 
 private fun lerp(a: Float, b: Float, t: Float): Float = a + (b - a) * t.coerceIn(0f, 1f)
@@ -177,44 +184,29 @@ private fun lerpCorrections(a: NodeCorrections, b: NodeCorrections, t: Float): N
 )
 
 private fun lerpWheel(a: ColorWheelValue, b: ColorWheelValue, t: Float): ColorWheelValue = ColorWheelValue(
-    red = lerp(a.red, b.red, t),
-    green = lerp(a.green, b.green, t),
-    blue = lerp(a.blue, b.blue, t),
-    luma = lerp(a.luma, b.luma, t),
-    puckX = lerp(a.puckX, b.puckX, t),
-    puckY = lerp(a.puckY, b.puckY, t),
+    red = lerp(a.red, b.red, t), green = lerp(a.green, b.green, t), blue = lerp(a.blue, b.blue, t),
+    luma = lerp(a.luma, b.luma, t), puckX = lerp(a.puckX, b.puckX, t), puckY = lerp(a.puckY, b.puckY, t),
 )
 
 private fun lerpPrimary(a: PrimaryWheels, b: PrimaryWheels, t: Float): PrimaryWheels = PrimaryWheels(
-    lift = lerpWheel(a.lift, b.lift, t),
-    gamma = lerpWheel(a.gamma, b.gamma, t),
-    gain = lerpWheel(a.gain, b.gain, t),
-    offset = lerpWheel(a.offset, b.offset, t),
+    lift = lerpWheel(a.lift, b.lift, t), gamma = lerpWheel(a.gamma, b.gamma, t),
+    gain = lerpWheel(a.gain, b.gain, t), offset = lerpWheel(a.offset, b.offset, t),
 )
 
 private fun lerpLog(a: LogWheels, b: LogWheels, t: Float): LogWheels = LogWheels(
-    shadows = lerpWheel(a.shadows, b.shadows, t),
-    midtones = lerpWheel(a.midtones, b.midtones, t),
-    highlights = lerpWheel(a.highlights, b.highlights, t),
-    global = lerpWheel(a.global, b.global, t),
-    shadowRange = lerp(a.shadowRange, b.shadowRange, t),
-    highlightRange = lerp(a.highlightRange, b.highlightRange, t),
+    shadows = lerpWheel(a.shadows, b.shadows, t), midtones = lerpWheel(a.midtones, b.midtones, t),
+    highlights = lerpWheel(a.highlights, b.highlights, t), global = lerpWheel(a.global, b.global, t),
+    shadowRange = lerp(a.shadowRange, b.shadowRange, t), highlightRange = lerp(a.highlightRange, b.highlightRange, t),
 )
 
 private fun lerpCurve(a: Curve5, b: Curve5, t: Float): Curve5 {
     if (a.points.size != b.points.size) return if (t < .5f) a else b
-    return Curve5(
-        points = a.points.zip(b.points).map { (left, right) ->
-            CurvePoint(lerp(left.x, right.x, t), lerp(left.y, right.y, t))
-        },
-    )
+    return Curve5(points = a.points.zip(b.points).map { (l, r) -> CurvePoint(lerp(l.x, r.x, t), lerp(l.y, r.y, t)) })
 }
 
 private fun lerpCurves(a: RgbCurves, b: RgbCurves, t: Float): RgbCurves = RgbCurves(
-    master = lerpCurve(a.master, b.master, t),
-    red = lerpCurve(a.red, b.red, t),
-    green = lerpCurve(a.green, b.green, t),
-    blue = lerpCurve(a.blue, b.blue, t),
+    master = lerpCurve(a.master, b.master, t), red = lerpCurve(a.red, b.red, t),
+    green = lerpCurve(a.green, b.green, t), blue = lerpCurve(a.blue, b.blue, t),
 )
 
 private fun lerpNullable(a: Float?, b: Float?, t: Float): Float? = when {
@@ -227,26 +219,18 @@ private fun lerpQualifier(a: HslQualifier, b: HslQualifier, t: Float): HslQualif
     enabled = if (t < .5f) a.enabled else b.enabled,
     hueCenterDegrees = lerpAngle(a.hueCenterDegrees, b.hueCenterDegrees, t, 360f),
     hueWidthDegrees = lerp(a.hueWidthDegrees, b.hueWidthDegrees, t),
-    saturationMin = lerp(a.saturationMin, b.saturationMin, t),
-    saturationMax = lerp(a.saturationMax, b.saturationMax, t),
-    luminanceMin = lerp(a.luminanceMin, b.luminanceMin, t),
-    luminanceMax = lerp(a.luminanceMax, b.luminanceMax, t),
-    softness = lerp(a.softness, b.softness, t),
-    hueShiftDegrees = lerp(a.hueShiftDegrees, b.hueShiftDegrees, t),
-    saturationShift = lerp(a.saturationShift, b.saturationShift, t),
-    luminanceShift = lerp(a.luminanceShift, b.luminanceShift, t),
-    pickedRed = lerpNullable(a.pickedRed, b.pickedRed, t),
-    pickedGreen = lerpNullable(a.pickedGreen, b.pickedGreen, t),
+    saturationMin = lerp(a.saturationMin, b.saturationMin, t), saturationMax = lerp(a.saturationMax, b.saturationMax, t),
+    luminanceMin = lerp(a.luminanceMin, b.luminanceMin, t), luminanceMax = lerp(a.luminanceMax, b.luminanceMax, t),
+    softness = lerp(a.softness, b.softness, t), hueShiftDegrees = lerp(a.hueShiftDegrees, b.hueShiftDegrees, t),
+    saturationShift = lerp(a.saturationShift, b.saturationShift, t), luminanceShift = lerp(a.luminanceShift, b.luminanceShift, t),
+    pickedRed = lerpNullable(a.pickedRed, b.pickedRed, t), pickedGreen = lerpNullable(a.pickedGreen, b.pickedGreen, t),
     pickedBlue = lerpNullable(a.pickedBlue, b.pickedBlue, t),
 )
 
-private fun lerpAdvancedColor(a: AdvancedColorGrade, b: AdvancedColorGrade, t: Float): AdvancedColorGrade =
-    AdvancedColorGrade(
-        primary = lerpPrimary(a.primary, b.primary, t),
-        log = lerpLog(a.log, b.log, t),
-        curves = lerpCurves(a.curves, b.curves, t),
-        qualifier = lerpQualifier(a.qualifier, b.qualifier, t),
-    )
+private fun lerpAdvancedColor(a: AdvancedColorGrade, b: AdvancedColorGrade, t: Float): AdvancedColorGrade = AdvancedColorGrade(
+    primary = lerpPrimary(a.primary, b.primary, t), log = lerpLog(a.log, b.log, t),
+    curves = lerpCurves(a.curves, b.curves, t), qualifier = lerpQualifier(a.qualifier, b.qualifier, t),
+)
 
 private fun lerpEffects(a: List<NodeEffect>, b: List<NodeEffect>, t: Float): List<NodeEffect> {
     val ids = (a.map { it.id } + b.map { it.id }).distinct()
