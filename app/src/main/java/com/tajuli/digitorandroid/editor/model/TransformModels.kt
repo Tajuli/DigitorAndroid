@@ -18,7 +18,7 @@ enum class KeyframeInterpolation {
 data class FloatKeyframe(
     val timeUs: Long,
     val value: Float,
-    val interpolation: KeyframeInterpolation = KeyframeInterpolation.EASE_IN_OUT,
+    val interpolation: KeyframeInterpolation = KeyframeInterpolation.LINEAR,
 )
 
 data class AnimatedFloat(
@@ -62,7 +62,7 @@ data class AnimatedFloat(
     fun upsertKeyframe(
         timeUs: Long,
         value: Float,
-        interpolation: KeyframeInterpolation = KeyframeInterpolation.EASE_IN_OUT,
+        interpolation: KeyframeInterpolation = KeyframeInterpolation.LINEAR,
     ): AnimatedFloat {
         val t = timeUs.coerceAtLeast(0L)
         val next = ordered().toMutableList()
@@ -95,10 +95,12 @@ data class AnimatedFloat(
 
         val split = splitUs.coerceAtLeast(0L)
         val splitValue = valueAt(split)
-        val leftKeys = (keys.filter { it.timeUs < split } + FloatKeyframe(split, splitValue))
+        val leftSegment = keys.zipWithNext().firstOrNull { (left, right) -> split in left.timeUs..right.timeUs }
+        val activeInterpolation = leftSegment?.first?.interpolation ?: KeyframeInterpolation.LINEAR
+        val leftKeys = (keys.filter { it.timeUs < split } + FloatKeyframe(split, splitValue, activeInterpolation))
             .distinctBy { it.timeUs }
             .sortedBy { it.timeUs }
-        val rightKeys = (listOf(FloatKeyframe(0L, splitValue)) + keys
+        val rightKeys = (listOf(FloatKeyframe(0L, splitValue, activeInterpolation)) + keys
             .filter { it.timeUs > split }
             .map { it.copy(timeUs = it.timeUs - split) })
             .distinctBy { it.timeUs }
