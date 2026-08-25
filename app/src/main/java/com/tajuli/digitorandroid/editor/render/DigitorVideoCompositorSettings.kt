@@ -15,12 +15,9 @@ internal fun compositionVideoTracks(project: TimelineProject): List<TimelineTrac
     }
 
 /**
- * Alpha for one Digitor video track at a composition timestamp.
- *
- * A Media3 video input may keep its most recently rendered texture while the sequence is inside a
- * gap or has reached the end of its last clip. Returning 1 outside an active clip therefore leaves
- * that stale texture visible and can make a shorter overlay appear frozen over the layers below it.
- * A track with no clip at this timestamp must be fully transparent.
+ * Returns the clip alpha for this instant, or fully transparent when this track has no active clip.
+ * Returning 0 outside clip bounds is essential for unequal-length layers: a finished short overlay
+ * must not leave its last decoded texture visible above a longer background clip.
  */
 internal fun compositionOpacityAt(track: TimelineTrack, timelineUs: Long): Float =
     track.clips
