@@ -14,7 +14,7 @@ import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** CPU fallback: no OpenGL. Decode -> transform/color/composite -> byte-buffer AVC encode. */
+/** CPU fallback: no OpenGL. Decode -> transform/color/effects/composite -> byte-buffer AVC encode. */
 class CpuExportBackend(private val context: Context) : ExportBackend {
     override suspend fun export(
         project: TimelineProject,
@@ -40,7 +40,7 @@ class CpuExportBackend(private val context: Context) : ExportBackend {
                     if (frameIndex % 4 == 0 || frameIndex == frameCount - 1) {
                         onProgress(
                             ExportProgress.Stage(
-                                "CPU: transform + per-pixel color + AVC encode",
+                                "CPU: transform + color + effects + AVC encode",
                                 (frameIndex + 1f) / frameCount,
                             )
                         )
@@ -62,6 +62,7 @@ class CpuExportBackend(private val context: Context) : ExportBackend {
 private class CpuTimelineCompositor(private val context: Context) : AutoCloseable {
     private val workerCount = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(2, 8)
     private val color = CpuColorProcessor(workerCount)
+    private val effects = CpuNodeEffectsProcessor(workerCount)
     private val workers = Executors.newFixedThreadPool(workerCount)
     private val retrievers = mutableMapOf<String, MediaMetadataRetriever>()
 
@@ -89,6 +90,7 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
             val overlay = IntArray(project.width * project.height)
             transformed.getPixels(overlay, 0, project.width, 0, 0, project.width, project.height)
             color.processClipArgb8888(overlay, project.width, project.height, clip, sourceUs)
+            effects.processClipArgb8888(overlay, project.width, project.height, clip, sourceUs)
             blend(canvas, overlay, project.width, project.height, clip.opacity)
             if (transformed !== bitmap) transformed.recycle()
             bitmap.recycle()
@@ -140,6 +142,7 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
     override fun close() {
         retrievers.values.forEach { it.release() }
         color.close()
+        effects.close()
         workers.shutdown()
     }
 }
