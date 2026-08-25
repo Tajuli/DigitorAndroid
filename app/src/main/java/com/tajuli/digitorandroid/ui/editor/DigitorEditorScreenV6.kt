@@ -121,13 +121,10 @@ private fun TimelineProject.activeVideoClipsAt(timelineUs: Long): List<TimelineC
         .mapNotNull { track -> track.clips.firstOrNull { timelineUs in it.timelineStartUs until it.timelineEndUs } }
 
 /**
- * V6 is the true multilayer editor preview.
- *
- * A single CompositionPlayer receives the same track-per-sequence Composition used by export.
- * MultipleInputVideoGraph decodes/composites simultaneous V tracks, while CompositionPlayer also
- * mixes active A tracks. Preview deliberately avoids experimental replayable-cache/redraw APIs:
- * current Media3 multi-video preview is still experimental on real devices, and those cache APIs
- * caused native/runtime crashes on import on some OEMs. Paused refresh uses normal prepare/seek.
+ * V6 uses CompositionPlayer for timeline preview. A single video sequence stays on Media3's normal
+ * single-input video graph; MultipleInputVideoGraph is only installed when the project actually has
+ * more than one visible video sequence. This avoids routing ordinary one-layer scrubbing through the
+ * still-sensitive multi-input graph while preserving true overlapping-layer preview when needed.
  */
 @UnstableApi
 @Composable
@@ -138,11 +135,18 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
     val router = remember { ProcessingRouter(context.applicationContext) }
     val compositionBuilder = remember { Media3CompositionBuilder() }
 
+    val visibleVideoSequenceCount = state.project.tracks.count { track ->
+        track.kind == TrackKind.VIDEO && !track.muted && track.clips.isNotEmpty()
+    }
+    val useMultipleInputVideoGraph = visibleVideoSequenceCount > 1
+
     var playerGeneration by remember { mutableStateOf(0) }
-    val player = remember(playerGeneration) {
-        CompositionPlayer.Builder(context.applicationContext)
-            .setVideoGraphFactory(MultipleInputVideoGraph.Factory())
-            .build()
+    val player = remember(playerGeneration, useMultipleInputVideoGraph) {
+        val builder = CompositionPlayer.Builder(context.applicationContext)
+        if (useMultipleInputVideoGraph) {
+            builder.setVideoGraphFactory(MultipleInputVideoGraph.Factory())
+        }
+        builder.build()
     }
 
     val selectedClip = state.project.clip(state.selectedClipId)
@@ -167,8 +171,6 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
             isPlaying = false
             runCatching { player.pause() }
             vm.importUris(uris)
-            // Picker foreground/surface transitions have wedged codecs on some OEMs. A fresh player
-            // generation is safer than reusing the graph that existed before the picker returned.
             playerGeneration += 1
         }
     }
@@ -215,8 +217,6 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
         previousProjectDurationUs = durationUs
     }
 
-    // Project edits (including Scale/Transform/Color) rebuild the composition at the current cursor.
-    // We keep the refresh on supported prepare/seek APIs instead of replayable-cache redraw calls.
     LaunchedEffect(player, state.project, hasMedia) {
         previewReady = false
         if (!hasMedia) {
@@ -236,8 +236,6 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
             player.stop()
             player.setComposition(composition, startMs)
             player.prepare()
-            // Explicitly repeat the normal seek after prepare so paused previews request the current
-            // composite frame even on devices that ignore the initial setComposition position.
             player.seekTo(startMs)
             if (resume) player.play()
             previewStatus = "Preview: preparing…"
@@ -250,7 +248,6 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
         }
     }
 
-    // CompositionPlayer is the authoritative timeline clock for mixed audio and multilayer video.
     LaunchedEffect(player, isPlaying, previewReady) {
         while (isPlaying && previewReady) {
             val durationUs = state.project.durationUs.coerceAtLeast(0L)
@@ -264,7 +261,6 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
         }
     }
 
-    // Panels still use the bridge to display the selected clip's animated value at the playhead.
     LaunchedEffect(cursorUs, selectedClip?.id, previewClip?.id) {
         val clockClip = selectedClip?.takeIf { clip ->
             state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO &&
@@ -277,7 +273,9 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
     fun seekTimeline(requestUs: Long) {
         val target = requestUs.coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
         cursorUs = target
-        if (previewReady) {
+        // Seeking is valid while CompositionPlayer is preparing/buffering. Do not gate this on
+        // STATE_READY: some devices render the first frame before the ready callback reaches Compose.
+        if (hasMedia) {
             runCatching { player.seekTo(target / 1000L) }
                 .onFailure { previewStatus = "Preview seek: ${it.message ?: "unavailable"}" }
         }
@@ -286,12 +284,13 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
     }
 
     fun togglePlayback() {
-        if (!hasMedia || !previewReady) return
+        if (!hasMedia) return
         if (isPlaying) {
             isPlaying = false
             player.pause()
         } else {
             if (cursorUs >= state.project.durationUs && state.project.durationUs > 0L) seekTimeline(0L)
+            if (player.playbackState == Player.STATE_IDLE) player.prepare()
             isPlaying = true
             player.play()
         }
@@ -415,7 +414,7 @@ fun DigitorEditorScreenV6(vm: EditorViewModelV4 = viewModel()) {
                 modifier = Modifier.fillMaxWidth().weight(1f),
             )
             TransportV6(
-                enabled = hasMedia && previewReady,
+                enabled = hasMedia,
                 isPlaying = isPlaying,
                 cursorUs = cursorUs,
                 durationUs = state.project.durationUs,
