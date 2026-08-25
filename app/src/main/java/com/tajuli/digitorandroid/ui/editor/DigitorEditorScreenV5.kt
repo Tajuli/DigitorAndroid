@@ -94,7 +94,7 @@ import com.tajuli.digitorandroid.editor.model.topmostVideoClipAt
 import com.tajuli.digitorandroid.editor.processing.ExportProgress
 import com.tajuli.digitorandroid.editor.processing.ProcessingRouter
 import com.tajuli.digitorandroid.editor.render.Media3CompositionBuilder
-import com.tajuli.digitorandroid.editor.render.SharedColorPipeline
+import com.tajuli.digitorandroid.editor.render.SharedVideoPipeline
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -199,9 +199,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
 
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
-            // Do not try to revive the player that survived DocumentsUI. Real-device logs show
-            // that this player can stay IDLE forever without creating a video decoder. Rotate the
-            // player/view generation instead, while leaving the old surface pair untouched.
             isPlaying = false
             runCatching { audioPlayer.pause() }
             pendingSeekUs = cursorUs
@@ -245,9 +242,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
 
         onDispose {
             videoPlayer.removeListener(listener)
-            // Never synchronously detach a retired player's surface while Compose is replacing
-            // PlayerView. On affected Unisoc devices that detach can block. Give the new view/player
-            // time to become active, then release the retired generation with short Media3 timeouts.
             val retiredPlayer = videoPlayer
             Handler(Looper.getMainLooper()).postDelayed({
                 runCatching { retiredPlayer.release() }
@@ -302,8 +296,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         if (uri != null) startExport(uri)
     }
 
-    // If deleting a tail fragment shortens the project exactly to the cursor, keep the cursor on
-    // the last real frame instead of leaving it at an exclusive timeline end with no preview clip.
     LaunchedEffect(state.project.durationUs) {
         val durationUs = state.project.durationUs.coerceAtLeast(0L)
         if (durationUs < previousProjectDurationUs && cursorUs >= durationUs) {
@@ -313,8 +305,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         previousProjectDurationUs = durationUs
     }
 
-    // Video preview: decode the complete source and seek by absolute source time. Avoiding
-    // MediaItem clipping keeps split-right fragments (sourceIn > 0) on the normal ExoPlayer path.
     LaunchedEffect(
         videoPlayerGeneration,
         previewClip?.id,
@@ -322,6 +312,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         previewClip?.sourceInUs,
         previewClip?.sourceOutUs,
         previewClip?.nodeGraph,
+        previewClip?.transform,
     ) {
         val clip = previewClip
         if (clip == null) {
@@ -343,9 +334,9 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             loadedPreviewUri != clip.uri ||
             loadedPreviewSourceInUs != clip.sourceInUs ||
             loadedPreviewSourceOutUs != clip.sourceOutUs
-        val gradeHash = clip.nodeGraph.hashCode()
+        val gradeHash = 31 * clip.nodeGraph.hashCode() + clip.transform.hashCode()
         val gradeChanged = loadedPreviewGradeHash != gradeHash
-        if (!sourceChanged && gradeChanged) delay(320)
+        if (!sourceChanged && gradeChanged) delay(120)
 
         val requestedTimelineUs = pendingSeekUs ?: cursorUs
         val sourcePositionMs = if (sourceChanged) {
@@ -357,7 +348,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         }
         val resumePlayback = isPlaying
         val effects = withContext(Dispatchers.Default) {
-            SharedColorPipeline.previewEffectsFor(clip)
+            SharedVideoPipeline.previewEffectsFor(clip)
         }
 
         Log.d(
@@ -381,9 +372,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         pendingSeekUs = null
     }
 
-    // Audio preview is independent from video. Stop the old composition immediately, debounce
-    // structural edits, and never swallow coroutine cancellation. That prevents an obsolete audio
-    // build from racing a newer split/delete/import state and touching CompositionPlayer late.
     LaunchedEffect(audioPreviewKey, hasAudio) {
         audioPreviewReady = false
         runCatching {
@@ -419,7 +407,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         }
     }
 
-    // Preserve the same local frame when a selected clip is moved on the timeline.
     LaunchedEffect(selectedClip?.id, selectedClip?.timelineStartUs) {
         val clip = selectedClip
         if (clip == null) {
@@ -448,8 +435,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         previewAnchorTimelineStartUs = clip.timelineStartUs
     }
 
-    // One global editor clock. Mixed audio is the master when available; otherwise the visible
-    // ExoPlayer clip drives time. Empty video gaps without audio advance on the editor ticker.
     LaunchedEffect(videoPlayer, audioPlayer, isPlaying, hasAudio, audioPreviewReady, previewClip?.id) {
         while (isPlaying) {
             val durationUs = state.project.durationUs.coerceAtLeast(0L)
@@ -461,8 +446,6 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
 
             cursorUs = nextUs
 
-            // Keep the single video decoder aligned to the mixed-audio master without continuous
-            // seeking. Correct only visible drift large enough to notice.
             if (hasAudio && audioPreviewReady && previewClip != null && loadedPreviewClipId == previewClip.id) {
                 val desiredMs = previewClip.previewSourcePositionMs(nextUs)
                 if (abs(videoPlayer.currentPosition - desiredMs) > 180L) {
@@ -598,6 +581,26 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
 
             Box(Modifier.fillMaxWidth().height(290.dp)) {
                 when (workspace) {
+                    WorkspaceV5.EDIT -> EditWorkspaceV5(
+                        project = state.project,
+                        selectedTrackId = state.selectedTrackId,
+                        selectedClipIds = state.selectedClipIds,
+                        selectedClip = selectedClip,
+                        cursorUs = cursorUs,
+                        vm = vm,
+                        onSeek = ::seekTimeline,
+                        onSelectTrack = vm::selectTrack,
+                        onSelectClip = vm::selectClip,
+                        onMoveClip = vm::moveClip,
+                        onMoveClipToTrack = vm::moveClipToTrack,
+                        onAddVideoTrack = { vm.addTrack(TrackKind.VIDEO) },
+                        onAddAudioTrack = { vm.addTrack(TrackKind.AUDIO) },
+                        onSplit = { vm.splitSelectedAt(cursorUs) },
+                        onDelete = vm::deleteSelected,
+                        onUnlink = vm::unlinkSelected,
+                        onImport = ::launchImport,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                     WorkspaceV5.COLOR -> ColorWorkspaceV4(selectedClip, vm, Modifier.fillMaxSize())
                     WorkspaceV5.NODES -> NodeGraphV4(selectedClip, vm, Modifier.fillMaxSize())
                     WorkspaceV5.CORRECTION -> CorrectionWorkspaceV4(selectedClip, vm, Modifier.fillMaxSize())
@@ -626,7 +629,8 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
                 selected = workspace,
                 onSelected = {
                     workspace = it
-                    val editsClip = it == WorkspaceV5.COLOR ||
+                    val editsClip = it == WorkspaceV5.EDIT ||
+                        it == WorkspaceV5.COLOR ||
                         it == WorkspaceV5.CORRECTION ||
                         it == WorkspaceV5.NODES ||
                         it == WorkspaceV5.EFFECTS
