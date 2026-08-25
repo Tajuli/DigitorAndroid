@@ -85,4 +85,19 @@ class TransformModelsTest {
         val removed = added.toggleAllKeyframes(333_333L)
         assertFalse(removed.hasAnimation)
     }
+
+    @Test
+    fun deletingOneKeyframePreservesOtherKeyframes() {
+        val animated = AnimatedFloat(1f)
+            .upsertKeyframe(5_000_000L, 1.20f)
+            .upsertKeyframe(10_000_000L, 1.10f)
+            .upsertKeyframe(20_000_000L, 0.90f)
+
+        val removed = animated.removeKeyframeAt(10_000_000L)
+
+        assertFalse(removed.hasKeyframeAt(10_000_000L))
+        assertTrue(removed.hasKeyframeAt(5_000_000L))
+        assertTrue(removed.hasKeyframeAt(20_000_000L))
+        assertEquals(2, removed.keyframes.size)
+    }
 }
