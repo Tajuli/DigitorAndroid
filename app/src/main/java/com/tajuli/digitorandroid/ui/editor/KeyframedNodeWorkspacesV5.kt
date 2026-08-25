@@ -47,6 +47,9 @@ private fun evaluatedNodeClip(clip: TimelineClip?, frameRate: Int): EvaluatedNod
  * this fingerprint, so moving the playhead never creates keyframes by itself. Once a domain has at
  * least one keyframe, an actual control edit updates the base node and is automatically captured at
  * the current frame, matching Transform auto-key behavior.
+ *
+ * Effects use a more precise inline auto-key path in EffectsWorkspaceV4 so changing one amount
+ * starts from the evaluated effect state and does not overwrite another effect's interpolated amount.
  */
 @Composable
 private fun AutoKeyNodeDomainV5(
@@ -121,7 +124,6 @@ fun KeyframedEffectsWorkspaceV5(
 ) {
     val baseNode = clip?.nodeGraph?.selectedNode()
     val evaluated = evaluatedNodeClip(clip, frameRate)
-    AutoKeyNodeDomainV5(clip, baseNode, NodeAnimationDomain.EFFECTS, evaluated.sourceTimeUs)
     Column(modifier) {
         if (clip != null && baseNode != null && (baseNode.kind == NodeKind.SERIAL || baseNode.kind == NodeKind.PARALLEL)) {
             NodeDomainKeyframeBarV5(clip, baseNode, NodeAnimationDomain.EFFECTS, frameRate)
