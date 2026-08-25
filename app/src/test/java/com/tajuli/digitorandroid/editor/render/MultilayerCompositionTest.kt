@@ -33,9 +33,9 @@ class MultilayerCompositionTest {
     }
 
     @Test
-    fun compositionOpacityIsTransparentInGapsAndAfterShorterOverlayEnds() {
+    fun compositionOpacityFollowsActiveClipAndTurnsTransparentOutsideClip() {
         val track = TimelineTrack(
-            name = "V2",
+            name = "V1",
             kind = TrackKind.VIDEO,
             clips = listOf(
                 clip("first", 0L, 1_000_000L, opacity = .35f),
@@ -47,6 +47,25 @@ class MultilayerCompositionTest {
         assertEquals(0f, compositionOpacityAt(track, 1_500_000L), 0.0001f)
         assertEquals(1f, compositionOpacityAt(track, 2_500_000L), 0.0001f)
         assertEquals(0f, compositionOpacityAt(track, 3_500_000L), 0.0001f)
+    }
+
+    @Test
+    fun shortOverlayDoesNotOwnProjectDuration() {
+        val overlay = TimelineTrack(
+            name = "V2",
+            kind = TrackKind.VIDEO,
+            clips = listOf(clip("overlay", 0L, 1_000_000L)),
+        )
+        val background = TimelineTrack(
+            name = "V1",
+            kind = TrackKind.VIDEO,
+            clips = listOf(clip("background", 0L, 4_000_000L)),
+        )
+        val project = TimelineProject(tracks = listOf(overlay, background))
+
+        assertEquals(4_000_000L, project.durationUs)
+        assertEquals(0f, compositionOpacityAt(overlay, 2_000_000L), 0.0001f)
+        assertEquals(1f, compositionOpacityAt(background, 2_000_000L), 0.0001f)
     }
 
     private fun clip(
