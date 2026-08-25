@@ -25,15 +25,29 @@ object SharedColorPipeline {
         add(AnimatedNodeColorLut(clip, EXPORT_LUT_SIZE, preview = false))
     }
 
+    /** Legacy single-source ExoPlayer preview path. */
     fun previewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
-        val hasQualifier = clip.nodeGraph.nodes.any { it.advancedColor.qualifier.enabled }
         addSpatialQualifierEffects(clip)
-        val size = if (hasQualifier || clip.nodeAnimations.hasColorAnimation) {
+        add(AnimatedNodeColorLut(clip, previewLutSize(clip), preview = true))
+    }
+
+    /**
+     * CompositionPlayer uses EditedMediaItem-local timestamps, just like Transformer. Keep preview
+     * LUT resolution light, but use export-style timestamp mapping so trimmed fragments and every
+     * simultaneous V-track evaluate their own animation time independently.
+     */
+    fun compositionPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
+        addSpatialQualifierEffects(clip)
+        add(AnimatedNodeColorLut(clip, previewLutSize(clip), preview = false))
+    }
+
+    private fun previewLutSize(clip: TimelineClip): Int {
+        val hasQualifier = clip.nodeGraph.nodes.any { it.advancedColor.qualifier.enabled }
+        return if (hasQualifier || clip.nodeAnimations.hasColorAnimation) {
             QUALIFIER_PREVIEW_LUT_SIZE
         } else {
             PREVIEW_LUT_SIZE
         }
-        add(AnimatedNodeColorLut(clip, size, preview = true))
     }
 
     private fun MutableList<Effect>.addSpatialQualifierEffects(clip: TimelineClip) {
