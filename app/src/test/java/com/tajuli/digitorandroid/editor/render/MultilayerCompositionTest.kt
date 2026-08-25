@@ -68,6 +68,33 @@ class MultilayerCompositionTest {
         assertEquals(1f, compositionOpacityAt(background, 2_000_000L), 0.0001f)
     }
 
+    @Test
+    fun trimmedClipDeclaresSourceDurationInsteadOfClippedDuration() {
+        val uri = "content://test/shared-source"
+        val full = TimelineClip(
+            uri = uri,
+            label = "full",
+            timelineStartUs = 0L,
+            sourceInUs = 0L,
+            sourceOutUs = 47_000_000L,
+        )
+        val trimmed = TimelineClip(
+            uri = uri,
+            label = "trimmed",
+            timelineStartUs = 50_000_000L,
+            sourceInUs = 20_000_000L,
+            sourceOutUs = 30_000_000L,
+        )
+        val project = TimelineProject(
+            tracks = listOf(
+                TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(full, trimmed)),
+            ),
+        )
+
+        assertEquals(10_000_000L, trimmed.durationUs)
+        assertEquals(47_000_000L, sourceDurationUsFor(project, trimmed))
+    }
+
     private fun clip(
         label: String,
         startUs: Long,
