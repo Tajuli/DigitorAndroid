@@ -11,12 +11,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import com.tajuli.digitorandroid.editor.model.AdvancedColorGrade
 import com.tajuli.digitorandroid.editor.model.ColorNode
+import com.tajuli.digitorandroid.editor.model.ColorWheelValue
+import com.tajuli.digitorandroid.editor.model.HslQualifier
+import com.tajuli.digitorandroid.editor.model.LogWheels
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
+import com.tajuli.digitorandroid.editor.model.NodeCorrections
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
+import com.tajuli.digitorandroid.editor.model.PrimaryWheels
+import com.tajuli.digitorandroid.editor.model.RgbCurves
 import com.tajuli.digitorandroid.editor.model.TimelineClip
-import com.tajuli.digitorandroid.editor.model.visibleEffects
 import kotlin.math.roundToLong
 
 private data class EvaluatedNodeClip(
@@ -42,37 +48,151 @@ private fun evaluatedNodeClip(clip: TimelineClip?, frameRate: Int): EvaluatedNod
     return EvaluatedNodeClip(clip.copy(nodeGraph = evaluatedGraph), sourceUs)
 }
 
-/**
- * Watches only the immutable editor/base node. Playback changes the evaluated display node but not
- * this fingerprint, so moving the playhead never creates keyframes by itself. Once a domain has at
- * least one keyframe, an actual control edit updates the base node and is automatically captured at
- * the current frame, matching Transform auto-key behavior.
- *
- * Effects use a more precise inline auto-key path in EffectsWorkspaceV4 so changing one amount
- * starts from the evaluated effect state and does not overwrite another effect's interpolated amount.
- */
 @Composable
-private fun AutoKeyNodeDomainV5(
+private fun AutoKeyCorrectionV5(
     clip: TimelineClip?,
-    node: ColorNode?,
-    domain: NodeAnimationDomain,
+    baseNode: ColorNode?,
+    evaluatedNode: ColorNode?,
     sourceTimeUs: Long?,
 ) {
-    if (clip == null || node == null || sourceTimeUs == null) return
-    val fingerprint: Any = when (domain) {
-        NodeAnimationDomain.CORRECTION -> node.corrections
-        NodeAnimationDomain.COLOR -> node.advancedColor
-        NodeAnimationDomain.EFFECTS -> node.visibleEffects()
-    }
-    var previous by remember(clip.id, node.id, domain) { mutableStateOf(fingerprint) }
+    if (clip == null || baseNode == null || evaluatedNode == null || sourceTimeUs == null) return
+    var previous by remember(clip.id, baseNode.id) { mutableStateOf(baseNode.corrections) }
+    val current = baseNode.corrections
 
-    LaunchedEffect(fingerprint, sourceTimeUs, clip.id, node.id, domain) {
-        if (fingerprint != previous && clip.nodeAnimations.hasAnimation(node.id, domain)) {
-            clip.nodeAnimations.upsertIfAnimated(node, domain, sourceTimeUs)
+    LaunchedEffect(current, sourceTimeUs, clip.id, baseNode.id) {
+        if (current != previous && clip.nodeAnimations.hasAnimation(baseNode.id, NodeAnimationDomain.CORRECTION)) {
+            val merged = mergeCorrections(previous, current, evaluatedNode.corrections)
+            clip.nodeAnimations.upsertIfAnimated(
+                evaluatedNode.copy(corrections = merged),
+                NodeAnimationDomain.CORRECTION,
+                sourceTimeUs,
+            )
         }
-        previous = fingerprint
+        previous = current
     }
 }
+
+@Composable
+private fun AutoKeyColorV5(
+    clip: TimelineClip?,
+    baseNode: ColorNode?,
+    evaluatedNode: ColorNode?,
+    sourceTimeUs: Long?,
+) {
+    if (clip == null || baseNode == null || evaluatedNode == null || sourceTimeUs == null) return
+    var previous by remember(clip.id, baseNode.id) { mutableStateOf(baseNode.advancedColor) }
+    val current = baseNode.advancedColor
+
+    LaunchedEffect(current, sourceTimeUs, clip.id, baseNode.id) {
+        if (current != previous && clip.nodeAnimations.hasAnimation(baseNode.id, NodeAnimationDomain.COLOR)) {
+            val merged = mergeAdvancedColor(previous, current, evaluatedNode.advancedColor)
+            clip.nodeAnimations.upsertIfAnimated(
+                evaluatedNode.copy(advancedColor = merged),
+                NodeAnimationDomain.COLOR,
+                sourceTimeUs,
+            )
+        }
+        previous = current
+    }
+}
+
+private fun mergeCorrections(
+    previous: NodeCorrections,
+    current: NodeCorrections,
+    evaluated: NodeCorrections,
+): NodeCorrections = NodeCorrections(
+    exposure = changed(previous.exposure, current.exposure, evaluated.exposure),
+    contrast = changed(previous.contrast, current.contrast, evaluated.contrast),
+    saturation = changed(previous.saturation, current.saturation, evaluated.saturation),
+    temperature = changed(previous.temperature, current.temperature, evaluated.temperature),
+    tint = changed(previous.tint, current.tint, evaluated.tint),
+    highlights = changed(previous.highlights, current.highlights, evaluated.highlights),
+    shadows = changed(previous.shadows, current.shadows, evaluated.shadows),
+    hue = changed(previous.hue, current.hue, evaluated.hue),
+    colorBoost = changed(previous.colorBoost, current.colorBoost, evaluated.colorBoost),
+)
+
+private fun mergeAdvancedColor(
+    previous: AdvancedColorGrade,
+    current: AdvancedColorGrade,
+    evaluated: AdvancedColorGrade,
+): AdvancedColorGrade = AdvancedColorGrade(
+    primary = mergePrimary(previous.primary, current.primary, evaluated.primary),
+    log = mergeLog(previous.log, current.log, evaluated.log),
+    curves = mergeCurves(previous.curves, current.curves, evaluated.curves),
+    qualifier = mergeQualifier(previous.qualifier, current.qualifier, evaluated.qualifier),
+)
+
+private fun mergePrimary(
+    previous: PrimaryWheels,
+    current: PrimaryWheels,
+    evaluated: PrimaryWheels,
+): PrimaryWheels = PrimaryWheels(
+    lift = mergeWheel(previous.lift, current.lift, evaluated.lift),
+    gamma = mergeWheel(previous.gamma, current.gamma, evaluated.gamma),
+    gain = mergeWheel(previous.gain, current.gain, evaluated.gain),
+    offset = mergeWheel(previous.offset, current.offset, evaluated.offset),
+)
+
+private fun mergeLog(
+    previous: LogWheels,
+    current: LogWheels,
+    evaluated: LogWheels,
+): LogWheels = LogWheels(
+    shadows = mergeWheel(previous.shadows, current.shadows, evaluated.shadows),
+    midtones = mergeWheel(previous.midtones, current.midtones, evaluated.midtones),
+    highlights = mergeWheel(previous.highlights, current.highlights, evaluated.highlights),
+    global = mergeWheel(previous.global, current.global, evaluated.global),
+    shadowRange = changed(previous.shadowRange, current.shadowRange, evaluated.shadowRange),
+    highlightRange = changed(previous.highlightRange, current.highlightRange, evaluated.highlightRange),
+)
+
+private fun mergeWheel(
+    previous: ColorWheelValue,
+    current: ColorWheelValue,
+    evaluated: ColorWheelValue,
+): ColorWheelValue = ColorWheelValue(
+    red = changed(previous.red, current.red, evaluated.red),
+    green = changed(previous.green, current.green, evaluated.green),
+    blue = changed(previous.blue, current.blue, evaluated.blue),
+    luma = changed(previous.luma, current.luma, evaluated.luma),
+    puckX = changed(previous.puckX, current.puckX, evaluated.puckX),
+    puckY = changed(previous.puckY, current.puckY, evaluated.puckY),
+)
+
+private fun mergeCurves(previous: RgbCurves, current: RgbCurves, evaluated: RgbCurves): RgbCurves = RgbCurves(
+    master = if (current.master != previous.master) current.master else evaluated.master,
+    red = if (current.red != previous.red) current.red else evaluated.red,
+    green = if (current.green != previous.green) current.green else evaluated.green,
+    blue = if (current.blue != previous.blue) current.blue else evaluated.blue,
+)
+
+private fun mergeQualifier(
+    previous: HslQualifier,
+    current: HslQualifier,
+    evaluated: HslQualifier,
+): HslQualifier = HslQualifier(
+    enabled = if (current.enabled != previous.enabled) current.enabled else evaluated.enabled,
+    hueCenterDegrees = changed(previous.hueCenterDegrees, current.hueCenterDegrees, evaluated.hueCenterDegrees),
+    hueWidthDegrees = changed(previous.hueWidthDegrees, current.hueWidthDegrees, evaluated.hueWidthDegrees),
+    saturationMin = changed(previous.saturationMin, current.saturationMin, evaluated.saturationMin),
+    saturationMax = changed(previous.saturationMax, current.saturationMax, evaluated.saturationMax),
+    luminanceMin = changed(previous.luminanceMin, current.luminanceMin, evaluated.luminanceMin),
+    luminanceMax = changed(previous.luminanceMax, current.luminanceMax, evaluated.luminanceMax),
+    softness = changed(previous.softness, current.softness, evaluated.softness),
+    hueShiftDegrees = changed(previous.hueShiftDegrees, current.hueShiftDegrees, evaluated.hueShiftDegrees),
+    saturationShift = changed(previous.saturationShift, current.saturationShift, evaluated.saturationShift),
+    luminanceShift = changed(previous.luminanceShift, current.luminanceShift, evaluated.luminanceShift),
+    pickedRed = changedNullable(previous.pickedRed, current.pickedRed, evaluated.pickedRed),
+    pickedGreen = changedNullable(previous.pickedGreen, current.pickedGreen, evaluated.pickedGreen),
+    pickedBlue = changedNullable(previous.pickedBlue, current.pickedBlue, evaluated.pickedBlue),
+)
+
+private fun changed(previous: Float, current: Float, evaluated: Float): Float =
+    if (current != previous) current else evaluated
+
+private fun changedNullable(previous: Float?, current: Float?, evaluated: Float?): Float? =
+    if (current != previous) current else evaluated
 
 /** Keeps the V4 grading panels while adding one clean keyframe lane per editing domain. */
 @Composable
@@ -84,7 +204,8 @@ fun KeyframedCorrectionWorkspaceV5(
 ) {
     val baseNode = clip?.nodeGraph?.selectedNode()
     val evaluated = evaluatedNodeClip(clip, frameRate)
-    AutoKeyNodeDomainV5(clip, baseNode, NodeAnimationDomain.CORRECTION, evaluated.sourceTimeUs)
+    val evaluatedNode = evaluated.clip?.nodeGraph?.selectedNode()
+    AutoKeyCorrectionV5(clip, baseNode, evaluatedNode, evaluated.sourceTimeUs)
     Column(modifier) {
         if (clip != null && baseNode != null && (baseNode.kind == NodeKind.SERIAL || baseNode.kind == NodeKind.PARALLEL)) {
             NodeDomainKeyframeBarV5(clip, baseNode, NodeAnimationDomain.CORRECTION, frameRate)
@@ -104,7 +225,8 @@ fun KeyframedColorWorkspaceV5(
 ) {
     val baseNode = clip?.nodeGraph?.selectedNode()
     val evaluated = evaluatedNodeClip(clip, frameRate)
-    AutoKeyNodeDomainV5(clip, baseNode, NodeAnimationDomain.COLOR, evaluated.sourceTimeUs)
+    val evaluatedNode = evaluated.clip?.nodeGraph?.selectedNode()
+    AutoKeyColorV5(clip, baseNode, evaluatedNode, evaluated.sourceTimeUs)
     Column(modifier) {
         if (clip != null && baseNode != null && (baseNode.kind == NodeKind.SERIAL || baseNode.kind == NodeKind.PARALLEL)) {
             NodeDomainKeyframeBarV5(clip, baseNode, NodeAnimationDomain.COLOR, frameRate)
