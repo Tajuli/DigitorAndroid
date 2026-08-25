@@ -294,33 +294,34 @@ private fun TransformRowV5(
             )
         }
         if (channel.keyframes.isNotEmpty()) {
-            Row(
-                Modifier.fillMaxWidth().height(20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                KeyframeStripV5(
-                    channel = channel,
-                    durationUs = durationUs,
-                    activeKeyframeUs = keyframeLocalUs.takeIf { activeKeyframe },
-                    onKeyframeTap = onSeekKeyframe,
-                    modifier = Modifier.weight(1f).height(18.dp),
-                )
-                if (activeKeyframe) {
-                    Spacer(Modifier.width(6.dp))
+            KeyframeStripV5(
+                channel = channel,
+                durationUs = durationUs,
+                activeKeyframeUs = keyframeLocalUs.takeIf { activeKeyframe },
+                onKeyframeTap = onSeekKeyframe,
+                modifier = Modifier.fillMaxWidth().height(18.dp),
+            )
+            if (activeKeyframe) {
+                Row(
+                    Modifier.fillMaxWidth().height(28.dp).padding(top = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Text(
-                        "◆ ${formatTransformTime(keyframeLocalUs)}",
-                        fontSize = 6.sp,
-                        color = X5Accent,
-                    )
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        "Delete",
+                        "Selected ◆ ${formatTransformTime(keyframeLocalUs)}",
+                        modifier = Modifier.weight(1f),
                         fontSize = 7.sp,
+                        color = X5Accent,
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Delete keyframe",
+                        fontSize = 8.sp,
                         color = X5Danger,
                         modifier = Modifier
-                            .background(X5Danger.copy(alpha = .08f), RoundedCornerShape(4.dp))
+                            .background(X5Danger.copy(alpha = .12f), RoundedCornerShape(5.dp))
                             .clickable(onClick = onKeyframe)
-                            .padding(horizontal = 7.dp, vertical = 4.dp),
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
                     )
                 }
             }
