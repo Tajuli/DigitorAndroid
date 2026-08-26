@@ -9,16 +9,11 @@ import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
-import com.tajuli.digitorandroid.editor.model.visibleVideoSegments
 
 /**
  * Coalesces adjacent clips that are still presentation-identical fragments of the same source.
- *
- * A timeline split creates exactly this shape: left.sourceOut == right.sourceIn and the copied
- * grading/transform state is identical. Keeping that artificial boundary in CompositionPlayer is
- * risky on current Media3 releases because video items with non-zero start offsets can fail during
- * preview. Animated transforms intentionally prevent coalescing once their rebased keyframes differ.
  */
 internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip> {
     if (clips.size < 2) return clips
@@ -44,15 +39,14 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
 }
 
 /**
- * Builds Media3 compositions for preview and export.
+ * Media3 builder used by export and audio preview.
  *
- * Export flattens overlapping video tracks into one topmost visible stream. This keeps Transformer
- * from decoding hidden lower videos and reduces decoder/compositor pressure on phones.
+ * Final GPU export now mirrors the Resolve-style viewer model: each visible V track remains an
+ * independent sequence. Media3 decodes/processes each active layer and ResolveVideoCompositorSettings
+ * performs the final z-order/transform/opacity composition. A short V2 is padded with a transparent
+ * tail so it cannot terminate a longer V1 export.
  *
- * The current editor uses a single-clip ExoPlayer for video preview. CompositionPlayer is retained
- * only for audio preview, where independent A tracks are mixed without creating multiple video
- * decoders/compositors. [buildPreview] remains available for compatibility, while
- * [buildAudioPreview] is the stable editor playback path.
+ * The editor's video viewer does NOT use CompositionPlayer; V7 uses DavinciFramePreviewEngine.
  */
 @UnstableApi
 class Media3CompositionBuilder {
@@ -75,27 +69,52 @@ class Media3CompositionBuilder {
         require(problems.isEmpty()) { problems.joinToString("; ") }
 
         val sequences = mutableListOf<EditedMediaItemSequence>()
+        val videoTracks = resolveCompositionVideoTracks(project)
 
-        // Export only the video that is actually visible. Hidden lower tracks are trimmed out.
-        val visibleVideo = project.visibleVideoSegments()
-        if (visibleVideo.isNotEmpty()) {
-            val videoBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
-            var cursorUs = 0L
-            visibleVideo.forEach { segment ->
-                if (segment.timelineStartUs > cursorUs) {
-                    videoBuilder.addGap(segment.timelineStartUs - cursorUs)
-                }
-                val fragment = segment.asTimelineClip()
-                videoBuilder.addItem(toEditedMediaItem(fragment, TrackKind.VIDEO, forPreview = false))
-                cursorUs = segment.timelineEndUs
-            }
-            sequences += videoBuilder.build()
+        videoTracks.forEach { track ->
+            sequences += buildExportVideoSequence(project, track)
         }
-
         addAudioSequences(project, sequences, forPreview = false)
 
         require(sequences.isNotEmpty()) { "Timeline is empty" }
-        return Composition.Builder(sequences).build()
+        val builder = Composition.Builder(sequences)
+        if (videoTracks.isNotEmpty()) {
+            builder.setVideoCompositorSettings(
+                ResolveVideoCompositorSettings(
+                    outputWidth = project.width,
+                    outputHeight = project.height,
+                    videoTracks = videoTracks,
+                ),
+            )
+        }
+        return builder.build()
+    }
+
+    private fun buildExportVideoSequence(
+        project: TimelineProject,
+        track: TimelineTrack,
+    ): EditedMediaItemSequence {
+        val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
+        var cursorUs = 0L
+        track.sortedClips().forEach { clip ->
+            if (clip.timelineStartUs > cursorUs) {
+                builder.addGap(clip.timelineStartUs - cursorUs)
+            }
+            builder.addItem(
+                toEditedMediaItem(
+                    clip = clip,
+                    kind = TrackKind.VIDEO,
+                    forPreview = false,
+                    compositorOwnsGeometry = true,
+                ),
+            )
+            cursorUs = clip.timelineEndUs
+        }
+        if (project.durationUs > cursorUs) {
+            // Keep this input alive until project end. During this interval compositor alpha is 0.
+            builder.addGap(project.durationUs - cursorUs)
+        }
+        return builder.build()
     }
 
     private fun buildPreviewInternal(project: TimelineProject): Composition {
@@ -103,8 +122,6 @@ class Media3CompositionBuilder {
         require(problems.isEmpty()) { problems.joinToString("; ") }
 
         val sequences = mutableListOf<EditedMediaItemSequence>()
-
-        // Compatibility multitrack preview path. The editor itself no longer uses this for video.
         project.tracks
             .filter { it.kind == TrackKind.VIDEO && !it.muted && it.clips.isNotEmpty() }
             .forEach { track ->
@@ -152,6 +169,7 @@ class Media3CompositionBuilder {
         clip: TimelineClip,
         kind: TrackKind,
         forPreview: Boolean,
+        compositorOwnsGeometry: Boolean = false,
     ): EditedMediaItem {
         val clipping = MediaItem.ClippingConfiguration.Builder()
             .setStartPositionMs(clip.sourceInUs / 1000L)
@@ -165,10 +183,10 @@ class Media3CompositionBuilder {
         val builder = EditedMediaItem.Builder(mediaItem)
             .setDurationUs(clip.durationUs)
         if (kind == TrackKind.VIDEO) {
-            val videoEffects = if (forPreview) {
-                SharedVideoPipeline.previewEffectsFor(clip)
-            } else {
-                SharedVideoPipeline.effectsFor(clip)
+            val videoEffects = when {
+                forPreview -> SharedVideoPipeline.previewEffectsFor(clip)
+                compositorOwnsGeometry -> SharedVideoPipeline.compositedExportEffectsFor(clip)
+                else -> SharedVideoPipeline.effectsFor(clip)
             }
             builder.setEffects(Effects(emptyList(), videoEffects))
         }
