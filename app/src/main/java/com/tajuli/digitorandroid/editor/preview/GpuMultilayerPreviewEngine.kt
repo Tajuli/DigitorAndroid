@@ -66,6 +66,7 @@ class GpuMultilayerPreviewEngine(
     )
 
     private data class Session(
+        val generation: Long,
         val key: String,
         val graph: MultipleInputVideoGraph,
         val decoders: List<LayerDecoder>,
@@ -80,6 +81,7 @@ class GpuMultilayerPreviewEngine(
 
     private var outputTarget: OutputTarget? = null
     private var session: Session? = null
+    private var sessionGeneration = 0L
     private var closed = false
 
     fun setOutputSurface(surface: Surface?, width: Int, height: Int) {
@@ -150,6 +152,7 @@ class GpuMultilayerPreviewEngine(
         }
 
         val expectedKey = sessionKey(project, activeLayers)
+        val generation = ++sessionGeneration
         var graph: MultipleInputVideoGraph? = null
         val decoders = mutableListOf<LayerDecoder>()
         try {
@@ -163,14 +166,20 @@ class GpuMultilayerPreviewEngine(
                         isRedrawnFrame: Boolean,
                     ) {
                         val activeSession = session
-                        if (activeSession != null && activeSession.key == expectedKey && !activeSession.firstOutputReported) {
+                        if (activeSession != null &&
+                            activeSession.generation == generation &&
+                            activeSession.key == expectedKey &&
+                            !activeSession.firstOutputReported
+                        ) {
                             activeSession.firstOutputReported = true
                             listener.onReady(activeSession.decoders.size)
                         }
                     }
 
                     override fun onError(exception: VideoFrameProcessingException) {
-                        listener.onError("GPU preview: ${exception.message ?: "video graph failed"}")
+                        if (session?.generation == generation) {
+                            listener.onError("GPU preview: ${exception.message ?: "video graph failed"}")
+                        }
                     }
                 },
                 mainExecutor,
@@ -215,7 +224,9 @@ class GpuMultilayerPreviewEngine(
                         createdGraph.registerInputFrame(index)
                     } catch (error: Throwable) {
                         mainHandler.post {
-                            listener.onError("GPU preview layer ${index + 1}: ${error.message ?: "frame registration failed"}")
+                            if (session?.generation == generation) {
+                                listener.onError("GPU preview layer ${index + 1}: ${error.message ?: "frame registration failed"}")
+                            }
                         }
                     }
                 }
@@ -237,6 +248,7 @@ class GpuMultilayerPreviewEngine(
             }
 
             session = Session(
+                generation = generation,
                 key = expectedKey,
                 graph = createdGraph,
                 decoders = decoders,
