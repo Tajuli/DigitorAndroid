@@ -5,6 +5,7 @@ import androidx.media3.common.VideoCompositorSettings
 import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.StaticOverlaySettings
+import com.tajuli.digitorandroid.editor.model.PreviewClipState
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
@@ -40,18 +41,51 @@ internal class ResolveVideoCompositorSettings(
 
     override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
         val clip = videoTracks.getOrNull(inputId)?.activeVideoClipAt(presentationTimeUs)
-            ?: return StaticOverlaySettings.Builder().setAlphaScale(0f).build()
-
-        val localUs = (presentationTimeUs - clip.timelineStartUs)
-            .coerceIn(0L, clip.durationUs.coerceAtLeast(0L))
-        val transform = clip.transform.evaluate(localUs)
-
-        return StaticOverlaySettings.Builder()
-            .setAlphaScale(clip.opacity.coerceIn(0f, 1f))
-            .setOverlayFrameAnchor(0f, 0f)
-            .setBackgroundFrameAnchor(transform.positionX, -transform.positionY)
-            .setScale(transform.scaleX, transform.scaleY)
-            .setRotationDegrees(transform.rotationDegrees)
-            .build()
+            ?: return transparentOverlay()
+        return overlayForClip(clip, presentationTimeUs)
     }
 }
+
+/**
+ * Final-output viewer compositor.
+ *
+ * It uses the same transform/opacity math as [ResolveVideoCompositorSettings], but reads the newest
+ * immutable clip snapshot from [PreviewClipState]. This is what lets Scale/Position/Rotation/Opacity
+ * update on the next GPU frame without recreating ExoPlayer, MediaCodec or the VideoGraph.
+ */
+@UnstableApi
+internal class PreviewResolveVideoCompositorSettings(
+    private val outputWidth: Int,
+    private val outputHeight: Int,
+    private val fallbackClips: List<TimelineClip>,
+) : VideoCompositorSettings {
+
+    override fun getOutputSize(inputSizes: List<Size>): Size =
+        Size(outputWidth.coerceAtLeast(1), outputHeight.coerceAtLeast(1))
+
+    override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
+        val fallback = fallbackClips.getOrNull(inputId) ?: return transparentOverlay()
+        val clip = PreviewClipState.snapshot(fallback.id) ?: fallback
+        if (presentationTimeUs !in clip.timelineStartUs until clip.timelineEndUs) {
+            return transparentOverlay()
+        }
+        return overlayForClip(clip, presentationTimeUs)
+    }
+}
+
+private fun overlayForClip(clip: TimelineClip, presentationTimeUs: Long): OverlaySettings {
+    val localUs = (presentationTimeUs - clip.timelineStartUs)
+        .coerceIn(0L, clip.durationUs.coerceAtLeast(0L))
+    val transform = clip.transform.evaluate(localUs)
+
+    return StaticOverlaySettings.Builder()
+        .setAlphaScale(clip.opacity.coerceIn(0f, 1f))
+        .setOverlayFrameAnchor(0f, 0f)
+        .setBackgroundFrameAnchor(transform.positionX, -transform.positionY)
+        .setScale(transform.scaleX, transform.scaleY)
+        .setRotationDegrees(transform.rotationDegrees)
+        .build()
+}
+
+private fun transparentOverlay(): OverlaySettings =
+    StaticOverlaySettings.Builder().setAlphaScale(0f).build()
