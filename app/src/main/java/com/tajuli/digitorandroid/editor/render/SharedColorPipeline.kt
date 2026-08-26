@@ -36,6 +36,17 @@ object SharedColorPipeline {
         add(AnimatedNodeColorLut(clip, size, preview = true))
     }
 
+    /**
+     * Final-output viewer color stage.
+     *
+     * Uses the exact export LUT resolution and qualifier stage, but evaluates time from the editor
+     * playhead. This keeps the viewer on the same pre-encoder GPU color path as Transformer export.
+     */
+    fun finalOutputPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
+        addSpatialQualifierEffects(clip)
+        add(AnimatedNodeColorLut(clip, EXPORT_LUT_SIZE, preview = true))
+    }
+
     private fun MutableList<Effect>.addSpatialQualifierEffects(clip: TimelineClip) {
         clip.nodeGraph.nodes.forEach { node ->
             // The spatial pre-filter has immutable shader parameters today. If the qualifier itself
