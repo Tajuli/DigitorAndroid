@@ -489,6 +489,9 @@ private fun FramePreviewV7(
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
     Box(modifier.background(Color(0xFF030304)).onSizeChanged { previewSize = it }, contentAlignment = Alignment.Center) {
         if (hasVideo) {
+            // TextureView keeps the GPU output inside the normal Compose view hierarchy. This avoids
+            // OEM SurfaceView layer/punch-through failures where the graph rendered successfully but
+            // the separate hardware surface remained visually black.
             AndroidView(
                 factory = { ctx ->
                     TextureView(ctx).apply {
