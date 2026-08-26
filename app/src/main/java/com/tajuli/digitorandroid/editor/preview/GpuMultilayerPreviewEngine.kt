@@ -284,9 +284,9 @@ class GpuMultilayerPreviewEngine(
             return
         }
 
-        // Media3 CompositionPlayerSeekTest uses this exact lifecycle for scrub seeks. Exiting
-        // scrubbing commits the latest pending seek and lets the paused player present its target
-        // frame instead of leaving the previous composed frame latched on the Surface.
+        // Match androidx.media3.transformer.CompositionPlayerSeekTest: an individual paused seek is
+        // a transient scrub transaction. Exiting scrubbing commits the latest pending seek and lets
+        // the paused player present its target frame instead of leaving the old frame latched.
         runCatching {
             player.pause()
             if (player.isScrubbingModeEnabled) player.setScrubbingModeEnabled(false)
