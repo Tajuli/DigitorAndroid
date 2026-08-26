@@ -7,6 +7,7 @@ import androidx.media3.common.Format
 import androidx.media3.common.util.GlUtil
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.ColorLut
+import com.tajuli.digitorandroid.editor.model.PreviewClipState
 import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 
@@ -15,7 +16,8 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
  *
  * Export maps Media3 item-local timestamps to the original source timeline. Preview uses the same
  * playhead clock as transform keyframes so seeks/effect rebuilds cannot restart the animation at
- * zero. Static grades build only once; animated grades update the existing GL texture per frame.
+ * zero. In persistent preview, the LUT also reads the newest clip snapshot so ordinary grading
+ * changes update the existing GL texture instead of rebuilding MediaCodec/VideoGraph.
  */
 @UnstableApi
 internal class AnimatedNodeColorLut(
@@ -26,16 +28,20 @@ internal class AnimatedNodeColorLut(
     private var textureId = Format.NO_VALUE
     private var lastSourceUs = Long.MIN_VALUE
     private var lastRevision = Long.MIN_VALUE
+    private var lastGraphHash = Int.MIN_VALUE
     private var previewRevision = Long.MIN_VALUE
     private var previewAnchorPresentationUs = 0L
     private var previewAnchorSourceUs = clip.sourceInUs
 
     override fun getLutTextureId(presentationTimeUs: Long): Int {
-        val sourceUs = sourceTimeUs(presentationTimeUs)
-        val animationRevision = clip.nodeAnimations.revision
-        val timeChanged = clip.nodeAnimations.hasColorAnimation && sourceUs != lastSourceUs
-        if (textureId == Format.NO_VALUE || animationRevision != lastRevision || timeChanged) {
-            val bitmap = cubeBitmap(SharedColorPipeline.buildCubeAtSourceTime(clip, size, sourceUs))
+        val currentClip = if (preview) PreviewClipState.snapshot(clip.id) ?: clip else clip
+        val sourceUs = sourceTimeUs(currentClip, presentationTimeUs)
+        val animationRevision = currentClip.nodeAnimations.revision
+        val graphHash = currentClip.nodeGraph.hashCode()
+        val timeChanged = currentClip.nodeAnimations.hasColorAnimation && sourceUs != lastSourceUs
+        val parametersChanged = graphHash != lastGraphHash || animationRevision != lastRevision
+        if (textureId == Format.NO_VALUE || parametersChanged || timeChanged) {
+            val bitmap = cubeBitmap(SharedColorPipeline.buildCubeAtSourceTime(currentClip, size, sourceUs))
             try {
                 if (textureId == Format.NO_VALUE) {
                     textureId = GlUtil.createTexture(bitmap)
@@ -50,6 +56,7 @@ internal class AnimatedNodeColorLut(
             }
             lastSourceUs = sourceUs
             lastRevision = animationRevision
+            lastGraphHash = graphHash
         }
         return textureId
     }
@@ -63,11 +70,12 @@ internal class AnimatedNodeColorLut(
         }
     }
 
-    private fun sourceTimeUs(presentationTimeUs: Long): Long {
-        val minSource = clip.sourceInUs.coerceAtLeast(0L)
-        val maxSource = clip.sourceOutUs.coerceAtLeast(minSource)
+    private fun sourceTimeUs(currentClip: TimelineClip, presentationTimeUs: Long): Long {
+        val minSource = currentClip.sourceInUs.coerceAtLeast(0L)
+        val maxSource = currentClip.sourceOutUs.coerceAtLeast(minSource)
         if (!preview) {
-            return (clip.sourceInUs + presentationTimeUs.coerceAtLeast(0L)).coerceIn(minSource, maxSource)
+            return (currentClip.sourceInUs + presentationTimeUs.coerceAtLeast(0L))
+                .coerceIn(minSource, maxSource)
         }
 
         val snapshot = PreviewTransformClock.snapshotFor(clip.id)
@@ -77,7 +85,7 @@ internal class AnimatedNodeColorLut(
         if (snapshot.revision != previewRevision) {
             previewRevision = snapshot.revision
             previewAnchorPresentationUs = presentationTimeUs
-            previewAnchorSourceUs = clip.sourceInUs + snapshot.localUs
+            previewAnchorSourceUs = currentClip.sourceInUs + snapshot.localUs
         }
         return (previewAnchorSourceUs + (presentationTimeUs - previewAnchorPresentationUs))
             .coerceIn(minSource, maxSource)
