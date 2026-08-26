@@ -1,9 +1,10 @@
 package com.tajuli.digitorandroid.ui.editor
 
+import android.graphics.SurfaceTexture
 import android.net.Uri
 import android.os.SystemClock
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.view.Surface
+import android.view.TextureView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -121,14 +122,6 @@ private fun TimelineProject.activeVideoClipsV7(timelineUs: Long): List<TimelineC
             track.clips.firstOrNull { clip -> timelineUs in clip.timelineStartUs until clip.timelineEndUs }
         }
 
-/**
- * Resolve-inspired editor viewer.
- *
- * Video no longer uses multi-video CompositionPlayer. Active V layers are decoded by independent
- * MediaCodec-backed ExoPlayers into one direct MultipleInputVideoGraph, which applies the same
- * per-layer GPU effects and Resolve compositor settings as export. Audio remains on the stable
- * audio-only CompositionPlayer path.
- */
 @UnstableApi
 @Composable
 fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
@@ -160,11 +153,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
             object : GpuMultilayerPreviewEngine.Listener {
                 override fun onReady(activeLayerCount: Int) {
                     previewReady = true
-                    previewStatus = if (activeLayerCount > 0) {
-                        "GPU preview · direct graph · ${activeLayerCount}L"
-                    } else {
-                        null
-                    }
+                    previewStatus = if (activeLayerCount > 0) "GPU preview · TextureView · ${activeLayerCount}L" else null
                 }
 
                 override fun onError(message: String) {
@@ -193,9 +182,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
     val hasAudio = state.project.tracks.any { track ->
         track.kind == TrackKind.AUDIO && !track.muted && track.clips.isNotEmpty()
     }
-    val audioPreviewKey = state.project.tracks
-        .filter { track -> track.kind == TrackKind.AUDIO }
-        .hashCode()
+    val audioPreviewKey = state.project.tracks.filter { track -> track.kind == TrackKind.AUDIO }.hashCode()
 
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
@@ -206,19 +193,12 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
     }
     fun launchImport() = mediaPicker.launch(vm.selectedImportMimeTypes())
 
-    // Only the active playhead layers enter the direct graph. Importing a V2 clip elsewhere does
-    // not disturb the currently rendering V1 decoder; entering the overlap creates a fresh graph.
     LaunchedEffect(state.project, cursorUs, isPlaying, activeLayerKey) {
         if (activeLayerKey != lastPreviewLayerKey) {
             previewReady = activeVideoClips.isEmpty()
             lastPreviewLayerKey = activeLayerKey
         }
-        previewEngine.update(
-            project = state.project,
-            timelineUs = cursorUs,
-            playing = isPlaying,
-            forceSeek = !isPlaying,
-        )
+        previewEngine.update(state.project, cursorUs, isPlaying, forceSeek = !isPlaying)
     }
 
     LaunchedEffect(state.project.durationUs) {
@@ -230,21 +210,15 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
         previousProjectDurationUs = durationUs
     }
 
-    // Keep audio on its historically stable CompositionPlayer-only path. Video decoders are muted.
     LaunchedEffect(audioPreviewKey, hasAudio) {
         audioPreviewReady = false
-        runCatching {
-            audioPlayer.pause()
-            audioPlayer.stop()
-        }
+        runCatching { audioPlayer.pause(); audioPlayer.stop() }
         if (!hasAudio) return@LaunchedEffect
         val snapshot = state.project
         val resume = isPlaying
         delay(100)
         try {
-            val composition = withContext(Dispatchers.Default) {
-                compositionBuilder.buildAudioPreview(snapshot)
-            }
+            val composition = withContext(Dispatchers.Default) { compositionBuilder.buildAudioPreview(snapshot) }
             val maxStartUs = (snapshot.durationUs - 1L).coerceAtLeast(0L)
             val startMs = cursorUs.coerceIn(0L, maxStartUs) / 1000L
             audioPlayer.stop()
@@ -260,8 +234,6 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
         }
     }
 
-    // Mixed audio is the master clock when present. Video-only projects use a monotonic editor
-    // clock; the direct graph decoders are periodically drift-corrected by the preview engine.
     LaunchedEffect(isPlaying, audioPreviewReady, hasAudio) {
         while (isPlaying) {
             val durationUs = state.project.durationUs.coerceAtLeast(0L)
@@ -282,11 +254,9 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
 
     LaunchedEffect(cursorUs, selectedClip?.id, previewClip?.id) {
         val clockClip = selectedClip?.takeIf { clip ->
-            state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO &&
-                cursorUs in clip.timelineStartUs until clip.timelineEndUs
+            state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs
         } ?: previewClip
-        if (clockClip == null) PreviewTransformClock.clear()
-        else PreviewTransformClock.update(clockClip, cursorUs)
+        if (clockClip == null) PreviewTransformClock.clear() else PreviewTransformClock.update(clockClip, cursorUs)
     }
 
     fun seekTimeline(requestUs: Long) {
@@ -364,13 +334,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
             title = { Text("Export video") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
-                        value = exportName,
-                        onValueChange = { exportName = it },
-                        label = { Text("File name") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    OutlinedTextField(value = exportName, onValueChange = { exportName = it }, label = { Text("File name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     Text("File type", fontSize = 10.sp, color = E7Muted)
                     AssistChip(onClick = {}, label = { Text("MP4 · H.264 / AAC") })
                     Text("Export backend is unchanged.", fontSize = 9.sp, color = E7Muted)
@@ -382,9 +346,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                     showExportDialog = false
                     saveDocument.launch("$base.mp4")
                 }) {
-                    Icon(Icons.Rounded.Save, null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("Choose location")
+                    Icon(Icons.Rounded.Save, null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(5.dp)); Text("Choose location")
                 }
             },
             dismissButton = { TextButton(onClick = { showExportDialog = false }) { Text("Cancel") } },
@@ -402,16 +364,8 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
             )
             if (exportFraction != null && exportFraction!! < 1f) {
                 Column {
-                    LinearProgressIndicator(
-                        progress = { exportFraction!!.coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth().height(3.dp),
-                    )
-                    Text(
-                        "${((exportFraction ?: 0f) * 100).roundToInt()}%  ${exportStatus.orEmpty()}",
-                        fontSize = 9.sp,
-                        color = E7Muted,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp),
-                    )
+                    LinearProgressIndicator(progress = { exportFraction!!.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth().height(3.dp))
+                    Text("${((exportFraction ?: 0f) * 100).roundToInt()}%  ${exportStatus.orEmpty()}", fontSize = 9.sp, color = E7Muted, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp))
                 }
             }
 
@@ -427,8 +381,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                 qualifierPickerActive = state.qualifierPickerActive,
                 onPickColor = { x, y, width, height ->
                     val target = selectedClip?.takeIf { clip ->
-                        state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO &&
-                            cursorUs in clip.timelineStartUs until clip.timelineEndUs
+                        state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs
                     } ?: previewClip
                     target?.let { clip ->
                         if (clip.id != selectedClip?.id) vm.selectClip(clip.id)
@@ -437,15 +390,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                 },
                 modifier = Modifier.fillMaxWidth().weight(1f),
             )
-            TransportV7(
-                enabled = hasMedia,
-                isPlaying = isPlaying,
-                cursorUs = cursorUs,
-                durationUs = state.project.durationUs,
-                onBack = { seekTimeline(cursorUs - 10 * US_PER_SECOND) },
-                onPlayPause = ::togglePlayback,
-                onForward = { seekTimeline(cursorUs + 10 * US_PER_SECOND) },
-            )
+            TransportV7(enabled = hasMedia, isPlaying = isPlaying, cursorUs = cursorUs, durationUs = state.project.durationUs, onBack = { seekTimeline(cursorUs - 10 * US_PER_SECOND) }, onPlayPause = ::togglePlayback, onForward = { seekTimeline(cursorUs + 10 * US_PER_SECOND) })
 
             Box(Modifier.fillMaxWidth().height(290.dp)) {
                 when (workspace) {
@@ -497,11 +442,9 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                 selected = workspace,
                 onSelected = { next ->
                     workspace = next
-                    val editsClip = next == WorkspaceV7.EDIT || next == WorkspaceV7.COLOR ||
-                        next == WorkspaceV7.CORRECTION || next == WorkspaceV7.NODES || next == WorkspaceV7.EFFECTS
+                    val editsClip = next == WorkspaceV7.EDIT || next == WorkspaceV7.COLOR || next == WorkspaceV7.CORRECTION || next == WorkspaceV7.NODES || next == WorkspaceV7.EFFECTS
                     val selectedIsActiveVideo = selectedClip?.let { clip ->
-                        state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO &&
-                            cursorUs in clip.timelineStartUs until clip.timelineEndUs
+                        state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs
                     } == true
                     if (editsClip && !selectedIsActiveVideo && previewClip != null) vm.selectClip(previewClip.id)
                     if (next != WorkspaceV7.COLOR && state.qualifierPickerActive) vm.setQualifierPickerActive(false)
@@ -513,31 +456,18 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
 }
 
 @Composable
-private fun TopBarV7(
-    title: String,
-    status: String,
-    exportFraction: Float?,
-    onImport: () -> Unit,
-    onExport: () -> Unit,
-) {
+private fun TopBarV7(title: String, status: String, exportFraction: Float?, onImport: () -> Unit, onExport: () -> Unit) {
     val exporting = exportFraction != null && exportFraction < 1f
-    Row(
-        Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    Row(Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onImport, modifier = Modifier.size(40.dp)) { Icon(Icons.Rounded.Add, "Import") }
         Column(Modifier.weight(1f)) {
             Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(6.dp).clip(CircleShape).background(E7Accent))
-                Spacer(Modifier.width(5.dp))
-                Text(status, fontSize = 9.sp, color = Color.White.copy(alpha = .55f), maxLines = 1)
+                Box(Modifier.size(6.dp).clip(CircleShape).background(E7Accent)); Spacer(Modifier.width(5.dp)); Text(status, fontSize = 9.sp, color = Color.White.copy(alpha = .55f), maxLines = 1)
             }
         }
         Button(onClick = onExport, enabled = !exporting, modifier = Modifier.height(34.dp), shape = RoundedCornerShape(7.dp)) {
-            Icon(Icons.Rounded.Share, null, modifier = Modifier.size(15.dp))
-            Spacer(Modifier.width(5.dp))
-            Text(if (exporting) "${((exportFraction ?: 0f) * 100).roundToInt()}%" else "Export", fontSize = 11.sp)
+            Icon(Icons.Rounded.Share, null, modifier = Modifier.size(15.dp)); Spacer(Modifier.width(5.dp)); Text(if (exporting) "${((exportFraction ?: 0f) * 100).roundToInt()}%" else "Export", fontSize = 11.sp)
         }
     }
 }
@@ -557,89 +487,68 @@ private fun FramePreviewV7(
     modifier: Modifier,
 ) {
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
-    Box(
-        modifier.background(Color(0xFF030304)).onSizeChanged { previewSize = it },
-        contentAlignment = Alignment.Center,
-    ) {
+    Box(modifier.background(Color(0xFF030304)).onSizeChanged { previewSize = it }, contentAlignment = Alignment.Center) {
         if (hasVideo) {
             AndroidView(
                 factory = { ctx ->
-                    SurfaceView(ctx).apply {
-                        holder.addCallback(
-                            object : SurfaceHolder.Callback {
-                                override fun surfaceCreated(holder: SurfaceHolder) {
-                                    engine.setOutputSurface(
-                                        holder.surface,
-                                        width.takeIf { it > 0 } ?: outputWidth,
-                                        height.takeIf { it > 0 } ?: outputHeight,
-                                    )
-                                }
+                    TextureView(ctx).apply {
+                        var outputSurface: Surface? = null
 
-                                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                                    engine.setOutputSurface(holder.surface, width, height)
-                                }
+                        fun attach(texture: SurfaceTexture, w: Int, h: Int) {
+                            val safeWidth = w.takeIf { it > 0 } ?: outputWidth.coerceAtLeast(1)
+                            val safeHeight = h.takeIf { it > 0 } ?: outputHeight.coerceAtLeast(1)
+                            texture.setDefaultBufferSize(safeWidth, safeHeight)
+                            outputSurface?.release()
+                            outputSurface = Surface(texture)
+                            engine.setOutputSurface(outputSurface, safeWidth, safeHeight)
+                        }
 
-                                override fun surfaceDestroyed(holder: SurfaceHolder) {
-                                    engine.setOutputSurface(null, 1, 1)
-                                }
-                            },
-                        )
+                        surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                            override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+                                attach(surface, width, height)
+                            }
+
+                            override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+                                surface.setDefaultBufferSize(width.coerceAtLeast(1), height.coerceAtLeast(1))
+                                engine.setOutputSurface(outputSurface, width.coerceAtLeast(1), height.coerceAtLeast(1))
+                            }
+
+                            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                                engine.setOutputSurface(null, 1, 1)
+                                outputSurface?.release()
+                                outputSurface = null
+                                return true
+                            }
+
+                            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+                        }
+
+                        if (isAvailable) {
+                            surfaceTexture?.let { attach(it, width, height) }
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxSize(),
             )
             if (!ready && activeVideoClip != null) {
-                Text(
-                    "Preparing GPU preview…",
-                    color = Color.White.copy(alpha = .55f),
-                    fontSize = 11.sp,
-                    modifier = Modifier.background(Color.Black.copy(alpha = .62f), RoundedCornerShape(5.dp))
-                        .padding(horizontal = 9.dp, vertical = 6.dp),
-                )
+                Text("Preparing GPU preview…", color = Color.White.copy(alpha = .55f), fontSize = 11.sp, modifier = Modifier.background(Color.Black.copy(alpha = .62f), RoundedCornerShape(5.dp)).padding(horizontal = 9.dp, vertical = 6.dp))
             } else if (activeVideoClip == null) {
-                Text(
-                    "No video at cursor · audio can continue",
-                    color = Color.White.copy(alpha = .55f),
-                    fontSize = 11.sp,
-                    modifier = Modifier.background(Color.Black.copy(alpha = .62f), RoundedCornerShape(5.dp))
-                        .padding(horizontal = 9.dp, vertical = 6.dp),
-                )
+                Text("No video at cursor · audio can continue", color = Color.White.copy(alpha = .55f), fontSize = 11.sp, modifier = Modifier.background(Color.Black.copy(alpha = .62f), RoundedCornerShape(5.dp)).padding(horizontal = 9.dp, vertical = 6.dp))
             }
         } else {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Rounded.AddPhotoAlternate, null, tint = Color.White.copy(alpha = .35f), modifier = Modifier.size(40.dp))
-                Spacer(Modifier.height(8.dp))
-                Text("No video media", color = Color.White.copy(alpha = .55f), fontSize = 12.sp)
-                TextButton(onClick = onImport) { Text("Import media") }
+                Icon(Icons.Rounded.AddPhotoAlternate, null, tint = Color.White.copy(alpha = .35f), modifier = Modifier.size(40.dp)); Spacer(Modifier.height(8.dp)); Text("No video media", color = Color.White.copy(alpha = .55f), fontSize = 12.sp); TextButton(onClick = onImport) { Text("Import media") }
             }
         }
 
-        Text(
-            "Direct GPU Preview · $activeLayerCount ${if (activeLayerCount == 1) "layer" else "layers"}",
-            modifier = Modifier.align(Alignment.TopStart).padding(10.dp)
-                .background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp))
-                .padding(horizontal = 7.dp, vertical = 4.dp),
-            fontSize = 9.sp,
-            color = Color.White.copy(alpha = .72f),
-        )
+        Text("Texture GPU Preview · $activeLayerCount ${if (activeLayerCount == 1) "layer" else "layers"}", modifier = Modifier.align(Alignment.TopStart).padding(10.dp).background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 4.dp), fontSize = 9.sp, color = Color.White.copy(alpha = .72f))
 
         if (qualifierPickerActive && activeVideoClip != null) {
-            Box(
-                Modifier.fillMaxSize().background(Color.Black.copy(alpha = .05f)).pointerInput(previewSize) {
-                    detectTapGestures { pos ->
-                        onPickColor(pos.x, pos.y, previewSize.width.toFloat(), previewSize.height.toFloat())
-                    }
-                },
-                contentAlignment = Alignment.TopCenter,
-            ) {
-                Row(
-                    Modifier.padding(top = 9.dp).background(Color.Black.copy(alpha = .76f), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 9.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(Icons.Rounded.Colorize, null, modifier = Modifier.size(15.dp), tint = E7Accent)
-                    Spacer(Modifier.width(5.dp))
-                    Text("Tap the color to qualify selected layer", fontSize = 9.sp, color = Color.White)
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .05f)).pointerInput(previewSize) {
+                detectTapGestures { pos -> onPickColor(pos.x, pos.y, previewSize.width.toFloat(), previewSize.height.toFloat()) }
+            }, contentAlignment = Alignment.TopCenter) {
+                Row(Modifier.padding(top = 9.dp).background(Color.Black.copy(alpha = .76f), RoundedCornerShape(6.dp)).padding(horizontal = 9.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.Colorize, null, modifier = Modifier.size(15.dp), tint = E7Accent); Spacer(Modifier.width(5.dp)); Text("Tap the color to qualify selected layer", fontSize = 9.sp, color = Color.White)
                 }
             }
         }
@@ -647,57 +556,23 @@ private fun FramePreviewV7(
 }
 
 @Composable
-private fun TransportV7(
-    enabled: Boolean,
-    isPlaying: Boolean,
-    cursorUs: Long,
-    durationUs: Long,
-    onBack: () -> Unit,
-    onPlayPause: () -> Unit,
-    onForward: () -> Unit,
-) {
-    Row(
-        Modifier.fillMaxWidth().height(42.dp).background(Color(0xFF0D0D11)),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-    ) {
+private fun TransportV7(enabled: Boolean, isPlaying: Boolean, cursorUs: Long, durationUs: Long, onBack: () -> Unit, onPlayPause: () -> Unit, onForward: () -> Unit) {
+    Row(Modifier.fillMaxWidth().height(42.dp).background(Color(0xFF0D0D11)), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
         Text(timeV7(cursorUs), color = E7Muted, fontSize = 9.sp, modifier = Modifier.width(66.dp))
-        IconButton(onClick = onBack, enabled = enabled, modifier = Modifier.size(34.dp)) {
-            Icon(Icons.Rounded.Replay10, null, modifier = Modifier.size(18.dp))
-        }
-        IconButton(onClick = onPlayPause, enabled = enabled, modifier = Modifier.size(38.dp)) {
-            Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, modifier = Modifier.size(23.dp))
-        }
-        IconButton(onClick = onForward, enabled = enabled, modifier = Modifier.size(34.dp)) {
-            Icon(Icons.Rounded.Forward10, null, modifier = Modifier.size(18.dp))
-        }
+        IconButton(onClick = onBack, enabled = enabled, modifier = Modifier.size(34.dp)) { Icon(Icons.Rounded.Replay10, null, modifier = Modifier.size(18.dp)) }
+        IconButton(onClick = onPlayPause, enabled = enabled, modifier = Modifier.size(38.dp)) { Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, modifier = Modifier.size(23.dp)) }
+        IconButton(onClick = onForward, enabled = enabled, modifier = Modifier.size(34.dp)) { Icon(Icons.Rounded.Forward10, null, modifier = Modifier.size(18.dp)) }
         Text(timeV7(durationUs), color = E7Muted, fontSize = 9.sp, modifier = Modifier.width(66.dp))
     }
 }
 
 @Composable
 private fun WorkspaceBarV7(selected: WorkspaceV7, onSelected: (WorkspaceV7) -> Unit, modifier: Modifier) {
-    Row(
-        modifier.background(Color(0xFF0A0A0D)).horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
+    Row(modifier.background(Color(0xFF0A0A0D)).horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         WorkspaceV7.entries.forEach { item ->
             val active = item == selected
-            Column(
-                Modifier.width(68.dp).fillMaxHeight().clickable { onSelected(item) }
-                    .background(if (active) E7Accent.copy(alpha = .10f) else Color.Transparent),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                Icon(
-                    item.icon,
-                    item.label,
-                    modifier = Modifier.size(18.dp),
-                    tint = if (active) E7Accent else Color.White.copy(alpha = .55f),
-                )
-                Spacer(Modifier.height(3.dp))
-                Text(item.label, fontSize = 8.sp, color = if (active) E7Accent else Color.White.copy(alpha = .55f))
+            Column(Modifier.width(68.dp).fillMaxHeight().clickable { onSelected(item) }.background(if (active) E7Accent.copy(alpha = .10f) else Color.Transparent), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                Icon(item.icon, item.label, modifier = Modifier.size(18.dp), tint = if (active) E7Accent else Color.White.copy(alpha = .55f)); Spacer(Modifier.height(3.dp)); Text(item.label, fontSize = 8.sp, color = if (active) E7Accent else Color.White.copy(alpha = .55f))
             }
         }
     }
