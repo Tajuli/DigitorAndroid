@@ -4,11 +4,15 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.view.Surface
+import androidx.media3.common.C
 import androidx.media3.common.ColorInfo
 import androidx.media3.common.DebugViewProvider
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.common.SurfaceInfo
+import androidx.media3.common.Tracks
 import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.VideoFrameProcessor
 import androidx.media3.common.VideoGraph
@@ -26,16 +30,18 @@ import java.util.concurrent.Executor
 import kotlin.math.abs
 
 /**
- * Device-safe realtime multilayer GPU preview.
+ * Final-output / Export-node preview.
  *
- * CompositionPlayer's multi-video path is intentionally not used here. Each visible V layer is
- * decoded by its own MediaCodec-backed ExoPlayer directly into a MultipleInputVideoGraph input
- * surface. The graph applies the same per-layer effects and ResolveVideoCompositorSettings used by
- * Transformer export, then renders one composited output Surface for the editor viewer.
+ * The editor viewer does not display a decoder surface directly. Every active V layer is decoded by
+ * MediaCodec-backed ExoPlayer into a MultipleInputVideoGraph input, receives the same per-layer GPU
+ * effects as export, then passes through the same ResolveVideoCompositorSettings. The single graph
+ * output surface is therefore the final composited output, analogous to viewing the Render/Viewer
+ * output node in a compositor.
  *
- * Only clips that are active at the current playhead are registered as graph inputs. This avoids
- * timeline gap/sequence state in CompositionPlayer and lets topology changes (V2 add/remove,
- * split/delete, clip boundaries) rebuild a small graph without wedging the existing decoder.
+ * Multi-video CompositionPlayer is intentionally not used. The important decoder/graph handshake is:
+ * discover the selected video format -> registerInputStream -> pre-register the first input frame ->
+ * attach the decoder surface. This prevents the graph from receiving an unregistered first frame,
+ * which previously resulted in a permanently blank preview.
  */
 @UnstableApi
 class GpuMultilayerPreviewEngine(
@@ -62,6 +68,7 @@ class GpuMultilayerPreviewEngine(
     private data class LayerDecoder(
         val layer: ActiveLayer,
         val player: ExoPlayer,
+        val playerListener: Player.Listener,
         val metadataListener: VideoFrameMetadataListener,
     )
 
@@ -174,7 +181,7 @@ class GpuMultilayerPreviewEngine(
 
                     override fun onError(exception: VideoFrameProcessingException) {
                         if (session?.generation == generation) {
-                            listener.onError("GPU preview: ${exception.message ?: "video graph failed"}")
+                            listener.onError("Export-node preview: ${exception.message ?: "video graph failed"}")
                         }
                     }
                 },
@@ -202,45 +209,121 @@ class GpuMultilayerPreviewEngine(
             activeLayers.forEachIndexed { index, layer ->
                 val clip = layer.clip
                 val effects = SharedVideoPipeline.compositedExportEffectsFor(clip)
+                val requestedSourcePositionMs = sourcePositionUs(clip, timelineUs) / 1000L
                 var streamRegistered = false
+                var firstFramePreRegistered = false
+                lateinit var player: ExoPlayer
 
-                val metadataListener = VideoFrameMetadataListener { _, _, inputFormat, _ ->
+                val metadataListener = VideoFrameMetadataListener { _, _, _, _ ->
                     try {
-                        if (!streamRegistered) {
-                            val graphFormat = safeGraphFormat(inputFormat, project)
-                            createdGraph.registerInputStream(
-                                index,
-                                VideoFrameProcessor.INPUT_TYPE_SURFACE,
-                                graphFormat,
-                                effects,
-                                clip.timelineStartUs - clip.sourceInUs,
-                            )
-                            streamRegistered = true
+                        if (firstFramePreRegistered) {
+                            // The first frame was registered before the decoder surface was attached.
+                            firstFramePreRegistered = false
+                        } else if (streamRegistered) {
+                            val accepted = createdGraph.registerInputFrame(index)
+                            if (!accepted && session?.generation == generation) {
+                                listener.onError("Export-node preview layer ${index + 1}: GPU input busy")
+                            }
                         }
-                        createdGraph.registerInputFrame(index)
                     } catch (error: Throwable) {
                         mainHandler.post {
                             if (session?.generation == generation) {
-                                listener.onError("GPU preview layer ${index + 1}: ${error.message ?: "frame registration failed"}")
+                                listener.onError(
+                                    "Export-node preview layer ${index + 1}: ${error.message ?: "frame registration failed"}",
+                                )
                             }
                         }
                     }
                 }
 
-                val player = ExoPlayer.Builder(appContext)
+                val playerListener = object : Player.Listener {
+                    override fun onTracksChanged(tracks: Tracks) {
+                        if (streamRegistered || closed || generation != sessionGeneration) return
+                        val videoGroup = tracks.groups.firstOrNull { group ->
+                            group.type == C.TRACK_TYPE_VIDEO && group.isSelected
+                        } ?: return
+                        val selectedIndex = (0 until videoGroup.length)
+                            .firstOrNull { trackIndex -> videoGroup.isTrackSelected(trackIndex) }
+                            ?: 0
+                        val selectedFormat = videoGroup.getTrackFormat(selectedIndex)
+
+                        try {
+                            createdGraph.registerInputStream(
+                                index,
+                                VideoFrameProcessor.INPUT_TYPE_SURFACE,
+                                safeGraphFormat(selectedFormat, project),
+                                effects,
+                                clip.timelineStartUs - clip.sourceInUs,
+                            )
+                            streamRegistered = true
+
+                            // Media3 requires a surface frame to be registered before the decoder
+                            // renders it. Wait until the graph accepts that first registration, then
+                            // attach the MediaCodec output surface. Subsequent frames are registered
+                            // by VideoFrameMetadataListener immediately before rendering.
+                            val attachSurfaceWhenReady = object : Runnable {
+                                var attempts = 0
+
+                                override fun run() {
+                                    if (closed || generation != sessionGeneration) return
+                                    val accepted = runCatching {
+                                        createdGraph.registerInputFrame(index)
+                                    }.getOrElse { error ->
+                                        if (session?.generation == generation) {
+                                            listener.onError(
+                                                "Export-node preview layer ${index + 1}: ${error.message ?: "GPU input registration failed"}",
+                                            )
+                                        }
+                                        return
+                                    }
+                                    if (!accepted) {
+                                        if (attempts++ < FIRST_FRAME_REGISTER_RETRIES) {
+                                            mainHandler.postDelayed(this, FIRST_FRAME_REGISTER_RETRY_MS)
+                                        } else if (session?.generation == generation) {
+                                            listener.onError("Export-node preview layer ${index + 1}: GPU input never became ready")
+                                        }
+                                        return
+                                    }
+
+                                    firstFramePreRegistered = true
+                                    player.setVideoFrameMetadataListener(metadataListener)
+                                    player.setVideoSurface(createdGraph.getInputSurface(index))
+                                    player.seekTo(requestedSourcePositionMs)
+                                    if (playing) player.play() else player.pause()
+                                }
+                            }
+                            mainHandler.post(attachSurfaceWhenReady)
+                        } catch (error: Throwable) {
+                            if (session?.generation == generation) {
+                                listener.onError(
+                                    "Export-node preview layer ${index + 1}: ${error.message ?: "stream registration failed"}",
+                                )
+                            }
+                        }
+                    }
+
+                    override fun onPlayerError(error: PlaybackException) {
+                        if (session?.generation == generation) {
+                            listener.onError(
+                                "Export-node preview layer ${index + 1}: ${error.message ?: error.errorCodeName}",
+                            )
+                        }
+                    }
+                }
+
+                player = ExoPlayer.Builder(appContext)
                     .setDetachSurfaceTimeoutMs(DETACH_SURFACE_TIMEOUT_MS)
                     .setReleaseTimeoutMs(RELEASE_TIMEOUT_MS)
                     .build()
                     .apply {
                         volume = 0f
-                        setVideoSurface(createdGraph.getInputSurface(index))
-                        setVideoFrameMetadataListener(metadataListener)
+                        addListener(playerListener)
                         setMediaItem(MediaItem.fromUri(clip.uri))
+                        // Prepare first with no output surface. onTracksChanged gives us the exact
+                        // decoder format needed by the final GPU graph before any frame is rendered.
                         prepare()
-                        seekTo(sourcePositionUs(clip, timelineUs) / 1000L)
-                        if (playing) play()
                     }
-                decoders += LayerDecoder(layer, player, metadataListener)
+                decoders += LayerDecoder(layer, player, playerListener, metadataListener)
             }
 
             session = Session(
@@ -255,7 +338,7 @@ class GpuMultilayerPreviewEngine(
             decoders.forEach(::releaseDecoder)
             runCatching { graph?.setOutputSurfaceInfo(null) }
             runCatching { graph?.release() }
-            listener.onError("GPU preview: ${error.message ?: "unable to create multilayer graph"}")
+            listener.onError("Export-node preview: ${error.message ?: "unable to create final output graph"}")
         }
     }
 
@@ -267,7 +350,7 @@ class GpuMultilayerPreviewEngine(
                 target?.let { SurfaceInfo(it.surface, it.width, it.height) },
             )
         }.onFailure { error ->
-            listener.onError("GPU preview surface: ${error.message ?: "unavailable"}")
+            listener.onError("Export-node preview surface: ${error.message ?: "unavailable"}")
         }
     }
 
@@ -295,6 +378,7 @@ class GpuMultilayerPreviewEngine(
 
     private fun releaseDecoder(decoder: LayerDecoder) {
         runCatching { decoder.player.clearVideoFrameMetadataListener(decoder.metadataListener) }
+        runCatching { decoder.player.removeListener(decoder.playerListener) }
         runCatching { decoder.player.setVideoSurface(null) }
         runCatching { decoder.player.release() }
     }
@@ -302,6 +386,7 @@ class GpuMultilayerPreviewEngine(
     override fun close() {
         if (closed) return
         closed = true
+        sessionGeneration += 1L
         retireSession()
         outputTarget = null
     }
@@ -328,6 +413,7 @@ class GpuMultilayerPreviewEngine(
         format.buildUpon()
             .setWidth(if (format.width > 0) format.width else project.width.coerceAtLeast(1))
             .setHeight(if (format.height > 0) format.height else project.height.coerceAtLeast(1))
+            .setPixelWidthHeightRatio(format.pixelWidthHeightRatio.takeIf { it > 0f } ?: 1f)
             .setColorInfo(format.colorInfo ?: ColorInfo.SDR_BT709_LIMITED)
             .build()
 
@@ -343,5 +429,7 @@ class GpuMultilayerPreviewEngine(
         const val MAX_LAYER_DRIFT_US = 150_000L
         const val DETACH_SURFACE_TIMEOUT_MS = 350L
         const val RELEASE_TIMEOUT_MS = 500L
+        const val FIRST_FRAME_REGISTER_RETRIES = 60
+        const val FIRST_FRAME_REGISTER_RETRY_MS = 8L
     }
 }
