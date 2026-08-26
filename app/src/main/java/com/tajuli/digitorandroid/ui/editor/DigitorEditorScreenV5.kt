@@ -85,6 +85,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.transformer.CompositionPlayer
 import androidx.media3.ui.PlayerView
+import com.tajuli.digitorandroid.editor.model.PreviewClipState
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
@@ -136,13 +137,13 @@ private enum class WorkspaceV5(val label: String, val icon: ImageVector) {
  * Stable editor preview architecture:
  * - exactly one topmost video clip is decoded by ExoPlayer at any time;
  * - all active A tracks are mixed by a separate audio-only CompositionPlayer;
- * - export still uses the shared Media3 Transformer composition.
+ * - export still uses the shared Media3 Transformer composition;
+ * - ordinary transform/color parameter edits update the already-attached GPU effects without
+ *   stopping, clearing, preparing, or seeking the video decoder.
  *
  * Video preview deliberately decodes the full source and seeks to source timestamps instead of
  * using MediaItem clipping. A successful document-picker import rotates to a fresh video-player
- * generation. This avoids carrying an OEM MediaCodec/Surface state that became wedged while the
- * picker owned the foreground window. Audio composition rebuilds are independent and
- * cancellation-safe.
+ * generation. Audio composition rebuilds are independent and cancellation-safe.
  */
 @UnstableApi
 @Composable
@@ -177,7 +178,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
     var loadedPreviewUri by remember { mutableStateOf<String?>(null) }
     var loadedPreviewSourceInUs by remember { mutableStateOf<Long?>(null) }
     var loadedPreviewSourceOutUs by remember { mutableStateOf<Long?>(null) }
-    var loadedPreviewGradeHash by remember { mutableStateOf<Int?>(null) }
+    var loadedPreviewPipelineKey by remember { mutableStateOf<Int?>(null) }
     var loadedPreviewGeneration by remember { mutableStateOf(-1) }
     var audioPreviewReady by remember { mutableStateOf(false) }
     var previousProjectDurationUs by remember { mutableStateOf(state.project.durationUs) }
@@ -188,6 +189,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
     var previewStatus by remember { mutableStateOf<String?>(null) }
 
     val previewClip = state.project.topmostVideoClipAt(cursorUs)
+    val previewPipelineKey = previewClip?.let(SharedVideoPipeline::previewPipelineKey)
     val hasMedia = state.project.hasPlayableMedia()
     val hasVideo = state.project.hasPlayableVideo()
     val hasAudio = state.project.tracks.any {
@@ -233,7 +235,12 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         }
     }
 
-    DisposableEffect(audioPlayer) { onDispose { audioPlayer.release() } }
+    DisposableEffect(audioPlayer) {
+        onDispose {
+            audioPlayer.release()
+            PreviewClipState.clear()
+        }
+    }
 
     fun startExport(destination: Uri) {
         if (state.project.durationUs <= 0L) {
@@ -284,17 +291,24 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         previousProjectDurationUs = durationUs
     }
 
+    // Publish ordinary parameter changes to the long-lived GL effects. This does not touch player
+    // media items, codec state, the output surface, or playback position.
+    LaunchedEffect(previewClip) {
+        previewClip?.let(PreviewClipState::update)
+    }
+
+    // Rebuild only when the source clip or immutable effect topology actually changes.
     LaunchedEffect(
         videoPlayerGeneration,
         previewClip?.id,
         previewClip?.uri,
         previewClip?.sourceInUs,
         previewClip?.sourceOutUs,
-        previewClip?.nodeGraph,
-        previewClip?.transform,
+        previewPipelineKey,
     ) {
         val clip = previewClip
         if (clip == null) {
+            loadedPreviewClipId?.let(PreviewClipState::remove)
             videoPlayer.stop()
             videoPlayer.clearMediaItems()
             videoPlayer.setVideoEffects(emptyList())
@@ -302,17 +316,17 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
             loadedPreviewUri = null
             loadedPreviewSourceInUs = null
             loadedPreviewSourceOutUs = null
-            loadedPreviewGradeHash = null
+            loadedPreviewPipelineKey = null
             loadedPreviewGeneration = videoPlayerGeneration
             pendingSeekUs = null
             return@LaunchedEffect
         }
+        PreviewClipState.update(clip)
         val sourceChanged = loadedPreviewGeneration != videoPlayerGeneration ||
             loadedPreviewClipId != clip.id || loadedPreviewUri != clip.uri ||
             loadedPreviewSourceInUs != clip.sourceInUs || loadedPreviewSourceOutUs != clip.sourceOutUs
-        val gradeHash = 31 * clip.nodeGraph.hashCode() + clip.transform.hashCode()
-        val gradeChanged = loadedPreviewGradeHash != gradeHash
-        if (!sourceChanged && gradeChanged) delay(120)
+        val pipelineChanged = loadedPreviewPipelineKey != previewPipelineKey
+        if (!sourceChanged && pipelineChanged) delay(120)
 
         val requestedTimelineUs = pendingSeekUs ?: cursorUs
         val sourcePositionMs = if (sourceChanged) {
@@ -324,7 +338,10 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         }
         val resumePlayback = isPlaying
         val effects = withContext(Dispatchers.Default) { SharedVideoPipeline.previewEffectsFor(clip) }
-        Log.d(VIDEO_PREVIEW_TAG, "Loading generation=$videoPlayerGeneration clip=${clip.id} source=${sourcePositionMs}ms")
+        Log.d(
+            VIDEO_PREVIEW_TAG,
+            "Loading generation=$videoPlayerGeneration clip=${clip.id} source=${sourcePositionMs}ms topology=$previewPipelineKey",
+        )
         videoPlayer.stop()
         videoPlayer.clearMediaItems()
         videoPlayer.setVideoEffects(effects)
@@ -337,7 +354,7 @@ fun DigitorEditorScreenV5(vm: EditorViewModelV4 = viewModel()) {
         loadedPreviewUri = clip.uri
         loadedPreviewSourceInUs = clip.sourceInUs
         loadedPreviewSourceOutUs = clip.sourceOutUs
-        loadedPreviewGradeHash = gradeHash
+        loadedPreviewPipelineKey = previewPipelineKey
         loadedPreviewGeneration = videoPlayerGeneration
         pendingSeekUs = null
     }
