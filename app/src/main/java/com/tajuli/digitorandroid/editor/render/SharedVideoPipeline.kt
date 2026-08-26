@@ -5,16 +5,22 @@ import androidx.media3.common.util.UnstableApi
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 
 /**
- * Keeps preview/export effect ordering identical: geometry first, then the resolved color graph,
- * then one graph-aware spatial FX compositor.
+ * Shared video processing stages.
  *
- * The spatial stage keeps parallel node branches independent and mixes them at Mix nodes instead
- * of flattening editable nodes into a serial effect list.
+ * The legacy export path applies clip geometry as an item effect. Resolve-style multilayer export
+ * moves geometry to VideoCompositorSettings so scaled/positioned upper tracks remain transparent
+ * outside their image and lower tracks stay visible there.
  */
 @UnstableApi
 object SharedVideoPipeline {
     fun effectsFor(clip: TimelineClip): List<Effect> = buildList {
         ClipTransformEffect.forExport(clip)?.let(::add)
+        addAll(SharedColorPipeline.effectsFor(clip))
+        SpatialNodeGraphEffect.forClip(clip, preview = false)?.let(::add)
+    }
+
+    /** Per-layer effects used before the final multilayer compositor. Geometry is compositor-owned. */
+    fun compositedExportEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         addAll(SharedColorPipeline.effectsFor(clip))
         SpatialNodeGraphEffect.forClip(clip, preview = false)?.let(::add)
     }
