@@ -13,6 +13,7 @@ import androidx.media3.effect.GlShaderProgram
 import com.tajuli.digitorandroid.editor.model.ColorNode
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.NodeKind
+import com.tajuli.digitorandroid.editor.model.PreviewClipState
 import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.SpatialGraphOperation
 import com.tajuli.digitorandroid.editor.model.SpatialNodeGraphPlan
@@ -27,9 +28,8 @@ import com.tajuli.digitorandroid.editor.model.visibleEffects
  *
  *     mixed = commonBase + sum(branch - commonBase)
  *
- * This mirrors the existing color-graph mixer semantics instead of flattening spatial branches into
- * a left-to-right effect chain. The color graph still runs before this spatial graph in the shared
- * video pipeline; this class owns the spatial topology after color has been resolved.
+ * In preview the compiled topology remains stable while effect amounts/nodes are read from
+ * [PreviewClipState] every frame. Export stays immutable and deterministic.
  */
 @UnstableApi
 internal class SpatialNodeGraphEffect private constructor(
@@ -106,10 +106,11 @@ internal class SpatialNodeGraphEffect private constructor(
 
         override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
             try {
+                val currentClip = if (preview) PreviewClipState.snapshot(clip.id) ?: clip else clip
                 val outputFboHolder = IntArray(1)
                 GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, outputFboHolder, 0)
                 val media3OutputFbo = outputFboHolder[0]
-                val sourceUs = sourceTimeUs(presentationTimeUs)
+                val sourceUs = sourceTimeUs(currentClip, presentationTimeUs)
                 val slotTextures = IntArray(plan.operations.size) { inputTexId }
                 var scratchCursor = 0
 
@@ -133,7 +134,10 @@ internal class SpatialNodeGraphEffect private constructor(
 
                         NodeKind.SERIAL, NodeKind.PARALLEL -> {
                             val input = textureForSlot(slotTextures, operation.inputSlot, operation.slot, inputTexId)
-                            val evaluated = clip.nodeAnimations.evaluateNode(operation.node, sourceUs)
+                            val liveNode = currentClip.nodeGraph.nodes
+                                .firstOrNull { it.id == operation.node.id }
+                                ?: operation.node
+                            val evaluated = currentClip.nodeAnimations.evaluateNode(liveNode, sourceUs)
                             val amounts = effectAmounts(evaluated)
                             if (amounts.isIdentity) {
                                 slotTextures[operation.slot] = input
@@ -263,11 +267,11 @@ internal class SpatialNodeGraphEffect private constructor(
             )
         }
 
-        private fun sourceTimeUs(presentationTimeUs: Long): Long {
-            val minSource = clip.sourceInUs.coerceAtLeast(0L)
-            val maxSource = clip.sourceOutUs.coerceAtLeast(minSource)
+        private fun sourceTimeUs(currentClip: TimelineClip, presentationTimeUs: Long): Long {
+            val minSource = currentClip.sourceInUs.coerceAtLeast(0L)
+            val maxSource = currentClip.sourceOutUs.coerceAtLeast(minSource)
             if (!preview) {
-                return (clip.sourceInUs + presentationTimeUs.coerceAtLeast(0L))
+                return (currentClip.sourceInUs + presentationTimeUs.coerceAtLeast(0L))
                     .coerceIn(minSource, maxSource)
             }
 
@@ -276,7 +280,7 @@ internal class SpatialNodeGraphEffect private constructor(
             if (snapshot.revision != previewRevision) {
                 previewRevision = snapshot.revision
                 previewAnchorPresentationUs = presentationTimeUs
-                previewAnchorSourceUs = clip.sourceInUs + snapshot.localUs
+                previewAnchorSourceUs = currentClip.sourceInUs + snapshot.localUs
             }
             return (previewAnchorSourceUs + (presentationTimeUs - previewAnchorPresentationUs))
                 .coerceIn(minSource, maxSource)
