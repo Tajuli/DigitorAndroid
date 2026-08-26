@@ -1,10 +1,8 @@
 package com.tajuli.digitorandroid.ui.editor
 
 import android.net.Uri
-import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -66,19 +64,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.MultipleInputVideoGraph
 import androidx.media3.transformer.CompositionPlayer
+import androidx.media3.ui.PlayerView
 import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
@@ -87,7 +87,6 @@ import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
 import com.tajuli.digitorandroid.editor.model.hasPlayableMedia
 import com.tajuli.digitorandroid.editor.model.hasPlayableVideo
 import com.tajuli.digitorandroid.editor.model.topmostVideoClipAt
-import com.tajuli.digitorandroid.editor.preview.DavinciFramePreviewEngine
 import com.tajuli.digitorandroid.editor.processing.ExportProgress
 import com.tajuli.digitorandroid.editor.processing.ProcessingRouter
 import com.tajuli.digitorandroid.editor.render.Media3CompositionBuilder
@@ -124,10 +123,9 @@ private fun TimelineProject.activeVideoClipsV7(timelineUs: Long): List<TimelineC
 /**
  * Resolve-inspired editor viewer.
  *
- * Video preview is playhead-driven rather than player-driven: the current timeline time is
- * evaluated into one final composited frame by [DavinciFramePreviewEngine]. Media3 is retained only
- * for mixed audio playback and final export. This keeps video scrubbing independent from Media3's
- * experimental multi-input CompositionPlayer video graph.
+ * Preview and export now share the exact same Media3 Composition built by [Media3CompositionBuilder].
+ * CompositionPlayer owns realtime decode/playback while MultipleInputVideoGraph runs the same
+ * OpenGL multilayer effects/compositor graph that Transformer receives for final export.
  */
 @UnstableApi
 @Composable
@@ -138,15 +136,14 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
     val scope = rememberCoroutineScope()
     val router = remember { ProcessingRouter(appContext) }
     val compositionBuilder = remember { Media3CompositionBuilder() }
-    val previewEngine = remember { DavinciFramePreviewEngine(appContext, maxPreviewLongEdge = 720) }
-    val previewFrame by previewEngine.frame.collectAsState()
-    val audioPlayer = remember { CompositionPlayer.Builder(appContext).build() }
+    val previewPlayer = remember {
+        CompositionPlayer.Builder(appContext)
+            .setVideoGraphFactory(MultipleInputVideoGraph.Factory())
+            .build()
+    }
 
-    DisposableEffect(previewEngine, audioPlayer) {
-        onDispose {
-            previewEngine.close()
-            audioPlayer.release()
-        }
+    DisposableEffect(previewPlayer) {
+        onDispose { previewPlayer.release() }
     }
 
     val selectedClip = state.project.clip(state.selectedClipId)
@@ -154,9 +151,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
     var isPlaying by remember { mutableStateOf(false) }
     var cursorUs by remember { mutableStateOf(0L) }
     var previousProjectDurationUs by remember { mutableStateOf(state.project.durationUs) }
-    var audioPreviewReady by remember { mutableStateOf(false) }
-    var playAnchorCursorUs by remember { mutableStateOf(0L) }
-    var playAnchorRealtimeMs by remember { mutableStateOf(0L) }
+    var previewReady by remember { mutableStateOf(false) }
     var previewStatus by remember { mutableStateOf<String?>(null) }
     var showExportDialog by remember { mutableStateOf(false) }
     var exportName by remember { mutableStateOf("Digitor_${System.currentTimeMillis()}") }
@@ -167,34 +162,53 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
     val activeVideoClips = state.project.activeVideoClipsV7(cursorUs)
     val hasMedia = state.project.hasPlayableMedia()
     val hasVideo = state.project.hasPlayableVideo()
-    val hasAudio = state.project.tracks.any { track ->
-        track.kind == TrackKind.AUDIO && !track.muted && track.clips.isNotEmpty()
-    }
-    val audioPreviewKey = state.project.tracks
-        .filter { track -> track.kind == TrackKind.AUDIO }
-        .hashCode()
 
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
             isPlaying = false
-            runCatching { audioPlayer.pause() }
+            runCatching { previewPlayer.pause() }
             vm.importUris(uris)
         }
     }
     fun launchImport() = mediaPicker.launch(vm.selectedImportMimeTypes())
 
-    // Every cursor movement or immutable project edit requests a fresh final frame. The engine
-    // conflates rapid scrubbing requests so old positions never build a seek queue.
-    LaunchedEffect(state.project, cursorUs, hasVideo) {
-        if (hasVideo) previewEngine.submit(state.project, cursorUs)
-    }
+    // Rebuild only when immutable timeline/edit state changes. This intentionally calls build(),
+    // not buildPreview(), so preview receives the exact same track sequences, per-layer effects,
+    // z-order, transforms, opacity and ResolveVideoCompositorSettings as final GPU export.
+    LaunchedEffect(state.project) {
+        val snapshot = state.project
+        previewReady = false
+        if (!snapshot.hasPlayableMedia()) {
+            runCatching {
+                previewPlayer.pause()
+                previewPlayer.stop()
+            }
+            isPlaying = false
+            previewStatus = null
+            return@LaunchedEffect
+        }
 
-    LaunchedEffect(previewFrame?.timelineUs, previewFrame?.renderTimeMs) {
-        val frame = previewFrame
-        previewStatus = when {
-            !hasVideo -> null
-            frame == null -> "Preview: rendering…"
-            else -> "Frame ${timeV7(frame.timelineUs)} · ${frame.activeLayerCount}L · ${frame.renderTimeMs}ms"
+        val resumePlayback = isPlaying || previewPlayer.isPlaying
+        delay(80)
+        try {
+            val composition = withContext(Dispatchers.Default) {
+                compositionBuilder.build(snapshot)
+            }
+            val maxStartUs = (snapshot.durationUs - 1L).coerceAtLeast(0L)
+            val startMs = cursorUs.coerceIn(0L, maxStartUs) / 1000L
+            previewPlayer.pause()
+            previewPlayer.stop()
+            previewPlayer.setComposition(composition, startMs)
+            previewPlayer.prepare()
+            previewReady = true
+            previewStatus = "GPU preview · shared export pipeline"
+            if (resumePlayback) previewPlayer.play()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            previewReady = false
+            isPlaying = false
+            previewStatus = "GPU preview: ${error.message ?: "unavailable"}"
         }
     }
 
@@ -202,56 +216,21 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
         val durationUs = state.project.durationUs.coerceAtLeast(0L)
         if (durationUs < previousProjectDurationUs && cursorUs >= durationUs) {
             cursorUs = if (durationUs > 0L) durationUs - 1L else 0L
+            if (previewReady) runCatching { previewPlayer.seekTo(cursorUs / 1000L) }
         }
         previousProjectDurationUs = durationUs
     }
 
-    // Audio is still a separate timeline service, like a professional editor keeping the viewer
-    // render pipeline independent from the audio clock/mixer.
-    LaunchedEffect(audioPreviewKey, hasAudio) {
-        audioPreviewReady = false
-        runCatching {
-            audioPlayer.pause()
-            audioPlayer.stop()
-        }
-        if (!hasAudio) return@LaunchedEffect
-        val snapshot = state.project
-        val resume = isPlaying
-        delay(100)
-        try {
-            val composition = withContext(Dispatchers.Default) {
-                compositionBuilder.buildAudioPreview(snapshot)
-            }
-            val maxStartUs = (snapshot.durationUs - 1L).coerceAtLeast(0L)
-            val startMs = cursorUs.coerceIn(0L, maxStartUs) / 1000L
-            audioPlayer.stop()
-            audioPlayer.setComposition(composition, startMs)
-            audioPlayer.prepare()
-            audioPreviewReady = true
-            if (resume) audioPlayer.play()
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Throwable) {
-            audioPreviewReady = false
-            previewStatus = "Audio preview: ${error.message ?: "unavailable"}"
-        }
-    }
-
-    // Timeline clock. Mixed audio is authoritative when available; video-only projects use a
-    // monotonic editor clock. The viewer then renders whatever layers are active at that time.
-    LaunchedEffect(isPlaying, audioPreviewReady, hasAudio) {
-        while (isPlaying) {
-            val durationUs = state.project.durationUs.coerceAtLeast(0L)
-            val nextUs = if (hasAudio && audioPreviewReady) {
-                audioPlayer.currentPosition.coerceAtLeast(0L) * 1000L
-            } else {
-                playAnchorCursorUs + (SystemClock.elapsedRealtime() - playAnchorRealtimeMs) * 1000L
-            }.coerceIn(0L, durationUs)
-            cursorUs = nextUs
-            if (durationUs > 0L && nextUs >= durationUs) {
-                runCatching { audioPlayer.pause() }
-                isPlaying = false
-                break
+    // CompositionPlayer is the single authoritative preview clock for both video and mixed audio.
+    // Cursor updates never trigger frame extraction or composition rebuilds, so normal playback can
+    // run continuously on MediaCodec + the OpenGL video graph.
+    LaunchedEffect(previewPlayer, previewReady, hasMedia) {
+        while (previewReady && hasMedia) {
+            val playing = previewPlayer.isPlaying
+            isPlaying = playing
+            if (playing) {
+                cursorUs = (previewPlayer.currentPosition.coerceAtLeast(0L) * 1000L)
+                    .coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
             }
             delay(33)
         }
@@ -269,25 +248,19 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
     fun seekTimeline(requestUs: Long) {
         val target = requestUs.coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
         cursorUs = target
-        if (hasAudio && audioPreviewReady) runCatching { audioPlayer.seekTo(target / 1000L) }
-        if (isPlaying && !(hasAudio && audioPreviewReady)) {
-            playAnchorCursorUs = target
-            playAnchorRealtimeMs = SystemClock.elapsedRealtime()
-        }
+        if (previewReady) runCatching { previewPlayer.seekTo(target / 1000L) }
         val activeVideo = state.project.topmostVideoClipAt(target)
         if (activeVideo != null && selectedClip == null) vm.selectClip(activeVideo.id)
     }
 
     fun togglePlayback() {
-        if (!hasMedia) return
-        if (isPlaying) {
+        if (!hasMedia || !previewReady) return
+        if (previewPlayer.isPlaying) {
+            previewPlayer.pause()
             isPlaying = false
-            runCatching { audioPlayer.pause() }
         } else {
             if (cursorUs >= state.project.durationUs && state.project.durationUs > 0L) seekTimeline(0L)
-            playAnchorCursorUs = cursorUs
-            playAnchorRealtimeMs = SystemClock.elapsedRealtime()
-            if (hasAudio && audioPreviewReady) runCatching { audioPlayer.play() }
+            previewPlayer.play()
             isPlaying = true
         }
     }
@@ -347,7 +320,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                     )
                     Text("File type", fontSize = 10.sp, color = E7Muted)
                     AssistChip(onClick = {}, label = { Text("MP4 · H.264 / AAC") })
-                    Text("Viewer uses playhead frame compositing; export backend is unchanged in this PR.", fontSize = 9.sp, color = E7Muted)
+                    Text("Viewer and export share the same Media3 GPU composition.", fontSize = 9.sp, color = E7Muted)
                 }
             },
             confirmButton = {
@@ -390,7 +363,8 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
             }
 
             FramePreviewV7(
-                frame = previewFrame,
+                player = previewPlayer,
+                ready = previewReady,
                 hasVideo = hasVideo,
                 activeVideoClip = previewClip,
                 activeLayerCount = activeVideoClips.size,
@@ -515,7 +489,8 @@ private fun TopBarV7(
 
 @Composable
 private fun FramePreviewV7(
-    frame: DavinciFramePreviewEngine.Frame?,
+    player: Player,
+    ready: Boolean,
     hasVideo: Boolean,
     activeVideoClip: TimelineClip?,
     activeLayerCount: Int,
@@ -530,18 +505,26 @@ private fun FramePreviewV7(
         contentAlignment = Alignment.Center,
     ) {
         if (hasVideo) {
-            val bitmap = frame?.bitmap
-            if (bitmap != null && !bitmap.isRecycled) {
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = "Composited preview",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Fit,
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        useController = false
+                        setKeepContentOnPlayerReset(true)
+                        this.player = player
+                    }
+                },
+                update = { view -> view.player = player },
+                modifier = Modifier.fillMaxSize(),
+            )
+            if (!ready) {
+                Text(
+                    "Preparing GPU preview…",
+                    color = Color.White.copy(alpha = .55f),
+                    fontSize = 11.sp,
+                    modifier = Modifier.background(Color.Black.copy(alpha = .62f), RoundedCornerShape(5.dp))
+                        .padding(horizontal = 9.dp, vertical = 6.dp),
                 )
-            } else {
-                Text("Rendering preview…", color = Color.White.copy(alpha = .55f), fontSize = 11.sp)
-            }
-            if (activeVideoClip == null) {
+            } else if (activeVideoClip == null) {
                 Text(
                     "No video at cursor · audio can continue",
                     color = Color.White.copy(alpha = .55f),
@@ -560,7 +543,7 @@ private fun FramePreviewV7(
         }
 
         Text(
-            "Frame Preview · $activeLayerCount ${if (activeLayerCount == 1) "layer" else "layers"}",
+            "GPU Preview · $activeLayerCount ${if (activeLayerCount == 1) "layer" else "layers"}",
             modifier = Modifier.align(Alignment.TopStart).padding(10.dp)
                 .background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp))
                 .padding(horizontal = 7.dp, vertical = 4.dp),
