@@ -21,16 +21,15 @@ import kotlin.math.abs
 /**
  * Export-quality final-output preview backed by Media3's official [CompositionPlayer].
  *
- * The first PR #33 implementation drove [MultipleInputVideoGraph] directly with hand-wired
- * ExoPlayers. It could produce final-frame callbacks while some devices still displayed a black
- * Surface because that bypassed Media3's playback frame-release/surface-presentation layer.
+ * CompositionPlayer owns decoder surfaces, stream transitions, frame release, scrubbing and final
+ * Surface presentation. The input Composition mirrors export: one sequence per Digitor V track,
+ * export-resolution 33^3 LUT/node processing and Resolve compositor geometry/opacity.
  *
- * This engine keeps the same export-quality GPU graph, but lets CompositionPlayer own decoder
- * surfaces, stream transitions, frame release, scrubbing and final Surface presentation. The input
- * Composition mirrors export: one sequence per Digitor V track, export-resolution 33^3 LUT/node
- * processing and Resolve compositor geometry/opacity. Ordinary visual edits are published through
- * [PreviewClipState] and refresh the already-prepared player by seeking the current frame; only
- * source/timing/shader-topology changes rebuild the Composition.
+ * Important: Media3 scrubbing is not the same thing as a normally paused Player. A player that is
+ * paused first and then put into scrubbing mode may acknowledge seek positions without decoding and
+ * releasing the requested video frame. For editor-paused state we therefore keep playWhenReady=true
+ * and enable scrubbing mode. Media3 suppresses timeline progression with
+ * PLAYBACK_SUPPRESSION_REASON_SCRUBBING, while seekTo() still decodes/renders the target frame.
  */
 @UnstableApi
 class GpuMultilayerPreviewEngine(
@@ -71,9 +70,6 @@ class GpuMultilayerPreviewEngine(
     private var closed = false
 
     private val player = CompositionPlayer.Builder(appContext)
-        // CompositionPlayer's PlaybackVideoGraphWrapper is the important part here: it owns frame
-        // release and Surface presentation. MultipleInputVideoGraph is used only behind that official
-        // wrapper, never driven directly by Digitor.
         .setVideoGraphFactory(MultipleInputVideoGraph.Factory())
         .build()
         .apply {
@@ -111,8 +107,9 @@ class GpuMultilayerPreviewEngine(
         outputTarget = target
 
         if (target == null) {
+            // Surface detach is allowed to pause the underlying player. The desired editor transport
+            // state stays in pendingState/playing and is re-armed when a valid Surface returns.
             runCatching { player.pause() }
-            playing = false
             runCatching { player.clearVideoSurface() }
             return
         }
@@ -169,13 +166,10 @@ class GpuMultilayerPreviewEngine(
         val liveChanged = liveStateKey != nextLiveStateKey
         liveStateKey = nextLiveStateKey
 
-        if (this.playing != playing) {
-            this.playing = playing
-            runCatching { player.setScrubbingModeEnabled(!playing) }
-            runCatching {
-                if (playing) player.play() else player.pause()
-            }
-        }
+        // Always verify transport mode. This also re-arms scrubbing after a Surface detach, where
+        // the underlying player was intentionally paused while the editor state stayed unchanged.
+        this.playing = playing
+        applyEditorTransportMode(playing)
 
         val cursorChanged = abs(safeTimelineUs - lastRequestedTimelineUs) >= CURSOR_CHANGE_US
         lastRequestedTimelineUs = safeTimelineUs
@@ -222,15 +216,18 @@ class GpuMultilayerPreviewEngine(
             val startMs = timelineUs.coerceIn(0L, maxStartUs) / 1000L
 
             player.setComposition(composition, startMs)
-            player.setScrubbingModeEnabled(!playing)
             player.prepare()
-            if (playing) player.play()
 
             prepared = true
             this.playing = playing
             compositionKey = nextCompositionKey
             liveStateKey = liveStateKey(project)
             lastRequestedTimelineUs = timelineUs
+
+            // Arm transport only after prepare(). For a paused editor this deliberately calls play()
+            // first and then enables scrubbing suppression; doing pause()->scrub makes Media3 drop
+            // the seek-render work on real devices.
+            applyEditorTransportMode(playing)
         } catch (error: Throwable) {
             prepared = false
             compositionKey = null
@@ -240,10 +237,46 @@ class GpuMultilayerPreviewEngine(
         }
     }
 
+    /**
+     * Maps Digitor's two transport states onto Media3's three relevant states.
+     *
+     * Editor playing  -> normal playWhenReady playback.
+     * Editor paused   -> playWhenReady=true + scrubbing suppression, so timeline stays still but
+     *                    seekTo() continues to decode and present requested frames.
+     */
+    private fun applyEditorTransportMode(editorPlaying: Boolean) {
+        if (!prepared) return
+
+        runCatching {
+            if (editorPlaying) {
+                if (player.isScrubbingModeEnabled) {
+                    player.setScrubbingModeEnabled(false)
+                }
+                player.play()
+            } else {
+                if (player.isScrubbingModeEnabled) {
+                    // A Surface detach may have called pause() while scrubbing remained enabled.
+                    // Recreate the required playWhenReady=true -> scrubbing transition in that case.
+                    if (!player.playWhenReady) {
+                        player.setScrubbingModeEnabled(false)
+                        player.play()
+                        player.setScrubbingModeEnabled(true)
+                    }
+                } else {
+                    player.play()
+                    player.setScrubbingModeEnabled(true)
+                }
+            }
+        }.onFailure { error ->
+            listener.onError("Final GPU preview transport: ${error.message ?: "unavailable"}")
+        }
+    }
+
     private fun schedulePausedRefresh(timelineUs: Long) {
         refreshRunnable?.let(mainHandler::removeCallbacks)
         val runnable = Runnable {
             if (closed || !prepared || outputTarget == null || playing) return@Runnable
+            applyEditorTransportMode(editorPlaying = false)
             seekToTimeline(timelineUs)
         }
         refreshRunnable = runnable
@@ -254,6 +287,10 @@ class GpuMultilayerPreviewEngine(
         if (!prepared) return
         refreshRunnable?.let(mainHandler::removeCallbacks)
         refreshRunnable = null
+
+        // Cursor seeks must execute with active scrubbing transport when the editor is paused.
+        if (!playing) applyEditorTransportMode(editorPlaying = false)
+
         runCatching { player.seekTo(timelineUs.coerceAtLeast(0L) / 1000L) }
             .onFailure { error ->
                 listener.onError("Final GPU preview seek: ${error.message ?: "failed"}")
@@ -264,6 +301,9 @@ class GpuMultilayerPreviewEngine(
         refreshRunnable?.let(mainHandler::removeCallbacks)
         refreshRunnable = null
         if (prepared) {
+            runCatching {
+                if (player.isScrubbingModeEnabled) player.setScrubbingModeEnabled(false)
+            }
             runCatching { player.pause() }
             runCatching { player.stop() }
         }
@@ -282,6 +322,9 @@ class GpuMultilayerPreviewEngine(
         pendingState = null
         outputTarget = null
         PreviewClipState.clear()
+        runCatching {
+            if (player.isScrubbingModeEnabled) player.setScrubbingModeEnabled(false)
+        }
         runCatching { player.pause() }
         runCatching { player.stop() }
         runCatching { player.clearVideoSurface() }
