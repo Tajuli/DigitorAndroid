@@ -11,6 +11,8 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import kotlin.math.max
+import kotlin.math.roundToInt
 
 /**
  * Coalesces adjacent clips that are still presentation-identical fragments of the same source.
@@ -28,7 +30,8 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
             previous.opacity == clip.opacity &&
             previous.colorGrade == clip.colorGrade &&
             previous.nodeGraph == clip.nodeGraph &&
-            previous.transform == clip.transform
+            previous.transform == clip.transform &&
+            previous.nodeAnimations == clip.nodeAnimations
         if (canMerge) {
             result[result.lastIndex] = previous!!.copy(sourceOutUs = clip.sourceOutUs)
         } else {
@@ -38,21 +41,73 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
     return result
 }
 
+/** Returns an even preview size while preserving the project aspect ratio. */
+internal fun resolvePreviewOutputSize(
+    project: TimelineProject,
+    maxLongEdge: Int,
+): Pair<Int, Int> {
+    val sourceWidth = project.width.coerceAtLeast(2)
+    val sourceHeight = project.height.coerceAtLeast(2)
+    val limit = maxLongEdge.coerceAtLeast(2)
+    val longest = max(sourceWidth, sourceHeight)
+    if (longest <= limit) return sourceWidth.evenAtLeastTwo() to sourceHeight.evenAtLeastTwo()
+
+    val scale = limit.toFloat() / longest.toFloat()
+    val width = (sourceWidth * scale).roundToInt().evenAtLeastTwo()
+    val height = (sourceHeight * scale).roundToInt().evenAtLeastTwo()
+    return width to height
+}
+
+private fun Int.evenAtLeastTwo(): Int {
+    val safe = coerceAtLeast(2)
+    return if (safe % 2 == 0) safe else (safe - 1).coerceAtLeast(2)
+}
+
 /**
- * Media3 builder used by export and audio preview.
+ * Media3 builder shared by final export and editor preview.
  *
- * Final GPU export now mirrors the Resolve-style viewer model: each visible V track remains an
- * independent sequence. Media3 decodes/processes each active layer and ResolveVideoCompositorSettings
- * performs the final z-order/transform/opacity composition. A short V2 is padded with a transparent
- * tail so it cannot terminate a longer V1 export.
- *
- * The editor's video viewer does NOT use CompositionPlayer; V7 uses DavinciFramePreviewEngine.
+ * Export and GPU preview keep every visible V track as an independent sequence. Media3 performs
+ * hardware decode plus GL color/node processing, then [ResolveVideoCompositorSettings] applies
+ * z-order, transform and opacity. Preview uses the same topology at a reduced output resolution.
  */
 @UnstableApi
 class Media3CompositionBuilder {
     fun build(project: TimelineProject): Composition = buildExport(project)
 
+    /** Compatibility preview path retained for existing callers/tests. */
     fun buildPreview(project: TimelineProject): Composition = buildPreviewInternal(project)
+
+    /**
+     * Video-only real-time preview composition. Audio remains on the dedicated audio CompositionPlayer
+     * so video graph rebuilds do not interrupt the editor audio service.
+     */
+    fun buildGpuPreview(
+        project: TimelineProject,
+        maxLongEdge: Int = 720,
+    ): Composition {
+        val problems = project.validate()
+        require(problems.isEmpty()) { problems.joinToString("; ") }
+
+        val videoTracks = resolveCompositionVideoTracks(project)
+        require(videoTracks.isNotEmpty()) { "Timeline has no playable video" }
+        val sequences = videoTracks.map { track ->
+            buildCompositedVideoSequence(
+                project = project,
+                track = track,
+                forPreview = true,
+            )
+        }
+        val (outputWidth, outputHeight) = resolvePreviewOutputSize(project, maxLongEdge)
+        return Composition.Builder(sequences)
+            .setVideoCompositorSettings(
+                ResolveVideoCompositorSettings(
+                    outputWidth = outputWidth,
+                    outputHeight = outputHeight,
+                    videoTracks = videoTracks,
+                ),
+            )
+            .build()
+    }
 
     fun buildAudioPreview(project: TimelineProject): Composition {
         val problems = project.validate()
@@ -72,7 +127,7 @@ class Media3CompositionBuilder {
         val videoTracks = resolveCompositionVideoTracks(project)
 
         videoTracks.forEach { track ->
-            sequences += buildExportVideoSequence(project, track)
+            sequences += buildCompositedVideoSequence(project, track, forPreview = false)
         }
         addAudioSequences(project, sequences, forPreview = false)
 
@@ -90,13 +145,15 @@ class Media3CompositionBuilder {
         return builder.build()
     }
 
-    private fun buildExportVideoSequence(
+    private fun buildCompositedVideoSequence(
         project: TimelineProject,
         track: TimelineTrack,
+        forPreview: Boolean,
     ): EditedMediaItemSequence {
         val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
         var cursorUs = 0L
-        track.sortedClips().forEach { clip ->
+        val clips = if (forPreview) coalescePreviewClips(track.clips) else track.sortedClips()
+        clips.forEach { clip ->
             if (clip.timelineStartUs > cursorUs) {
                 builder.addGap(clip.timelineStartUs - cursorUs)
             }
@@ -104,14 +161,14 @@ class Media3CompositionBuilder {
                 toEditedMediaItem(
                     clip = clip,
                     kind = TrackKind.VIDEO,
-                    forPreview = false,
+                    forPreview = forPreview,
                     compositorOwnsGeometry = true,
                 ),
             )
             cursorUs = clip.timelineEndUs
         }
         if (project.durationUs > cursorUs) {
-            // Keep this input alive until project end. During this interval compositor alpha is 0.
+            // Keep every input sequence alive to project end; compositor alpha is zero in gaps.
             builder.addGap(project.durationUs - cursorUs)
         }
         return builder.build()
@@ -184,6 +241,7 @@ class Media3CompositionBuilder {
             .setDurationUs(clip.durationUs)
         if (kind == TrackKind.VIDEO) {
             val videoEffects = when {
+                forPreview && compositorOwnsGeometry -> SharedVideoPipeline.compositedPreviewEffectsFor(clip)
                 forPreview -> SharedVideoPipeline.previewEffectsFor(clip)
                 compositorOwnsGeometry -> SharedVideoPipeline.compositedExportEffectsFor(clip)
                 else -> SharedVideoPipeline.effectsFor(clip)
