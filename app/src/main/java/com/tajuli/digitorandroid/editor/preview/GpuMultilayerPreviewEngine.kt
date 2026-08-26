@@ -17,10 +17,8 @@ import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.VideoFrameProcessor
 import androidx.media3.common.VideoGraph
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.DefaultVideoFrameProcessor
 import androidx.media3.effect.MultipleInputVideoGraph
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import com.tajuli.digitorandroid.editor.model.PreviewClipState
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
@@ -34,16 +32,19 @@ import kotlin.math.abs
 /**
  * Persistent final-output / Export-node preview.
  *
- * Every active V layer is decoded by a MediaCodec-backed ExoPlayer into a direct
+ * Every active V layer is decoded by a MediaCodec-backed ExoPlayer into one direct
  * [MultipleInputVideoGraph]. Per-layer color/spatial processing uses the export-quality GPU path and
  * the final graph uses the same Resolve compositor math as Transformer export. The viewer therefore
  * displays the final pre-encoder frame instead of a separate CPU approximation.
  *
- * Ordinary transform, opacity, Correction/Color and already-active spatial-FX amount edits do not
- * rebuild MediaCodec or the graph. Their newest immutable clip state is read on the GPU. While paused,
- * a replayable last-frame cache lets the graph re-run that exact decoded frame through updated GPU
- * effects without seeking/re-decoding. Source/topology changes still rebuild the small active-layer
- * graph because they genuinely change decoder or shader structure.
+ * The graph is never started before a valid viewer Surface exists. This is important on slower OEM
+ * devices: a first frame produced before SurfaceView creation is otherwise consumed by the automatic
+ * output renderer and the later-attached Surface stays black until another decoder frame arrives.
+ *
+ * MultipleInputVideoGraph does not implement redraw(), even with replayable cache enabled. Paused
+ * visual edits therefore refresh the current frame by seeking the already-alive decoder. MediaCodec,
+ * the GPU graph and output Surface remain persistent; only source/timing or immutable shader topology
+ * changes rebuild the small active-layer graph.
  */
 @UnstableApi
 class GpuMultilayerPreviewEngine(
@@ -67,11 +68,16 @@ class GpuMultilayerPreviewEngine(
         val height: Int,
     )
 
+    private data class PendingState(
+        val project: TimelineProject,
+        val timelineUs: Long,
+        val playing: Boolean,
+    )
+
     private data class LayerDecoder(
         val layer: ActiveLayer,
         val player: ExoPlayer,
         val playerListener: Player.Listener,
-        val metadataListener: VideoFrameMetadataListener,
     )
 
     private data class Session(
@@ -89,19 +95,18 @@ class GpuMultilayerPreviewEngine(
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mainExecutor = Executor { runnable -> mainHandler.post(runnable) }
-    private val graphFactory = MultipleInputVideoGraph.Factory(
-        DefaultVideoFrameProcessor.Factory.Builder()
-            .setEnableReplayableCache(true)
-            .build(),
-    )
+    private val graphFactory = MultipleInputVideoGraph.Factory()
 
     private var outputTarget: OutputTarget? = null
+    private var pendingState: PendingState? = null
     private var session: Session? = null
     private var sessionGeneration = 0L
+    private var refreshRunnable: Runnable? = null
     private var closed = false
 
     fun setOutputSurface(surface: Surface?, width: Int, height: Int) {
         if (closed) return
+
         outputTarget = surface?.takeIf { it.isValid }?.let {
             OutputTarget(
                 surface = it,
@@ -109,16 +114,49 @@ class GpuMultilayerPreviewEngine(
                 height = height.coerceAtLeast(1),
             )
         }
-        applyOutputTarget(session?.graph)
+
+        val current = session
+        applyOutputTarget(current?.graph)
+
+        if (outputTarget == null) {
+            // A detached Surface must not keep video clocks running invisibly. Mark the session
+            // paused so the pending editor state can resume it when a new Surface becomes valid.
+            current?.let { active ->
+                active.decoders.forEach { decoder -> runCatching { decoder.player.pause() } }
+                active.playing = false
+            }
+            return
+        }
+
+        // Initial Compose composition often submits the timeline before AndroidView creates its
+        // SurfaceView. Build/re-seek only after the valid output target has been installed.
+        val pending = pendingState
+        if (pending != null) {
+            update(
+                project = pending.project,
+                timelineUs = pending.timelineUs,
+                playing = pending.playing,
+                forceSeek = true,
+            )
+        } else if (current != null) {
+            scheduleFrameRefresh(current, current.lastRequestedTimelineUs, immediate = true)
+        }
     }
 
     fun update(project: TimelineProject, timelineUs: Long, playing: Boolean, forceSeek: Boolean = false) {
         if (closed) return
+
         val safeTimelineUs = timelineUs.coerceIn(0L, project.durationUs.coerceAtLeast(0L))
+        pendingState = PendingState(project, safeTimelineUs, playing)
         val activeLayers = activeLayers(project, safeTimelineUs)
+        PreviewClipState.updateAll(activeLayers.map { layer -> layer.clip })
+
+        // Do not let the first processed frame disappear before SurfaceView exists. setOutputSurface
+        // will replay this exact pending state as soon as Android gives us a valid Surface.
+        if (outputTarget == null) return
+
         val key = sessionKey(project, activeLayers)
         val current = session
-
         if (current == null || current.key != key) {
             rebuildSession(project, activeLayers, safeTimelineUs, playing)
             return
@@ -126,7 +164,6 @@ class GpuMultilayerPreviewEngine(
 
         val nextLiveStateKey = liveStateKey(activeLayers)
         val liveStateChanged = current.liveStateKey != nextLiveStateKey
-        PreviewClipState.updateAll(activeLayers.map { layer -> layer.clip })
         current.liveStateKey = nextLiveStateKey
 
         if (current.playing != playing) {
@@ -143,17 +180,14 @@ class GpuMultilayerPreviewEngine(
         current.lastRequestedTimelineUs = safeTimelineUs
 
         if (!playing || forceSeek) {
-            when {
-                cursorChanged -> {
-                    seekDecoders(current, safeTimelineUs, force = true)
-                }
-                liveStateChanged -> {
-                    // Re-run the exact cached decoded frame through live LUT/node/compositor state.
-                    // If replay is unavailable on a device, fall back to a codec seek without
-                    // tearing down the persistent graph.
-                    val redrawn = runCatching { current.graph.redraw() }.isSuccess
-                    if (!redrawn) seekDecoders(current, safeTimelineUs, force = true)
-                }
+            if (cursorChanged || liveStateChanged || forceSeek) {
+                // MultipleInputVideoGraph.redraw() is intentionally unsupported in Media3 1.11.
+                // Refresh through the persistent decoder instead of recreating MediaCodec/GL state.
+                scheduleFrameRefresh(
+                    current,
+                    safeTimelineUs,
+                    immediate = cursorChanged || forceSeek,
+                )
             }
             current.lastSyncCursorUs = safeTimelineUs
             return
@@ -178,16 +212,19 @@ class GpuMultilayerPreviewEngine(
         playing: Boolean,
     ) {
         retireSession()
+
         if (activeLayers.isEmpty()) {
             listener.onReady(0)
             return
         }
+        if (outputTarget == null) return
 
         PreviewClipState.updateAll(activeLayers.map { layer -> layer.clip })
         val expectedKey = sessionKey(project, activeLayers)
         val generation = ++sessionGeneration
         var graph: MultipleInputVideoGraph? = null
         val decoders = mutableListOf<LayerDecoder>()
+
         try {
             val createdGraph = graphFactory.create(
                 appContext,
@@ -199,9 +236,11 @@ class GpuMultilayerPreviewEngine(
                         isRedrawnFrame: Boolean,
                     ) {
                         val activeSession = session
+                        val target = outputTarget
                         if (activeSession != null &&
                             activeSession.generation == generation &&
                             activeSession.key == expectedKey &&
+                            target != null && target.surface.isValid &&
                             !activeSession.firstOutputReported
                         ) {
                             activeSession.firstOutputReported = true
@@ -228,8 +267,10 @@ class GpuMultilayerPreviewEngine(
                     fallbackClips = activeLayers.map { layer -> layer.clip },
                 ),
             )
-
             activeLayers.indices.forEach(createdGraph::registerInput)
+
+            // Install the output Surface before any decoder is prepared, so the first automatic
+            // output render is guaranteed to have somewhere visible to go.
             applyOutputTarget(createdGraph)
 
             activeLayers.forEachIndexed { index, layer ->
@@ -237,30 +278,7 @@ class GpuMultilayerPreviewEngine(
                 val effects = SharedVideoPipeline.finalOutputPreviewEffectsFor(clip)
                 val requestedSourcePositionMs = sourcePositionUs(clip, timelineUs) / 1000L
                 var streamRegistered = false
-                var firstFramePreRegistered = false
                 lateinit var player: ExoPlayer
-
-                val metadataListener = VideoFrameMetadataListener { _, _, _, _ ->
-                    try {
-                        if (firstFramePreRegistered) {
-                            // The first frame was registered before the decoder surface was attached.
-                            firstFramePreRegistered = false
-                        } else if (streamRegistered) {
-                            val accepted = createdGraph.registerInputFrame(index)
-                            if (!accepted && session?.generation == generation) {
-                                listener.onError("Final GPU preview layer ${index + 1}: GPU input busy")
-                            }
-                        }
-                    } catch (error: Throwable) {
-                        mainHandler.post {
-                            if (session?.generation == generation) {
-                                listener.onError(
-                                    "Final GPU preview layer ${index + 1}: ${error.message ?: "frame registration failed"}",
-                                )
-                            }
-                        }
-                    }
-                }
 
                 val playerListener = object : Player.Listener {
                     override fun onTracksChanged(tracks: Tracks) {
@@ -274,52 +292,34 @@ class GpuMultilayerPreviewEngine(
                         val selectedFormat = videoGroup.getTrackFormat(selectedIndex)
 
                         try {
+                            // Media3 1.11 can register MediaCodec SurfaceTexture frames itself. This
+                            // avoids the manual first-frame registration race that could leave the
+                            // direct graph alive but visually black on slower devices.
+                            createdGraph.setOnInputSurfaceReadyListener(index) {
+                                mainHandler.post {
+                                    if (closed || generation != sessionGeneration) return@post
+                                    runCatching {
+                                        player.setVideoSurface(createdGraph.getInputSurface(index))
+                                        player.seekTo(requestedSourcePositionMs)
+                                        player.setScrubbingModeEnabled(!playing)
+                                        if (playing) player.play() else player.pause()
+                                    }.onFailure { error ->
+                                        if (session?.generation == generation) {
+                                            listener.onError(
+                                                "Final GPU preview layer ${index + 1}: ${error.message ?: "decoder surface attach failed"}",
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                             createdGraph.registerInputStream(
                                 index,
-                                VideoFrameProcessor.INPUT_TYPE_SURFACE,
+                                VideoFrameProcessor.INPUT_TYPE_SURFACE_AUTOMATIC_FRAME_REGISTRATION,
                                 safeGraphFormat(selectedFormat, project),
                                 effects,
                                 clip.timelineStartUs - clip.sourceInUs,
                             )
                             streamRegistered = true
-
-                            // MediaCodec surface input requires each frame to be registered before
-                            // rendering. Wait until the first registration is accepted, then attach
-                            // the decoder output surface. Subsequent frames are registered by the
-                            // metadata callback immediately before MediaCodec renders them.
-                            val attachSurfaceWhenReady = object : Runnable {
-                                var attempts = 0
-
-                                override fun run() {
-                                    if (closed || generation != sessionGeneration) return
-                                    val accepted = runCatching {
-                                        createdGraph.registerInputFrame(index)
-                                    }.getOrElse { error ->
-                                        if (session?.generation == generation) {
-                                            listener.onError(
-                                                "Final GPU preview layer ${index + 1}: ${error.message ?: "GPU input registration failed"}",
-                                            )
-                                        }
-                                        return
-                                    }
-                                    if (!accepted) {
-                                        if (attempts++ < FIRST_FRAME_REGISTER_RETRIES) {
-                                            mainHandler.postDelayed(this, FIRST_FRAME_REGISTER_RETRY_MS)
-                                        } else if (session?.generation == generation) {
-                                            listener.onError("Final GPU preview layer ${index + 1}: GPU input never became ready")
-                                        }
-                                        return
-                                    }
-
-                                    firstFramePreRegistered = true
-                                    player.setVideoFrameMetadataListener(metadataListener)
-                                    player.setVideoSurface(createdGraph.getInputSurface(index))
-                                    player.seekTo(requestedSourcePositionMs)
-                                    runCatching { player.setScrubbingModeEnabled(!playing) }
-                                    if (playing) player.play() else player.pause()
-                                }
-                            }
-                            mainHandler.post(attachSurfaceWhenReady)
                         } catch (error: Throwable) {
                             if (session?.generation == generation) {
                                 listener.onError(
@@ -346,11 +346,9 @@ class GpuMultilayerPreviewEngine(
                         volume = 0f
                         addListener(playerListener)
                         setMediaItem(MediaItem.fromUri(clip.uri))
-                        // Prepare first with no video output. onTracksChanged gives the exact decoder
-                        // format needed by the final GPU graph before any frame reaches it.
                         prepare()
                     }
-                decoders += LayerDecoder(layer, player, playerListener, metadataListener)
+                decoders += LayerDecoder(layer, player, playerListener)
             }
 
             session = Session(
@@ -384,6 +382,18 @@ class GpuMultilayerPreviewEngine(
         }
     }
 
+    private fun scheduleFrameRefresh(session: Session, timelineUs: Long, immediate: Boolean) {
+        refreshRunnable?.let(mainHandler::removeCallbacks)
+        val generation = session.generation
+        val runnable = Runnable {
+            if (closed || outputTarget == null || this.session?.generation != generation) return@Runnable
+            seekDecoders(session, timelineUs, force = true)
+        }
+        refreshRunnable = runnable
+        if (immediate) mainHandler.post(runnable)
+        else mainHandler.postDelayed(runnable, PAUSED_EDIT_REFRESH_MS)
+    }
+
     private fun seekDecoders(session: Session, timelineUs: Long, force: Boolean = false) {
         session.decoders.forEach { decoder ->
             val desiredUs = sourcePositionUs(decoder.layer.clip, timelineUs)
@@ -395,6 +405,9 @@ class GpuMultilayerPreviewEngine(
     }
 
     private fun retireSession() {
+        refreshRunnable?.let(mainHandler::removeCallbacks)
+        refreshRunnable = null
+
         val old = session ?: return
         session = null
         old.decoders.forEach { decoder ->
@@ -408,7 +421,6 @@ class GpuMultilayerPreviewEngine(
     }
 
     private fun releaseDecoder(decoder: LayerDecoder) {
-        runCatching { decoder.player.clearVideoFrameMetadataListener(decoder.metadataListener) }
         runCatching { decoder.player.removeListener(decoder.playerListener) }
         runCatching { decoder.player.setVideoSurface(null) }
         runCatching { decoder.player.release() }
@@ -420,6 +432,7 @@ class GpuMultilayerPreviewEngine(
         sessionGeneration += 1L
         retireSession()
         PreviewClipState.clear()
+        pendingState = null
         outputTarget = null
     }
 
@@ -448,7 +461,7 @@ class GpuMultilayerPreviewEngine(
         }
     }
 
-    /** Detect live visual changes so a paused frame is redrawn without rebuilding the session. */
+    /** Detect live visual changes so a paused frame is refreshed without rebuilding the session. */
     private fun liveStateKey(layers: List<ActiveLayer>): Int =
         layers.map { layer -> layer.clip.hashCode() }.hashCode()
 
@@ -473,7 +486,6 @@ class GpuMultilayerPreviewEngine(
         const val MAX_LAYER_DRIFT_US = 150_000L
         const val DETACH_SURFACE_TIMEOUT_MS = 350L
         const val RELEASE_TIMEOUT_MS = 500L
-        const val FIRST_FRAME_REGISTER_RETRIES = 60
-        const val FIRST_FRAME_REGISTER_RETRY_MS = 8L
+        const val PAUSED_EDIT_REFRESH_MS = 16L
     }
 }
