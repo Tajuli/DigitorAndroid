@@ -88,6 +88,7 @@ import com.tajuli.digitorandroid.editor.model.hasPlayableMedia
 import com.tajuli.digitorandroid.editor.model.hasPlayableVideo
 import com.tajuli.digitorandroid.editor.model.topmostVideoClipAt
 import com.tajuli.digitorandroid.editor.preview.DavinciFramePreviewEngine
+import com.tajuli.digitorandroid.editor.preview.GpuPreviewSurface
 import com.tajuli.digitorandroid.editor.processing.ExportProgress
 import com.tajuli.digitorandroid.editor.processing.ProcessingRouter
 import com.tajuli.digitorandroid.editor.render.Media3CompositionBuilder
@@ -124,10 +125,8 @@ private fun TimelineProject.activeVideoClipsV7(timelineUs: Long): List<TimelineC
 /**
  * Resolve-inspired editor viewer.
  *
- * Video preview is playhead-driven rather than player-driven: the current timeline time is
- * evaluated into one final composited frame by [DavinciFramePreviewEngine]. Media3 is retained only
- * for mixed audio playback and final export. This keeps video scrubbing independent from Media3's
- * experimental multi-input CompositionPlayer video graph.
+ * Video preview is playhead-driven and rendered by a persistent MediaCodec/OpenGL graph directly
+ * into a SurfaceView. Media3 is retained separately for mixed audio playback and final export.
  */
 @UnstableApi
 @Composable
@@ -183,8 +182,8 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
     }
     fun launchImport() = mediaPicker.launch(vm.selectedImportMimeTypes())
 
-    // Every cursor movement or immutable project edit requests a fresh final frame. The engine
-    // conflates rapid scrubbing requests so old positions never build a seek queue.
+    // Cursor/project changes are clock hints. The preview engine decides whether they represent
+    // continuous playback or a true scrub and avoids per-frame seeks during playback.
     LaunchedEffect(state.project, cursorUs, hasVideo) {
         if (hasVideo) previewEngine.submit(state.project, cursorUs)
     }
@@ -193,8 +192,9 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
         val frame = previewFrame
         previewStatus = when {
             !hasVideo -> null
-            frame == null -> "Preview: rendering…"
-            else -> "Frame ${timeV7(frame.timelineUs)} · ${frame.activeLayerCount}L · ${frame.renderTimeMs}ms"
+            frame == null -> "Preview: GPU preparing…"
+            frame.bitmap != null -> "Preview: CPU fallback · ${frame.renderTimeMs}ms"
+            else -> "GPU ${timeV7(frame.timelineUs)} · ${frame.activeLayerCount}L"
         }
     }
 
@@ -206,8 +206,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
         previousProjectDurationUs = durationUs
     }
 
-    // Audio is still a separate timeline service, like a professional editor keeping the viewer
-    // render pipeline independent from the audio clock/mixer.
+    // Audio is a separate timeline service; video remains a direct GPU surface.
     LaunchedEffect(audioPreviewKey, hasAudio) {
         audioPreviewReady = false
         runCatching {
@@ -238,7 +237,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
     }
 
     // Timeline clock. Mixed audio is authoritative when available; video-only projects use a
-    // monotonic editor clock. The viewer then renders whatever layers are active at that time.
+    // monotonic editor clock. The GPU player follows this clock without seeking every 33 ms.
     LaunchedEffect(isPlaying, audioPreviewReady, hasAudio) {
         while (isPlaying) {
             val durationUs = state.project.durationUs.coerceAtLeast(0L)
@@ -347,7 +346,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                     )
                     Text("File type", fontSize = 10.sp, color = E7Muted)
                     AssistChip(onClick = {}, label = { Text("MP4 · H.264 / AAC") })
-                    Text("Viewer uses playhead frame compositing; export backend is unchanged in this PR.", fontSize = 9.sp, color = E7Muted)
+                    Text("Viewer uses direct GPU surface playback; export backend is unchanged.", fontSize = 9.sp, color = E7Muted)
                 }
             },
             confirmButton = {
@@ -390,6 +389,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
             }
 
             FramePreviewV7(
+                previewEngine = previewEngine,
                 frame = previewFrame,
                 hasVideo = hasVideo,
                 activeVideoClip = previewClip,
@@ -515,6 +515,7 @@ private fun TopBarV7(
 
 @Composable
 private fun FramePreviewV7(
+    previewEngine: DavinciFramePreviewEngine,
     frame: DavinciFramePreviewEngine.Frame?,
     hasVideo: Boolean,
     activeVideoClip: TimelineClip?,
@@ -530,17 +531,25 @@ private fun FramePreviewV7(
         contentAlignment = Alignment.Center,
     ) {
         if (hasVideo) {
-            val bitmap = frame?.bitmap
-            if (bitmap != null && !bitmap.isRecycled) {
+            // Healthy path: MediaCodec + OpenGL render directly into this SurfaceView. No frame is
+            // copied back to the CPU. A bitmap appears only if the engine enters CPU fallback.
+            GpuPreviewSurface(
+                engine = previewEngine,
+                modifier = Modifier.fillMaxSize(),
+            )
+
+            val fallbackBitmap = frame?.bitmap
+            if (fallbackBitmap != null && !fallbackBitmap.isRecycled) {
                 Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = "Composited preview",
+                    bitmap = fallbackBitmap.asImageBitmap(),
+                    contentDescription = "CPU fallback preview",
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Fit,
                 )
-            } else {
-                Text("Rendering preview…", color = Color.White.copy(alpha = .55f), fontSize = 11.sp)
+            } else if (frame == null) {
+                Text("Preparing GPU preview…", color = Color.White.copy(alpha = .55f), fontSize = 11.sp)
             }
+
             if (activeVideoClip == null) {
                 Text(
                     "No video at cursor · audio can continue",
@@ -560,7 +569,7 @@ private fun FramePreviewV7(
         }
 
         Text(
-            "Frame Preview · $activeLayerCount ${if (activeLayerCount == 1) "layer" else "layers"}",
+            "GPU Preview · $activeLayerCount ${if (activeLayerCount == 1) "layer" else "layers"}",
             modifier = Modifier.align(Alignment.TopStart).padding(10.dp)
                 .background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp))
                 .padding(horizontal = 7.dp, vertical = 4.dp),
