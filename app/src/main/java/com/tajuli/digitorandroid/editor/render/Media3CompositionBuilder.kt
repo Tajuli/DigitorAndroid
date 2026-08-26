@@ -14,9 +14,6 @@ import com.tajuli.digitorandroid.editor.model.TrackKind
 import kotlin.math.max
 import kotlin.math.roundToInt
 
-/**
- * Coalesces adjacent clips that are still presentation-identical fragments of the same source.
- */
 internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip> {
     if (clips.size < 2) return clips
     val sorted = clips.sortedBy { it.timelineStartUs }
@@ -41,7 +38,6 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
     return result
 }
 
-/** Returns an even preview size while preserving the project aspect ratio. */
 internal fun resolvePreviewOutputSize(
     project: TimelineProject,
     maxLongEdge: Int,
@@ -63,23 +59,15 @@ private fun Int.evenAtLeastTwo(): Int {
     return if (safe % 2 == 0) safe else (safe - 1).coerceAtLeast(2)
 }
 
-/**
- * Media3 builder shared by final export and editor preview.
- *
- * Export and GPU preview keep every visible V track as an independent sequence. Media3 performs
- * hardware decode plus GL color/node processing, then [ResolveVideoCompositorSettings] applies
- * z-order, transform and opacity. Preview uses the same topology at a reduced output resolution.
- */
 @UnstableApi
 class Media3CompositionBuilder {
     fun build(project: TimelineProject): Composition = buildExport(project)
 
-    /** Compatibility preview path retained for existing callers/tests. */
     fun buildPreview(project: TimelineProject): Composition = buildPreviewInternal(project)
 
     /**
-     * Video-only real-time preview composition. Audio remains on the dedicated audio CompositionPlayer
-     * so video graph rebuilds do not interrupt the editor audio service.
+     * Video-only real-time preview composition. The decoder/GL graph is long-lived; transform,
+     * opacity and color state can resolve newer immutable editor snapshots without rebuilding it.
      */
     fun buildGpuPreview(
         project: TimelineProject,
@@ -104,6 +92,7 @@ class Media3CompositionBuilder {
                     outputWidth = outputWidth,
                     outputHeight = outputHeight,
                     videoTracks = videoTracks,
+                    livePreview = true,
                 ),
             )
             .build()
@@ -152,6 +141,8 @@ class Media3CompositionBuilder {
     ): EditedMediaItemSequence {
         val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
         var cursorUs = 0L
+        // Coalescing must only happen when presentation state is identical. This is fine at graph
+        // construction time; later visual slider changes are read live by preview effects/compositor.
         val clips = if (forPreview) coalescePreviewClips(track.clips) else track.sortedClips()
         clips.forEach { clip ->
             if (clip.timelineStartUs > cursorUs) {
@@ -168,7 +159,6 @@ class Media3CompositionBuilder {
             cursorUs = clip.timelineEndUs
         }
         if (project.durationUs > cursorUs) {
-            // Keep every input sequence alive to project end; compositor alpha is zero in gaps.
             builder.addGap(project.durationUs - cursorUs)
         }
         return builder.build()
