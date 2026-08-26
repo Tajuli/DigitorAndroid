@@ -39,11 +39,15 @@ object SharedVideoPipeline {
      *
      * Geometry is deliberately omitted here because the same Resolve compositor used by export owns
      * transform/opacity. Color uses the export 33^3 LUT and spatial FX use the same shader graph;
-     * preview=true only changes timestamp/live-state lookup, not the rendering math.
+     * only timestamp/live-state lookup differs from Transformer export.
      */
     fun finalOutputPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         addAll(SharedColorPipeline.finalOutputPreviewEffectsFor(clip))
-        SpatialNodeGraphEffect.forClip(clip, preview = true)?.let(::add)
+        SpatialNodeGraphEffect.forClip(
+            clip = clip,
+            preview = true,
+            timelineMappedPreview = true,
+        )?.let(::add)
     }
 
     /**
