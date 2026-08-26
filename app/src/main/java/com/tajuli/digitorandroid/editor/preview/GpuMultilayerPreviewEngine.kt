@@ -62,6 +62,7 @@ class GpuMultilayerPreviewEngine(
     private data class LayerDecoder(
         val layer: ActiveLayer,
         val player: ExoPlayer,
+        val metadataListener: VideoFrameMetadataListener,
     )
 
     private data class Session(
@@ -150,6 +151,7 @@ class GpuMultilayerPreviewEngine(
             return
         }
 
+        val expectedKey = sessionKey(project, activeLayers)
         var graph: MultipleInputVideoGraph? = null
         val decoders = mutableListOf<LayerDecoder>()
         try {
@@ -163,7 +165,7 @@ class GpuMultilayerPreviewEngine(
                         isRedrawnFrame: Boolean,
                     ) {
                         val activeSession = session
-                        if (activeSession != null && activeSession.graph === createdGraph && !activeSession.firstOutputReported) {
+                        if (activeSession != null && activeSession.key == expectedKey && !activeSession.firstOutputReported) {
                             activeSession.firstOutputReported = true
                             listener.onReady(activeSession.decoders.size)
                         }
@@ -199,6 +201,27 @@ class GpuMultilayerPreviewEngine(
                 val effects = SharedVideoPipeline.compositedExportEffectsFor(clip)
                 var streamRegistered = false
 
+                val metadataListener = VideoFrameMetadataListener { _, _, inputFormat, _ ->
+                    try {
+                        if (!streamRegistered) {
+                            val graphFormat = safeGraphFormat(inputFormat, project)
+                            createdGraph.registerInputStream(
+                                index,
+                                VideoFrameProcessor.INPUT_TYPE_SURFACE,
+                                graphFormat,
+                                effects,
+                                clip.timelineStartUs - clip.sourceInUs,
+                            )
+                            streamRegistered = true
+                        }
+                        createdGraph.registerInputFrame(index)
+                    } catch (error: Throwable) {
+                        mainHandler.post {
+                            listener.onError("GPU preview layer ${index + 1}: ${error.message ?: "frame registration failed"}")
+                        }
+                    }
+                }
+
                 val player = ExoPlayer.Builder(appContext)
                     .setDetachSurfaceTimeoutMs(DETACH_SURFACE_TIMEOUT_MS)
                     .setReleaseTimeoutMs(RELEASE_TIMEOUT_MS)
@@ -206,38 +229,17 @@ class GpuMultilayerPreviewEngine(
                     .apply {
                         volume = 0f
                         setVideoSurface(createdGraph.getInputSurface(index))
-                        setVideoFrameMetadataListener(
-                            VideoFrameMetadataListener { _, _, inputFormat, _ ->
-                                try {
-                                    if (!streamRegistered) {
-                                        val graphFormat = safeGraphFormat(inputFormat, project)
-                                        createdGraph.registerInputStream(
-                                            index,
-                                            VideoFrameProcessor.INPUT_TYPE_SURFACE,
-                                            graphFormat,
-                                            effects,
-                                            clip.timelineStartUs - clip.sourceInUs,
-                                        )
-                                        streamRegistered = true
-                                    }
-                                    createdGraph.registerInputFrame(index)
-                                } catch (error: Throwable) {
-                                    mainHandler.post {
-                                        listener.onError("GPU preview layer ${index + 1}: ${error.message ?: "frame registration failed"}")
-                                    }
-                                }
-                            },
-                        )
+                        setVideoFrameMetadataListener(metadataListener)
                         setMediaItem(MediaItem.fromUri(clip.uri))
                         prepare()
                         seekTo(sourcePositionUs(clip, timelineUs) / 1000L)
                         if (playing) play()
                     }
-                decoders += LayerDecoder(layer, player)
+                decoders += LayerDecoder(layer, player, metadataListener)
             }
 
             session = Session(
-                key = sessionKey(project, activeLayers),
+                key = expectedKey,
                 graph = createdGraph,
                 decoders = decoders,
                 playing = playing,
@@ -286,7 +288,7 @@ class GpuMultilayerPreviewEngine(
     }
 
     private fun releaseDecoder(decoder: LayerDecoder) {
-        runCatching { decoder.player.clearVideoFrameMetadataListener() }
+        runCatching { decoder.player.clearVideoFrameMetadataListener(decoder.metadataListener) }
         runCatching { decoder.player.setVideoSurface(null) }
         runCatching { decoder.player.release() }
     }
