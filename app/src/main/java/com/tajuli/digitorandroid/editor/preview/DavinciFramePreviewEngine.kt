@@ -2,15 +2,12 @@ package com.tajuli.digitorandroid.editor.preview
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.PixelFormat
-import android.media.Image
-import android.media.ImageReader
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.view.Surface
 import androidx.media3.common.Format
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -34,7 +31,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
-import kotlin.math.max
 import kotlin.math.min
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,16 +44,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Resolve-style playhead preview backed by the Media3 GPU topology used by export.
+ * Resolve-style playhead preview backed by MediaCodec + Media3 OpenGL.
  *
- * MediaCodec decodes the active video streams, Media3 GL effects process color/node state, and the
- * Resolve compositor combines tracks. ImageReader is currently only the final bridge into the
- * existing Compose bitmap viewer. Playback uses a reduced readback size because GPU->CPU readback
- * is the remaining expensive stage and should never be allowed to starve the actual decoder.
+ * Normal preview is zero-readback: the final GPU-composited frame is rendered directly into the
+ * viewer SurfaceView. There is no ImageReader, RGBA copy, Bitmap upload, or Compose texture upload
+ * in the healthy path. This matches the export architecture much more closely and is especially
+ * important on low-end devices where GPU->CPU readback can take longer than a frame interval.
  *
- * Important scheduling rule: UI cursor requests are hints about the editor clock, not a requirement
- * to seek once per request. During normal forward playback the prepared CompositionPlayer is allowed
- * to run continuously. Only real scrubs/jumps seek the graph.
+ * UI playhead requests are clock hints. During normal forward playback the prepared player runs
+ * continuously; only real scrubs/jumps seek. A CPU bitmap renderer remains as device-safety fallback.
  */
 @UnstableApi
 class DavinciFramePreviewEngine(
@@ -66,7 +61,7 @@ class DavinciFramePreviewEngine(
 ) : Closeable {
 
     data class Frame(
-        val bitmap: Bitmap,
+        val bitmap: Bitmap?,
         val timelineUs: Long,
         val activeLayerCount: Int,
         val renderTimeMs: Long,
@@ -86,13 +81,10 @@ class DavinciFramePreviewEngine(
     private val pendingGpuRequest = AtomicReference<Request?>(null)
     private val mutableFrame = MutableStateFlow<Frame?>(null)
     private val closed = AtomicBoolean(false)
-    private val lastRenderedTimelineUs = AtomicLong(-1L)
     private val lastSubmitNs = AtomicLong(0L)
 
     private val playerThread = HandlerThread("DigitorGpuPreviewPlayer").apply { start() }
     private val playerHandler = Handler(playerThread.looper)
-    private val readbackThread = HandlerThread("DigitorGpuPreviewReadback").apply { start() }
-    private val readbackHandler = Handler(readbackThread.looper)
 
     private val fallbackScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val fallbackRequests = Channel<Request>(Channel.CONFLATED)
@@ -103,7 +95,7 @@ class DavinciFramePreviewEngine(
 
     // Player-thread-only state.
     private var player: CompositionPlayer? = null
-    private var imageReader: ImageReader? = null
+    private var previewSurface: Surface? = null
     private var loadedProject: TimelineProject? = null
     private var loadedOutputSize: Pair<Int, Int>? = null
     private var lastHandledTimelineUs = -1L
@@ -153,15 +145,47 @@ class DavinciFramePreviewEngine(
                         maxLongEdge = min(maxPreviewLongEdge, FALLBACK_LONG_EDGE),
                     )
                 }
-                if (request.revision == revision.get()) {
-                    mutableFrame.value = Frame(
-                        bitmap = rendered.bitmap,
-                        timelineUs = request.timelineUs,
-                        activeLayerCount = rendered.layerCount,
-                        renderTimeMs = (System.nanoTime() - request.startedNs) / 1_000_000L,
-                    )
+                // Channel.CONFLATED already prevents an unbounded queue. Publishing completed work
+                // is better than discarding every frame when a slow device receives 30 cursor ticks/s.
+                mutableFrame.value = Frame(
+                    bitmap = rendered.bitmap,
+                    timelineUs = request.timelineUs,
+                    activeLayerCount = rendered.layerCount,
+                    renderTimeMs = (System.nanoTime() - request.startedNs) / 1_000_000L,
+                )
+            }
+        }
+    }
+
+    /** Called by the stable SurfaceView when its display surface becomes available. */
+    fun attachSurface(surface: Surface) {
+        if (closed.get()) return
+        playerHandler.post {
+            if (closed.get() || gpuDisabled) return@post
+            if (previewSurface === surface) return@post
+            previewSurface?.let { old -> runCatching { player?.clearVideoSurface(old) } }
+            previewSurface = surface
+            val activePlayer = player
+            val size = loadedOutputSize
+            if (activePlayer != null && size != null && surface.isValid) {
+                activePlayer.setVideoSurface(surface, Size(size.first, size.second))
+                latestRequest.get()?.let { request ->
+                    if (!activePlayer.isPlaying) {
+                        activePlayer.setScrubbingModeEnabled(true)
+                        activePlayer.seekTo(request.timelineUs / 1000L)
+                    }
                 }
             }
+        }
+    }
+
+    /** Called once when the SurfaceView surface is actually destroyed/replaced. */
+    fun detachSurface(surface: Surface) {
+        if (closed.get()) return
+        playerHandler.post {
+            if (previewSurface !== surface) return@post
+            runCatching { player?.clearVideoSurface(surface) }
+            previewSurface = null
         }
     }
 
@@ -190,13 +214,12 @@ class DavinciFramePreviewEngine(
 
     private fun handleGpuRequest(request: Request) {
         val targetMs = request.timelineUs / 1000L
-        val previewLongEdge = min(maxPreviewLongEdge, GPU_READBACK_LONG_EDGE)
-        val outputSize = resolvePreviewOutputSize(request.project, previewLongEdge)
+        val outputSize = resolvePreviewOutputSize(request.project, maxPreviewLongEdge)
         val projectChanged = loadedProject != request.project
         val outputChanged = loadedOutputSize != outputSize
 
         if (player == null || projectChanged || outputChanged) {
-            configureGpuGraph(request, outputSize, previewLongEdge)
+            configureGpuGraph(request, outputSize)
             lastHandledTimelineUs = request.timelineUs
             lastHandledNs = System.nanoTime()
             continuousPlayback = false
@@ -208,8 +231,6 @@ class DavinciFramePreviewEngine(
         val wallDeltaUs = if (lastHandledNs == 0L) Long.MAX_VALUE else (nowNs - lastHandledNs) / 1_000L
         val timelineDeltaUs = request.timelineUs - lastHandledTimelineUs
 
-        // A healthy playback clock advances timeline and wall time at roughly the same rate. Use a
-        // deliberately wide ratio because this handler is allowed to lag and requests are conflated.
         val forwardClockLike = wallDeltaUs in 5_000L..1_500_000L &&
             timelineDeltaUs > 0L &&
             timelineDeltaUs <= 1_500_000L &&
@@ -239,18 +260,8 @@ class DavinciFramePreviewEngine(
         lastHandledNs = nowNs
     }
 
-    private fun configureGpuGraph(
-        request: Request,
-        outputSize: Pair<Int, Int>,
-        previewLongEdge: Int,
-    ) {
+    private fun configureGpuGraph(request: Request, outputSize: Pair<Int, Int>) {
         val (width, height) = outputSize
-        if (imageReader == null || loadedOutputSize != outputSize) {
-            imageReader?.close()
-            imageReader = createReadbackSurface(width, height)
-            loadedOutputSize = outputSize
-        }
-
         val activePlayer = player ?: CompositionPlayer.Builder(appContext)
             .setLooper(playerThread.looper)
             .setVideoGraphFactory(MultipleInputVideoGraph.Factory())
@@ -263,7 +274,17 @@ class DavinciFramePreviewEngine(
                 })
                 created.setVideoFrameMetadataListener(
                     VideoFrameMetadataListener { presentationTimeUs, _, _: Format, _ ->
-                        lastRenderedTimelineUs.set(presentationTimeUs)
+                        val requestAtRender = latestRequest.get() ?: return@VideoFrameMetadataListener
+                        mutableFrame.value = Frame(
+                            bitmap = null,
+                            timelineUs = presentationTimeUs,
+                            activeLayerCount = activeVideoLayersAt(
+                                requestAtRender.project,
+                                presentationTimeUs,
+                            ).size,
+                            renderTimeMs = ((System.nanoTime() - requestAtRender.startedNs) / 1_000_000L)
+                                .coerceAtLeast(0L),
+                        )
                     },
                 )
                 player = created
@@ -271,47 +292,17 @@ class DavinciFramePreviewEngine(
 
         activePlayer.pause()
         activePlayer.stop()
-        activePlayer.setVideoSurface(
-            checkNotNull(imageReader).surface,
-            Size(width, height),
-        )
+        previewSurface?.takeIf { it.isValid }?.let { surface ->
+            activePlayer.setVideoSurface(surface, Size(width, height))
+        }
         activePlayer.setScrubbingModeEnabled(true)
         activePlayer.setComposition(
-            compositionBuilder.buildGpuPreview(request.project, previewLongEdge),
+            compositionBuilder.buildGpuPreview(request.project, maxPreviewLongEdge),
             request.timelineUs / 1000L,
         )
         activePlayer.prepare()
         loadedProject = request.project
-    }
-
-    private fun createReadbackSurface(width: Int, height: Int): ImageReader {
-        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-        val pool = BitmapReadbackPool(width, height)
-        reader.setOnImageAvailableListener({ source ->
-            val image = runCatching { source.acquireLatestImage() }.getOrNull()
-                ?: return@setOnImageAvailableListener
-            try {
-                // acquireLatestImage already discards stale queued buffers. Do NOT reject a fully
-                // rendered frame merely because the UI cursor advanced while this memory copy was in
-                // progress; doing so can starve the viewer forever on slower devices.
-                val bitmap = pool.copyFrom(image)
-                val request = latestRequest.get() ?: return@setOnImageAvailableListener
-                val metadataUs = lastRenderedTimelineUs.get()
-                val frameUs = if (metadataUs >= 0L) metadataUs else request.timelineUs
-                mutableFrame.value = Frame(
-                    bitmap = bitmap,
-                    timelineUs = frameUs,
-                    activeLayerCount = activeVideoLayersAt(request.project, frameUs).size,
-                    renderTimeMs = ((System.nanoTime() - request.startedNs) / 1_000_000L)
-                        .coerceAtLeast(0L),
-                )
-            } catch (error: Throwable) {
-                playerHandler.post { disableGpuAndFallback(error, latestRequest.get()) }
-            } finally {
-                image.close()
-            }
-        }, readbackHandler)
-        return reader
+        loadedOutputSize = outputSize
     }
 
     private fun disableGpuAndFallback(error: Throwable, request: Request?) {
@@ -322,10 +313,9 @@ class DavinciFramePreviewEngine(
         gpuDisabled = true
         continuousPlayback = false
         runCatching { player?.pause() }
+        previewSurface?.let { surface -> runCatching { player?.clearVideoSurface(surface) } }
         runCatching { player?.release() }
         player = null
-        runCatching { imageReader?.close() }
-        imageReader = null
         loadedProject = null
         loadedOutputSize = null
         request?.let { fallbackRequests.trySend(it) }
@@ -341,19 +331,15 @@ class DavinciFramePreviewEngine(
 
         playerHandler.removeCallbacksAndMessages(null)
         playerHandler.post {
+            previewSurface?.let { surface -> runCatching { player?.clearVideoSurface(surface) } }
+            previewSurface = null
             runCatching { player?.release() }
             player = null
-            runCatching { imageReader?.close() }
-            imageReader = null
             playerThread.quitSafely()
         }
-        readbackThread.quitSafely()
     }
 
     private companion object {
-        // 540p keeps the GPU pipeline fast while cutting the expensive RGBA readback almost in half
-        // compared with 720p. A later direct SurfaceView path can restore 720p with zero readback.
-        const val GPU_READBACK_LONG_EDGE = 540
         const val FALLBACK_LONG_EDGE = 480
         const val PLAYBACK_IDLE_PAUSE_MS = 220L
         const val MAX_PLAYBACK_DRIFT_US = 350_000L
@@ -377,45 +363,6 @@ private data class RenderedPreviewFrame(
     val bitmap: Bitmap,
     val layerCount: Int,
 )
-
-private class BitmapReadbackPool(
-    private val width: Int,
-    private val height: Int,
-) {
-    private val outputs = Array(3) { Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888) }
-    private var staging: Array<Bitmap>? = null
-    private var index = 0
-
-    fun copyFrom(image: Image): Bitmap {
-        val plane = image.planes.firstOrNull() ?: error("GPU preview image has no RGBA plane")
-        require(plane.pixelStride == 4) {
-            "Unsupported GPU readback pixel stride ${plane.pixelStride}"
-        }
-        val output = outputs[index]
-        val slot = index
-        index = (index + 1) % outputs.size
-
-        val buffer = plane.buffer
-        buffer.rewind()
-        val tightRowBytes = width * 4
-        if (plane.rowStride == tightRowBytes) {
-            output.copyPixelsFromBuffer(buffer)
-            return output
-        }
-
-        val paddedWidth = plane.rowStride / plane.pixelStride
-        require(paddedWidth >= width) { "Invalid GPU readback row stride ${plane.rowStride}" }
-        var padded = staging
-        if (padded == null || padded[0].width != paddedWidth) {
-            padded = Array(3) { Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888) }
-            staging = padded
-        }
-        val stagingBitmap = padded[slot]
-        stagingBitmap.copyPixelsFromBuffer(buffer)
-        Canvas(output).drawBitmap(stagingBitmap, 0f, 0f, null)
-        return output
-    }
-}
 
 private class SoftwarePreviewTimelineCompositor(private val context: Context) : Closeable {
     private val workerCount = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(2, 6)
