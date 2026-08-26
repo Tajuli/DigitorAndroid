@@ -36,7 +36,27 @@ class PersistentPreviewPipelineTest {
         assertEquals(baseKey, SharedVideoPipeline.previewPipelineKey(graded))
     }
 
-    @Test fun qualifierAndSpatialFxRemainSafeRebuildBoundaries() {
+    @Test fun activeSpatialFxAmountDoesNotRebuildPipeline() {
+        val base = clip()
+        val selected = base.nodeGraph.selectedNodeId
+        val effectId = "blur"
+        fun withBlur(amount: Float): TimelineClip = base.copy(
+            nodeGraph = base.nodeGraph.copy(nodes = base.nodeGraph.nodes.map { node ->
+                if (node.id == selected) {
+                    node.copy(effects = listOf(NodeEffect(id = effectId, name = "Blur", amount = amount)))
+                } else node
+            }),
+        )
+
+        val low = withBlur(.25f)
+        val high = withBlur(.85f)
+        assertEquals(
+            SharedVideoPipeline.previewPipelineKey(low),
+            SharedVideoPipeline.previewPipelineKey(high),
+        )
+    }
+
+    @Test fun qualifierAndSpatialStageToggleRemainSafeRebuildBoundaries() {
         val base = clip()
         val selected = base.nodeGraph.selectedNodeId
         val baseKey = SharedVideoPipeline.previewPipelineKey(base)
