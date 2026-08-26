@@ -11,11 +11,13 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import androidx.media3.common.Format
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.MultipleInputVideoGraph
+import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.transformer.CompositionPlayer
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
@@ -32,6 +34,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.min
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,17 +48,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Resolve-style playhead preview backed by the same Media3 GPU topology used by export.
+ * Resolve-style playhead preview backed by the Media3 GPU topology used by export.
  *
  * MediaCodec decodes the active video streams, Media3 GL effects process color/node state, and the
- * Resolve compositor combines tracks at a reduced preview resolution. The final RGBA surface is
- * read back through ImageReader only so the existing Compose bitmap viewer can remain unchanged.
- * No CPU transform/color/effect/compositing work is performed on the normal path.
+ * Resolve compositor combines tracks. ImageReader is currently only the final bridge into the
+ * existing Compose bitmap viewer. Playback uses a reduced readback size because GPU->CPU readback
+ * is the remaining expensive stage and should never be allowed to starve the actual decoder.
  *
- * While normal playback advances, nearby requests keep the GPU player running continuously instead
- * of random-seeking every 33 ms. Scrubs/large jumps seek the prepared composition. Project edits
- * replace the composition at the current playhead. If the device rejects the experimental Media3
- * preview graph, the previous software renderer remains available as a safety fallback.
+ * Important scheduling rule: UI cursor requests are hints about the editor clock, not a requirement
+ * to seek once per request. During normal forward playback the prepared CompositionPlayer is allowed
+ * to run continuously. Only real scrubs/jumps seek the graph.
  */
 @UnstableApi
 class DavinciFramePreviewEngine(
@@ -84,13 +86,14 @@ class DavinciFramePreviewEngine(
     private val pendingGpuRequest = AtomicReference<Request?>(null)
     private val mutableFrame = MutableStateFlow<Frame?>(null)
     private val closed = AtomicBoolean(false)
+    private val lastRenderedTimelineUs = AtomicLong(-1L)
+    private val lastSubmitNs = AtomicLong(0L)
 
     private val playerThread = HandlerThread("DigitorGpuPreviewPlayer").apply { start() }
     private val playerHandler = Handler(playerThread.looper)
     private val readbackThread = HandlerThread("DigitorGpuPreviewReadback").apply { start() }
     private val readbackHandler = Handler(readbackThread.looper)
 
-    // Software path is cold unless Media3 reports that this device cannot run the GPU graph.
     private val fallbackScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val fallbackRequests = Channel<Request>(Channel.CONFLATED)
     private val softwareFallback = SoftwarePreviewTimelineCompositor(appContext)
@@ -105,6 +108,7 @@ class DavinciFramePreviewEngine(
     private var loadedOutputSize: Pair<Int, Int>? = null
     private var lastHandledTimelineUs = -1L
     private var lastHandledNs = 0L
+    private var continuousPlayback = false
 
     val frame: StateFlow<Frame?> = mutableFrame.asStateFlow()
 
@@ -124,6 +128,21 @@ class DavinciFramePreviewEngine(
         }
     }
 
+    private val pauseWhenCursorStops = object : Runnable {
+        override fun run() {
+            if (closed.get() || gpuDisabled) return
+            val idleMs = (System.nanoTime() - lastSubmitNs.get()) / 1_000_000L
+            if (idleMs >= PLAYBACK_IDLE_PAUSE_MS) {
+                val activePlayer = player ?: return
+                if (activePlayer.isPlaying) activePlayer.pause()
+                continuousPlayback = false
+                activePlayer.setScrubbingModeEnabled(true)
+            } else {
+                playerHandler.postDelayed(this, PLAYBACK_IDLE_PAUSE_MS - idleMs)
+            }
+        }
+    }
+
     init {
         fallbackScope.launch {
             for (request in fallbackRequests) {
@@ -131,7 +150,7 @@ class DavinciFramePreviewEngine(
                     softwareFallback.render(
                         project = request.project,
                         timeUs = request.timelineUs,
-                        maxLongEdge = maxPreviewLongEdge,
+                        maxLongEdge = min(maxPreviewLongEdge, FALLBACK_LONG_EDGE),
                     )
                 }
                 if (request.revision == revision.get()) {
@@ -155,60 +174,76 @@ class DavinciFramePreviewEngine(
             revision = revision.incrementAndGet(),
         )
         latestRequest.set(request)
+        lastSubmitNs.set(System.nanoTime())
 
         if (gpuDisabled) {
             fallbackRequests.trySend(request)
             return
         }
 
-        // Conflate cursor traffic before it reaches the CompositionPlayer application thread.
         pendingGpuRequest.set(request)
         playerHandler.removeCallbacks(gpuDrain)
         playerHandler.post(gpuDrain)
+        playerHandler.removeCallbacks(pauseWhenCursorStops)
+        playerHandler.postDelayed(pauseWhenCursorStops, PLAYBACK_IDLE_PAUSE_MS)
     }
 
     private fun handleGpuRequest(request: Request) {
         val targetMs = request.timelineUs / 1000L
-        val projectChanged = loadedProject !== request.project
-        val outputSize = resolvePreviewOutputSize(request.project, maxPreviewLongEdge)
+        val previewLongEdge = min(maxPreviewLongEdge, GPU_READBACK_LONG_EDGE)
+        val outputSize = resolvePreviewOutputSize(request.project, previewLongEdge)
+        val projectChanged = loadedProject != request.project
         val outputChanged = loadedOutputSize != outputSize
 
         if (player == null || projectChanged || outputChanged) {
-            configureGpuGraph(request, outputSize)
+            configureGpuGraph(request, outputSize, previewLongEdge)
             lastHandledTimelineUs = request.timelineUs
             lastHandledNs = System.nanoTime()
+            continuousPlayback = false
             return
         }
 
         val activePlayer = checkNotNull(player)
         val nowNs = System.nanoTime()
+        val wallDeltaUs = if (lastHandledNs == 0L) Long.MAX_VALUE else (nowNs - lastHandledNs) / 1_000L
         val timelineDeltaUs = request.timelineUs - lastHandledTimelineUs
-        val wallDeltaMs = if (lastHandledNs == 0L) Long.MAX_VALUE else (nowNs - lastHandledNs) / 1_000_000L
-        val sequentialPlayback =
-            timelineDeltaUs in 5_000L..160_000L && wallDeltaMs in 5L..250L
 
-        if (sequentialPlayback) {
-            // Let MediaCodec decode forward continuously. Only correct drift when the editor/audio
-            // clock and the video player diverge enough to become visible.
+        // A healthy playback clock advances timeline and wall time at roughly the same rate. Use a
+        // deliberately wide ratio because this handler is allowed to lag and requests are conflated.
+        val forwardClockLike = wallDeltaUs in 5_000L..1_500_000L &&
+            timelineDeltaUs > 0L &&
+            timelineDeltaUs <= 1_500_000L &&
+            timelineDeltaUs >= wallDeltaUs / 4L &&
+            timelineDeltaUs <= wallDeltaUs * 4L
+
+        val keepContinuous = continuousPlayback &&
+            timelineDeltaUs > 0L &&
+            timelineDeltaUs <= 1_500_000L
+
+        if (forwardClockLike || keepContinuous) {
+            continuousPlayback = true
             activePlayer.setScrubbingModeEnabled(false)
             val playerUs = activePlayer.currentPosition.coerceAtLeast(0L) * 1000L
-            if (abs(playerUs - request.timelineUs) > 180_000L) {
+            if (abs(playerUs - request.timelineUs) > MAX_PLAYBACK_DRIFT_US) {
                 activePlayer.seekTo(targetMs)
             }
             if (!activePlayer.isPlaying) activePlayer.play()
         } else {
-            // Scrub/edit/large jump: pause and ask the prepared graph for the requested frame.
+            continuousPlayback = false
             activePlayer.pause()
             activePlayer.setScrubbingModeEnabled(true)
             activePlayer.seekTo(targetMs)
-            activePlayer.experimentalRedrawLastFrame()
         }
 
         lastHandledTimelineUs = request.timelineUs
         lastHandledNs = nowNs
     }
 
-    private fun configureGpuGraph(request: Request, outputSize: Pair<Int, Int>) {
+    private fun configureGpuGraph(
+        request: Request,
+        outputSize: Pair<Int, Int>,
+        previewLongEdge: Int,
+    ) {
         val (width, height) = outputSize
         if (imageReader == null || loadedOutputSize != outputSize) {
             imageReader?.close()
@@ -226,6 +261,11 @@ class DavinciFramePreviewEngine(
                         disableGpuAndFallback(error, latestRequest.get())
                     }
                 })
+                created.setVideoFrameMetadataListener(
+                    VideoFrameMetadataListener { presentationTimeUs, _, _: Format, _ ->
+                        lastRenderedTimelineUs.set(presentationTimeUs)
+                    },
+                )
                 player = created
             }
 
@@ -237,31 +277,34 @@ class DavinciFramePreviewEngine(
         )
         activePlayer.setScrubbingModeEnabled(true)
         activePlayer.setComposition(
-            compositionBuilder.buildGpuPreview(request.project, maxPreviewLongEdge),
+            compositionBuilder.buildGpuPreview(request.project, previewLongEdge),
             request.timelineUs / 1000L,
         )
         activePlayer.prepare()
-        activePlayer.experimentalRedrawLastFrame()
         loadedProject = request.project
     }
 
     private fun createReadbackSurface(width: Int, height: Int): ImageReader {
-        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
+        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
         val pool = BitmapReadbackPool(width, height)
         reader.setOnImageAvailableListener({ source ->
-            val image = runCatching { source.acquireLatestImage() }.getOrNull() ?: return@setOnImageAvailableListener
+            val image = runCatching { source.acquireLatestImage() }.getOrNull()
+                ?: return@setOnImageAvailableListener
             try {
-                val request = latestRequest.get() ?: return@setOnImageAvailableListener
+                // acquireLatestImage already discards stale queued buffers. Do NOT reject a fully
+                // rendered frame merely because the UI cursor advanced while this memory copy was in
+                // progress; doing so can starve the viewer forever on slower devices.
                 val bitmap = pool.copyFrom(image)
-                // Do not publish a frame for a request superseded while GL/readback was in flight.
-                if (request.revision == revision.get()) {
-                    mutableFrame.value = Frame(
-                        bitmap = bitmap,
-                        timelineUs = request.timelineUs,
-                        activeLayerCount = activeVideoLayersAt(request.project, request.timelineUs).size,
-                        renderTimeMs = (System.nanoTime() - request.startedNs) / 1_000_000L,
-                    )
-                }
+                val request = latestRequest.get() ?: return@setOnImageAvailableListener
+                val metadataUs = lastRenderedTimelineUs.get()
+                val frameUs = if (metadataUs >= 0L) metadataUs else request.timelineUs
+                mutableFrame.value = Frame(
+                    bitmap = bitmap,
+                    timelineUs = frameUs,
+                    activeLayerCount = activeVideoLayersAt(request.project, frameUs).size,
+                    renderTimeMs = ((System.nanoTime() - request.startedNs) / 1_000_000L)
+                        .coerceAtLeast(0L),
+                )
             } catch (error: Throwable) {
                 playerHandler.post { disableGpuAndFallback(error, latestRequest.get()) }
             } finally {
@@ -277,6 +320,7 @@ class DavinciFramePreviewEngine(
             return
         }
         gpuDisabled = true
+        continuousPlayback = false
         runCatching { player?.pause() }
         runCatching { player?.release() }
         player = null
@@ -305,6 +349,15 @@ class DavinciFramePreviewEngine(
         }
         readbackThread.quitSafely()
     }
+
+    private companion object {
+        // 540p keeps the GPU pipeline fast while cutting the expensive RGBA readback almost in half
+        // compared with 720p. A later direct SurfaceView path can restore 720p with zero readback.
+        const val GPU_READBACK_LONG_EDGE = 540
+        const val FALLBACK_LONG_EDGE = 480
+        const val PLAYBACK_IDLE_PAUSE_MS = 220L
+        const val MAX_PLAYBACK_DRIFT_US = 350_000L
+    }
 }
 
 /** First project video track is the top track; rendering therefore runs in reverse track order. */
@@ -325,7 +378,6 @@ private data class RenderedPreviewFrame(
     val layerCount: Int,
 )
 
-/** Small rotating bitmap pool: GPU does the processing; this is only the final surface readback. */
 private class BitmapReadbackPool(
     private val width: Int,
     private val height: Int,
@@ -365,10 +417,6 @@ private class BitmapReadbackPool(
     }
 }
 
-/**
- * Device-safety fallback copied from the previously tested viewer. It is intentionally never used
- * when the Media3 GPU preview graph is healthy.
- */
 private class SoftwarePreviewTimelineCompositor(private val context: Context) : Closeable {
     private val workerCount = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(2, 6)
     private val color = CpuColorProcessor(workerCount)
