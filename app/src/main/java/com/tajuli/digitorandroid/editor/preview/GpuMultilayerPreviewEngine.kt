@@ -17,31 +17,33 @@ import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.VideoFrameProcessor
 import androidx.media3.common.VideoGraph
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.DefaultVideoFrameProcessor
 import androidx.media3.effect.MultipleInputVideoGraph
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
+import com.tajuli.digitorandroid.editor.model.PreviewClipState
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
-import com.tajuli.digitorandroid.editor.render.ResolveVideoCompositorSettings
+import com.tajuli.digitorandroid.editor.render.PreviewResolveVideoCompositorSettings
 import com.tajuli.digitorandroid.editor.render.SharedVideoPipeline
 import java.util.concurrent.Executor
 import kotlin.math.abs
 
 /**
- * Final-output / Export-node preview.
+ * Persistent final-output / Export-node preview.
  *
- * The editor viewer does not display a decoder surface directly. Every active V layer is decoded by
- * MediaCodec-backed ExoPlayer into a MultipleInputVideoGraph input, receives the same per-layer GPU
- * effects as export, then passes through the same ResolveVideoCompositorSettings. The single graph
- * output surface is therefore the final composited output, analogous to viewing the Render/Viewer
- * output node in a compositor.
+ * Every active V layer is decoded by a MediaCodec-backed ExoPlayer into a direct
+ * [MultipleInputVideoGraph]. Per-layer color/spatial processing uses the export-quality GPU path and
+ * the final graph uses the same Resolve compositor math as Transformer export. The viewer therefore
+ * displays the final pre-encoder frame instead of a separate CPU approximation.
  *
- * Multi-video CompositionPlayer is intentionally not used. The important decoder/graph handshake is:
- * discover the selected video format -> registerInputStream -> pre-register the first input frame ->
- * attach the decoder surface. This prevents the graph from receiving an unregistered first frame,
- * which previously resulted in a permanently blank preview.
+ * Ordinary transform, opacity, Correction/Color and already-active spatial-FX amount edits do not
+ * rebuild MediaCodec or the graph. Their newest immutable clip state is read on the GPU. While paused,
+ * a replayable last-frame cache lets the graph re-run that exact decoded frame through updated GPU
+ * effects without seeking/re-decoding. Source/topology changes still rebuild the small active-layer
+ * graph because they genuinely change decoder or shader structure.
  */
 @UnstableApi
 class GpuMultilayerPreviewEngine(
@@ -79,12 +81,19 @@ class GpuMultilayerPreviewEngine(
         val decoders: List<LayerDecoder>,
         var playing: Boolean,
         var lastSyncCursorUs: Long,
+        var lastRequestedTimelineUs: Long,
+        var liveStateKey: Int,
         var firstOutputReported: Boolean = false,
     )
 
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mainExecutor = Executor { runnable -> mainHandler.post(runnable) }
+    private val graphFactory = MultipleInputVideoGraph.Factory(
+        DefaultVideoFrameProcessor.Factory.Builder()
+            .setEnableReplayableCache(true)
+            .build(),
+    )
 
     private var outputTarget: OutputTarget? = null
     private var session: Session? = null
@@ -115,17 +124,37 @@ class GpuMultilayerPreviewEngine(
             return
         }
 
+        val nextLiveStateKey = liveStateKey(activeLayers)
+        val liveStateChanged = current.liveStateKey != nextLiveStateKey
+        PreviewClipState.updateAll(activeLayers.map { layer -> layer.clip })
+        current.liveStateKey = nextLiveStateKey
+
         if (current.playing != playing) {
             current.playing = playing
             current.decoders.forEach { decoder ->
+                runCatching { decoder.player.setScrubbingModeEnabled(!playing) }
                 runCatching {
                     if (playing) decoder.player.play() else decoder.player.pause()
                 }
             }
         }
 
+        val cursorChanged = abs(safeTimelineUs - current.lastRequestedTimelineUs) >= CURSOR_CHANGE_US
+        current.lastRequestedTimelineUs = safeTimelineUs
+
         if (!playing || forceSeek) {
-            seekDecoders(current, safeTimelineUs)
+            when {
+                cursorChanged -> {
+                    seekDecoders(current, safeTimelineUs, force = true)
+                }
+                liveStateChanged -> {
+                    // Re-run the exact cached decoded frame through live LUT/node/compositor state.
+                    // If replay is unavailable on a device, fall back to a codec seek without
+                    // tearing down the persistent graph.
+                    val redrawn = runCatching { current.graph.redraw() }.isSuccess
+                    if (!redrawn) seekDecoders(current, safeTimelineUs, force = true)
+                }
+            }
             current.lastSyncCursorUs = safeTimelineUs
             return
         }
@@ -154,12 +183,13 @@ class GpuMultilayerPreviewEngine(
             return
         }
 
+        PreviewClipState.updateAll(activeLayers.map { layer -> layer.clip })
         val expectedKey = sessionKey(project, activeLayers)
         val generation = ++sessionGeneration
         var graph: MultipleInputVideoGraph? = null
         val decoders = mutableListOf<LayerDecoder>()
         try {
-            val createdGraph = MultipleInputVideoGraph.Factory().create(
+            val createdGraph = graphFactory.create(
                 appContext,
                 ColorInfo.SDR_BT709_LIMITED,
                 DebugViewProvider.NONE,
@@ -181,7 +211,7 @@ class GpuMultilayerPreviewEngine(
 
                     override fun onError(exception: VideoFrameProcessingException) {
                         if (session?.generation == generation) {
-                            listener.onError("Export-node preview: ${exception.message ?: "video graph failed"}")
+                            listener.onError("Final GPU preview: ${exception.message ?: "video graph failed"}")
                         }
                     }
                 },
@@ -191,15 +221,11 @@ class GpuMultilayerPreviewEngine(
             )
             graph = createdGraph
             createdGraph.initialize()
-
-            val compositorTracks = activeLayers.map { layer ->
-                layer.track.copy(clips = listOf(layer.clip))
-            }
             createdGraph.setCompositorSettings(
-                ResolveVideoCompositorSettings(
+                PreviewResolveVideoCompositorSettings(
                     outputWidth = project.width,
                     outputHeight = project.height,
-                    videoTracks = compositorTracks,
+                    fallbackClips = activeLayers.map { layer -> layer.clip },
                 ),
             )
 
@@ -208,7 +234,7 @@ class GpuMultilayerPreviewEngine(
 
             activeLayers.forEachIndexed { index, layer ->
                 val clip = layer.clip
-                val effects = SharedVideoPipeline.compositedExportEffectsFor(clip)
+                val effects = SharedVideoPipeline.finalOutputPreviewEffectsFor(clip)
                 val requestedSourcePositionMs = sourcePositionUs(clip, timelineUs) / 1000L
                 var streamRegistered = false
                 var firstFramePreRegistered = false
@@ -222,14 +248,14 @@ class GpuMultilayerPreviewEngine(
                         } else if (streamRegistered) {
                             val accepted = createdGraph.registerInputFrame(index)
                             if (!accepted && session?.generation == generation) {
-                                listener.onError("Export-node preview layer ${index + 1}: GPU input busy")
+                                listener.onError("Final GPU preview layer ${index + 1}: GPU input busy")
                             }
                         }
                     } catch (error: Throwable) {
                         mainHandler.post {
                             if (session?.generation == generation) {
                                 listener.onError(
-                                    "Export-node preview layer ${index + 1}: ${error.message ?: "frame registration failed"}",
+                                    "Final GPU preview layer ${index + 1}: ${error.message ?: "frame registration failed"}",
                                 )
                             }
                         }
@@ -257,10 +283,10 @@ class GpuMultilayerPreviewEngine(
                             )
                             streamRegistered = true
 
-                            // Media3 requires a surface frame to be registered before the decoder
-                            // renders it. Wait until the graph accepts that first registration, then
-                            // attach the MediaCodec output surface. Subsequent frames are registered
-                            // by VideoFrameMetadataListener immediately before rendering.
+                            // MediaCodec surface input requires each frame to be registered before
+                            // rendering. Wait until the first registration is accepted, then attach
+                            // the decoder output surface. Subsequent frames are registered by the
+                            // metadata callback immediately before MediaCodec renders them.
                             val attachSurfaceWhenReady = object : Runnable {
                                 var attempts = 0
 
@@ -271,7 +297,7 @@ class GpuMultilayerPreviewEngine(
                                     }.getOrElse { error ->
                                         if (session?.generation == generation) {
                                             listener.onError(
-                                                "Export-node preview layer ${index + 1}: ${error.message ?: "GPU input registration failed"}",
+                                                "Final GPU preview layer ${index + 1}: ${error.message ?: "GPU input registration failed"}",
                                             )
                                         }
                                         return
@@ -280,7 +306,7 @@ class GpuMultilayerPreviewEngine(
                                         if (attempts++ < FIRST_FRAME_REGISTER_RETRIES) {
                                             mainHandler.postDelayed(this, FIRST_FRAME_REGISTER_RETRY_MS)
                                         } else if (session?.generation == generation) {
-                                            listener.onError("Export-node preview layer ${index + 1}: GPU input never became ready")
+                                            listener.onError("Final GPU preview layer ${index + 1}: GPU input never became ready")
                                         }
                                         return
                                     }
@@ -289,6 +315,7 @@ class GpuMultilayerPreviewEngine(
                                     player.setVideoFrameMetadataListener(metadataListener)
                                     player.setVideoSurface(createdGraph.getInputSurface(index))
                                     player.seekTo(requestedSourcePositionMs)
+                                    runCatching { player.setScrubbingModeEnabled(!playing) }
                                     if (playing) player.play() else player.pause()
                                 }
                             }
@@ -296,7 +323,7 @@ class GpuMultilayerPreviewEngine(
                         } catch (error: Throwable) {
                             if (session?.generation == generation) {
                                 listener.onError(
-                                    "Export-node preview layer ${index + 1}: ${error.message ?: "stream registration failed"}",
+                                    "Final GPU preview layer ${index + 1}: ${error.message ?: "stream registration failed"}",
                                 )
                             }
                         }
@@ -305,7 +332,7 @@ class GpuMultilayerPreviewEngine(
                     override fun onPlayerError(error: PlaybackException) {
                         if (session?.generation == generation) {
                             listener.onError(
-                                "Export-node preview layer ${index + 1}: ${error.message ?: error.errorCodeName}",
+                                "Final GPU preview layer ${index + 1}: ${error.message ?: error.errorCodeName}",
                             )
                         }
                     }
@@ -319,8 +346,8 @@ class GpuMultilayerPreviewEngine(
                         volume = 0f
                         addListener(playerListener)
                         setMediaItem(MediaItem.fromUri(clip.uri))
-                        // Prepare first with no output surface. onTracksChanged gives us the exact
-                        // decoder format needed by the final GPU graph before any frame is rendered.
+                        // Prepare first with no video output. onTracksChanged gives the exact decoder
+                        // format needed by the final GPU graph before any frame reaches it.
                         prepare()
                     }
                 decoders += LayerDecoder(layer, player, playerListener, metadataListener)
@@ -333,12 +360,15 @@ class GpuMultilayerPreviewEngine(
                 decoders = decoders,
                 playing = playing,
                 lastSyncCursorUs = timelineUs,
+                lastRequestedTimelineUs = timelineUs,
+                liveStateKey = liveStateKey(activeLayers),
             )
         } catch (error: Throwable) {
             decoders.forEach(::releaseDecoder)
             runCatching { graph?.setOutputSurfaceInfo(null) }
             runCatching { graph?.release() }
-            listener.onError("Export-node preview: ${error.message ?: "unable to create final output graph"}")
+            activeLayers.forEach { layer -> PreviewClipState.remove(layer.clip.id) }
+            listener.onError("Final GPU preview: ${error.message ?: "unable to create final output graph"}")
         }
     }
 
@@ -350,15 +380,15 @@ class GpuMultilayerPreviewEngine(
                 target?.let { SurfaceInfo(it.surface, it.width, it.height) },
             )
         }.onFailure { error ->
-            listener.onError("Export-node preview surface: ${error.message ?: "unavailable"}")
+            listener.onError("Final GPU preview surface: ${error.message ?: "unavailable"}")
         }
     }
 
-    private fun seekDecoders(session: Session, timelineUs: Long) {
+    private fun seekDecoders(session: Session, timelineUs: Long, force: Boolean = false) {
         session.decoders.forEach { decoder ->
             val desiredUs = sourcePositionUs(decoder.layer.clip, timelineUs)
             val actualUs = decoder.player.currentPosition.coerceAtLeast(0L) * 1000L
-            if (abs(actualUs - desiredUs) >= SEEK_TOLERANCE_US) {
+            if (force || abs(actualUs - desiredUs) >= SEEK_TOLERANCE_US) {
                 runCatching { decoder.player.seekTo(desiredUs / 1000L) }
             }
         }
@@ -374,6 +404,7 @@ class GpuMultilayerPreviewEngine(
         runCatching { old.graph.setOutputSurfaceInfo(null) }
         old.decoders.forEach(::releaseDecoder)
         runCatching { old.graph.release() }
+        old.decoders.forEach { decoder -> PreviewClipState.remove(decoder.layer.clip.id) }
     }
 
     private fun releaseDecoder(decoder: LayerDecoder) {
@@ -388,6 +419,7 @@ class GpuMultilayerPreviewEngine(
         closed = true
         sessionGeneration += 1L
         retireSession()
+        PreviewClipState.clear()
         outputTarget = null
     }
 
@@ -401,13 +433,24 @@ class GpuMultilayerPreviewEngine(
             }
             .toList()
 
+    /** Rebuild only for source/timing/shader-topology changes, never ordinary parameter edits. */
     private fun sessionKey(project: TimelineProject, layers: List<ActiveLayer>): String = buildString {
         append(project.width).append('x').append(project.height).append('|')
         layers.forEach { layer ->
+            val clip = layer.clip
             append(layer.track.id).append(':')
-            append(layer.clip.hashCode()).append(';')
+            append(clip.id).append(':')
+            append(clip.uri).append(':')
+            append(clip.timelineStartUs).append(':')
+            append(clip.sourceInUs).append(':')
+            append(clip.sourceOutUs).append(':')
+            append(SharedVideoPipeline.finalOutputPreviewPipelineKey(clip)).append(';')
         }
     }
+
+    /** Detect live visual changes so a paused frame is redrawn without rebuilding the session. */
+    private fun liveStateKey(layers: List<ActiveLayer>): Int =
+        layers.map { layer -> layer.clip.hashCode() }.hashCode()
 
     private fun safeGraphFormat(format: Format, project: TimelineProject): Format =
         format.buildUpon()
@@ -424,6 +467,7 @@ class GpuMultilayerPreviewEngine(
     }
 
     private companion object {
+        const val CURSOR_CHANGE_US = 1_000L
         const val SEEK_TOLERANCE_US = 20_000L
         const val DRIFT_CHECK_INTERVAL_US = 250_000L
         const val MAX_LAYER_DRIFT_US = 150_000L
