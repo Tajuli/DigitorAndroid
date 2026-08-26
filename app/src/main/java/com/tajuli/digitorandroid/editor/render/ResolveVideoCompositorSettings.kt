@@ -9,6 +9,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 
 internal fun resolveCompositionVideoTracks(project: TimelineProject): List<TimelineTrack> =
     project.tracks.filter { track ->
@@ -19,27 +20,37 @@ internal fun TimelineTrack.activeVideoClipAt(timelineUs: Long): TimelineClip? =
     clips.firstOrNull { clip -> timelineUs in clip.timelineStartUs until clip.timelineEndUs }
 
 /**
- * Resolve-style final export compositor.
+ * Resolve-style multilayer compositor shared by export and preview.
  *
- * Each Digitor V track stays as an independent video sequence. Color/node processing happens on
- * that layer before composition; transform and opacity happen here while the layer is still a
- * texture, so the area outside a scaled/positioned V2 remains transparent and V1 can show through.
- *
- * Digitor stores the first video track as the top track. Media3's compositor treats the first video
- * input as the foreground, so preserving project track order preserves the timeline z-order.
+ * Export is fully snapshot-based. GPU preview can resolve the latest immutable editor snapshot by
+ * stable track/clip id, allowing transform and opacity sliders to update without rebuilding the
+ * MediaCodec/GL graph.
  */
 @UnstableApi
 internal class ResolveVideoCompositorSettings(
     private val outputWidth: Int,
     private val outputHeight: Int,
     private val videoTracks: List<TimelineTrack>,
+    private val livePreview: Boolean = false,
 ) : VideoCompositorSettings {
+
+    private val trackIds = videoTracks.map { it.id }
 
     override fun getOutputSize(inputSizes: List<Size>): Size =
         Size(outputWidth.coerceAtLeast(1), outputHeight.coerceAtLeast(1))
 
     override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
-        val clip = videoTracks.getOrNull(inputId)?.activeVideoClipAt(presentationTimeUs)
+        val snapshotTrack = videoTracks.getOrNull(inputId)
+            ?: return StaticOverlaySettings.Builder().setAlphaScale(0f).build()
+
+        val track = if (livePreview) {
+            val id = trackIds.getOrNull(inputId)
+            PreviewProjectRegistry.project()?.tracks?.firstOrNull { it.id == id } ?: snapshotTrack
+        } else {
+            snapshotTrack
+        }
+
+        val clip = track.activeVideoClipAt(presentationTimeUs)
             ?: return StaticOverlaySettings.Builder().setAlphaScale(0f).build()
 
         val localUs = (presentationTimeUs - clip.timelineStartUs)
