@@ -1,6 +1,8 @@
 package com.tajuli.digitorandroid.ui.editor
 
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -56,6 +58,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -121,6 +124,28 @@ private fun TimelineProject.activeVideoClipsV7(timelineUs: Long): List<TimelineC
         }
 
 /**
+ * Identifies edits that change decoder/compositor topology rather than only shader parameters.
+ * A new key forces a fresh CompositionPlayer + PlayerView surface so Media3 cannot keep a stale
+ * decoder/video graph after split/delete, track insertion, clip moves between V tracks or trims.
+ */
+private fun TimelineProject.previewTopologyKeyV7(): String = buildString {
+    append(width).append('x').append(height).append('|')
+    tracks.forEach { track ->
+        append(track.id).append(':')
+            .append(track.kind).append(':')
+            .append(track.muted).append('[')
+        track.sortedClips().forEach { clip ->
+            append(clip.id).append('@')
+                .append(clip.uri).append('@')
+                .append(clip.timelineStartUs).append('@')
+                .append(clip.sourceInUs).append('@')
+                .append(clip.sourceOutUs).append(';')
+        }
+        append(']')
+    }
+}
+
+/**
  * Resolve-inspired editor viewer.
  *
  * Preview and export now share the exact same Media3 Composition built by [Media3CompositionBuilder].
@@ -136,14 +161,24 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
     val scope = rememberCoroutineScope()
     val router = remember { ProcessingRouter(appContext) }
     val compositionBuilder = remember { Media3CompositionBuilder() }
-    val previewPlayer = remember {
+    val previewTopologyKey = state.project.previewTopologyKeyV7()
+    val previewPlayer = remember(previewTopologyKey) {
         CompositionPlayer.Builder(appContext)
             .setVideoGraphFactory(MultipleInputVideoGraph.Factory())
             .build()
     }
 
+    // Topology edits can wedge the old MediaCodec/GL graph if it is synchronously reused or
+    // released while Compose is replacing the surface. Pause immediately, then retire it after the
+    // replacement PlayerView has had time to attach to the fresh player.
     DisposableEffect(previewPlayer) {
-        onDispose { previewPlayer.release() }
+        onDispose {
+            val retiredPlayer = previewPlayer
+            runCatching { retiredPlayer.pause() }
+            Handler(Looper.getMainLooper()).postDelayed({
+                runCatching { retiredPlayer.release() }
+            }, 750L)
+        }
     }
 
     val selectedClip = state.project.clip(state.selectedClipId)
@@ -172,10 +207,9 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
     }
     fun launchImport() = mediaPicker.launch(vm.selectedImportMimeTypes())
 
-    // Rebuild only when immutable timeline/edit state changes. This intentionally calls build(),
-    // not buildPreview(), so preview receives the exact same track sequences, per-layer effects,
-    // z-order, transforms, opacity and ResolveVideoCompositorSettings as final GPU export.
-    LaunchedEffect(state.project) {
+    // Rebuild on immutable timeline/edit state. A topology change supplies a brand-new player;
+    // parameter-only edits keep the current player. build() remains the exact export composition.
+    LaunchedEffect(state.project, previewPlayer) {
         val snapshot = state.project
         previewReady = false
         if (!snapshot.hasPlayableMedia()) {
@@ -364,6 +398,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
 
             FramePreviewV7(
                 player = previewPlayer,
+                generation = previewTopologyKey,
                 ready = previewReady,
                 hasVideo = hasVideo,
                 activeVideoClip = previewClip,
@@ -490,6 +525,7 @@ private fun TopBarV7(
 @Composable
 private fun FramePreviewV7(
     player: Player,
+    generation: String,
     ready: Boolean,
     hasVideo: Boolean,
     activeVideoClip: TimelineClip?,
@@ -505,17 +541,19 @@ private fun FramePreviewV7(
         contentAlignment = Alignment.Center,
     ) {
         if (hasVideo) {
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        useController = false
-                        setKeepContentOnPlayerReset(true)
-                        this.player = player
-                    }
-                },
-                update = { view -> view.player = player },
-                modifier = Modifier.fillMaxSize(),
-            )
+            key(generation) {
+                AndroidView(
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            useController = false
+                            setKeepContentOnPlayerReset(true)
+                            this.player = player
+                        }
+                    },
+                    update = { view -> view.player = player },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             if (!ready) {
                 Text(
                     "Preparing GPU preview…",
