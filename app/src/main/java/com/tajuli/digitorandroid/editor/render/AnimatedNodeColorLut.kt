@@ -14,16 +14,18 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 /**
  * Timestamp-aware 3D LUT used for Correction and Color keyframes.
  *
- * Export maps Media3 item-local timestamps to the original source timeline. Preview uses the same
- * playhead clock as transform keyframes so seeks/effect rebuilds cannot restart the animation at
- * zero. In persistent preview, the LUT also reads the newest clip snapshot so ordinary grading
- * changes update the existing GL texture instead of rebuilding MediaCodec/VideoGraph.
+ * Export maps Media3 item-local timestamps to the original source timeline. The legacy single-source
+ * preview uses [PreviewTransformClock]. The final-output VideoGraph adds each clip's timeline offset
+ * before effects run, so [timelineMappedPreview] maps that timeline timestamp straight back to the
+ * source timestamp. Preview modes can read [PreviewClipState] and update the existing GL texture
+ * without rebuilding MediaCodec/VideoGraph.
  */
 @UnstableApi
 internal class AnimatedNodeColorLut(
     private val clip: TimelineClip,
     private val size: Int,
     private val preview: Boolean,
+    private val timelineMappedPreview: Boolean = false,
 ) : ColorLut {
     private var textureId = Format.NO_VALUE
     private var lastSourceUs = Long.MIN_VALUE
@@ -75,6 +77,10 @@ internal class AnimatedNodeColorLut(
         val maxSource = currentClip.sourceOutUs.coerceAtLeast(minSource)
         if (!preview) {
             return (currentClip.sourceInUs + presentationTimeUs.coerceAtLeast(0L))
+                .coerceIn(minSource, maxSource)
+        }
+        if (timelineMappedPreview) {
+            return (currentClip.sourceInUs + (presentationTimeUs - currentClip.timelineStartUs))
                 .coerceIn(minSource, maxSource)
         }
 
