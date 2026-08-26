@@ -3,7 +3,9 @@ package com.tajuli.digitorandroid.editor.render
 import androidx.media3.common.Effect
 import androidx.media3.common.util.UnstableApi
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
+import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.visibleEffects
 
 /**
  * Keeps preview/export effect ordering identical: geometry first, then the resolved color graph,
@@ -30,9 +32,8 @@ object SharedVideoPipeline {
 
     /**
      * Hash of preview characteristics that still require rebuilding the Media3 effect chain.
-     * Transform and ordinary Correction/Color values are excluded and update live on the GPU.
-     * Qualifier feather shaders and static spatial FX currently carry immutable setup, so those
-     * remain rebuild boundaries until they are moved to live uniforms as well.
+     * Transform, ordinary Correction/Color values, and active spatial-FX amounts are excluded and
+     * update live on the GPU. Qualifier feather shaders remain immutable setup for now.
      */
     fun previewPipelineKey(clip: TimelineClip): Int {
         val nodeTopology = clip.nodeGraph.nodes.map { it.id to it.kind }
@@ -44,18 +45,16 @@ object SharedVideoPipeline {
                 clip.nodeAnimations.qualifierIsAnimated(node.id),
             )
         }
-        val spatialConfiguration = clip.nodeGraph.nodes.map { node ->
-            Triple(
-                node.id,
-                node.effects,
-                clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS),
-            )
+        val hasSpatialFx = clip.nodeGraph.nodes.any { node ->
+            if (node.kind != NodeKind.SERIAL && node.kind != NodeKind.PARALLEL) return@any false
+            node.visibleEffects().any { it.enabled && it.amount > 0f } ||
+                clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
         }
         return listOf(
             nodeTopology,
             edges,
             qualifierConfiguration,
-            spatialConfiguration,
+            hasSpatialFx,
             clip.nodeAnimations.hasColorAnimation,
         ).hashCode()
     }
