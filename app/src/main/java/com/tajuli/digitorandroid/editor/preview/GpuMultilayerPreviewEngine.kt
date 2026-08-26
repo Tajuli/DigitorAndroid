@@ -21,15 +21,16 @@ import kotlin.math.abs
 /**
  * Export-quality final-output preview backed by Media3's official [CompositionPlayer].
  *
- * CompositionPlayer owns decoder surfaces, stream transitions, frame release, scrubbing and final
- * Surface presentation. The input Composition mirrors export: one sequence per Digitor V track,
+ * CompositionPlayer owns decoder surfaces, stream transitions, frame release and final Surface
+ * presentation. The input Composition mirrors export: one sequence per Digitor V track,
  * export-resolution 33^3 LUT/node processing and Resolve compositor geometry/opacity.
  *
- * Important: Media3 scrubbing is not the same thing as a normally paused Player. A player that is
- * paused first and then put into scrubbing mode may acknowledge seek positions without decoding and
- * releasing the requested video frame. For editor-paused state we therefore keep playWhenReady=true
- * and enable scrubbing mode. Media3 suppresses timeline progression with
- * PLAYBACK_SUPPRESSION_REASON_SCRUBBING, while seekTo() still decodes/renders the target frame.
+ * Paused cursor seeks deliberately follow Media3's own CompositionPlayer seek tests:
+ * scrubbing ON -> seekTo(target) -> scrubbing OFF. Keeping scrubbing enabled permanently can leave
+ * a composed Surface showing the previous frame even though the player's logical position changes.
+ *
+ * Replayable cache is enabled for fixed-cursor visual edits. Scale/position/opacity/color changes can
+ * therefore redraw the already-decoded final frame instead of decoding/seeking the source again.
  */
 @UnstableApi
 class GpuMultilayerPreviewEngine(
@@ -71,6 +72,7 @@ class GpuMultilayerPreviewEngine(
 
     private val player = CompositionPlayer.Builder(appContext)
         .setVideoGraphFactory(MultipleInputVideoGraph.Factory())
+        .experimentalSetEnableReplayableCache(true)
         .build()
         .apply {
             volume = 0f
@@ -94,8 +96,7 @@ class GpuMultilayerPreviewEngine(
     fun setOutputSurface(surface: Surface?, width: Int, height: Int) {
         if (closed) return
 
-        refreshRunnable?.let(mainHandler::removeCallbacks)
-        refreshRunnable = null
+        cancelRefresh()
 
         val target = surface?.takeIf { it.isValid }?.let {
             OutputTarget(
@@ -107,8 +108,9 @@ class GpuMultilayerPreviewEngine(
         outputTarget = target
 
         if (target == null) {
-            // Surface detach is allowed to pause the underlying player. The desired editor transport
-            // state stays in pendingState/playing and is re-armed when a valid Surface returns.
+            runCatching {
+                if (player.isScrubbingModeEnabled) player.setScrubbingModeEnabled(false)
+            }
             runCatching { player.pause() }
             runCatching { player.clearVideoSurface() }
             return
@@ -166,8 +168,6 @@ class GpuMultilayerPreviewEngine(
         val liveChanged = liveStateKey != nextLiveStateKey
         liveStateKey = nextLiveStateKey
 
-        // Always verify transport mode. This also re-arms scrubbing after a Surface detach, where
-        // the underlying player was intentionally paused while the editor state stayed unchanged.
         this.playing = playing
         applyEditorTransportMode(playing)
 
@@ -177,7 +177,7 @@ class GpuMultilayerPreviewEngine(
         if (!playing) {
             when {
                 cursorChanged || forceSeek -> seekToTimeline(safeTimelineUs)
-                liveChanged -> schedulePausedRefresh(safeTimelineUs)
+                liveChanged -> schedulePausedRedraw(safeTimelineUs)
             }
             return
         }
@@ -201,9 +201,11 @@ class GpuMultilayerPreviewEngine(
         playing: Boolean,
         nextCompositionKey: String,
     ) {
-        refreshRunnable?.let(mainHandler::removeCallbacks)
-        refreshRunnable = null
+        cancelRefresh()
 
+        runCatching {
+            if (player.isScrubbingModeEnabled) player.setScrubbingModeEnabled(false)
+        }
         runCatching { player.pause() }
         runCatching { player.stop() }
 
@@ -224,9 +226,6 @@ class GpuMultilayerPreviewEngine(
             liveStateKey = liveStateKey(project)
             lastRequestedTimelineUs = timelineUs
 
-            // Arm transport only after prepare(). For a paused editor this deliberately calls play()
-            // first and then enables scrubbing suppression; doing pause()->scrub makes Media3 drop
-            // the seek-render work on real devices.
             applyEditorTransportMode(playing)
         } catch (error: Throwable) {
             prepared = false
@@ -238,46 +237,35 @@ class GpuMultilayerPreviewEngine(
     }
 
     /**
-     * Maps Digitor's two transport states onto Media3's three relevant states.
-     *
-     * Editor playing  -> normal playWhenReady playback.
-     * Editor paused   -> playWhenReady=true + scrubbing suppression, so timeline stays still but
-     *                    seekTo() continues to decode and present requested frames.
+     * Normal editor pause is a normal paused CompositionPlayer. Scrubbing is only enabled around an
+     * individual seek, matching Media3's own CompositionPlayerSeekTest behavior.
      */
     private fun applyEditorTransportMode(editorPlaying: Boolean) {
         if (!prepared) return
 
         runCatching {
-            if (editorPlaying) {
-                if (player.isScrubbingModeEnabled) {
-                    player.setScrubbingModeEnabled(false)
-                }
-                player.play()
-            } else {
-                if (player.isScrubbingModeEnabled) {
-                    // A Surface detach may have called pause() while scrubbing remained enabled.
-                    // Recreate the required playWhenReady=true -> scrubbing transition in that case.
-                    if (!player.playWhenReady) {
-                        player.setScrubbingModeEnabled(false)
-                        player.play()
-                        player.setScrubbingModeEnabled(true)
-                    }
-                } else {
-                    player.play()
-                    player.setScrubbingModeEnabled(true)
-                }
+            if (player.isScrubbingModeEnabled) {
+                player.setScrubbingModeEnabled(false)
             }
+            if (editorPlaying) player.play() else player.pause()
         }.onFailure { error ->
             listener.onError("Final GPU preview transport: ${error.message ?: "unavailable"}")
         }
     }
 
-    private fun schedulePausedRefresh(timelineUs: Long) {
-        refreshRunnable?.let(mainHandler::removeCallbacks)
+    /**
+     * Reprocesses the last decoded frame with the newest live transform/color/effect state. If an
+     * OEM/graph combination rejects replay, fall back to a transient seek at the same timeline time.
+     */
+    private fun schedulePausedRedraw(timelineUs: Long) {
+        cancelRefresh()
         val runnable = Runnable {
             if (closed || !prepared || outputTarget == null || playing) return@Runnable
-            applyEditorTransportMode(editorPlaying = false)
-            seekToTimeline(timelineUs)
+            runCatching {
+                player.experimentalRedrawLastFrame()
+            }.onFailure {
+                seekToTimeline(timelineUs)
+            }
         }
         refreshRunnable = runnable
         mainHandler.postDelayed(runnable, PAUSED_EDIT_REFRESH_MS)
@@ -285,21 +273,41 @@ class GpuMultilayerPreviewEngine(
 
     private fun seekToTimeline(timelineUs: Long) {
         if (!prepared) return
+        cancelRefresh()
+        val positionMs = timelineUs.coerceAtLeast(0L) / 1000L
+
+        if (playing) {
+            runCatching { player.seekTo(positionMs) }
+                .onFailure { error ->
+                    listener.onError("Final GPU preview seek: ${error.message ?: "failed"}")
+                }
+            return
+        }
+
+        // Media3 CompositionPlayerSeekTest uses this exact lifecycle for scrub seeks. Exiting
+        // scrubbing commits the latest pending seek and lets the paused player present its target
+        // frame instead of leaving the previous composed frame latched on the Surface.
+        runCatching {
+            player.pause()
+            if (player.isScrubbingModeEnabled) player.setScrubbingModeEnabled(false)
+            player.setScrubbingModeEnabled(true)
+            player.seekTo(positionMs)
+            player.setScrubbingModeEnabled(false)
+        }.onFailure { error ->
+            runCatching {
+                if (player.isScrubbingModeEnabled) player.setScrubbingModeEnabled(false)
+            }
+            listener.onError("Final GPU preview seek: ${error.message ?: "failed"}")
+        }
+    }
+
+    private fun cancelRefresh() {
         refreshRunnable?.let(mainHandler::removeCallbacks)
         refreshRunnable = null
-
-        // Cursor seeks must execute with active scrubbing transport when the editor is paused.
-        if (!playing) applyEditorTransportMode(editorPlaying = false)
-
-        runCatching { player.seekTo(timelineUs.coerceAtLeast(0L) / 1000L) }
-            .onFailure { error ->
-                listener.onError("Final GPU preview seek: ${error.message ?: "failed"}")
-            }
     }
 
     private fun retireComposition() {
-        refreshRunnable?.let(mainHandler::removeCallbacks)
-        refreshRunnable = null
+        cancelRefresh()
         if (prepared) {
             runCatching {
                 if (player.isScrubbingModeEnabled) player.setScrubbingModeEnabled(false)
@@ -317,8 +325,7 @@ class GpuMultilayerPreviewEngine(
     override fun close() {
         if (closed) return
         closed = true
-        refreshRunnable?.let(mainHandler::removeCallbacks)
-        refreshRunnable = null
+        cancelRefresh()
         pendingState = null
         outputTarget = null
         PreviewClipState.clear()
@@ -378,6 +385,6 @@ class GpuMultilayerPreviewEngine(
     private companion object {
         const val CURSOR_CHANGE_US = 1_000L
         const val MAX_PLAYBACK_DRIFT_US = 140_000L
-        const val PAUSED_EDIT_REFRESH_MS = 24L
+        const val PAUSED_EDIT_REFRESH_MS = 16L
     }
 }
