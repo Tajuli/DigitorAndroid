@@ -125,8 +125,6 @@ class GpuMultilayerPreviewEngine(
             return
         }
 
-        // All layer decoders share the same wall clock. Correct only visible drift so normal
-        // playback stays continuous and does not become a seek loop.
         if (abs(safeTimelineUs - current.lastSyncCursorUs) >= DRIFT_CHECK_INTERVAL_US) {
             current.decoders.forEach { decoder ->
                 val desiredUs = sourcePositionUs(decoder.layer.clip, safeTimelineUs)
