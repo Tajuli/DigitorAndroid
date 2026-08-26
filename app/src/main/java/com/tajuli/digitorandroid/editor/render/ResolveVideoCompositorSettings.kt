@@ -47,24 +47,26 @@ internal class ResolveVideoCompositorSettings(
 }
 
 /**
- * Final-output viewer compositor.
+ * Live final-output compositor used by CompositionPlayer preview.
  *
- * It uses the same transform/opacity math as [ResolveVideoCompositorSettings], but reads the newest
- * immutable clip snapshot from [PreviewClipState]. This is what lets Scale/Position/Rotation/Opacity
- * update on the next GPU frame without recreating ExoPlayer, MediaCodec or the VideoGraph.
+ * The sequence layout is identical to export, so [inputId] maps to the same Digitor V track as
+ * [ResolveVideoCompositorSettings]. The only preview-specific behavior is reading the newest
+ * immutable clip snapshot from [PreviewClipState]. This keeps transform/opacity edits live while
+ * the official Media3 playback wrapper keeps decoder, frame-release and Surface presentation state.
  */
 @UnstableApi
-internal class PreviewResolveVideoCompositorSettings(
+internal class CompositionPreviewResolveVideoCompositorSettings(
     private val outputWidth: Int,
     private val outputHeight: Int,
-    private val fallbackClips: List<TimelineClip>,
+    private val videoTracks: List<TimelineTrack>,
 ) : VideoCompositorSettings {
 
     override fun getOutputSize(inputSizes: List<Size>): Size =
         Size(outputWidth.coerceAtLeast(1), outputHeight.coerceAtLeast(1))
 
     override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
-        val fallback = fallbackClips.getOrNull(inputId) ?: return transparentOverlay()
+        val fallback = videoTracks.getOrNull(inputId)?.activeVideoClipAt(presentationTimeUs)
+            ?: return transparentOverlay()
         val clip = PreviewClipState.snapshot(fallback.id) ?: fallback
         if (presentationTimeUs !in clip.timelineStartUs until clip.timelineEndUs) {
             return transparentOverlay()
