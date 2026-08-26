@@ -35,25 +35,35 @@ import com.tajuli.digitorandroid.editor.model.visibleEffects
 internal class SpatialNodeGraphEffect private constructor(
     private val clip: TimelineClip,
     private val preview: Boolean,
+    private val timelineMappedPreview: Boolean,
 ) : GlEffect {
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram =
-        Program(clip, preview, useHdr)
+        Program(clip, preview, timelineMappedPreview, useHdr)
 
     companion object {
-        fun forClip(clip: TimelineClip, preview: Boolean): SpatialNodeGraphEffect? {
+        fun forClip(
+            clip: TimelineClip,
+            preview: Boolean,
+            timelineMappedPreview: Boolean = false,
+        ): SpatialNodeGraphEffect? {
             val hasSpatialFx = clip.nodeGraph.nodes.any { node ->
                 if (node.kind != NodeKind.SERIAL && node.kind != NodeKind.PARALLEL) return@any false
                 node.visibleEffects().any { it.enabled && it.amount > 0f } ||
                     clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
             }
-            return if (hasSpatialFx) SpatialNodeGraphEffect(clip, preview) else null
+            return if (hasSpatialFx) {
+                SpatialNodeGraphEffect(clip, preview, timelineMappedPreview)
+            } else {
+                null
+            }
         }
     }
 
     private class Program(
         private val clip: TimelineClip,
         private val preview: Boolean,
+        private val timelineMappedPreview: Boolean,
         private val useHighPrecisionColorComponents: Boolean,
     ) : BaseGlShaderProgram(
         /* useHighPrecisionColorComponents = */ useHighPrecisionColorComponents,
@@ -272,6 +282,10 @@ internal class SpatialNodeGraphEffect private constructor(
             val maxSource = currentClip.sourceOutUs.coerceAtLeast(minSource)
             if (!preview) {
                 return (currentClip.sourceInUs + presentationTimeUs.coerceAtLeast(0L))
+                    .coerceIn(minSource, maxSource)
+            }
+            if (timelineMappedPreview) {
+                return (currentClip.sourceInUs + (presentationTimeUs - currentClip.timelineStartUs))
                     .coerceIn(minSource, maxSource)
             }
 
