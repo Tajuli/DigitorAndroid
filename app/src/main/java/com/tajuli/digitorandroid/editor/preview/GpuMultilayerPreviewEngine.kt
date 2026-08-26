@@ -96,10 +96,6 @@ class GpuMultilayerPreviewEngine(
         applyOutputTarget(session?.graph)
     }
 
-    /**
-     * Updates the preview to [timelineUs]. Cheap when the same layers remain active; a new direct
-     * graph is created only when the active-layer/effect topology actually changes.
-     */
     fun update(project: TimelineProject, timelineUs: Long, playing: Boolean, forceSeek: Boolean = false) {
         if (closed) return
         val safeTimelineUs = timelineUs.coerceIn(0L, project.durationUs.coerceAtLeast(0L))
