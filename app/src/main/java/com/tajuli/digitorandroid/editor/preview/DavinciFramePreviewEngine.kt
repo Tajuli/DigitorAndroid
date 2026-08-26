@@ -16,6 +16,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.MultipleInputVideoGraph
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.transformer.CompositionPlayer
+import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
@@ -46,13 +47,10 @@ import kotlinx.coroutines.withContext
 /**
  * Resolve-style playhead preview backed by MediaCodec + Media3 OpenGL.
  *
- * Normal preview is zero-readback: the final GPU-composited frame is rendered directly into the
- * viewer SurfaceView. There is no ImageReader, RGBA copy, Bitmap upload, or Compose texture upload
- * in the healthy path. This matches the export architecture much more closely and is especially
- * important on low-end devices where GPU->CPU readback can take longer than a frame interval.
- *
- * UI playhead requests are clock hints. During normal forward playback the prepared player runs
- * continuously; only real scrubs/jumps seek. A CPU bitmap renderer remains as device-safety fallback.
+ * Healthy preview is zero-readback: the final GPU-composited frame is rendered directly into the
+ * viewer SurfaceView. The decoder/GL graph is kept alive across common visual edits; transform,
+ * opacity and color read the latest immutable project snapshot instead of forcing setComposition.
+ * Only media/timeline/node topology changes rebuild the graph.
  */
 @UnstableApi
 class DavinciFramePreviewEngine(
@@ -96,7 +94,7 @@ class DavinciFramePreviewEngine(
     // Player-thread-only state.
     private var player: CompositionPlayer? = null
     private var previewSurface: Surface? = null
-    private var loadedProject: TimelineProject? = null
+    private var loadedGraphKey: PreviewGraphKey? = null
     private var loadedOutputSize: Pair<Int, Int>? = null
     private var lastHandledTimelineUs = -1L
     private var lastHandledNs = 0L
@@ -145,8 +143,6 @@ class DavinciFramePreviewEngine(
                         maxLongEdge = min(maxPreviewLongEdge, FALLBACK_LONG_EDGE),
                     )
                 }
-                // Channel.CONFLATED already prevents an unbounded queue. Publishing completed work
-                // is better than discarding every frame when a slow device receives 30 cursor ticks/s.
                 mutableFrame.value = Frame(
                     bitmap = rendered.bitmap,
                     timelineUs = request.timelineUs,
@@ -157,7 +153,6 @@ class DavinciFramePreviewEngine(
         }
     }
 
-    /** Called by the stable SurfaceView when its display surface becomes available. */
     fun attachSurface(surface: Surface) {
         if (closed.get()) return
         playerHandler.post {
@@ -179,7 +174,6 @@ class DavinciFramePreviewEngine(
         }
     }
 
-    /** Called once when the SurfaceView surface is actually destroyed/replaced. */
     fun detachSurface(surface: Surface) {
         if (closed.get()) return
         playerHandler.post {
@@ -191,6 +185,9 @@ class DavinciFramePreviewEngine(
 
     fun submit(project: TimelineProject, timelineUs: Long) {
         if (closed.get()) return
+        // Long-lived preview effects/compositor resolve this latest snapshot by stable clip/track id.
+        PreviewProjectRegistry.update(project)
+
         val safeTimeUs = timelineUs.coerceIn(0L, project.durationUs.coerceAtLeast(0L))
         val request = Request(
             project = project,
@@ -215,10 +212,10 @@ class DavinciFramePreviewEngine(
     private fun handleGpuRequest(request: Request) {
         val targetMs = request.timelineUs / 1000L
         val outputSize = resolvePreviewOutputSize(request.project, maxPreviewLongEdge)
-        val projectChanged = loadedProject != request.project
+        val graphChanged = loadedGraphKey != previewGraphKey(request.project)
         val outputChanged = loadedOutputSize != outputSize
 
-        if (player == null || projectChanged || outputChanged) {
+        if (player == null || graphChanged || outputChanged) {
             configureGpuGraph(request, outputSize)
             lastHandledTimelineUs = request.timelineUs
             lastHandledNs = System.nanoTime()
@@ -301,7 +298,7 @@ class DavinciFramePreviewEngine(
             request.timelineUs / 1000L,
         )
         activePlayer.prepare()
-        loadedProject = request.project
+        loadedGraphKey = previewGraphKey(request.project)
         loadedOutputSize = outputSize
     }
 
@@ -316,7 +313,7 @@ class DavinciFramePreviewEngine(
         previewSurface?.let { surface -> runCatching { player?.clearVideoSurface(surface) } }
         runCatching { player?.release() }
         player = null
-        loadedProject = null
+        loadedGraphKey = null
         loadedOutputSize = null
         request?.let { fallbackRequests.trySend(it) }
     }
@@ -325,6 +322,7 @@ class DavinciFramePreviewEngine(
         if (!closed.compareAndSet(false, true)) return
         pendingGpuRequest.set(null)
         latestRequest.set(null)
+        PreviewProjectRegistry.clear()
         fallbackRequests.close()
         fallbackScope.cancel()
         softwareFallback.close()
@@ -344,6 +342,78 @@ class DavinciFramePreviewEngine(
         const val PLAYBACK_IDLE_PAUSE_MS = 220L
         const val MAX_PLAYBACK_DRIFT_US = 350_000L
     }
+}
+
+/**
+ * Things that actually require a new MediaCodec/GL graph. Visual values intentionally stay out of
+ * this key so common slider changes do not tear down decoders.
+ */
+private data class PreviewGraphKey(
+    val width: Int,
+    val height: Int,
+    val frameRate: Int,
+    val tracks: List<PreviewTrackKey>,
+)
+
+private data class PreviewTrackKey(
+    val id: String,
+    val clips: List<PreviewClipKey>,
+)
+
+private data class PreviewClipKey(
+    val id: String,
+    val uri: String,
+    val timelineStartUs: Long,
+    val sourceInUs: Long,
+    val sourceOutUs: Long,
+    val nodeTopologyHash: Int,
+    val qualifierPresenceHash: Int,
+    val spatialPipelineNeeded: Boolean,
+    val colorAnimationPresent: Boolean,
+    val spatialAnimationPresent: Boolean,
+)
+
+private fun previewGraphKey(project: TimelineProject): PreviewGraphKey {
+    val tracks = project.tracks
+        .filter { it.kind == TrackKind.VIDEO && !it.muted && it.clips.isNotEmpty() }
+        .map { track ->
+            PreviewTrackKey(
+                id = track.id,
+                clips = track.sortedClips().map { clip ->
+                    val nodes = clip.nodeGraph.nodes
+                    val topologyHash = 31 * nodes.map { it.id to it.kind }.hashCode() +
+                        clip.nodeGraph.edges.hashCode()
+                    val qualifierPresenceHash = nodes.map { node ->
+                        node.id to node.advancedColor.qualifier.enabled
+                    }.hashCode()
+                    val spatialPipelineNeeded = nodes.any { node ->
+                        node.effects.any { it.enabled && it.amount > 0f } ||
+                            clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
+                    }
+                    val spatialAnimationPresent = nodes.any { node ->
+                        clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
+                    }
+                    PreviewClipKey(
+                        id = clip.id,
+                        uri = clip.uri,
+                        timelineStartUs = clip.timelineStartUs,
+                        sourceInUs = clip.sourceInUs,
+                        sourceOutUs = clip.sourceOutUs,
+                        nodeTopologyHash = topologyHash,
+                        qualifierPresenceHash = qualifierPresenceHash,
+                        spatialPipelineNeeded = spatialPipelineNeeded,
+                        colorAnimationPresent = clip.nodeAnimations.hasColorAnimation,
+                        spatialAnimationPresent = spatialAnimationPresent,
+                    )
+                },
+            )
+        }
+    return PreviewGraphKey(
+        width = project.width,
+        height = project.height,
+        frameRate = project.frameRate,
+        tracks = tracks,
+    )
 }
 
 /** First project video track is the top track; rendering therefore runs in reverse track order. */
