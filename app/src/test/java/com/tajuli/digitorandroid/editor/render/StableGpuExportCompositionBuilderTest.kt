@@ -64,4 +64,31 @@ class StableGpuExportCompositionBuilderTest {
         assertEquals(1080, outputSize.width)
         assertEquals(1920, outputSize.height)
     }
+
+    @Test
+    fun exportKeepsTrimPointsAtMicrosecondPrecision() {
+        val clip = TimelineClip(
+            uri = "content://test/microseconds",
+            label = "microseconds",
+            timelineStartUs = 0L,
+            sourceInUs = 1_234_567L,
+            sourceOutUs = 3_456_789L,
+        )
+        val project = TimelineProject(
+            tracks = listOf(
+                TimelineTrack(
+                    name = "V1",
+                    kind = TrackKind.VIDEO,
+                    clips = listOf(clip),
+                ),
+            ),
+        )
+
+        val composition = StableGpuExportCompositionBuilder().build(project)
+        val mediaItem = composition.sequences.single().editedMediaItems.single().mediaItem
+        val clipping = mediaItem.clippingConfiguration
+
+        assertEquals(1_234_567L, clipping.startPositionUs)
+        assertEquals(3_456_789L, clipping.endPositionUs)
+    }
 }
