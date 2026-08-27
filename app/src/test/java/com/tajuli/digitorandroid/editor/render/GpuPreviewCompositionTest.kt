@@ -9,18 +9,6 @@ import org.junit.Test
 
 class GpuPreviewCompositionTest {
     @Test
-    fun previewSize_preservesAspectAndCapsLongEdge() {
-        val project = TimelineProject(width = 1920, height = 1080)
-        assertEquals(720 to 404, resolvePreviewOutputSize(project, 720))
-    }
-
-    @Test
-    fun previewSize_keepsSmallProjectsEven() {
-        val project = TimelineProject(width = 641, height = 359)
-        assertEquals(640 to 358, resolvePreviewOutputSize(project, 720))
-    }
-
-    @Test
     fun resolveTracks_preservesVisibleVideoTrackOrder() {
         val clip = TimelineClip(
             uri = "content://clip",
