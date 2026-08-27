@@ -3,26 +3,60 @@ package com.tajuli.digitorandroid.editor.preview
 import android.content.Context
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 
 /**
  * Direct display surface for the editor GPU preview.
  *
- * The Media3/OpenGL graph renders straight into this SurfaceView. There is no ImageReader,
- * GPU-to-CPU pixel copy, Bitmap upload, or Compose texture upload in the normal preview path.
+ * MediaCodec frames are composited by DigitorRenderCore/OpenGL straight into this SurfaceView.
+ * There is no ImageReader, GPU-to-CPU pixel copy, Bitmap upload, or Compose texture upload in the
+ * normal preview path.
+ *
+ * The SurfaceView itself is center-fitted to the project/canvas aspect ratio. This is essential:
+ * letting AndroidView fill an arbitrary editor panel would stretch the project frame and make clip
+ * scale/position look different from export even when the GPU render pixels were correct.
  */
 @Composable
 fun GpuPreviewSurface(
     engine: DavinciFramePreviewEngine,
     modifier: Modifier = Modifier,
 ) {
-    AndroidView(
+    val project by PreviewProjectRegistry.flow.collectAsState()
+    val projectAspect = project
+        ?.let { it.width.toFloat() / it.height.coerceAtLeast(1).toFloat() }
+        ?.takeIf { it.isFinite() && it > 0f }
+        ?: (16f / 9f)
+
+    BoxWithConstraints(
         modifier = modifier,
-        factory = { context -> DigitorPreviewSurfaceView(context, engine) },
-        update = { view -> view.bind(engine) },
-    )
+        contentAlignment = Alignment.Center,
+    ) {
+        val availableAspect = if (maxHeight.value > 0f) {
+            maxWidth.value / maxHeight.value
+        } else {
+            projectAspect
+        }
+        val fittedModifier = if (availableAspect > projectAspect) {
+            Modifier.fillMaxHeight().aspectRatio(projectAspect)
+        } else {
+            Modifier.fillMaxWidth().aspectRatio(projectAspect)
+        }
+
+        AndroidView(
+            modifier = fittedModifier,
+            factory = { context -> DigitorPreviewSurfaceView(context, engine) },
+            update = { view -> view.bind(engine) },
+        )
+    }
 }
 
 private class DigitorPreviewSurfaceView(
