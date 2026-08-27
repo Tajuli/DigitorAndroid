@@ -22,7 +22,9 @@ private val DigitorDark = darkColorScheme(
     outline = DigitorDivider,
     onBackground = Color(0xFFF4F4F5),
     onSurface = Color(0xFFF4F4F5),
-    onSurfaceVariant = Color(0xFFA7A7AE),
+    // Transport icons are explicitly tinted white in the editor; keep the fallback content color
+    // pure white as well so Material3 never dims them because of theme inheritance.
+    onSurfaceVariant = Color.White,
 )
 
 @Composable

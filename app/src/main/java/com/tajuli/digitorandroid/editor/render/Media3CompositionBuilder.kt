@@ -9,17 +9,11 @@ import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
-import com.tajuli.digitorandroid.editor.model.visibleVideoSegments
+import kotlin.math.max
+import kotlin.math.roundToInt
 
-/**
- * Coalesces adjacent clips that are still presentation-identical fragments of the same source.
- *
- * A timeline split creates exactly this shape: left.sourceOut == right.sourceIn and the copied
- * grading/transform state is identical. Keeping that artificial boundary in CompositionPlayer is
- * risky on current Media3 releases because video items with non-zero start offsets can fail during
- * preview. Animated transforms intentionally prevent coalescing once their rebased keyframes differ.
- */
 internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip> {
     if (clips.size < 2) return clips
     val sorted = clips.sortedBy { it.timelineStartUs }
@@ -33,7 +27,8 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
             previous.opacity == clip.opacity &&
             previous.colorGrade == clip.colorGrade &&
             previous.nodeGraph == clip.nodeGraph &&
-            previous.transform == clip.transform
+            previous.transform == clip.transform &&
+            previous.nodeAnimations == clip.nodeAnimations
         if (canMerge) {
             result[result.lastIndex] = previous!!.copy(sourceOutUs = clip.sourceOutUs)
         } else {
@@ -43,23 +38,68 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
     return result
 }
 
-/**
- * Builds Media3 compositions for preview and export.
- *
- * Export flattens overlapping video tracks into one topmost visible stream. This keeps Transformer
- * from decoding hidden lower videos and reduces decoder/compositor pressure on phones.
- *
- * The current editor uses a single-clip ExoPlayer for video preview. CompositionPlayer is retained
- * only for audio preview, where independent A tracks are mixed without creating multiple video
- * decoders/compositors. [buildPreview] remains available for compatibility, while
- * [buildAudioPreview] is the stable editor playback path.
- */
+internal fun resolvePreviewOutputSize(
+    project: TimelineProject,
+    maxLongEdge: Int,
+): Pair<Int, Int> {
+    val sourceWidth = project.width.coerceAtLeast(2)
+    val sourceHeight = project.height.coerceAtLeast(2)
+    val limit = maxLongEdge.coerceAtLeast(2)
+    val longest = max(sourceWidth, sourceHeight)
+    if (longest <= limit) return sourceWidth.evenAtLeastTwo() to sourceHeight.evenAtLeastTwo()
+
+    val scale = limit.toFloat() / longest.toFloat()
+    val width = (sourceWidth * scale).roundToInt().evenAtLeastTwo()
+    val height = (sourceHeight * scale).roundToInt().evenAtLeastTwo()
+    return width to height
+}
+
+private fun Int.evenAtLeastTwo(): Int {
+    val safe = coerceAtLeast(2)
+    return if (safe % 2 == 0) safe else (safe - 1).coerceAtLeast(2)
+}
+
 @UnstableApi
 class Media3CompositionBuilder {
     fun build(project: TimelineProject): Composition = buildExport(project)
 
     fun buildPreview(project: TimelineProject): Composition = buildPreviewInternal(project)
 
+    /**
+     * Video-only real-time preview composition. The decoder/GL graph is long-lived; transform,
+     * opacity and color state can resolve newer immutable editor snapshots without rebuilding it.
+     */
+    fun buildGpuPreview(
+        project: TimelineProject,
+        maxLongEdge: Int = 720,
+    ): Composition {
+        val problems = project.validate()
+        require(problems.isEmpty()) { problems.joinToString("; ") }
+
+        val videoTracks = resolveCompositionVideoTracks(project)
+        require(videoTracks.isNotEmpty()) { "Timeline has no playable video" }
+        val sequences = videoTracks.map { track ->
+            buildCompositedVideoSequence(
+                project = project,
+                track = track,
+                forPreview = true,
+            )
+        }
+        val (outputWidth, outputHeight) = resolvePreviewOutputSize(project, maxLongEdge)
+        return Composition.Builder(sequences)
+            .setVideoCompositorSettings(
+                ResolveVideoCompositorSettings(
+                    outputWidth = outputWidth,
+                    outputHeight = outputHeight,
+                    videoTracks = videoTracks,
+                    livePreview = true,
+                ),
+            )
+            .build()
+    }
+
+    /** Legacy mixed-audio composition retained for export/tests. Realtime multitrack preview uses
+     * [buildAudioTrackPreview] so CompositionPlayer only has to play one sequence per instance. */
     fun buildAudioPreview(project: TimelineProject): Composition {
         val problems = project.validate()
         require(problems.isEmpty()) { problems.joinToString("; ") }
@@ -70,32 +110,86 @@ class Media3CompositionBuilder {
         return Composition.Builder(sequences).build()
     }
 
+    /**
+     * Builds exactly one audio sequence for one A track. This is the realtime-preview primitive:
+     * every A track gets its own audio-only CompositionPlayer and Android mixes their outputs.
+     * A trailing silent gap extends every player to project duration so the chosen master clock
+     * cannot stop just because its last clip ends before another audio/video track.
+     */
+    fun buildAudioTrackPreview(project: TimelineProject, trackId: String): Composition {
+        val problems = project.validate()
+        require(problems.isEmpty()) { problems.joinToString("; ") }
+
+        val track = project.tracks.firstOrNull { candidate ->
+            candidate.id == trackId &&
+                candidate.kind == TrackKind.AUDIO &&
+                !candidate.muted &&
+                candidate.clips.isNotEmpty()
+        } ?: error("Audio preview track is missing, muted, or empty")
+
+        val sequence = buildAudioSequence(
+            project = project,
+            track = track,
+            forPreview = true,
+            extendToProjectDuration = true,
+        )
+        return Composition.Builder(listOf(sequence)).build()
+    }
+
     private fun buildExport(project: TimelineProject): Composition {
         val problems = project.validate()
         require(problems.isEmpty()) { problems.joinToString("; ") }
 
         val sequences = mutableListOf<EditedMediaItemSequence>()
+        val videoTracks = resolveCompositionVideoTracks(project)
 
-        // Export only the video that is actually visible. Hidden lower tracks are trimmed out.
-        val visibleVideo = project.visibleVideoSegments()
-        if (visibleVideo.isNotEmpty()) {
-            val videoBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
-            var cursorUs = 0L
-            visibleVideo.forEach { segment ->
-                if (segment.timelineStartUs > cursorUs) {
-                    videoBuilder.addGap(segment.timelineStartUs - cursorUs)
-                }
-                val fragment = segment.asTimelineClip()
-                videoBuilder.addItem(toEditedMediaItem(fragment, TrackKind.VIDEO, forPreview = false))
-                cursorUs = segment.timelineEndUs
-            }
-            sequences += videoBuilder.build()
+        videoTracks.forEach { track ->
+            sequences += buildCompositedVideoSequence(project, track, forPreview = false)
         }
-
         addAudioSequences(project, sequences, forPreview = false)
 
         require(sequences.isNotEmpty()) { "Timeline is empty" }
-        return Composition.Builder(sequences).build()
+        val builder = Composition.Builder(sequences)
+        if (videoTracks.isNotEmpty()) {
+            builder.setVideoCompositorSettings(
+                ResolveVideoCompositorSettings(
+                    outputWidth = project.width,
+                    outputHeight = project.height,
+                    videoTracks = videoTracks,
+                ),
+            )
+        }
+        return builder.build()
+    }
+
+    private fun buildCompositedVideoSequence(
+        project: TimelineProject,
+        track: TimelineTrack,
+        forPreview: Boolean,
+    ): EditedMediaItemSequence {
+        val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
+        var cursorUs = 0L
+        // Coalescing must only happen when presentation state is identical. This is fine at graph
+        // construction time; later visual slider changes are read live by preview effects/compositor.
+        val clips = if (forPreview) coalescePreviewClips(track.clips) else track.sortedClips()
+        clips.forEach { clip ->
+            if (clip.timelineStartUs > cursorUs) {
+                builder.addGap(clip.timelineStartUs - cursorUs)
+            }
+            builder.addItem(
+                toEditedMediaItem(
+                    clip = clip,
+                    kind = TrackKind.VIDEO,
+                    forPreview = forPreview,
+                    compositorOwnsGeometry = true,
+                ),
+            )
+            cursorUs = clip.timelineEndUs
+        }
+        if (project.durationUs > cursorUs) {
+            builder.addGap(project.durationUs - cursorUs)
+        }
+        return builder.build()
     }
 
     private fun buildPreviewInternal(project: TimelineProject): Composition {
@@ -103,8 +197,6 @@ class Media3CompositionBuilder {
         require(problems.isEmpty()) { problems.joinToString("; ") }
 
         val sequences = mutableListOf<EditedMediaItemSequence>()
-
-        // Compatibility multitrack preview path. The editor itself no longer uses this for video.
         project.tracks
             .filter { it.kind == TrackKind.VIDEO && !it.muted && it.clips.isNotEmpty() }
             .forEach { track ->
@@ -134,28 +226,46 @@ class Media3CompositionBuilder {
         project.tracks
             .filter { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
             .forEach { track ->
-                val audioBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
-                var cursorUs = 0L
-                val clips = if (forPreview) coalescePreviewClips(track.clips) else track.sortedClips()
-                clips.forEach { clip ->
-                    if (clip.timelineStartUs > cursorUs) {
-                        audioBuilder.addGap(clip.timelineStartUs - cursorUs)
-                    }
-                    audioBuilder.addItem(toEditedMediaItem(clip, TrackKind.AUDIO, forPreview))
-                    cursorUs = clip.timelineEndUs
-                }
-                sequences += audioBuilder.build()
+                sequences += buildAudioSequence(
+                    project = project,
+                    track = track,
+                    forPreview = forPreview,
+                    extendToProjectDuration = false,
+                )
             }
+    }
+
+    private fun buildAudioSequence(
+        project: TimelineProject,
+        track: TimelineTrack,
+        forPreview: Boolean,
+        extendToProjectDuration: Boolean,
+    ): EditedMediaItemSequence {
+        val audioBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
+        var cursorUs = 0L
+        val clips = if (forPreview) coalescePreviewClips(track.clips) else track.sortedClips()
+        clips.forEach { clip ->
+            if (clip.timelineStartUs > cursorUs) {
+                audioBuilder.addGap(clip.timelineStartUs - cursorUs)
+            }
+            audioBuilder.addItem(toEditedMediaItem(clip, TrackKind.AUDIO, forPreview))
+            cursorUs = clip.timelineEndUs
+        }
+        if (extendToProjectDuration && project.durationUs > cursorUs) {
+            audioBuilder.addGap(project.durationUs - cursorUs)
+        }
+        return audioBuilder.build()
     }
 
     private fun toEditedMediaItem(
         clip: TimelineClip,
         kind: TrackKind,
         forPreview: Boolean,
+        compositorOwnsGeometry: Boolean = false,
     ): EditedMediaItem {
         val clipping = MediaItem.ClippingConfiguration.Builder()
-            .setStartPositionMs(clip.sourceInUs / 1000L)
-            .setEndPositionMs(clip.sourceOutUs / 1000L)
+            .setStartPositionUs(clip.sourceInUs)
+            .setEndPositionUs(clip.sourceOutUs)
             .build()
         val mediaItem = MediaItem.Builder()
             .setUri(clip.uri)
@@ -165,10 +275,11 @@ class Media3CompositionBuilder {
         val builder = EditedMediaItem.Builder(mediaItem)
             .setDurationUs(clip.durationUs)
         if (kind == TrackKind.VIDEO) {
-            val videoEffects = if (forPreview) {
-                SharedVideoPipeline.previewEffectsFor(clip)
-            } else {
-                SharedVideoPipeline.effectsFor(clip)
+            val videoEffects = when {
+                forPreview && compositorOwnsGeometry -> SharedVideoPipeline.compositedPreviewEffectsFor(clip)
+                forPreview -> SharedVideoPipeline.previewEffectsFor(clip)
+                compositorOwnsGeometry -> SharedVideoPipeline.compositedExportEffectsFor(clip)
+                else -> SharedVideoPipeline.effectsFor(clip)
             }
             builder.setEffects(Effects(emptyList(), videoEffects))
         }
