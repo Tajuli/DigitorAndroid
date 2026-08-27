@@ -10,8 +10,11 @@ import androidx.media3.transformer.ExportResult as Media3ExportResult
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
+import com.tajuli.digitorandroid.editor.render.StableGpuExportCompositionBuilder
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -19,40 +22,49 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 @UnstableApi
 class GpuExportBackend(
     private val context: Context,
-    private val compositionBuilder: com.tajuli.digitorandroid.editor.render.Media3CompositionBuilder = com.tajuli.digitorandroid.editor.render.Media3CompositionBuilder(),
+    private val compositionBuilder: StableGpuExportCompositionBuilder = StableGpuExportCompositionBuilder(),
 ) : ExportBackend {
     override suspend fun export(
         project: TimelineProject,
         output: File,
         onProgress: (ExportProgress) -> Unit,
     ): ExportResult = suspendCancellableCoroutine { continuation ->
-        // Realtime preview and export both use full-resolution MediaCodec + OpenGL resources. Many
-        // Android devices cannot keep both graphs alive simultaneously; native codec/driver failure
-        // can kill the process before Media3 can deliver an ExportException. Acquire an exclusive
-        // export lease first, which synchronously releases preview decoders/GL and restores them when
-        // this export finishes, fails, or is cancelled.
         onProgress(ExportProgress.Stage("GPU: releasing preview resources", 0.01f))
-        val previewLease = PreviewExportCoordinator.acquireExportLease()
+        val previewLease = runCatching { PreviewExportCoordinator.acquireExportLease() }
+            .getOrElse { error ->
+                if (continuation.isActive) continuation.resumeWithException(error)
+                return@suspendCancellableCoroutine
+            }
 
-        onProgress(ExportProgress.Stage("GPU: building multitrack composition", 0.02f))
+        val videoTrackCount = project.tracks.count { track ->
+            track.kind == TrackKind.VIDEO && !track.muted && track.clips.isNotEmpty()
+        }
+        val compositionStage = if (videoTrackCount == 1) {
+            "GPU: building stable single-layer export"
+        } else {
+            "GPU: building multitrack composition"
+        }
+        onProgress(ExportProgress.Stage(compositionStage, 0.02f))
+
         val composition = runCatching { compositionBuilder.build(project) }
             .getOrElse { error ->
                 previewLease.close()
                 if (continuation.isActive) continuation.resumeWithException(error)
                 return@suspendCancellableCoroutine
             }
+
         output.parentFile?.mkdirs()
         if (output.exists()) output.delete()
 
         var progressHandler: Handler? = null
         var progressRunnable: Runnable? = null
+        var startRunnable: Runnable? = null
+        val transformerStarted = AtomicBoolean(false)
 
-        fun stopProgressPolling() {
-            val handler = progressHandler
-            val runnable = progressRunnable
-            if (handler != null && runnable != null) {
-                handler.removeCallbacks(runnable)
-            }
+        fun stopCallbacks() {
+            val handler = progressHandler ?: return
+            progressRunnable?.let(handler::removeCallbacks)
+            startRunnable?.let(handler::removeCallbacks)
         }
 
         fun restorePreview() {
@@ -65,7 +77,7 @@ class GpuExportBackend(
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
                 .addListener(object : Transformer.Listener {
                     override fun onCompleted(composition: Composition, exportResult: Media3ExportResult) {
-                        stopProgressPolling()
+                        stopCallbacks()
                         restorePreview()
                         if (continuation.isActive) {
                             onProgress(ExportProgress.Stage("GPU: complete", 1f))
@@ -84,7 +96,7 @@ class GpuExportBackend(
                         exportResult: Media3ExportResult,
                         exportException: ExportException,
                     ) {
-                        stopProgressPolling()
+                        stopCallbacks()
                         restorePreview()
                         if (continuation.isActive) continuation.resumeWithException(exportException)
                     }
@@ -101,7 +113,7 @@ class GpuExportBackend(
         val progressHolder = ProgressHolder()
         val runnable = object : Runnable {
             override fun run() {
-                if (!continuation.isActive) return
+                if (!continuation.isActive || !transformerStarted.get()) return
                 val state = runCatching { transformer.getProgress(progressHolder) }
                     .getOrElse { Transformer.PROGRESS_STATE_UNAVAILABLE }
                 when (state) {
@@ -125,20 +137,38 @@ class GpuExportBackend(
         }
         progressRunnable = runnable
 
+        val starter = Runnable {
+            if (!continuation.isActive) {
+                restorePreview()
+                return@Runnable
+            }
+            onProgress(ExportProgress.Stage("GPU: MediaCodec + OpenGL export", 0.05f))
+            runCatching {
+                transformer.start(composition, output.absolutePath)
+                transformerStarted.set(true)
+                handler.post(runnable)
+            }.onFailure { error ->
+                stopCallbacks()
+                restorePreview()
+                if (continuation.isActive) continuation.resumeWithException(error)
+            }
+        }
+        startRunnable = starter
+
         continuation.invokeOnCancellation {
-            stopProgressPolling()
+            stopCallbacks()
             restorePreview()
-            handler.post { runCatching { transformer.cancel() } }
+            if (transformerStarted.get()) handler.post { runCatching { transformer.cancel() } }
         }
 
-        onProgress(ExportProgress.Stage("GPU: MediaCodec + OpenGL export", 0.05f))
-        runCatching {
-            transformer.start(composition, output.absolutePath)
-            handler.post(runnable)
-        }.onFailure { error ->
-            stopProgressPolling()
-            restorePreview()
-            if (continuation.isActive) continuation.resumeWithException(error)
-        }
+        // Some Android codec stacks release native decoder/GL resources asynchronously even after
+        // MediaCodec.stop/release returns. Give Codec2/SurfaceFlinger a short quiescent window before
+        // opening the export decoder + encoder pair.
+        onProgress(ExportProgress.Stage("GPU: waiting for codec release", 0.03f))
+        handler.postDelayed(starter, EXPORT_START_GRACE_MS)
+    }
+
+    private companion object {
+        const val EXPORT_START_GRACE_MS = 350L
     }
 }
