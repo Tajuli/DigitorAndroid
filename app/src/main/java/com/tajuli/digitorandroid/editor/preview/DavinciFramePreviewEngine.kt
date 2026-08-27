@@ -2,60 +2,50 @@ package com.tajuli.digitorandroid.editor.preview
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.media.MediaMetadataRetriever
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.net.Uri
-import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.Log
 import android.view.Surface
+import androidx.media3.common.ColorInfo
 import androidx.media3.common.Format
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.MultipleInputVideoGraph
-import androidx.media3.exoplayer.video.VideoFrameMetadataListener
-import androidx.media3.transformer.CompositionPlayer
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
-import com.tajuli.digitorandroid.editor.processing.CpuColorProcessor
-import com.tajuli.digitorandroid.editor.processing.CpuNodeEffectsProcessor
-import com.tajuli.digitorandroid.editor.processing.CpuTransformProcessor
-import com.tajuli.digitorandroid.editor.render.Media3CompositionBuilder
-import com.tajuli.digitorandroid.editor.render.resolvePreviewOutputSize
+import com.tajuli.digitorandroid.editor.render.DigitorRenderCore
 import java.io.Closeable
-import java.util.concurrent.Callable
-import java.util.concurrent.Executors
+import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
-import kotlin.math.min
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
- * Resolve-style playhead preview backed by MediaCodec + Media3 OpenGL.
+ * Resolve-style playhead preview with custom Android transport and one shared GPU render core.
  *
- * Healthy preview is zero-readback: the final GPU-composited frame is rendered directly into the
- * viewer SurfaceView. The decoder/GL graph is kept alive across common visual edits; transform,
- * opacity and color read the latest immutable project snapshot instead of forcing setComposition.
- * Only media/timeline/node topology changes rebuild the graph.
+ * MediaExtractor + MediaCodec own decode/play/scrub. Decoded frames go directly to
+ * [DigitorRenderCore] input Surfaces, then through the same color/spatial/compositor code used by
+ * export and straight into the viewer SurfaceView. CompositionPlayer is intentionally not involved
+ * in video preview scheduling anymore.
+ *
+ * There is no ImageReader, Bitmap readback, Compose texture upload or per-tick player seek in the
+ * healthy path. [maxPreviewLongEdge] is retained for source compatibility with older callers but is
+ * intentionally ignored: exact preview renders at project resolution so the render stages match
+ * export pixel geometry.
  */
 @UnstableApi
 class DavinciFramePreviewEngine(
     context: Context,
-    private val maxPreviewLongEdge: Int = 720,
+    @Suppress("UNUSED_PARAMETER") maxPreviewLongEdge: Int = 720,
 ) : Closeable {
 
     data class Frame(
@@ -68,355 +58,585 @@ class DavinciFramePreviewEngine(
     private data class Request(
         val project: TimelineProject,
         val timelineUs: Long,
+        val isPlaying: Boolean,
         val revision: Long,
         val startedNs: Long = System.nanoTime(),
     )
 
+    private data class ActiveLayer(
+        val track: TimelineTrack,
+        val clip: TimelineClip,
+    )
+
+    private data class SessionKey(
+        val width: Int,
+        val height: Int,
+        val frameRate: Int,
+        val layers: List<LayerKey>,
+    )
+
+    private data class LayerKey(
+        val trackId: String,
+        val clipId: String,
+        val uri: String,
+        val timelineStartUs: Long,
+        val sourceInUs: Long,
+        val sourceOutUs: Long,
+        val staticSpatialHash: Int,
+    )
+
+    private data class PreparedLayer(
+        val layer: ActiveLayer,
+        val extractor: MediaExtractor,
+        val platformFormat: MediaFormat,
+        val media3Format: Format,
+        val mime: String,
+    )
+
+    private data class HeldOutput(
+        val index: Int,
+        val presentationTimeUs: Long,
+        val flags: Int,
+    )
+
+    private data class AroundTarget(
+        val atOrBefore: HeldOutput?,
+        val after: HeldOutput?,
+    )
+
     private val appContext = context.applicationContext
-    private val compositionBuilder = Media3CompositionBuilder()
-    private val revision = AtomicLong(0L)
-    private val latestRequest = AtomicReference<Request?>(null)
-    private val pendingGpuRequest = AtomicReference<Request?>(null)
-    private val mutableFrame = MutableStateFlow<Frame?>(null)
     private val closed = AtomicBoolean(false)
-    private val lastSubmitNs = AtomicLong(0L)
+    private val revision = AtomicLong(0L)
+    private val pendingRequest = AtomicReference<Request?>(null)
+    private val mutableFrame = MutableStateFlow<Frame?>(null)
 
-    private val playerThread = HandlerThread("DigitorGpuPreviewPlayer").apply { start() }
-    private val playerHandler = Handler(playerThread.looper)
+    private val renderThread = HandlerThread("DigitorMediaCodecPreview").apply { start() }
+    private val handler = Handler(renderThread.looper)
+    private val renderExecutor = Executor { runnable -> handler.post(runnable) }
 
-    private val fallbackScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val fallbackRequests = Channel<Request>(Channel.CONFLATED)
-    private val softwareFallback = SoftwarePreviewTimelineCompositor(appContext)
-
-    @Volatile
-    private var gpuDisabled = false
-
-    // Player-thread-only state.
-    private var player: CompositionPlayer? = null
+    // Render-thread-only state.
     private var previewSurface: Surface? = null
-    private var loadedGraphKey: PreviewGraphKey? = null
-    private var loadedOutputSize: Pair<Int, Int>? = null
-    private var lastHandledTimelineUs = -1L
-    private var lastHandledNs = 0L
-    private var continuousPlayback = false
+    private var session: PreviewSession? = null
+    private var sessionGeneration = 0L
+    private var playing = false
+    private var playAnchorTimelineUs = 0L
+    private var playAnchorNs = 0L
+    private var lastRequestedTimelineUs = Long.MIN_VALUE
+    private var lastProjectRef: TimelineProject? = null
+    private var latestRequestStartedNs = 0L
 
     val frame: StateFlow<Frame?> = mutableFrame.asStateFlow()
 
-    private val gpuDrain = object : Runnable {
+    private val requestDrain = object : Runnable {
         override fun run() {
             if (closed.get()) return
-            val request = pendingGpuRequest.getAndSet(null) ?: return
-            if (gpuDisabled) {
-                fallbackRequests.trySend(request)
-            } else {
-                runCatching { handleGpuRequest(request) }
-                    .onFailure { disableGpuAndFallback(it, request) }
-            }
-            if (pendingGpuRequest.get() != null && !closed.get()) {
-                playerHandler.post(this)
-            }
+            val request = pendingRequest.getAndSet(null) ?: return
+            runCatching { handleRequest(request) }
+                .onFailure { failPreview("request", it) }
+            if (pendingRequest.get() != null && !closed.get()) handler.post(this)
         }
     }
 
-    private val pauseWhenCursorStops = object : Runnable {
+    private val playbackPump = object : Runnable {
         override fun run() {
-            if (closed.get() || gpuDisabled) return
-            val idleMs = (System.nanoTime() - lastSubmitNs.get()) / 1_000_000L
-            if (idleMs >= PLAYBACK_IDLE_PAUSE_MS) {
-                val activePlayer = player ?: return
-                if (activePlayer.isPlaying) activePlayer.pause()
-                continuousPlayback = false
-                activePlayer.setScrubbingModeEnabled(true)
-            } else {
-                playerHandler.postDelayed(this, PLAYBACK_IDLE_PAUSE_MS - idleMs)
+            if (closed.get() || !playing) return
+            val active = session ?: return
+            runCatching {
+                active.pumpPlayback(currentPlaybackTimelineUs())
+            }.onFailure {
+                failPreview("playback", it)
+                return
             }
-        }
-    }
-
-    init {
-        fallbackScope.launch {
-            for (request in fallbackRequests) {
-                val rendered = withContext(Dispatchers.Default) {
-                    softwareFallback.render(
-                        project = request.project,
-                        timeUs = request.timelineUs,
-                        maxLongEdge = min(maxPreviewLongEdge, FALLBACK_LONG_EDGE),
-                    )
-                }
-                mutableFrame.value = Frame(
-                    bitmap = rendered.bitmap,
-                    timelineUs = request.timelineUs,
-                    activeLayerCount = rendered.layerCount,
-                    renderTimeMs = (System.nanoTime() - request.startedNs) / 1_000_000L,
-                )
-            }
+            if (playing && !closed.get()) handler.postDelayed(this, PLAYBACK_PUMP_MS)
         }
     }
 
     fun attachSurface(surface: Surface) {
         if (closed.get()) return
-        playerHandler.post {
-            if (closed.get() || gpuDisabled) return@post
+        handler.post {
+            if (closed.get()) return@post
             if (previewSurface === surface) return@post
-            previewSurface?.let { old -> runCatching { player?.clearVideoSurface(old) } }
-            previewSurface = surface
-            val activePlayer = player
-            val size = loadedOutputSize
-            if (activePlayer != null && size != null && surface.isValid) {
-                activePlayer.setVideoSurface(surface, Size(size.first, size.second))
-                latestRequest.get()?.let { request ->
-                    if (!activePlayer.isPlaying) {
-                        activePlayer.setScrubbingModeEnabled(true)
-                        activePlayer.seekTo(request.timelineUs / 1000L)
-                    }
-                }
-            }
+            previewSurface = surface.takeIf { it.isValid }
+            session?.core?.setOutputSurface(previewSurface)
         }
     }
 
     fun detachSurface(surface: Surface) {
         if (closed.get()) return
-        playerHandler.post {
+        handler.post {
             if (previewSurface !== surface) return@post
-            runCatching { player?.clearVideoSurface(surface) }
             previewSurface = null
+            session?.core?.setOutputSurface(null)
         }
     }
 
-    fun submit(project: TimelineProject, timelineUs: Long) {
+    /**
+     * Submit an editor clock sample. [isPlaying] is explicit so playback is never inferred from
+     * delayed cursor deltas and accidentally treated as a scrub.
+     */
+    fun submit(project: TimelineProject, timelineUs: Long, isPlaying: Boolean = false) {
         if (closed.get()) return
-        // Long-lived preview effects/compositor resolve this latest snapshot by stable clip/track id.
         PreviewProjectRegistry.update(project)
-
-        val safeTimeUs = timelineUs.coerceIn(0L, project.durationUs.coerceAtLeast(0L))
         val request = Request(
             project = project,
-            timelineUs = safeTimeUs,
+            timelineUs = timelineUs.coerceIn(0L, project.durationUs.coerceAtLeast(0L)),
+            isPlaying = isPlaying,
             revision = revision.incrementAndGet(),
         )
-        latestRequest.set(request)
-        lastSubmitNs.set(System.nanoTime())
-
-        if (gpuDisabled) {
-            fallbackRequests.trySend(request)
-            return
-        }
-
-        pendingGpuRequest.set(request)
-        playerHandler.removeCallbacks(gpuDrain)
-        playerHandler.post(gpuDrain)
-        playerHandler.removeCallbacks(pauseWhenCursorStops)
-        playerHandler.postDelayed(pauseWhenCursorStops, PLAYBACK_IDLE_PAUSE_MS)
+        pendingRequest.set(request)
+        handler.removeCallbacks(requestDrain)
+        handler.post(requestDrain)
     }
 
-    private fun handleGpuRequest(request: Request) {
-        val targetMs = request.timelineUs / 1000L
-        val outputSize = resolvePreviewOutputSize(request.project, maxPreviewLongEdge)
-        val graphChanged = loadedGraphKey != previewGraphKey(request.project)
-        val outputChanged = loadedOutputSize != outputSize
-
-        if (player == null || graphChanged || outputChanged) {
-            configureGpuGraph(request, outputSize)
-            lastHandledTimelineUs = request.timelineUs
-            lastHandledNs = System.nanoTime()
-            continuousPlayback = false
+    private fun handleRequest(request: Request) {
+        latestRequestStartedNs = request.startedNs
+        val layers = activeLayerSpecsAt(request.project, request.timelineUs)
+        if (layers.isEmpty()) {
+            stopPlayback()
+            replaceSession(null)
+            lastRequestedTimelineUs = request.timelineUs
+            lastProjectRef = request.project
             return
         }
 
-        val activePlayer = checkNotNull(player)
-        val nowNs = System.nanoTime()
-        val wallDeltaUs = if (lastHandledNs == 0L) Long.MAX_VALUE else (nowNs - lastHandledNs) / 1_000L
-        val timelineDeltaUs = request.timelineUs - lastHandledTimelineUs
+        val wantedKey = sessionKey(request.project, layers)
+        val sessionChanged = session?.key != wantedKey
+        if (sessionChanged) {
+            replaceSession(buildSession(request.project, layers, wantedKey))
+        }
+        val active = session ?: return
 
-        val forwardClockLike = wallDeltaUs in 5_000L..1_500_000L &&
-            timelineDeltaUs > 0L &&
-            timelineDeltaUs <= 1_500_000L &&
-            timelineDeltaUs >= wallDeltaUs / 4L &&
-            timelineDeltaUs <= wallDeltaUs * 4L
+        val timelineChanged = request.timelineUs != lastRequestedTimelineUs
+        val projectChanged = lastProjectRef !== request.project
 
-        val keepContinuous = continuousPlayback &&
-            timelineDeltaUs > 0L &&
-            timelineDeltaUs <= 1_500_000L
-
-        if (forwardClockLike || keepContinuous) {
-            continuousPlayback = true
-            activePlayer.setScrubbingModeEnabled(false)
-            val playerUs = activePlayer.currentPosition.coerceAtLeast(0L) * 1000L
-            if (abs(playerUs - request.timelineUs) > MAX_PLAYBACK_DRIFT_US) {
-                activePlayer.seekTo(targetMs)
+        if (request.isPlaying) {
+            val wasPlaying = playing
+            val transportDriftUs = if (wasPlaying) {
+                abs(currentPlaybackTimelineUs() - request.timelineUs)
+            } else {
+                Long.MAX_VALUE
             }
-            if (!activePlayer.isPlaying) activePlayer.play()
+
+            // UI/audio clock is authoritative. Re-anchor pacing on every sample without seeking.
+            playAnchorTimelineUs = request.timelineUs
+            playAnchorNs = System.nanoTime()
+
+            if (!wasPlaying || sessionChanged || transportDriftUs > HARD_RESYNC_US) {
+                active.resetForPlayback(request.timelineUs)
+            }
+            playing = true
+            handler.removeCallbacks(playbackPump)
+            handler.post(playbackPump)
         } else {
-            continuousPlayback = false
-            activePlayer.pause()
-            activePlayer.setScrubbingModeEnabled(true)
-            activePlayer.seekTo(targetMs)
+            val wasPlaying = playing
+            stopPlayback()
+            when {
+                sessionChanged || wasPlaying || timelineChanged -> active.seekAndRender(request.timelineUs)
+                projectChanged -> active.core.redraw()
+            }
         }
 
-        lastHandledTimelineUs = request.timelineUs
-        lastHandledNs = nowNs
+        lastRequestedTimelineUs = request.timelineUs
+        lastProjectRef = request.project
     }
 
-    private fun configureGpuGraph(request: Request, outputSize: Pair<Int, Int>) {
-        val (width, height) = outputSize
-        val activePlayer = player ?: CompositionPlayer.Builder(appContext)
-            .setLooper(playerThread.looper)
-            .setVideoGraphFactory(MultipleInputVideoGraph.Factory())
-            .build()
-            .also { created ->
-                created.addListener(object : Player.Listener {
-                    override fun onPlayerError(error: PlaybackException) {
-                        disableGpuAndFallback(error, latestRequest.get())
-                    }
-                })
-                created.setVideoFrameMetadataListener(
-                    VideoFrameMetadataListener { presentationTimeUs, _, _: Format, _ ->
-                        val requestAtRender = latestRequest.get() ?: return@VideoFrameMetadataListener
+    private fun currentPlaybackTimelineUs(): Long {
+        if (playAnchorNs == 0L) return playAnchorTimelineUs
+        return playAnchorTimelineUs + (System.nanoTime() - playAnchorNs) / 1_000L
+    }
+
+    private fun stopPlayback() {
+        playing = false
+        handler.removeCallbacks(playbackPump)
+    }
+
+    private fun buildSession(
+        project: TimelineProject,
+        layers: List<ActiveLayer>,
+        key: SessionKey,
+    ): PreviewSession {
+        val prepared = mutableListOf<PreparedLayer>()
+        var core: DigitorRenderCore? = null
+        try {
+            layers.forEach { layer -> prepared += prepareLayer(layer) }
+            val generation = ++sessionGeneration
+            core = DigitorRenderCore(
+                context = appContext,
+                project = project,
+                layers = prepared.map { item ->
+                    DigitorRenderCore.Layer(
+                        track = item.layer.track,
+                        clip = item.layer.clip,
+                        format = item.media3Format,
+                    )
+                },
+                listenerExecutor = renderExecutor,
+                listener = object : DigitorRenderCore.Listener {
+                    override fun onFrameRendered(timelineUs: Long) {
+                        if (session?.generation != generation) return
                         mutableFrame.value = Frame(
                             bitmap = null,
-                            timelineUs = presentationTimeUs,
-                            activeLayerCount = activeVideoLayersAt(
-                                requestAtRender.project,
-                                presentationTimeUs,
-                            ).size,
-                            renderTimeMs = ((System.nanoTime() - requestAtRender.startedNs) / 1_000_000L)
+                            timelineUs = timelineUs,
+                            activeLayerCount = session?.sources?.size ?: layers.size,
+                            renderTimeMs = ((System.nanoTime() - latestRequestStartedNs) / 1_000_000L)
                                 .coerceAtLeast(0L),
                         )
-                    },
-                )
-                player = created
-            }
+                    }
 
-        activePlayer.pause()
-        activePlayer.stop()
-        previewSurface?.takeIf { it.isValid }?.let { surface ->
-            activePlayer.setVideoSurface(surface, Size(width, height))
+                    override fun onError(error: Throwable) {
+                        if (session?.generation == generation) failPreview("render core", error)
+                    }
+                },
+            )
+            previewSurface?.takeIf { it.isValid }?.let(core::setOutputSurface)
+
+            val sources = prepared.mapIndexed { index, item ->
+                val codec = MediaCodec.createDecoderByType(item.mime)
+                try {
+                    codec.configure(item.platformFormat, core.inputSurface(index), null, 0)
+                    codec.start()
+                } catch (error: Throwable) {
+                    runCatching { codec.release() }
+                    throw error
+                }
+                DecoderSource(
+                    inputIndex = index,
+                    clip = item.layer.clip,
+                    extractor = item.extractor,
+                    codec = codec,
+                )
+            }
+            return PreviewSession(
+                generation = generation,
+                key = key,
+                core = core,
+                sources = sources,
+            )
+        } catch (error: Throwable) {
+            prepared.forEach { item -> runCatching { item.extractor.release() } }
+            runCatching { core?.close() }
+            throw error
         }
-        activePlayer.setScrubbingModeEnabled(true)
-        activePlayer.setComposition(
-            compositionBuilder.buildGpuPreview(request.project, maxPreviewLongEdge),
-            request.timelineUs / 1000L,
-        )
-        activePlayer.prepare()
-        loadedGraphKey = previewGraphKey(request.project)
-        loadedOutputSize = outputSize
     }
 
-    private fun disableGpuAndFallback(error: Throwable, request: Request?) {
-        if (gpuDisabled) {
-            request?.let { fallbackRequests.trySend(it) }
-            return
+    private fun prepareLayer(layer: ActiveLayer): PreparedLayer {
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(appContext, Uri.parse(layer.clip.uri), null)
+            var videoTrack = -1
+            var platformFormat: MediaFormat? = null
+            var mime: String? = null
+            for (index in 0 until extractor.trackCount) {
+                val candidate = extractor.getTrackFormat(index)
+                val candidateMime = candidate.getString(MediaFormat.KEY_MIME)
+                if (candidateMime?.startsWith("video/") == true) {
+                    videoTrack = index
+                    platformFormat = candidate
+                    mime = candidateMime
+                    break
+                }
+            }
+            require(videoTrack >= 0 && platformFormat != null && mime != null) {
+                "No video track in ${layer.clip.label}"
+            }
+            extractor.selectTrack(videoTrack)
+
+            val width = platformFormat.intValue(MediaFormat.KEY_WIDTH, 1).coerceAtLeast(1)
+            val height = platformFormat.intValue(MediaFormat.KEY_HEIGHT, 1).coerceAtLeast(1)
+            val rotation = platformFormat.intValue(MediaFormat.KEY_ROTATION, 0)
+            val frameRate = platformFormat.numberValue(MediaFormat.KEY_FRAME_RATE)?.toFloat()
+
+            val formatBuilder = Format.Builder()
+                .setSampleMimeType(mime)
+                .setWidth(width)
+                .setHeight(height)
+                .setPixelWidthHeightRatio(1f)
+                .setRotationDegrees(rotation)
+                .setColorInfo(ColorInfo.SDR_BT709_LIMITED)
+            if (frameRate != null && frameRate > 0f) formatBuilder.setFrameRate(frameRate)
+
+            return PreparedLayer(
+                layer = layer,
+                extractor = extractor,
+                platformFormat = platformFormat,
+                media3Format = formatBuilder.build(),
+                mime = mime,
+            )
+        } catch (error: Throwable) {
+            runCatching { extractor.release() }
+            throw error
         }
-        gpuDisabled = true
-        continuousPlayback = false
-        runCatching { player?.pause() }
-        previewSurface?.let { surface -> runCatching { player?.clearVideoSurface(surface) } }
-        runCatching { player?.release() }
-        player = null
-        loadedGraphKey = null
-        loadedOutputSize = null
-        request?.let { fallbackRequests.trySend(it) }
+    }
+
+    private fun replaceSession(next: PreviewSession?) {
+        val previous = session
+        session = next
+        runCatching { previous?.close() }
+    }
+
+    private fun failPreview(stage: String, error: Throwable) {
+        Log.e(TAG, "Shared preview $stage failed", error)
+        stopPlayback()
     }
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        pendingGpuRequest.set(null)
-        latestRequest.set(null)
+        pendingRequest.set(null)
         PreviewProjectRegistry.clear()
-        fallbackRequests.close()
-        fallbackScope.cancel()
-        softwareFallback.close()
-
-        playerHandler.removeCallbacksAndMessages(null)
-        playerHandler.post {
-            previewSurface?.let { surface -> runCatching { player?.clearVideoSurface(surface) } }
+        handler.removeCallbacksAndMessages(null)
+        handler.post {
+            stopPlayback()
+            replaceSession(null)
             previewSurface = null
-            runCatching { player?.release() }
-            player = null
-            playerThread.quitSafely()
+            renderThread.quitSafely()
+        }
+    }
+
+    private inner class PreviewSession(
+        val generation: Long,
+        val key: SessionKey,
+        val core: DigitorRenderCore,
+        val sources: List<DecoderSource>,
+    ) : Closeable {
+
+        fun resetForPlayback(timelineUs: Long) {
+            core.flush()
+            sources.forEach { source -> source.resetToTimeline(timelineUs) }
+        }
+
+        fun pumpPlayback(timelineUs: Long) {
+            sources.forEach { source -> source.feedInput(MAX_INPUT_PER_PUMP) }
+            sources.forEach { source -> source.drainPlayback(timelineUs, core) }
+        }
+
+        fun seekAndRender(timelineUs: Long) {
+            core.flush()
+            sources.forEach { source -> source.resetToTimeline(timelineUs) }
+
+            // Input 0 is the top/primary stream, exactly like Transformer. Its timestamp chooses the
+            // composed output timestamp. Secondary streams also queue the next frame so the
+            // compositor can choose the frame covering the primary timestamp.
+            sources.forEachIndexed { index, source ->
+                val around = source.decodeAroundTarget()
+                val before = around.atOrBefore
+                val after = around.after
+                when {
+                    before != null -> {
+                        source.releaseToGraph(before, core)
+                        if (index != 0 && after != null) source.releaseToGraph(after, core)
+                        else if (after != null) source.releaseWithoutRendering(after)
+                    }
+                    after != null -> source.releaseToGraph(after, core)
+                }
+            }
+        }
+
+        override fun close() {
+            sources.forEach { source -> runCatching { source.close() } }
+            runCatching { core.close() }
+        }
+    }
+
+    private class DecoderSource(
+        val inputIndex: Int,
+        val clip: TimelineClip,
+        val extractor: MediaExtractor,
+        val codec: MediaCodec,
+    ) : Closeable {
+        private val bufferInfo = MediaCodec.BufferInfo()
+        private var inputEos = false
+        private var outputEos = false
+        private var playbackFloorSourceUs = clip.sourceInUs
+        private var heldPlaybackOutput: HeldOutput? = null
+
+        fun resetToTimeline(timelineUs: Long) {
+            heldPlaybackOutput?.let(::releaseWithoutRendering)
+            heldPlaybackOutput = null
+            runCatching { codec.flush() }.getOrThrow()
+            val targetSourceUs = timelineToSourceUs(clip, timelineUs)
+            extractor.seekTo(targetSourceUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            inputEos = false
+            outputEos = false
+            playbackFloorSourceUs = targetSourceUs
+        }
+
+        fun feedInput(limit: Int): Boolean {
+            if (inputEos) return false
+            var didWork = false
+            repeat(limit) {
+                if (inputEos) return@repeat
+                val inputIndex = codec.dequeueInputBuffer(0L)
+                if (inputIndex < 0) return@repeat
+                val input = codec.getInputBuffer(inputIndex)
+                    ?: error("Decoder input buffer unavailable")
+                input.clear()
+                val sampleTimeUs = extractor.sampleTime
+                if (sampleTimeUs < 0L || sampleTimeUs >= clip.sourceOutUs) {
+                    codec.queueInputBuffer(
+                        inputIndex,
+                        0,
+                        0,
+                        clip.sourceOutUs.coerceAtLeast(0L),
+                        MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                    )
+                    inputEos = true
+                    didWork = true
+                    return@repeat
+                }
+                val size = extractor.readSampleData(input, 0)
+                if (size < 0) {
+                    codec.queueInputBuffer(
+                        inputIndex,
+                        0,
+                        0,
+                        sampleTimeUs.coerceAtLeast(0L),
+                        MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                    )
+                    inputEos = true
+                } else {
+                    codec.queueInputBuffer(inputIndex, 0, size, sampleTimeUs, 0)
+                    extractor.advance()
+                }
+                didWork = true
+            }
+            return didWork
+        }
+
+        fun drainPlayback(timelineUs: Long, core: DigitorRenderCore) {
+            heldPlaybackOutput?.let { held ->
+                val heldTimelineUs = sourceToTimelineUs(clip, held.presentationTimeUs)
+                if (heldTimelineUs <= timelineUs + PLAYBACK_LEAD_US &&
+                    core.pendingInputFrames(inputIndex) < MAX_GRAPH_PENDING_FRAMES &&
+                    core.registerInputFrame(inputIndex)
+                ) {
+                    codec.releaseOutputBuffer(held.index, true)
+                    heldPlaybackOutput = null
+                } else {
+                    return
+                }
+            }
+
+            repeat(MAX_OUTPUT_PER_PUMP) {
+                if (outputEos || heldPlaybackOutput != null) return
+                val outputIndex = codec.dequeueOutputBuffer(bufferInfo, 0L)
+                when {
+                    outputIndex >= 0 -> {
+                        val output = HeldOutput(
+                            index = outputIndex,
+                            presentationTimeUs = bufferInfo.presentationTimeUs,
+                            flags = bufferInfo.flags,
+                        )
+                        val isEos = output.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                        val sourceUs = output.presentationTimeUs
+                        if (sourceUs < playbackFloorSourceUs || sourceUs < clip.sourceInUs) {
+                            codec.releaseOutputBuffer(outputIndex, false)
+                            if (isEos) outputEos = true
+                            return@repeat
+                        }
+                        if (sourceUs >= clip.sourceOutUs) {
+                            codec.releaseOutputBuffer(outputIndex, false)
+                            if (isEos) outputEos = true
+                            return@repeat
+                        }
+
+                        val outputTimelineUs = sourceToTimelineUs(clip, sourceUs)
+                        if (outputTimelineUs > timelineUs + PLAYBACK_LEAD_US ||
+                            core.pendingInputFrames(inputIndex) >= MAX_GRAPH_PENDING_FRAMES ||
+                            !core.registerInputFrame(inputIndex)
+                        ) {
+                            heldPlaybackOutput = output
+                            return
+                        }
+
+                        codec.releaseOutputBuffer(outputIndex, true)
+                        playbackFloorSourceUs = Long.MIN_VALUE
+                        if (isEos) outputEos = true
+                    }
+
+                    outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> return
+                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
+                }
+            }
+        }
+
+        fun decodeAroundTarget(): AroundTarget {
+            val targetSourceUs = playbackFloorSourceUs
+            var candidate: HeldOutput? = null
+            var future: HeldOutput? = null
+
+            repeat(MAX_SCRUB_STEPS) {
+                feedInput(2)
+                val outputIndex = codec.dequeueOutputBuffer(bufferInfo, SCRUB_DEQUEUE_TIMEOUT_US)
+                when {
+                    outputIndex >= 0 -> {
+                        val output = HeldOutput(
+                            index = outputIndex,
+                            presentationTimeUs = bufferInfo.presentationTimeUs,
+                            flags = bufferInfo.flags,
+                        )
+                        val sourceUs = output.presentationTimeUs
+                        val isEos = output.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                        when {
+                            sourceUs < clip.sourceInUs -> releaseWithoutRendering(output)
+                            sourceUs <= targetSourceUs && sourceUs < clip.sourceOutUs -> {
+                                candidate?.let(::releaseWithoutRendering)
+                                candidate = output
+                            }
+                            sourceUs < clip.sourceOutUs -> {
+                                future = output
+                                return@repeat
+                            }
+                            else -> releaseWithoutRendering(output)
+                        }
+                        if (future != null || isEos) {
+                            outputEos = isEos
+                            return@repeat
+                        }
+                    }
+
+                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
+                }
+                if (future != null || (inputEos && outputEos)) return@repeat
+            }
+            return AroundTarget(candidate, future)
+        }
+
+        fun releaseToGraph(output: HeldOutput, core: DigitorRenderCore) {
+            var accepted = false
+            repeat(REGISTER_RETRY_COUNT) {
+                if (!accepted && core.registerInputFrame(inputIndex)) accepted = true
+            }
+            codec.releaseOutputBuffer(output.index, accepted)
+        }
+
+        fun releaseWithoutRendering(output: HeldOutput) {
+            runCatching { codec.releaseOutputBuffer(output.index, false) }
+        }
+
+        override fun close() {
+            heldPlaybackOutput?.let(::releaseWithoutRendering)
+            heldPlaybackOutput = null
+            runCatching { codec.stop() }
+            runCatching { codec.release() }
+            runCatching { extractor.release() }
         }
     }
 
     private companion object {
-        const val FALLBACK_LONG_EDGE = 480
-        const val PLAYBACK_IDLE_PAUSE_MS = 220L
-        const val MAX_PLAYBACK_DRIFT_US = 350_000L
+        const val TAG = "DigitorSharedPreview"
+        const val PLAYBACK_PUMP_MS = 4L
+        const val PLAYBACK_LEAD_US = 45_000L
+        const val HARD_RESYNC_US = 300_000L
+        const val MAX_GRAPH_PENDING_FRAMES = 3
+        const val MAX_INPUT_PER_PUMP = 6
+        const val MAX_OUTPUT_PER_PUMP = 8
+        const val MAX_SCRUB_STEPS = 280
+        const val SCRUB_DEQUEUE_TIMEOUT_US = 1_000L
+        const val REGISTER_RETRY_COUNT = 24
     }
 }
 
-/**
- * Things that actually require a new MediaCodec/GL graph. Visual values intentionally stay out of
- * this key so common slider changes do not tear down decoders.
- */
-private data class PreviewGraphKey(
-    val width: Int,
-    val height: Int,
-    val frameRate: Int,
-    val tracks: List<PreviewTrackKey>,
-)
-
-private data class PreviewTrackKey(
-    val id: String,
-    val clips: List<PreviewClipKey>,
-)
-
-private data class PreviewClipKey(
-    val id: String,
-    val uri: String,
-    val timelineStartUs: Long,
-    val sourceInUs: Long,
-    val sourceOutUs: Long,
-    val nodeTopologyHash: Int,
-    val qualifierPresenceHash: Int,
-    val spatialPipelineNeeded: Boolean,
-    val colorAnimationPresent: Boolean,
-    val spatialAnimationPresent: Boolean,
-)
-
-private fun previewGraphKey(project: TimelineProject): PreviewGraphKey {
-    val tracks = project.tracks
-        .filter { it.kind == TrackKind.VIDEO && !it.muted && it.clips.isNotEmpty() }
-        .map { track ->
-            PreviewTrackKey(
-                id = track.id,
-                clips = track.sortedClips().map { clip ->
-                    val nodes = clip.nodeGraph.nodes
-                    val topologyHash = 31 * nodes.map { it.id to it.kind }.hashCode() +
-                        clip.nodeGraph.edges.hashCode()
-                    val qualifierPresenceHash = nodes.map { node ->
-                        node.id to node.advancedColor.qualifier.enabled
-                    }.hashCode()
-                    val spatialPipelineNeeded = nodes.any { node ->
-                        node.effects.any { it.enabled && it.amount > 0f } ||
-                            clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
-                    }
-                    val spatialAnimationPresent = nodes.any { node ->
-                        clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
-                    }
-                    PreviewClipKey(
-                        id = clip.id,
-                        uri = clip.uri,
-                        timelineStartUs = clip.timelineStartUs,
-                        sourceInUs = clip.sourceInUs,
-                        sourceOutUs = clip.sourceOutUs,
-                        nodeTopologyHash = topologyHash,
-                        qualifierPresenceHash = qualifierPresenceHash,
-                        spatialPipelineNeeded = spatialPipelineNeeded,
-                        colorAnimationPresent = clip.nodeAnimations.hasColorAnimation,
-                        spatialAnimationPresent = spatialAnimationPresent,
-                    )
-                },
-            )
-        }
-    return PreviewGraphKey(
-        width = project.width,
-        height = project.height,
-        frameRate = project.frameRate,
-        tracks = tracks,
-    )
-}
-
-/** First project video track is the top track; rendering therefore runs in reverse track order. */
+/** First project video track is the top track; CPU-style blending therefore runs bottom-to-top. */
 internal fun activeVideoLayersAt(project: TimelineProject, timeUs: Long): List<TimelineClip> =
     project.tracks
         .withIndex()
@@ -429,111 +649,65 @@ internal fun activeVideoLayersAt(project: TimelineProject, timeUs: Long): List<T
         .sortedByDescending { (trackIndex, _) -> trackIndex }
         .map { (_, clip) -> clip }
 
-private data class RenderedPreviewFrame(
-    val bitmap: Bitmap,
-    val layerCount: Int,
+private fun activeLayerSpecsAt(project: TimelineProject, timeUs: Long): List<DavinciFramePreviewEngine.ActiveLayer> =
+    project.tracks
+        .filter { track -> track.kind == TrackKind.VIDEO && !track.muted }
+        .mapNotNull { track ->
+            track.clips
+                .firstOrNull { clip -> timeUs in clip.timelineStartUs until clip.timelineEndUs }
+                ?.let { clip -> DavinciFramePreviewEngine.ActiveLayer(track, clip) }
+        }
+
+private fun sessionKey(
+    project: TimelineProject,
+    layers: List<DavinciFramePreviewEngine.ActiveLayer>,
+): DavinciFramePreviewEngine.SessionKey = DavinciFramePreviewEngine.SessionKey(
+    width = project.width,
+    height = project.height,
+    frameRate = project.frameRate,
+    layers = layers.map { layer ->
+        DavinciFramePreviewEngine.LayerKey(
+            trackId = layer.track.id,
+            clipId = layer.clip.id,
+            uri = layer.clip.uri,
+            timelineStartUs = layer.clip.timelineStartUs,
+            sourceInUs = layer.clip.sourceInUs,
+            sourceOutUs = layer.clip.sourceOutUs,
+            staticSpatialHash = staticSpatialHash(layer.clip),
+        )
+    },
 )
 
-private class SoftwarePreviewTimelineCompositor(private val context: Context) : Closeable {
-    private val workerCount = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(2, 6)
-    private val color = CpuColorProcessor(workerCount)
-    private val effects = CpuNodeEffectsProcessor(workerCount)
-    private val workers = Executors.newFixedThreadPool(workerCount)
-    private val retrievers = mutableMapOf<String, MediaMetadataRetriever>()
-
-    fun render(project: TimelineProject, timeUs: Long, maxLongEdge: Int): RenderedPreviewFrame {
-        val (outputWidth, outputHeight) = resolvePreviewOutputSize(project, maxLongEdge)
-        val canvas = IntArray(outputWidth * outputHeight) { 0xFF000000.toInt() }
-        val active = activeVideoLayersAt(project, timeUs)
-
-        active.forEach { clip ->
-            val clipLocalUs = (timeUs - clip.timelineStartUs).coerceAtLeast(0L)
-            val sourceUs = (clip.sourceInUs + clipLocalUs)
-                .coerceIn(clip.sourceInUs.coerceAtLeast(0L), clip.sourceOutUs.coerceAtLeast(clip.sourceInUs))
-            val bitmap = frameFor(clip, sourceUs, outputWidth, outputHeight) ?: return@forEach
-            val transformed = CpuTransformProcessor.render(
-                source = bitmap,
-                outputWidth = outputWidth,
-                outputHeight = outputHeight,
-                clip = clip,
-                clipLocalUs = clipLocalUs,
-            )
-            val overlay = IntArray(outputWidth * outputHeight)
-            transformed.getPixels(overlay, 0, outputWidth, 0, 0, outputWidth, outputHeight)
-            color.processClipArgb8888(overlay, outputWidth, outputHeight, clip, sourceUs)
-            effects.processClipArgb8888(overlay, outputWidth, outputHeight, clip, sourceUs)
-            blend(canvas, overlay, outputWidth, outputHeight, clip.opacity)
-
-            if (transformed !== bitmap) transformed.recycle()
-            bitmap.recycle()
-        }
-
-        val output = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
-        output.setPixels(canvas, 0, outputWidth, 0, 0, outputWidth, outputHeight)
-        return RenderedPreviewFrame(output, active.size)
+private fun staticSpatialHash(clip: TimelineClip): Int {
+    var result = clip.nodeGraph.edges.hashCode()
+    clip.nodeGraph.nodes.forEach { node ->
+        result = 31 * result + node.id.hashCode()
+        result = 31 * result + node.kind.hashCode()
+        result = 31 * result + node.effects.hashCode()
+        result = 31 * result + node.advancedColor.qualifier.hashCode()
+        result = 31 * result + clip.nodeAnimations.track(node.id, NodeAnimationDomain.EFFECTS).hashCode()
+        result = 31 * result + clip.nodeAnimations
+            .track(node.id, NodeAnimationDomain.COLOR)
+            .keyframes
+            .map { key -> key.sourceTimeUs to key.node.advancedColor.qualifier }
+            .hashCode()
     }
+    return result
+}
 
-    private fun frameFor(
-        clip: TimelineClip,
-        sourceTimeUs: Long,
-        previewWidth: Int,
-        previewHeight: Int,
-    ): Bitmap? {
-        val retriever = retrievers.getOrPut(clip.uri) {
-            MediaMetadataRetriever().also { it.setDataSource(context, Uri.parse(clip.uri)) }
-        }
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            retriever.getScaledFrameAtTime(
-                sourceTimeUs,
-                MediaMetadataRetriever.OPTION_CLOSEST,
-                previewWidth,
-                previewHeight,
-            )
-        } else {
-            retriever.getFrameAtTime(sourceTimeUs, MediaMetadataRetriever.OPTION_CLOSEST)
-        }
-    }
+internal fun timelineToSourceUs(clip: TimelineClip, timelineUs: Long): Long =
+    (clip.sourceInUs + (timelineUs - clip.timelineStartUs))
+        .coerceIn(clip.sourceInUs, clip.sourceOutUs.coerceAtLeast(clip.sourceInUs))
 
-    private fun blend(base: IntArray, top: IntArray, width: Int, height: Int, opacity: Float) {
-        val stripe = (height / workerCount).coerceAtLeast(1)
-        val jobs = mutableListOf<Callable<Unit>>()
-        var y = 0
-        while (y < height) {
-            val startY = y
-            val endY = min(height, y + stripe)
-            jobs += Callable {
-                var pixelIndex = startY * width
-                val end = endY * width
-                while (pixelIndex < end) {
-                    val source = top[pixelIndex]
-                    val sourceAlpha = ((((source ushr 24) and 0xFF) / 255f) * opacity)
-                        .coerceIn(0f, 1f)
-                    if (sourceAlpha > 0f) {
-                        val destination = base[pixelIndex]
-                        val sr = (source ushr 16) and 0xFF
-                        val sg = (source ushr 8) and 0xFF
-                        val sb = source and 0xFF
-                        val dr = (destination ushr 16) and 0xFF
-                        val dg = (destination ushr 8) and 0xFF
-                        val db = destination and 0xFF
-                        val r = (sr * sourceAlpha + dr * (1f - sourceAlpha) + .5f).toInt().coerceIn(0, 255)
-                        val g = (sg * sourceAlpha + dg * (1f - sourceAlpha) + .5f).toInt().coerceIn(0, 255)
-                        val b = (sb * sourceAlpha + db * (1f - sourceAlpha) + .5f).toInt().coerceIn(0, 255)
-                        base[pixelIndex] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-                    }
-                    pixelIndex++
-                }
-            }
-            y = endY
-        }
-        workers.invokeAll(jobs).forEach { it.get() }
-    }
+internal fun sourceToTimelineUs(clip: TimelineClip, sourceUs: Long): Long =
+    clip.timelineStartUs + (sourceUs - clip.sourceInUs)
 
-    override fun close() {
-        retrievers.values.forEach { retriever -> runCatching { retriever.release() } }
-        retrievers.clear()
-        color.close()
-        effects.close()
-        workers.shutdownNow()
-    }
+private fun MediaFormat.intValue(key: String, fallback: Int): Int =
+    if (!containsKey(key)) fallback else runCatching { getInteger(key) }.getOrDefault(fallback)
+
+private fun MediaFormat.numberValue(key: String): Number? {
+    if (!containsKey(key)) return null
+    return runCatching { getInteger(key) as Number }
+        .recoverCatching { getFloat(key) as Number }
+        .getOrNull()
 }
