@@ -9,12 +9,18 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import com.tajuli.digitorandroid.editor.model.TrackKind
 
 /**
  * Direct display surface for the editor GPU preview.
@@ -36,6 +42,11 @@ import androidx.compose.ui.viewinterop.AndroidView
  * The workspace outside the fitted project canvas is deliberately blackish gray. The project
  * canvas itself remains the rendered Surface, so scaling a clip below 100% exposes the canvas
  * around it while the outer pasteboard keeps the canvas boundary visible.
+ *
+ * A Surface can legally lose its displayed buffer while the editor is paused, after an Android
+ * lifecycle transition, or while preview GPU resources are rebuilt. A paused decoder has no pump
+ * that would naturally repaint it, so this host explicitly asks the engine to re-submit the last
+ * visible playhead frame after Surface/lifecycle/topology changes.
  */
 @Composable
 fun GpuPreviewSurface(
@@ -43,9 +54,44 @@ fun GpuPreviewSurface(
     modifier: Modifier = Modifier,
 ) {
     val project by PreviewProjectRegistry.flow.collectAsState()
+    val lifecycleOwner = LocalLifecycleOwner.current
     val renderWidth = project?.width?.coerceAtLeast(2) ?: 1920
     val renderHeight = project?.height?.coerceAtLeast(2) ?: 1080
     val projectAspect = renderWidth.toFloat() / renderHeight.toFloat()
+
+    // Only structural video changes participate in this key. Color/transform slider snapshots do
+    // not cause a second decode, but importing/moving/trimming a clip (and therefore rebuilding the
+    // decoder/GL session topology) gets a one-shot self-healing paused-frame refresh.
+    val videoTopologyKey = project?.tracks
+        ?.filter { track -> track.kind == TrackKind.VIDEO && !track.muted }
+        ?.map { track ->
+            track.id to track.clips.map { clip ->
+                listOf(
+                    clip.id,
+                    clip.uri,
+                    clip.timelineStartUs.toString(),
+                    clip.sourceInUs.toString(),
+                    clip.sourceOutUs.toString(),
+                )
+            }
+        }
+
+    LaunchedEffect(engine, videoTopologyKey) {
+        if (project != null) engine.scheduleCurrentFrameRefresh(140L)
+    }
+
+    // Some devices preserve the SurfaceView object while discarding its last buffer when the app
+    // is backgrounded, so surfaceCreated() is not guaranteed to fire on return. ON_RESUME is the
+    // second repaint trigger for that case.
+    DisposableEffect(lifecycleOwner, engine) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                engine.scheduleCurrentFrameRefresh(80L)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     BoxWithConstraints(
         modifier = modifier.background(PREVIEW_PASTEBOARD_GRAY),
@@ -127,13 +173,17 @@ private class DigitorPreviewSurfaceView(
         }
 
         if (engineChanged) {
-            attachedSurface?.takeIf { it.isValid }?.let { engine.attachSurface(it) }
+            attachedSurface?.takeIf { it.isValid }?.let {
+                engine.attachSurface(it)
+                engine.scheduleCurrentFrameRefresh(80L)
+            }
         }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         attachedSurface = holder.surface
         engine.attachSurface(holder.surface)
+        engine.scheduleCurrentFrameRefresh(80L)
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -142,6 +192,7 @@ private class DigitorPreviewSurfaceView(
             attachedSurface = holder.surface
         }
         engine.attachSurface(holder.surface)
+        engine.scheduleCurrentFrameRefresh(80L)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
