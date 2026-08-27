@@ -33,9 +33,9 @@ import androidx.compose.ui.viewinterop.AndroidView
  * the rendered frame on smaller phone displays. SurfaceFlinger then scales the completed project
  * frame down to the center-fitted viewer without changing its geometry.
  *
- * The workspace outside the fitted project canvas is deliberately gray. The project canvas itself
- * remains the rendered Surface, so scaling a clip below 100% exposes the canvas around it while the
- * outer gray pasteboard makes the canvas boundary obvious, similar to a desktop NLE viewer.
+ * The workspace outside the fitted project canvas is deliberately blackish gray. The project
+ * canvas itself remains the rendered Surface, so scaling a clip below 100% exposes the canvas
+ * around it while the outer pasteboard keeps the canvas boundary visible.
  */
 @Composable
 fun GpuPreviewSurface(
@@ -83,7 +83,7 @@ fun GpuPreviewSurface(
     }
 }
 
-private val PREVIEW_PASTEBOARD_GRAY = Color(0xFF424247)
+private val PREVIEW_PASTEBOARD_GRAY = Color(0xFF222226)
 
 private class DigitorPreviewSurfaceView(
     context: Context,
