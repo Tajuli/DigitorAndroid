@@ -47,9 +47,12 @@ internal class DigitorRenderCore(
         fun onError(error: Throwable)
     }
 
+    private val outputColorInfo: ColorInfo =
+        layers.firstOrNull()?.format?.colorInfo ?: ColorInfo.SDR_BT709_LIMITED
+
     private val graph: MultipleInputVideoGraph = MultipleInputVideoGraph.Factory().create(
         context.applicationContext,
-        ColorInfo.SDR_BT709_LIMITED,
+        outputColorInfo,
         DebugViewProvider.NONE,
         object : VideoGraph.Listener {
             override fun onOutputFrameAvailableForRendering(
@@ -71,6 +74,13 @@ internal class DigitorRenderCore(
     private var outputSurface: Surface? = null
 
     init {
+        require(!ColorInfo.isTransferHdr(outputColorInfo)) {
+            "Shared realtime compositor currently supports SDR input only"
+        }
+        require(layers.all { (it.format.colorInfo ?: outputColorInfo) == outputColorInfo }) {
+            "All simultaneously composited video layers must use the same SDR ColorInfo"
+        }
+
         graph.initialize()
 
         // Input order stays in project track order. ResolveVideoCompositorSettings therefore owns
@@ -85,7 +95,7 @@ internal class DigitorRenderCore(
         )
 
         // MultipleInputVideoGraph requires all input slots to exist before any frame is rendered.
-        layers.indices.forEach(graph::registerInput)
+        layers.indices.forEach { index -> graph.registerInput(index) }
         layers.forEachIndexed { index, layer ->
             graph.registerInputStream(
                 index,
