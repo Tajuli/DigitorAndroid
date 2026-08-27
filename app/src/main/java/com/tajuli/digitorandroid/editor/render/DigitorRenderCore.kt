@@ -14,6 +14,7 @@ import androidx.media3.common.VideoGraph
 import androidx.media3.common.util.MediaFormatUtil
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.MultipleInputVideoGraph
+import androidx.media3.transformer.TransformerUtil
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
@@ -27,10 +28,10 @@ import java.util.concurrent.Executor
  * frames into its input Surfaces. The graph applies the exact same 33^3 color LUT, spatial node
  * effects, transform/opacity rules and multilayer compositor that export uses.
  *
- * The transport-provided Format is not trusted for render color interpretation. The render core
- * resolves each source MediaFormat itself so the GL graph receives the same source color metadata
- * that Transformer export sees. This prevents a transport fallback such as BT.709 limited from
- * silently changing full-range/BT.601 source pixels.
+ * Source metadata is resolved independently from the decoder transport. Color metadata is then
+ * normalized with the exact same Transformer rule used by export: a null or incomplete DataSpace
+ * falls back to SDR BT.709 limited, while complete source ColorInfo is preserved. This is required
+ * both for preview/export parity and because DefaultVideoFrameProcessor rejects invalid DataSpace.
  */
 @UnstableApi
 internal class DigitorRenderCore(
@@ -54,14 +55,18 @@ internal class DigitorRenderCore(
 
     private val appContext = context.applicationContext
 
-    // Resolve source metadata independently from the decoder transport. This is intentionally done
-    // once per render session, not per frame.
+    // TransformerUtil.getValidColor() is the export-side contract. Apply it to the Format passed to
+    // the preview GL graph too, not just to the graph output ColorInfo. DefaultVideoFrameProcessor
+    // requires both input and output ColorInfo to contain a valid DataSpace.
     private val renderFormats: List<Format> = layers.map { layer ->
-        resolveSourceVideoFormat(appContext, layer.clip)
+        val sourceFormat = resolveSourceVideoFormat(appContext, layer.clip)
+        sourceFormat.buildUpon()
+            .setColorInfo(TransformerUtil.getValidColor(sourceFormat.colorInfo))
+            .build()
     }
 
     private fun normalizedColorInfo(format: Format): ColorInfo =
-        format.colorInfo ?: ColorInfo.SDR_BT709_LIMITED
+        TransformerUtil.getValidColor(format.colorInfo)
 
     private val outputColorInfo: ColorInfo =
         renderFormats.firstOrNull()?.let(::normalizedColorInfo) ?: ColorInfo.SDR_BT709_LIMITED
