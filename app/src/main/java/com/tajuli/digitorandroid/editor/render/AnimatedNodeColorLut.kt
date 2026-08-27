@@ -7,7 +7,6 @@ import androidx.media3.common.Format
 import androidx.media3.common.util.GlUtil
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.ColorLut
-import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 
@@ -16,7 +15,8 @@ import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
  *
  * In preview mode the long-lived GL effect resolves the latest clip snapshot on every frame. This
  * makes correction/color controls visible immediately without stop/setComposition/prepare. Export
- * stays deterministic and snapshot-based.
+ * stays deterministic and snapshot-based. Both modes use the exact same composition-time to
+ * source-time mapping from [ParityRenderContract].
  */
 @UnstableApi
 internal class AnimatedNodeColorLut(
@@ -27,13 +27,10 @@ internal class AnimatedNodeColorLut(
     private var textureId = Format.NO_VALUE
     private var lastSourceUs = Long.MIN_VALUE
     private var lastVisualRevision = Long.MIN_VALUE
-    private var previewRevision = Long.MIN_VALUE
-    private var previewAnchorPresentationUs = 0L
-    private var previewAnchorSourceUs = clip.sourceInUs
 
     override fun getLutTextureId(presentationTimeUs: Long): Int {
         val currentClip = currentClip()
-        val sourceUs = sourceTimeUs(currentClip, presentationTimeUs)
+        val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
         val visualRevision = visualRevision(currentClip)
         val timeChanged = currentClip.nodeAnimations.hasColorAnimation && sourceUs != lastSourceUs
         if (textureId == Format.NO_VALUE || visualRevision != lastVisualRevision || timeChanged) {
@@ -77,27 +74,6 @@ internal class AnimatedNodeColorLut(
         result = result * 31L + current.colorGrade.hashCode().toLong()
         result = result * 31L + current.nodeAnimations.revision
         return result
-    }
-
-    private fun sourceTimeUs(current: TimelineClip, presentationTimeUs: Long): Long {
-        val minSource = current.sourceInUs.coerceAtLeast(0L)
-        val maxSource = current.sourceOutUs.coerceAtLeast(minSource)
-        if (!preview) {
-            return (current.sourceInUs + presentationTimeUs.coerceAtLeast(0L))
-                .coerceIn(minSource, maxSource)
-        }
-
-        val snapshot = PreviewTransformClock.snapshotFor(current.id)
-        if (snapshot == null) {
-            return presentationTimeUs.coerceIn(minSource, maxSource)
-        }
-        if (snapshot.revision != previewRevision) {
-            previewRevision = snapshot.revision
-            previewAnchorPresentationUs = presentationTimeUs
-            previewAnchorSourceUs = current.sourceInUs + snapshot.localUs
-        }
-        return (previewAnchorSourceUs + (presentationTimeUs - previewAnchorPresentationUs))
-            .coerceIn(minSource, maxSource)
     }
 
     private fun cubeBitmap(cube: Array<Array<IntArray>>): Bitmap {
