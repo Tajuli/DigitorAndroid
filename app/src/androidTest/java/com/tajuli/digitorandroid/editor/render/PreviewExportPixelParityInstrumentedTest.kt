@@ -7,6 +7,7 @@ import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.ColorInfo
 import androidx.media3.common.DebugViewProvider
@@ -35,7 +36,6 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertArrayEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -227,6 +227,7 @@ class PreviewExportPixelParityInstrumentedTest {
                 }
 
                 override fun onError(exception: VideoFrameProcessingException) {
+                    Log.e(TAG, "Parity render graph failed", exception)
                     error.compareAndSet(null, exception)
                     outputLatch.countDown()
                     imageLatch.countDown()
@@ -274,9 +275,9 @@ class PreviewExportPixelParityInstrumentedTest {
             }
 
             assertTrue("Timed out waiting for graph output", outputLatch.await(10, TimeUnit.SECONDS))
-            assertNull("Render graph failed", error.get())
+            throwIfGraphFailed(error.get())
             assertTrue("Timed out waiting for RGBA output", imageLatch.await(10, TimeUnit.SECONDS))
-            assertNull("Render graph failed", error.get())
+            throwIfGraphFailed(error.get())
             return requireNotNull(pixels.get()) { "No RGBA pixels captured" }
         } finally {
             runCatching { graph.release() }
@@ -284,6 +285,11 @@ class PreviewExportPixelParityInstrumentedTest {
             readerThread.quitSafely()
             readerThread.join(2_000L)
         }
+    }
+
+    private fun throwIfGraphFailed(error: Throwable?) {
+        if (error == null) return
+        throw AssertionError("Render graph failed:\n${Log.getStackTraceString(error)}", error)
     }
 
     private fun queueBitmapWhenReady(
@@ -357,5 +363,9 @@ class PreviewExportPixelParityInstrumentedTest {
         override fun copyOf(): TimestampIterator = OneTimestampIterator(timestampUs)
 
         override fun getLastTimestampUs(): Long = timestampUs
+    }
+
+    private companion object {
+        const val TAG = "PreviewExportParity"
     }
 }
