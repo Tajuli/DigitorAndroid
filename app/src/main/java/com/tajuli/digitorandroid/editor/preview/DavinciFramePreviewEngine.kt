@@ -8,19 +8,21 @@ import android.media.MediaFormat
 import android.net.Uri
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import androidx.media3.common.ColorInfo
 import androidx.media3.common.Format
 import androidx.media3.common.util.UnstableApi
-import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.render.DigitorRenderCore
 import java.io.Closeable
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -106,9 +108,12 @@ class DavinciFramePreviewEngine(
 
     private val appContext = context.applicationContext
     private val closed = AtomicBoolean(false)
+    private val exportSuspended = AtomicBoolean(false)
     private val revision = AtomicLong(0L)
     private val pendingRequest = AtomicReference<Request?>(null)
     private val mutableFrame = MutableStateFlow<Frame?>(null)
+    private val resumeProject = AtomicReference<TimelineProject?>(null)
+    private val resumeTimelineUs = AtomicLong(0L)
 
     // Compatibility clock for the current UI, which predates the explicit isPlaying overload.
     // Once forward realtime playback is recognized it stays in play mode until the cursor goes idle;
@@ -135,19 +140,25 @@ class DavinciFramePreviewEngine(
 
     val frame: StateFlow<Frame?> = mutableFrame.asStateFlow()
 
+    init {
+        PreviewExportCoordinator.register(this)
+    }
+
     private val requestDrain = object : Runnable {
         override fun run() {
-            if (closed.get()) return
+            if (closed.get() || exportSuspended.get()) return
             val request = pendingRequest.getAndSet(null) ?: return
             runCatching { handleRequest(request) }
                 .onFailure { failPreview("request", it) }
-            if (pendingRequest.get() != null && !closed.get()) handler.post(this)
+            if (pendingRequest.get() != null && !closed.get() && !exportSuspended.get()) {
+                handler.post(this)
+            }
         }
     }
 
     private val playbackPump = object : Runnable {
         override fun run() {
-            if (closed.get() || !playing) return
+            if (closed.get() || exportSuspended.get() || !playing) return
             val active = session ?: return
             runCatching {
                 active.pumpPlayback(currentPlaybackTimelineUs())
@@ -155,13 +166,15 @@ class DavinciFramePreviewEngine(
                 failPreview("playback", it)
                 return
             }
-            if (playing && !closed.get()) handler.postDelayed(this, PLAYBACK_PUMP_MS)
+            if (playing && !closed.get() && !exportSuspended.get()) {
+                handler.postDelayed(this, PLAYBACK_PUMP_MS)
+            }
         }
     }
 
     private val legacyPauseWatchdog = object : Runnable {
         override fun run() {
-            if (closed.get() || !legacyPlaying.get()) return
+            if (closed.get() || exportSuspended.get() || !legacyPlaying.get()) return
             val idleMs = (System.nanoTime() - legacyLastSubmitNs.get()) / 1_000_000L
             if (idleMs < LEGACY_IDLE_PAUSE_MS) {
                 handler.postDelayed(this, LEGACY_IDLE_PAUSE_MS - idleMs)
@@ -194,6 +207,55 @@ class DavinciFramePreviewEngine(
     }
 
     /**
+     * Synchronously gives MediaCodec/GL resources back to the device before another heavy GPU job
+     * (currently export) starts. This prevents native codec/driver process deaths on devices that
+     * cannot host the full-resolution preview graph and Transformer graph at the same time.
+     */
+    internal fun suspendForExternalGpuWork(): Boolean {
+        if (closed.get()) return false
+        if (!exportSuspended.compareAndSet(false, true)) return true
+
+        pendingRequest.set(null)
+        legacyPlaying.set(false)
+        handler.removeCallbacks(requestDrain)
+        handler.removeCallbacks(playbackPump)
+        handler.removeCallbacks(legacyPauseWatchdog)
+
+        val latch = CountDownLatch(1)
+        val releaseAction = Runnable {
+            try {
+                lastProjectRef?.let(resumeProject::set)
+                if (lastRequestedTimelineUs != Long.MIN_VALUE) {
+                    resumeTimelineUs.set(lastRequestedTimelineUs.coerceAtLeast(0L))
+                }
+                stopPlayback()
+                replaceSession(null)
+                lastProjectRef = null
+                lastRequestedTimelineUs = Long.MIN_VALUE
+            } finally {
+                latch.countDown()
+            }
+        }
+
+        if (Looper.myLooper() == renderThread.looper) {
+            releaseAction.run()
+        } else {
+            handler.post(releaseAction)
+            runCatching { latch.await(EXPORT_RELEASE_TIMEOUT_MS, TimeUnit.MILLISECONDS) }
+        }
+        return true
+    }
+
+    /** Restores the most recent paused playhead after export releases its codec/GPU resources. */
+    internal fun resumeAfterExternalGpuWork() {
+        if (closed.get() || !exportSuspended.compareAndSet(true, false)) return
+        val project = resumeProject.get() ?: legacyProject.get() ?: return
+        val safeTimelineUs = resumeTimelineUs.get()
+            .coerceIn(0L, project.durationUs.coerceAtLeast(0L))
+        submit(project, safeTimelineUs, false)
+    }
+
+    /**
      * Compatibility entry point used by the current editor UI. Playback detection is deliberately
      * sticky: one delayed tick can never turn an already-running decoder back into scrub mode.
      */
@@ -204,6 +266,8 @@ class DavinciFramePreviewEngine(
         val previousNs = legacyLastSubmitNs.getAndSet(nowNs)
         val previousTimelineUs = legacyLastTimelineUs.getAndSet(safeTimelineUs)
         legacyProject.set(project)
+        resumeProject.set(project)
+        resumeTimelineUs.set(safeTimelineUs)
 
         if (previousNs != 0L && previousTimelineUs != Long.MIN_VALUE) {
             val wallDeltaUs = (nowNs - previousNs) / 1_000L
@@ -221,16 +285,23 @@ class DavinciFramePreviewEngine(
 
         submit(project, safeTimelineUs, legacyPlaying.get())
         handler.removeCallbacks(legacyPauseWatchdog)
-        if (legacyPlaying.get()) handler.postDelayed(legacyPauseWatchdog, LEGACY_IDLE_PAUSE_MS)
+        if (legacyPlaying.get() && !exportSuspended.get()) {
+            handler.postDelayed(legacyPauseWatchdog, LEGACY_IDLE_PAUSE_MS)
+        }
     }
 
     /** Explicit transport entry point for the next editor UI revision. */
     fun submit(project: TimelineProject, timelineUs: Long, isPlaying: Boolean) {
         if (closed.get()) return
+        val safeTimelineUs = timelineUs.coerceIn(0L, project.durationUs.coerceAtLeast(0L))
         PreviewProjectRegistry.update(project)
+        resumeProject.set(project)
+        resumeTimelineUs.set(safeTimelineUs)
+        if (exportSuspended.get()) return
+
         val request = Request(
             project = project,
-            timelineUs = timelineUs.coerceIn(0L, project.durationUs.coerceAtLeast(0L)),
+            timelineUs = safeTimelineUs,
             isPlaying = isPlaying,
             revision = revision.incrementAndGet(),
         )
@@ -240,6 +311,7 @@ class DavinciFramePreviewEngine(
     }
 
     private fun handleRequest(request: Request) {
+        if (exportSuspended.get()) return
         latestRequestStartedNs = request.startedNs
         val layers = activeLayerSpecsAt(request.project, request.timelineUs)
         if (layers.isEmpty()) {
@@ -432,6 +504,7 @@ class DavinciFramePreviewEngine(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        PreviewExportCoordinator.unregister(this)
         pendingRequest.set(null)
         PreviewProjectRegistry.clear()
         handler.removeCallbacksAndMessages(null)
@@ -683,6 +756,7 @@ class DavinciFramePreviewEngine(
         const val SCRUB_DEQUEUE_TIMEOUT_US = 1_000L
         const val REGISTER_RETRY_COUNT = 24
         const val LEGACY_IDLE_PAUSE_MS = 180L
+        const val EXPORT_RELEASE_TIMEOUT_MS = 1_500L
     }
 }
 
@@ -731,16 +805,21 @@ private fun sessionKey(
     },
 )
 
+/**
+ * Only state that changes the immutable GL topology belongs in the session key. Spatial FX values
+ * and their keyframes are deliberately excluded: the long-lived preview shader reads them from
+ * PreviewProjectRegistry on every draw, so a slider can redraw the held frame without rebuilding
+ * MediaCodec or the video graph. Qualifier spatial feather parameters remain immutable today and
+ * therefore still participate in this key.
+ */
 private fun staticSpatialHash(clip: TimelineClip): Int {
     var result = clip.nodeGraph.edges.hashCode()
     clip.nodeGraph.nodes.forEach { node ->
         result = 31 * result + node.id.hashCode()
         result = 31 * result + node.kind.hashCode()
-        result = 31 * result + node.effects.hashCode()
         result = 31 * result + node.advancedColor.qualifier.hashCode()
-        result = 31 * result + clip.nodeAnimations.track(node.id, NodeAnimationDomain.EFFECTS).hashCode()
         result = 31 * result + clip.nodeAnimations
-            .track(node.id, NodeAnimationDomain.COLOR)
+            .track(node.id, com.tajuli.digitorandroid.editor.model.NodeAnimationDomain.COLOR)
             .keyframes
             .map { key -> key.sourceTimeUs to key.node.advancedColor.qualifier }
             .hashCode()
@@ -760,7 +839,5 @@ private fun MediaFormat.intValue(key: String, fallback: Int): Int =
 
 private fun MediaFormat.numberValue(key: String): Number? {
     if (!containsKey(key)) return null
-    return runCatching { getInteger(key) as Number }
-        .recoverCatching { getFloat(key) as Number }
-        .getOrNull()
+    return runCatching { getNumber(key) }.getOrNull()
 }
