@@ -21,9 +21,15 @@ import androidx.compose.ui.viewinterop.AndroidView
  * There is no ImageReader, GPU-to-CPU pixel copy, Bitmap upload, or Compose texture upload in the
  * normal preview path.
  *
- * The SurfaceView itself is center-fitted to the project/canvas aspect ratio. This is essential:
- * letting AndroidView fill an arbitrary editor panel would stretch the project frame and make clip
- * scale/position look different from export even when the GPU render pixels were correct.
+ * Two sizes intentionally exist here:
+ * - the Compose/SurfaceView size is the physical on-screen viewer size;
+ * - the Surface buffer size is fixed to the project canvas resolution.
+ *
+ * DigitorRenderCore renders project-resolution pixels and its SurfaceInfo also describes that same
+ * project size. Keeping the actual Surface buffer at that exact size prevents an EGL viewport that
+ * is larger than the native Surface buffer, which otherwise shows only a cropped/zoomed portion of
+ * the rendered frame on smaller phone displays. SurfaceFlinger then scales the completed project
+ * frame down to the center-fitted viewer without changing its geometry.
  */
 @Composable
 fun GpuPreviewSurface(
@@ -31,10 +37,9 @@ fun GpuPreviewSurface(
     modifier: Modifier = Modifier,
 ) {
     val project by PreviewProjectRegistry.flow.collectAsState()
-    val projectAspect = project
-        ?.let { it.width.toFloat() / it.height.coerceAtLeast(1).toFloat() }
-        ?.takeIf { it.isFinite() && it > 0f }
-        ?: (16f / 9f)
+    val renderWidth = project?.width?.coerceAtLeast(2) ?: 1920
+    val renderHeight = project?.height?.coerceAtLeast(2) ?: 1080
+    val projectAspect = renderWidth.toFloat() / renderHeight.toFloat()
 
     BoxWithConstraints(
         modifier = modifier,
@@ -53,8 +58,21 @@ fun GpuPreviewSurface(
 
         AndroidView(
             modifier = fittedModifier,
-            factory = { context -> DigitorPreviewSurfaceView(context, engine) },
-            update = { view -> view.bind(engine) },
+            factory = { context ->
+                DigitorPreviewSurfaceView(
+                    context = context,
+                    initialEngine = engine,
+                    initialBufferWidth = renderWidth,
+                    initialBufferHeight = renderHeight,
+                )
+            },
+            update = { view ->
+                view.bind(
+                    nextEngine = engine,
+                    nextBufferWidth = renderWidth,
+                    nextBufferHeight = renderHeight,
+                )
+            },
         )
     }
 }
@@ -62,22 +80,47 @@ fun GpuPreviewSurface(
 private class DigitorPreviewSurfaceView(
     context: Context,
     initialEngine: DavinciFramePreviewEngine,
+    initialBufferWidth: Int,
+    initialBufferHeight: Int,
 ) : SurfaceView(context), SurfaceHolder.Callback {
 
     private var engine: DavinciFramePreviewEngine = initialEngine
     private var attachedSurface: android.view.Surface? = null
+    private var bufferWidth = initialBufferWidth.coerceAtLeast(2)
+    private var bufferHeight = initialBufferHeight.coerceAtLeast(2)
 
     init {
+        // The render core advertises project.width/project.height in SurfaceInfo. Make the native
+        // Surface buffer the same size so OpenGL's output viewport maps 1:1 to the project frame.
+        holder.setFixedSize(bufferWidth, bufferHeight)
         holder.addCallback(this)
         // Keep this SurfaceView in the normal hierarchy so Compose controls/overlays can remain
         // above it. We intentionally do not use setZOrderOnTop(true).
     }
 
-    fun bind(next: DavinciFramePreviewEngine) {
-        if (engine === next) return
-        attachedSurface?.let { engine.detachSurface(it) }
-        engine = next
-        attachedSurface?.let { engine.attachSurface(it) }
+    fun bind(
+        nextEngine: DavinciFramePreviewEngine,
+        nextBufferWidth: Int,
+        nextBufferHeight: Int,
+    ) {
+        val safeWidth = nextBufferWidth.coerceAtLeast(2)
+        val safeHeight = nextBufferHeight.coerceAtLeast(2)
+        val engineChanged = engine !== nextEngine
+
+        if (engineChanged) {
+            attachedSurface?.let { engine.detachSurface(it) }
+            engine = nextEngine
+        }
+
+        if (bufferWidth != safeWidth || bufferHeight != safeHeight) {
+            bufferWidth = safeWidth
+            bufferHeight = safeHeight
+            holder.setFixedSize(bufferWidth, bufferHeight)
+        }
+
+        if (engineChanged) {
+            attachedSurface?.takeIf { it.isValid }?.let { engine.attachSurface(it) }
+        }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
