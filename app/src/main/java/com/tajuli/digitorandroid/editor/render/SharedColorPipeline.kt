@@ -10,7 +10,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 /**
  * Single source of truth for GPU color processing.
  *
- * Correction/Color node snapshots can now be keyframed. The LUT effect is timestamp-aware and is
+ * Correction/Color node snapshots can be keyframed. The LUT effect is timestamp-aware and is
  * shared by preview and export. Static grades still upload only once; animated grades rebuild the
  * cube for the current source timestamp and update the same GL texture.
  */
@@ -23,6 +23,16 @@ object SharedColorPipeline {
     fun effectsFor(clip: TimelineClip): List<Effect> = buildList {
         addSpatialQualifierEffects(clip)
         add(AnimatedNodeColorLut(clip, EXPORT_LUT_SIZE, preview = false))
+    }
+
+    /**
+     * Exact realtime color path. It uses the export LUT resolution and export qualifier pre-filter,
+     * but resolves the latest immutable clip snapshot so correction/color sliders do not rebuild
+     * MediaCodec. Preview and export therefore execute the same color math at the same LUT size.
+     */
+    fun exactPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
+        addSpatialQualifierEffects(clip)
+        add(AnimatedNodeColorLut(clip, EXPORT_LUT_SIZE, preview = true))
     }
 
     fun previewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
