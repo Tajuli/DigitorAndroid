@@ -33,7 +33,10 @@ internal object PreviewExportCoordinator {
         val suspended = mutableListOf<DavinciFramePreviewEngine>()
         attempted.forEach { engine ->
             if (!engine.suspendForExternalGpuWork()) {
-                suspended.forEach { it.resumeAfterExternalGpuWork() }
+                suspended.forEach {
+                    it.resumeAfterExternalGpuWork()
+                    it.scheduleCurrentFrameRefresh(180L)
+                }
                 throw IllegalStateException(
                     "Preview GPU resources did not release in time; export was not started",
                 )
@@ -50,7 +53,13 @@ internal object PreviewExportCoordinator {
 
         override fun close() {
             if (!closed.compareAndSet(false, true)) return
-            engines.forEach { engine -> engine.resumeAfterExternalGpuWork() }
+            engines.forEach { engine ->
+                engine.resumeAfterExternalGpuWork()
+                // resumeAfterExternalGpuWork() rebuilds the decoder/GL session asynchronously.
+                // A second paused-frame submit after that rebuild guarantees the Surface receives a
+                // fresh buffer even when the export hand-off itself did not trigger a UI event.
+                engine.scheduleCurrentFrameRefresh(180L)
+            }
         }
     }
 }
