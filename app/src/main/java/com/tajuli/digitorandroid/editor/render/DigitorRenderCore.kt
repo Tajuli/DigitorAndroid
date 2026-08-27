@@ -47,8 +47,11 @@ internal class DigitorRenderCore(
         fun onError(error: Throwable)
     }
 
+    private fun normalizedColorInfo(format: Format): ColorInfo =
+        format.colorInfo ?: ColorInfo.SDR_BT709_LIMITED
+
     private val outputColorInfo: ColorInfo =
-        layers.firstOrNull()?.format?.colorInfo ?: ColorInfo.SDR_BT709_LIMITED
+        layers.firstOrNull()?.let { normalizedColorInfo(it.format) } ?: ColorInfo.SDR_BT709_LIMITED
 
     private val graph: MultipleInputVideoGraph = MultipleInputVideoGraph.Factory().create(
         context.applicationContext,
@@ -75,10 +78,10 @@ internal class DigitorRenderCore(
 
     init {
         require(!ColorInfo.isTransferHdr(outputColorInfo)) {
-            "Shared realtime compositor currently supports SDR input only"
+            "Pixel-parity realtime compositor currently supports SDR input only"
         }
-        require(layers.all { (it.format.colorInfo ?: outputColorInfo) == outputColorInfo }) {
-            "All simultaneously composited video layers must use the same SDR ColorInfo"
+        require(layers.all { normalizedColorInfo(it.format) == outputColorInfo }) {
+            "Pixel-parity compositing requires all simultaneous layers to use identical SDR ColorInfo"
         }
 
         graph.initialize()
