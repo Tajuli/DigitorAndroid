@@ -106,6 +106,11 @@ class DavinciFramePreviewEngine(
         val after: HeldOutput?,
     )
 
+    private data class PendingPausedOutput(
+        val source: DecoderSource,
+        val output: HeldOutput,
+    )
+
     private val appContext = context.applicationContext
     private val closed = AtomicBoolean(false)
     private val exportSuspended = AtomicBoolean(false)
@@ -187,9 +192,13 @@ class DavinciFramePreviewEngine(
         if (closed.get()) return
         handler.post {
             if (closed.get()) return@post
-            if (previewSurface === surface) return@post
+            if (previewSurface === surface) {
+                session?.retryPausedSubmission()
+                return@post
+            }
             previewSurface = surface.takeIf { it.isValid }
             session?.core?.setOutputSurface(previewSurface)
+            session?.retryPausedSubmission()
         }
     }
 
@@ -516,7 +525,18 @@ class DavinciFramePreviewEngine(
         val sources: List<DecoderSource>,
     ) : Closeable {
 
+        private val pendingPausedOutputs = mutableListOf<PendingPausedOutput>()
+        private var pausedRetryPosted = false
+
+        private val pausedRetry = Runnable {
+            pausedRetryPosted = false
+            if (session !== this || closed.get() || exportSuspended.get() || playing) return@Runnable
+            runCatching { drainPausedOutputs() }
+                .onFailure { failPreview("paused frame submit", it) }
+        }
+
         fun resetForPlayback(timelineUs: Long) {
+            clearPausedOutputs()
             core.flush()
             sources.forEach { source -> source.resetToTimeline(timelineUs) }
         }
@@ -527,6 +547,7 @@ class DavinciFramePreviewEngine(
         }
 
         fun seekAndRender(timelineUs: Long) {
+            clearPausedOutputs()
             core.flush()
             sources.forEach { source -> source.resetToTimeline(timelineUs) }
 
@@ -536,16 +557,64 @@ class DavinciFramePreviewEngine(
                 val after = around.after
                 when {
                     before != null -> {
-                        source.releaseToGraph(before, core)
-                        if (index != 0 && after != null) source.releaseToGraph(after, core)
-                        else if (after != null) source.releaseWithoutRendering(after)
+                        pendingPausedOutputs += PendingPausedOutput(source, before)
+                        if (index != 0 && after != null) {
+                            pendingPausedOutputs += PendingPausedOutput(source, after)
+                        } else if (after != null) {
+                            source.releaseWithoutRendering(after)
+                        }
                     }
-                    after != null -> source.releaseToGraph(after, core)
+                    after != null -> pendingPausedOutputs += PendingPausedOutput(source, after)
                 }
             }
+            drainPausedOutputs()
+        }
+
+        fun retryPausedSubmission() {
+            if (pendingPausedOutputs.isEmpty() || playing || pausedRetryPosted) return
+            pausedRetryPosted = true
+            handler.post(pausedRetry)
+        }
+
+        private fun drainPausedOutputs() {
+            if (pendingPausedOutputs.isEmpty()) return
+
+            // A paused target frame must not be consumed before the viewer Surface is attached.
+            // Otherwise the graph can process it successfully into a null output and there is no
+            // playback pump to submit another frame, leaving "Preparing GPU preview" forever.
+            if (previewSurface?.isValid != true) {
+                schedulePausedRetry()
+                return
+            }
+
+            val iterator = pendingPausedOutputs.iterator()
+            while (iterator.hasNext()) {
+                val pending = iterator.next()
+                if (pending.source.tryReleaseToGraph(pending.output, core)) {
+                    iterator.remove()
+                }
+            }
+
+            if (pendingPausedOutputs.isNotEmpty()) schedulePausedRetry()
+        }
+
+        private fun schedulePausedRetry() {
+            if (pausedRetryPosted) return
+            pausedRetryPosted = true
+            handler.postDelayed(pausedRetry, PAUSED_FRAME_RETRY_MS)
+        }
+
+        private fun clearPausedOutputs() {
+            handler.removeCallbacks(pausedRetry)
+            pausedRetryPosted = false
+            pendingPausedOutputs.forEach { pending ->
+                pending.source.releaseWithoutRendering(pending.output)
+            }
+            pendingPausedOutputs.clear()
         }
 
         override fun close() {
+            clearPausedOutputs()
             sources.forEach { source -> runCatching { source.close() } }
             runCatching { core.close() }
         }
@@ -709,16 +778,10 @@ class DavinciFramePreviewEngine(
             return AroundTarget(candidate, future)
         }
 
-        fun releaseToGraph(output: HeldOutput, core: DigitorRenderCore) {
-            var accepted = false
-            for (attempt in 0 until REGISTER_RETRY_COUNT) {
-                if (core.registerInputFrame(inputIndex)) {
-                    accepted = true
-                    break
-                }
-                Thread.yield()
-            }
-            codec.releaseOutputBuffer(output.index, accepted)
+        fun tryReleaseToGraph(output: HeldOutput, core: DigitorRenderCore): Boolean {
+            if (!core.registerInputFrame(inputIndex)) return false
+            codec.releaseOutputBuffer(output.index, true)
+            return true
         }
 
         fun releaseWithoutRendering(output: HeldOutput) {
@@ -737,6 +800,7 @@ class DavinciFramePreviewEngine(
     private companion object {
         const val TAG = "DigitorSharedPreview"
         const val PLAYBACK_PUMP_MS = 4L
+        const val PAUSED_FRAME_RETRY_MS = 8L
         const val PLAYBACK_LEAD_US = 45_000L
         const val HARD_RESYNC_US = 300_000L
         const val MAX_GRAPH_PENDING_FRAMES = 3
@@ -744,7 +808,6 @@ class DavinciFramePreviewEngine(
         const val MAX_OUTPUT_PER_PUMP = 8
         const val MAX_SCRUB_STEPS = 280
         const val SCRUB_DEQUEUE_TIMEOUT_US = 1_000L
-        const val REGISTER_RETRY_COUNT = 24
         const val LEGACY_IDLE_PAUSE_MS = 180L
         const val EXPORT_RELEASE_TIMEOUT_MS = 5_000L
     }
