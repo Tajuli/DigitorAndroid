@@ -3,6 +3,7 @@ package com.tajuli.digitorandroid.editor.preview
 import android.content.Context
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -12,6 +13,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.viewinterop.AndroidView
 
 /**
@@ -30,6 +32,10 @@ import androidx.compose.ui.viewinterop.AndroidView
  * is larger than the native Surface buffer, which otherwise shows only a cropped/zoomed portion of
  * the rendered frame on smaller phone displays. SurfaceFlinger then scales the completed project
  * frame down to the center-fitted viewer without changing its geometry.
+ *
+ * The workspace outside the fitted project canvas is deliberately gray. The project canvas itself
+ * remains the rendered Surface, so scaling a clip below 100% exposes the canvas around it while the
+ * outer gray pasteboard makes the canvas boundary obvious, similar to a desktop NLE viewer.
  */
 @Composable
 fun GpuPreviewSurface(
@@ -42,7 +48,7 @@ fun GpuPreviewSurface(
     val projectAspect = renderWidth.toFloat() / renderHeight.toFloat()
 
     BoxWithConstraints(
-        modifier = modifier,
+        modifier = modifier.background(PREVIEW_PASTEBOARD_GRAY),
         contentAlignment = Alignment.Center,
     ) {
         val availableAspect = if (maxHeight.value > 0f) {
@@ -76,6 +82,8 @@ fun GpuPreviewSurface(
         )
     }
 }
+
+private val PREVIEW_PASTEBOARD_GRAY = Color(0xFF424247)
 
 private class DigitorPreviewSurfaceView(
     context: Context,
