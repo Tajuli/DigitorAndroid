@@ -104,6 +104,7 @@ import kotlin.math.roundToInt
 private val E7Shell = Color(0xFF08080A)
 private val E7Muted = Color(0xFF909098)
 private val E7Accent = Color(0xFF30E0C3)
+private val E7PreviewPasteboard = Color(0xFF222226)
 
 private enum class WorkspaceV7(val label: String, val icon: ImageVector) {
     EDIT("Edit", Icons.Rounded.ContentCut),
@@ -526,7 +527,7 @@ private fun FramePreviewV7(
 ) {
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
     Box(
-        modifier.background(Color(0xFF030304)).onSizeChanged { previewSize = it },
+        modifier.background(E7PreviewPasteboard).onSizeChanged { previewSize = it },
         contentAlignment = Alignment.Center,
     ) {
         if (hasVideo) {
@@ -616,13 +617,18 @@ private fun TransportV7(
     ) {
         Text(timeV7(cursorUs), color = E7Muted, fontSize = 9.sp, modifier = Modifier.width(66.dp))
         IconButton(onClick = onBack, enabled = enabled, modifier = Modifier.size(34.dp)) {
-            Icon(Icons.Rounded.Replay10, null, modifier = Modifier.size(18.dp))
+            Icon(Icons.Rounded.Replay10, null, modifier = Modifier.size(18.dp), tint = Color.White)
         }
         IconButton(onClick = onPlayPause, enabled = enabled, modifier = Modifier.size(38.dp)) {
-            Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, modifier = Modifier.size(23.dp))
+            Icon(
+                if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                null,
+                modifier = Modifier.size(23.dp),
+                tint = Color.White,
+            )
         }
         IconButton(onClick = onForward, enabled = enabled, modifier = Modifier.size(34.dp)) {
-            Icon(Icons.Rounded.Forward10, null, modifier = Modifier.size(18.dp))
+            Icon(Icons.Rounded.Forward10, null, modifier = Modifier.size(18.dp), tint = Color.White)
         }
         Text(timeV7(durationUs), color = E7Muted, fontSize = 9.sp, modifier = Modifier.width(66.dp))
     }
