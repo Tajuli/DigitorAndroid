@@ -24,11 +24,22 @@ internal object PreviewExportCoordinator {
     }
 
     /**
-     * Releases all active preview decode/render sessions before export starts. The returned lease
-     * must be closed on completion, failure, or cancellation to restore paused preview frames.
+     * Releases all active preview decode/render sessions before export starts. Export is allowed to
+     * continue only after every registered preview engine confirms that its MediaCodec/GL session
+     * has actually been released. This is a barrier, not a best-effort hint.
      */
     fun acquireExportLease(): ExportLease {
-        val suspended = engines.filter { engine -> engine.suspendForExternalGpuWork() }
+        val attempted = engines.toList()
+        val suspended = mutableListOf<DavinciFramePreviewEngine>()
+        attempted.forEach { engine ->
+            if (!engine.suspendForExternalGpuWork()) {
+                suspended.forEach { it.resumeAfterExternalGpuWork() }
+                throw IllegalStateException(
+                    "Preview GPU resources did not release in time; export was not started",
+                )
+            }
+            suspended += engine
+        }
         return ExportLease(suspended)
     }
 
