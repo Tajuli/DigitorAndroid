@@ -263,11 +263,12 @@ class PreviewExportPixelParityInstrumentedTest {
             }
             tracks.indices.forEach { index ->
                 assertTrue(
-                    "Bitmap input $index was not accepted",
-                    graph.queueInputBitmap(
-                        index,
-                        bitmap,
-                        OneTimestampIterator(inputTimestampsUs[index]),
+                    "Bitmap input $index did not become ready",
+                    queueBitmapWhenReady(
+                        graph = graph,
+                        inputIndex = index,
+                        bitmap = bitmap,
+                        timestampUs = inputTimestampsUs[index],
                     ),
                 )
             }
@@ -283,6 +284,28 @@ class PreviewExportPixelParityInstrumentedTest {
             readerThread.quitSafely()
             readerThread.join(2_000L)
         }
+    }
+
+    private fun queueBitmapWhenReady(
+        graph: MultipleInputVideoGraph,
+        inputIndex: Int,
+        bitmap: Bitmap,
+        timestampUs: Long,
+    ): Boolean {
+        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (System.nanoTime() < deadlineNs) {
+            if (
+                graph.queueInputBitmap(
+                    inputIndex,
+                    bitmap,
+                    OneTimestampIterator(timestampUs),
+                )
+            ) {
+                return true
+            }
+            Thread.sleep(10L)
+        }
+        return false
     }
 
     private fun patternedBitmap(width: Int, height: Int): Bitmap {
