@@ -13,7 +13,6 @@ import androidx.media3.effect.GlShaderProgram
 import com.tajuli.digitorandroid.editor.model.ColorNode
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.NodeKind
-import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.SpatialNodeGraphPlan
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.visibleEffects
@@ -32,8 +31,8 @@ import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
  * video pipeline; this class owns the spatial topology after color has been resolved.
  *
  * Preview keeps the topology/program alive and resolves effect values from [PreviewProjectRegistry]
- * on every draw. This lets graph.redraw() show Blur/Sharpen/Glow/Grain changes on the current paused
- * frame without decoding a different frame or rebuilding MediaCodec.
+ * on every draw. Preview and export both derive animated effect time through
+ * [ParityRenderContract.sourceTimeUs], so trim/seek/timeline offsets cannot drift between modes.
  */
 @UnstableApi
 internal class SpatialNodeGraphEffect private constructor(
@@ -79,9 +78,6 @@ internal class SpatialNodeGraphEffect private constructor(
         private var inputHeight = 1
         private var scratchTextures = IntArray(0)
         private var scratchFbos = IntArray(0)
-        private var previewRevision = Long.MIN_VALUE
-        private var previewAnchorPresentationUs = 0L
-        private var previewAnchorSourceUs = clip.sourceInUs
 
         init {
             try {
@@ -122,7 +118,7 @@ internal class SpatialNodeGraphEffect private constructor(
                 GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, outputFboHolder, 0)
                 val media3OutputFbo = outputFboHolder[0]
                 val currentClip = if (preview) PreviewProjectRegistry.clip(clip.id) ?: clip else clip
-                val sourceUs = sourceTimeUs(presentationTimeUs, currentClip)
+                val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
                 val slotTextures = IntArray(plan.operations.size) { inputTexId }
                 var scratchCursor = 0
 
@@ -280,25 +276,6 @@ internal class SpatialNodeGraphEffect private constructor(
                 glow = amount("Glow"),
                 grain = amount("Film Grain"),
             )
-        }
-
-        private fun sourceTimeUs(presentationTimeUs: Long, currentClip: TimelineClip): Long {
-            val minSource = currentClip.sourceInUs.coerceAtLeast(0L)
-            val maxSource = currentClip.sourceOutUs.coerceAtLeast(minSource)
-            if (!preview) {
-                return (currentClip.sourceInUs + presentationTimeUs.coerceAtLeast(0L))
-                    .coerceIn(minSource, maxSource)
-            }
-
-            val snapshot = PreviewTransformClock.snapshotFor(currentClip.id)
-            if (snapshot == null) return presentationTimeUs.coerceIn(minSource, maxSource)
-            if (snapshot.revision != previewRevision) {
-                previewRevision = snapshot.revision
-                previewAnchorPresentationUs = presentationTimeUs
-                previewAnchorSourceUs = currentClip.sourceInUs + snapshot.localUs
-            }
-            return (previewAnchorSourceUs + (presentationTimeUs - previewAnchorPresentationUs))
-                .coerceIn(minSource, maxSource)
         }
 
         private fun newProgram(fragmentShader: String): GlProgram =
