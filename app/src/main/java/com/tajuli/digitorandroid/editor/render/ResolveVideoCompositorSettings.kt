@@ -19,6 +19,15 @@ internal fun resolveCompositionVideoTracks(project: TimelineProject): List<Timel
 internal fun TimelineTrack.activeVideoClipAt(timelineUs: Long): TimelineClip? =
     clips.firstOrNull { clip -> timelineUs in clip.timelineStartUs until clip.timelineEndUs }
 
+internal data class ResolveOverlayState(
+    val alphaScale: Float,
+    val backgroundX: Float,
+    val backgroundY: Float,
+    val scaleX: Float,
+    val scaleY: Float,
+    val rotationDegrees: Float,
+)
+
 /**
  * Resolve-style multilayer compositor shared by export and preview.
  *
@@ -26,11 +35,12 @@ internal fun TimelineTrack.activeVideoClipAt(timelineUs: Long): TimelineClip? =
  * stable track/clip id, allowing transform and opacity sliders to update without rebuilding the
  * MediaCodec/GL graph.
  *
- * Source aspect-ratio correction deliberately does not live here. The previous decoded-input-size
- * scaling experiment did not fix the phone preview; the real issue was a project-sized GL viewport
- * targeting a smaller native Surface buffer. GpuPreviewSurface now fixes that at the display
- * boundary by keeping the Surface buffer at project resolution. Leaving compositor geometry on the
- * original stable path also keeps Transformer export behavior unchanged.
+ * Geometry/alpha math is resolved into [ResolveOverlayState] first, then translated to Media3's
+ * [StaticOverlaySettings]. Keeping the math pure gives preview/export one testable contract and
+ * prevents single-track shortcuts from silently dropping opacity or transform semantics.
+ *
+ * Source aspect-ratio correction deliberately does not live here. The project-sized Surface buffer
+ * fixes the phone preview display boundary while this compositor remains project-resolution.
  */
 @UnstableApi
 internal class ResolveVideoCompositorSettings(
@@ -45,10 +55,8 @@ internal class ResolveVideoCompositorSettings(
     override fun getOutputSize(inputSizes: List<Size>): Size =
         Size(outputWidth.coerceAtLeast(1), outputHeight.coerceAtLeast(1))
 
-    override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
-        val snapshotTrack = videoTracks.getOrNull(inputId)
-            ?: return StaticOverlaySettings.Builder().setAlphaScale(0f).build()
-
+    internal fun resolveOverlayState(inputId: Int, presentationTimeUs: Long): ResolveOverlayState? {
+        val snapshotTrack = videoTracks.getOrNull(inputId) ?: return null
         val track = if (livePreview) {
             val id = trackIds.getOrNull(inputId)
             PreviewProjectRegistry.project()?.tracks?.firstOrNull { it.id == id } ?: snapshotTrack
@@ -56,19 +64,31 @@ internal class ResolveVideoCompositorSettings(
             snapshotTrack
         }
 
-        val clip = track.activeVideoClipAt(presentationTimeUs)
-            ?: return StaticOverlaySettings.Builder().setAlphaScale(0f).build()
-
+        val clip = track.activeVideoClipAt(presentationTimeUs) ?: return null
         val localUs = (presentationTimeUs - clip.timelineStartUs)
             .coerceIn(0L, clip.durationUs.coerceAtLeast(0L))
         val transform = clip.transform.evaluate(localUs)
 
+        return ResolveOverlayState(
+            alphaScale = clip.opacity.coerceIn(0f, 1f),
+            backgroundX = transform.positionX,
+            backgroundY = -transform.positionY,
+            scaleX = transform.scaleX,
+            scaleY = transform.scaleY,
+            rotationDegrees = transform.rotationDegrees,
+        )
+    }
+
+    override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
+        val state = resolveOverlayState(inputId, presentationTimeUs)
+            ?: return StaticOverlaySettings.Builder().setAlphaScale(0f).build()
+
         return StaticOverlaySettings.Builder()
-            .setAlphaScale(clip.opacity.coerceIn(0f, 1f))
+            .setAlphaScale(state.alphaScale)
             .setOverlayFrameAnchor(0f, 0f)
-            .setBackgroundFrameAnchor(transform.positionX, -transform.positionY)
-            .setScale(transform.scaleX, transform.scaleY)
-            .setRotationDegrees(transform.rotationDegrees)
+            .setBackgroundFrameAnchor(state.backgroundX, state.backgroundY)
+            .setScale(state.scaleX, state.scaleY)
+            .setRotationDegrees(state.rotationDegrees)
             .build()
     }
 }
