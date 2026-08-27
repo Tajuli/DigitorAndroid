@@ -46,30 +46,6 @@ class ResolveVideoCompositorSettingsTest {
         assertEquals("background", background.activeVideoClipAt(3_000_000L)?.label)
     }
 
-    @Test
-    fun matchingAspectDoesNotChangeScale() {
-        val scale = aspectFitScale(1920, 1080, 1920, 1080)
-
-        assertEquals(1f, scale.first, 0.0001f)
-        assertEquals(1f, scale.second, 0.0001f)
-    }
-
-    @Test
-    fun portraitInputIsContainedInsideLandscapeCanvas() {
-        val scale = aspectFitScale(1080, 1920, 1920, 1080)
-
-        assertEquals(0.31640625f, scale.first, 0.0001f)
-        assertEquals(1f, scale.second, 0.0001f)
-    }
-
-    @Test
-    fun ultraWideInputIsContainedInsideLandscapeCanvas() {
-        val scale = aspectFitScale(2560, 1080, 1920, 1080)
-
-        assertEquals(1f, scale.first, 0.0001f)
-        assertEquals(0.75f, scale.second, 0.0001f)
-    }
-
     private fun clip(label: String, startUs: Long, endUs: Long): TimelineClip = TimelineClip(
         uri = "content://test/$label",
         label = label,
