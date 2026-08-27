@@ -27,12 +27,12 @@ object SharedVideoPipeline {
 
     /**
      * Pixel-parity realtime path. Color uses the same 33^3 LUT resolution as export and spatial
-     * effects use the export shader variant. Geometry and opacity remain owned by the same Resolve
-     * compositor used by export.
+     * effects use the exact same shader implementation. The preview flag only anchors animated
+     * effect time to the editor playhead; it does not select a lower-quality shader.
      */
     fun compositedExactPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         addAll(SharedColorPipeline.exactPreviewEffectsFor(clip))
-        SpatialNodeGraphEffect.forClip(clip, preview = false)?.let(::add)
+        SpatialNodeGraphEffect.forClip(clip, preview = true)?.let(::add)
     }
 
     /**
