@@ -22,7 +22,9 @@ private val DigitorDark = darkColorScheme(
     outline = DigitorDivider,
     onBackground = Color(0xFFF4F4F5),
     onSurface = Color(0xFFF4F4F5),
-    onSurfaceVariant = Color(0xFFA7A7AE),
+    // Transport IconButtons inherit this content color. Pure white keeps Play/Pause and
+    // ±10-second controls readable against the dark editor transport bar.
+    onSurfaceVariant = Color.White,
 )
 
 @Composable
