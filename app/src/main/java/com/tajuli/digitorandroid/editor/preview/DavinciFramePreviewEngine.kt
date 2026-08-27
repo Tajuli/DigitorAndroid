@@ -63,19 +63,19 @@ class DavinciFramePreviewEngine(
         val startedNs: Long = System.nanoTime(),
     )
 
-    private data class ActiveLayer(
+    internal data class ActiveLayer(
         val track: TimelineTrack,
         val clip: TimelineClip,
     )
 
-    private data class SessionKey(
+    internal data class SessionKey(
         val width: Int,
         val height: Int,
         val frameRate: Int,
         val layers: List<LayerKey>,
     )
 
-    private data class LayerKey(
+    internal data class LayerKey(
         val trackId: String,
         val clipId: String,
         val uri: String,
@@ -109,6 +109,14 @@ class DavinciFramePreviewEngine(
     private val revision = AtomicLong(0L)
     private val pendingRequest = AtomicReference<Request?>(null)
     private val mutableFrame = MutableStateFlow<Frame?>(null)
+
+    // Compatibility clock for the current UI, which predates the explicit isPlaying overload.
+    // Once forward realtime playback is recognized it stays in play mode until the cursor goes idle;
+    // delayed individual ticks never kick the decoder back into scrub mode.
+    private val legacyLastSubmitNs = AtomicLong(0L)
+    private val legacyLastTimelineUs = AtomicLong(Long.MIN_VALUE)
+    private val legacyPlaying = AtomicBoolean(false)
+    private val legacyProject = AtomicReference<TimelineProject?>(null)
 
     private val renderThread = HandlerThread("DigitorMediaCodecPreview").apply { start() }
     private val handler = Handler(renderThread.looper)
@@ -151,6 +159,21 @@ class DavinciFramePreviewEngine(
         }
     }
 
+    private val legacyPauseWatchdog = object : Runnable {
+        override fun run() {
+            if (closed.get() || !legacyPlaying.get()) return
+            val idleMs = (System.nanoTime() - legacyLastSubmitNs.get()) / 1_000_000L
+            if (idleMs < LEGACY_IDLE_PAUSE_MS) {
+                handler.postDelayed(this, LEGACY_IDLE_PAUSE_MS - idleMs)
+                return
+            }
+            if (!legacyPlaying.compareAndSet(true, false)) return
+            val project = legacyProject.get() ?: return
+            val timelineUs = legacyLastTimelineUs.get().coerceAtLeast(0L)
+            submit(project, timelineUs, false)
+        }
+    }
+
     fun attachSurface(surface: Surface) {
         if (closed.get()) return
         handler.post {
@@ -171,10 +194,38 @@ class DavinciFramePreviewEngine(
     }
 
     /**
-     * Submit an editor clock sample. [isPlaying] is explicit so playback is never inferred from
-     * delayed cursor deltas and accidentally treated as a scrub.
+     * Compatibility entry point used by the current editor UI. Playback detection is deliberately
+     * sticky: one delayed tick can never turn an already-running decoder back into scrub mode.
      */
-    fun submit(project: TimelineProject, timelineUs: Long, isPlaying: Boolean = false) {
+    fun submit(project: TimelineProject, timelineUs: Long) {
+        if (closed.get()) return
+        val safeTimelineUs = timelineUs.coerceIn(0L, project.durationUs.coerceAtLeast(0L))
+        val nowNs = System.nanoTime()
+        val previousNs = legacyLastSubmitNs.getAndSet(nowNs)
+        val previousTimelineUs = legacyLastTimelineUs.getAndSet(safeTimelineUs)
+        legacyProject.set(project)
+
+        if (previousNs != 0L && previousTimelineUs != Long.MIN_VALUE) {
+            val wallDeltaUs = (nowNs - previousNs) / 1_000L
+            val timelineDeltaUs = safeTimelineUs - previousTimelineUs
+            val forwardRealtime = wallDeltaUs in 5_000L..750_000L &&
+                timelineDeltaUs > 0L &&
+                timelineDeltaUs <= 750_000L &&
+                timelineDeltaUs >= wallDeltaUs / 4L &&
+                timelineDeltaUs <= wallDeltaUs * 4L
+            when {
+                forwardRealtime -> legacyPlaying.set(true)
+                timelineDeltaUs < 0L || abs(timelineDeltaUs) > 1_500_000L -> legacyPlaying.set(false)
+            }
+        }
+
+        submit(project, safeTimelineUs, legacyPlaying.get())
+        handler.removeCallbacks(legacyPauseWatchdog)
+        if (legacyPlaying.get()) handler.postDelayed(legacyPauseWatchdog, LEGACY_IDLE_PAUSE_MS)
+    }
+
+    /** Explicit transport entry point for the next editor UI revision. */
+    fun submit(project: TimelineProject, timelineUs: Long, isPlaying: Boolean) {
         if (closed.get()) return
         PreviewProjectRegistry.update(project)
         val request = Request(
@@ -452,7 +503,7 @@ class DavinciFramePreviewEngine(
         fun resetToTimeline(timelineUs: Long) {
             heldPlaybackOutput?.let(::releaseWithoutRendering)
             heldPlaybackOutput = null
-            runCatching { codec.flush() }.getOrThrow()
+            codec.flush()
             val targetSourceUs = timelineToSourceUs(clip, timelineUs)
             extractor.seekTo(targetSourceUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             inputEos = false
@@ -463,10 +514,10 @@ class DavinciFramePreviewEngine(
         fun feedInput(limit: Int): Boolean {
             if (inputEos) return false
             var didWork = false
-            repeat(limit) {
-                if (inputEos) return@repeat
+            for (attempt in 0 until limit) {
+                if (inputEos) break
                 val inputIndex = codec.dequeueInputBuffer(0L)
-                if (inputIndex < 0) return@repeat
+                if (inputIndex < 0) break
                 val input = codec.getInputBuffer(inputIndex)
                     ?: error("Decoder input buffer unavailable")
                 input.clear()
@@ -481,7 +532,7 @@ class DavinciFramePreviewEngine(
                     )
                     inputEos = true
                     didWork = true
-                    return@repeat
+                    break
                 }
                 val size = extractor.readSampleData(input, 0)
                 if (size < 0) {
@@ -516,7 +567,7 @@ class DavinciFramePreviewEngine(
                 }
             }
 
-            repeat(MAX_OUTPUT_PER_PUMP) {
+            for (attempt in 0 until MAX_OUTPUT_PER_PUMP) {
                 if (outputEos || heldPlaybackOutput != null) return
                 val outputIndex = codec.dequeueOutputBuffer(bufferInfo, 0L)
                 when {
@@ -531,12 +582,12 @@ class DavinciFramePreviewEngine(
                         if (sourceUs < playbackFloorSourceUs || sourceUs < clip.sourceInUs) {
                             codec.releaseOutputBuffer(outputIndex, false)
                             if (isEos) outputEos = true
-                            return@repeat
+                            continue
                         }
                         if (sourceUs >= clip.sourceOutUs) {
                             codec.releaseOutputBuffer(outputIndex, false)
                             if (isEos) outputEos = true
-                            return@repeat
+                            continue
                         }
 
                         val outputTimelineUs = sourceToTimelineUs(clip, sourceUs)
@@ -564,7 +615,7 @@ class DavinciFramePreviewEngine(
             var candidate: HeldOutput? = null
             var future: HeldOutput? = null
 
-            repeat(MAX_SCRUB_STEPS) {
+            for (step in 0 until MAX_SCRUB_STEPS) {
                 feedInput(2)
                 val outputIndex = codec.dequeueOutputBuffer(bufferInfo, SCRUB_DEQUEUE_TIMEOUT_US)
                 when {
@@ -582,29 +633,27 @@ class DavinciFramePreviewEngine(
                                 candidate?.let(::releaseWithoutRendering)
                                 candidate = output
                             }
-                            sourceUs < clip.sourceOutUs -> {
-                                future = output
-                                return@repeat
-                            }
+                            sourceUs < clip.sourceOutUs -> future = output
                             else -> releaseWithoutRendering(output)
                         }
-                        if (future != null || isEos) {
-                            outputEos = isEos
-                            return@repeat
-                        }
+                        if (isEos) outputEos = true
                     }
 
                     outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
                 }
-                if (future != null || (inputEos && outputEos)) return@repeat
+                if (future != null || (inputEos && outputEos)) break
             }
             return AroundTarget(candidate, future)
         }
 
         fun releaseToGraph(output: HeldOutput, core: DigitorRenderCore) {
             var accepted = false
-            repeat(REGISTER_RETRY_COUNT) {
-                if (!accepted && core.registerInputFrame(inputIndex)) accepted = true
+            for (attempt in 0 until REGISTER_RETRY_COUNT) {
+                if (core.registerInputFrame(inputIndex)) {
+                    accepted = true
+                    break
+                }
+                Thread.yield()
             }
             codec.releaseOutputBuffer(output.index, accepted)
         }
@@ -633,6 +682,7 @@ class DavinciFramePreviewEngine(
         const val MAX_SCRUB_STEPS = 280
         const val SCRUB_DEQUEUE_TIMEOUT_US = 1_000L
         const val REGISTER_RETRY_COUNT = 24
+        const val LEGACY_IDLE_PAUSE_MS = 180L
     }
 }
 
@@ -649,7 +699,10 @@ internal fun activeVideoLayersAt(project: TimelineProject, timeUs: Long): List<T
         .sortedByDescending { (trackIndex, _) -> trackIndex }
         .map { (_, clip) -> clip }
 
-private fun activeLayerSpecsAt(project: TimelineProject, timeUs: Long): List<DavinciFramePreviewEngine.ActiveLayer> =
+private fun activeLayerSpecsAt(
+    project: TimelineProject,
+    timeUs: Long,
+): List<DavinciFramePreviewEngine.ActiveLayer> =
     project.tracks
         .filter { track -> track.kind == TrackKind.VIDEO && !track.muted }
         .mapNotNull { track ->
