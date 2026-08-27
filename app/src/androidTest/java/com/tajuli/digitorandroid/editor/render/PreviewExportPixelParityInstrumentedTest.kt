@@ -167,7 +167,7 @@ class PreviewExportPixelParityInstrumentedTest {
             bitmap = bitmap,
         )
 
-        bitmap.recycle()
+        if (!bitmap.isRecycled) bitmap.recycle()
         PreviewProjectRegistry.clear(project)
 
         // Both timestamp conventions must have landed on the same composition time; Film Grain is
@@ -263,12 +263,16 @@ class PreviewExportPixelParityInstrumentedTest {
                 )
             }
             tracks.indices.forEach { index ->
+                // Media3 owns queued bitmap inputs and may recycle them. Give every graph input its
+                // own copy so preview/export runs and the export sentinel cannot invalidate a bitmap
+                // still needed by another input.
+                val inputBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
                 assertTrue(
                     "Bitmap input $index did not become ready",
                     queueBitmapWhenReady(
                         graph = graph,
                         inputIndex = index,
-                        bitmap = bitmap,
+                        bitmap = inputBitmap,
                         timestampUs = inputTimestampsUs[index],
                     ),
                 )
