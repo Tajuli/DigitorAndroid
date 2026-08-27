@@ -66,6 +66,21 @@ class DavinciFramePreviewEngineTest {
         assertEquals(listOf("visible"), activeVideoLayersAt(project, 500_000L).map { it.label })
     }
 
+    @Test
+    fun trimmedClipMapsDecoderPtsToTimelinePtsExactly() {
+        val trimmed = TimelineClip(
+            id = "trimmed",
+            uri = "content://test/trimmed",
+            label = "trimmed",
+            timelineStartUs = 2_000_000L,
+            sourceInUs = 5_000_000L,
+            sourceOutUs = 8_000_000L,
+        )
+
+        assertEquals(5_500_000L, timelineToSourceUs(trimmed, 2_500_000L))
+        assertEquals(3_500_000L, sourceToTimelineUs(trimmed, 6_500_000L))
+    }
+
     private fun clip(label: String, startUs: Long, endUs: Long): TimelineClip = TimelineClip(
         uri = "content://test/$label",
         label = label,
