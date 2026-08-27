@@ -278,6 +278,12 @@ class PreviewExportPixelParityInstrumentedTest {
                 )
             }
 
+            // The device test supplies exactly one synthetic frame per input. Unlike a real decoder,
+            // there is no subsequent frame/EOS callback, so explicitly close every stream. This lets
+            // the multi-input compositor finalize the one-frame composition interval instead of
+            // waiting indefinitely for a later timestamp.
+            tracks.indices.forEach { index -> graph.signalEndOfInput(index) }
+
             assertTrue("Timed out waiting for graph output", outputLatch.await(10, TimeUnit.SECONDS))
             throwIfGraphFailed(error.get())
             assertTrue("Timed out waiting for RGBA output", imageLatch.await(10, TimeUnit.SECONDS))
