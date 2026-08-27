@@ -71,6 +71,8 @@ internal class DigitorRenderCore(
     private var outputSurface: Surface? = null
 
     init {
+        graph.initialize()
+
         // Input order stays in project track order. ResolveVideoCompositorSettings therefore owns
         // the exact same z-order/geometry semantics in preview and Transformer export.
         graph.setCompositorSettings(
@@ -82,6 +84,8 @@ internal class DigitorRenderCore(
             ),
         )
 
+        // MultipleInputVideoGraph requires all input slots to exist before any frame is rendered.
+        layers.indices.forEach(graph::registerInput)
         layers.forEachIndexed { index, layer ->
             graph.registerInputStream(
                 index,
@@ -108,6 +112,10 @@ internal class DigitorRenderCore(
     fun registerInputFrame(inputIndex: Int): Boolean = graph.registerInputFrame(inputIndex)
 
     fun pendingInputFrames(inputIndex: Int): Int = graph.getPendingInputFrameCount(inputIndex)
+
+    fun redraw() {
+        graph.redraw()
+    }
 
     fun flush() {
         graph.flush()
