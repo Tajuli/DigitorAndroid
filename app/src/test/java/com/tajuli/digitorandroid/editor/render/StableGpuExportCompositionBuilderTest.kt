@@ -4,6 +4,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 class StableGpuExportCompositionBuilderTest {
@@ -30,7 +31,9 @@ class StableGpuExportCompositionBuilderTest {
             videoTracks = listOf(track),
         )
 
-        assertEquals(0.37f, compositor.getOverlaySettings(0, 500_000L).alphaScale, 0f)
+        val state = compositor.resolveOverlayState(0, 500_000L)
+        assertNotNull(state)
+        assertEquals(0.37f, state!!.alphaScale, 0f)
     }
 
     @Test
