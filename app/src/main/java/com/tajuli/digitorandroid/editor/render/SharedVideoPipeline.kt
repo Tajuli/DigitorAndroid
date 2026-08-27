@@ -7,9 +7,9 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 /**
  * Shared video processing stages.
  *
- * Legacy single-stream paths apply clip geometry as an item effect. Resolve-style multilayer
- * preview/export move geometry to VideoCompositorSettings so scaled/positioned upper tracks remain
- * transparent outside their image and lower tracks stay visible there.
+ * The parity compositor path is intentionally centralized so preview and export cannot silently
+ * drift to different LUT resolutions or spatial shader stacks. Geometry and opacity are owned by
+ * ResolveVideoCompositorSettings for both preview and export.
  */
 @UnstableApi
 object SharedVideoPipeline {
@@ -19,20 +19,29 @@ object SharedVideoPipeline {
         SpatialNodeGraphEffect.forClip(clip, preview = false)?.let(::add)
     }
 
-    /** Per-layer effects used before the final multilayer export compositor. */
-    fun compositedExportEffectsFor(clip: TimelineClip): List<Effect> = buildList {
-        addAll(SharedColorPipeline.effectsFor(clip))
-        SpatialNodeGraphEffect.forClip(clip, preview = false)?.let(::add)
-    }
+    /** Per-layer effects used before the final export compositor. */
+    fun compositedExportEffectsFor(clip: TimelineClip): List<Effect> =
+        compositedParityEffectsFor(clip, preview = false)
 
     /**
-     * Pixel-parity realtime path. Color uses the same 33^3 LUT resolution as export and spatial
-     * effects use the exact same shader implementation. The preview flag only anchors animated
-     * effect time to the editor playhead; it does not select a lower-quality shader.
+     * Pixel-parity realtime path. Preview uses the same 33^3 color LUT and the same spatial shader
+     * implementation as export. The preview flag only selects live editor state/time anchoring.
      */
-    fun compositedExactPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
-        addAll(SharedColorPipeline.exactPreviewEffectsFor(clip))
-        SpatialNodeGraphEffect.forClip(clip, preview = true)?.let(::add)
+    fun compositedExactPreviewEffectsFor(clip: TimelineClip): List<Effect> =
+        compositedParityEffectsFor(clip, preview = true)
+
+    private fun compositedParityEffectsFor(
+        clip: TimelineClip,
+        preview: Boolean,
+    ): List<Effect> = buildList {
+        addAll(
+            if (preview) {
+                SharedColorPipeline.exactPreviewEffectsFor(clip)
+            } else {
+                SharedColorPipeline.effectsFor(clip)
+            },
+        )
+        SpatialNodeGraphEffect.forClip(clip, preview = preview)?.let(::add)
     }
 
     /**
