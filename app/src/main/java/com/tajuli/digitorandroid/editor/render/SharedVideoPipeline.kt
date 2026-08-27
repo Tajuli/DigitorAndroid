@@ -26,8 +26,18 @@ object SharedVideoPipeline {
     }
 
     /**
-     * GPU preview equivalent of [compositedExportEffectsFor]. Geometry/opacity are owned by the
-     * compositor while the lighter preview LUT/effect variants stay on the GL path.
+     * Pixel-parity realtime path. Color uses the same 33^3 LUT resolution as export and spatial
+     * effects use the export shader variant. Geometry and opacity remain owned by the same Resolve
+     * compositor used by export.
+     */
+    fun compositedExactPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
+        addAll(SharedColorPipeline.exactPreviewEffectsFor(clip))
+        SpatialNodeGraphEffect.forClip(clip, preview = false)?.let(::add)
+    }
+
+    /**
+     * Lightweight legacy GPU preview path retained for fallback/experimentation. Geometry/opacity
+     * are owned by the compositor while lower-resolution preview LUT/effects stay on the GL path.
      */
     fun compositedPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         addAll(SharedColorPipeline.previewEffectsFor(clip))
