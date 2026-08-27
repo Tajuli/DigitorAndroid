@@ -98,6 +98,8 @@ class Media3CompositionBuilder {
             .build()
     }
 
+    /** Legacy mixed-audio composition retained for export/tests. Realtime multitrack preview uses
+     * [buildAudioTrackPreview] so CompositionPlayer only has to play one sequence per instance. */
     fun buildAudioPreview(project: TimelineProject): Composition {
         val problems = project.validate()
         require(problems.isEmpty()) { problems.joinToString("; ") }
@@ -106,6 +108,32 @@ class Media3CompositionBuilder {
         addAudioSequences(project, sequences, forPreview = true)
         require(sequences.isNotEmpty()) { "Timeline has no playable audio" }
         return Composition.Builder(sequences).build()
+    }
+
+    /**
+     * Builds exactly one audio sequence for one A track. This is the realtime-preview primitive:
+     * every A track gets its own audio-only CompositionPlayer and Android mixes their outputs.
+     * A trailing silent gap extends every player to project duration so the chosen master clock
+     * cannot stop just because its last clip ends before another audio/video track.
+     */
+    fun buildAudioTrackPreview(project: TimelineProject, trackId: String): Composition {
+        val problems = project.validate()
+        require(problems.isEmpty()) { problems.joinToString("; ") }
+
+        val track = project.tracks.firstOrNull { candidate ->
+            candidate.id == trackId &&
+                candidate.kind == TrackKind.AUDIO &&
+                !candidate.muted &&
+                candidate.clips.isNotEmpty()
+        } ?: error("Audio preview track is missing, muted, or empty")
+
+        val sequence = buildAudioSequence(
+            project = project,
+            track = track,
+            forPreview = true,
+            extendToProjectDuration = true,
+        )
+        return Composition.Builder(listOf(sequence)).build()
     }
 
     private fun buildExport(project: TimelineProject): Composition {
@@ -198,18 +226,35 @@ class Media3CompositionBuilder {
         project.tracks
             .filter { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
             .forEach { track ->
-                val audioBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
-                var cursorUs = 0L
-                val clips = if (forPreview) coalescePreviewClips(track.clips) else track.sortedClips()
-                clips.forEach { clip ->
-                    if (clip.timelineStartUs > cursorUs) {
-                        audioBuilder.addGap(clip.timelineStartUs - cursorUs)
-                    }
-                    audioBuilder.addItem(toEditedMediaItem(clip, TrackKind.AUDIO, forPreview))
-                    cursorUs = clip.timelineEndUs
-                }
-                sequences += audioBuilder.build()
+                sequences += buildAudioSequence(
+                    project = project,
+                    track = track,
+                    forPreview = forPreview,
+                    extendToProjectDuration = false,
+                )
             }
+    }
+
+    private fun buildAudioSequence(
+        project: TimelineProject,
+        track: TimelineTrack,
+        forPreview: Boolean,
+        extendToProjectDuration: Boolean,
+    ): EditedMediaItemSequence {
+        val audioBuilder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
+        var cursorUs = 0L
+        val clips = if (forPreview) coalescePreviewClips(track.clips) else track.sortedClips()
+        clips.forEach { clip ->
+            if (clip.timelineStartUs > cursorUs) {
+                audioBuilder.addGap(clip.timelineStartUs - cursorUs)
+            }
+            audioBuilder.addItem(toEditedMediaItem(clip, TrackKind.AUDIO, forPreview))
+            cursorUs = clip.timelineEndUs
+        }
+        if (extendToProjectDuration && project.durationUs > cursorUs) {
+            audioBuilder.addGap(project.durationUs - cursorUs)
+        }
+        return audioBuilder.build()
     }
 
     private fun toEditedMediaItem(
