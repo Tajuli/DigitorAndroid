@@ -22,8 +22,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 @UnstableApi
 class GpuExportBackend(
     private val context: Context,
-    private val compositionBuilder: StableGpuExportCompositionBuilder = StableGpuExportCompositionBuilder(),
 ) : ExportBackend {
+    private val compositionBuilder = StableGpuExportCompositionBuilder()
+
     override suspend fun export(
         project: TimelineProject,
         output: File,
