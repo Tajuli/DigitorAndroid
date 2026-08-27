@@ -115,9 +115,6 @@ class DavinciFramePreviewEngine(
     private val resumeProject = AtomicReference<TimelineProject?>(null)
     private val resumeTimelineUs = AtomicLong(0L)
 
-    // Compatibility clock for the current UI, which predates the explicit isPlaying overload.
-    // Once forward realtime playback is recognized it stays in play mode until the cursor goes idle;
-    // delayed individual ticks never kick the decoder back into scrub mode.
     private val legacyLastSubmitNs = AtomicLong(0L)
     private val legacyLastTimelineUs = AtomicLong(Long.MIN_VALUE)
     private val legacyPlaying = AtomicBoolean(false)
@@ -127,7 +124,6 @@ class DavinciFramePreviewEngine(
     private val handler = Handler(renderThread.looper)
     private val renderExecutor = Executor { runnable -> handler.post(runnable) }
 
-    // Render-thread-only state.
     private var previewSurface: Surface? = null
     private var session: PreviewSession? = null
     private var sessionGeneration = 0L
@@ -208,8 +204,7 @@ class DavinciFramePreviewEngine(
 
     /**
      * Synchronously gives MediaCodec/GL resources back to the device before another heavy GPU job
-     * (currently export) starts. This prevents native codec/driver process deaths on devices that
-     * cannot host the full-resolution preview graph and Transformer graph at the same time.
+     * starts. Export must not start until the release action has actually finished.
      */
     internal fun suspendForExternalGpuWork(): Boolean {
         if (closed.get()) return false
@@ -237,16 +232,17 @@ class DavinciFramePreviewEngine(
             }
         }
 
-        if (Looper.myLooper() == renderThread.looper) {
+        return if (Looper.myLooper() == renderThread.looper) {
             releaseAction.run()
+            true
         } else {
             handler.post(releaseAction)
-            runCatching { latch.await(EXPORT_RELEASE_TIMEOUT_MS, TimeUnit.MILLISECONDS) }
+            runCatching {
+                latch.await(EXPORT_RELEASE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            }.getOrDefault(false)
         }
-        return true
     }
 
-    /** Restores the most recent paused playhead after export releases its codec/GPU resources. */
     internal fun resumeAfterExternalGpuWork() {
         if (closed.get() || !exportSuspended.compareAndSet(true, false)) return
         val project = resumeProject.get() ?: legacyProject.get() ?: return
@@ -255,10 +251,6 @@ class DavinciFramePreviewEngine(
         submit(project, safeTimelineUs, false)
     }
 
-    /**
-     * Compatibility entry point used by the current editor UI. Playback detection is deliberately
-     * sticky: one delayed tick can never turn an already-running decoder back into scrub mode.
-     */
     fun submit(project: TimelineProject, timelineUs: Long) {
         if (closed.get()) return
         val safeTimelineUs = timelineUs.coerceIn(0L, project.durationUs.coerceAtLeast(0L))
@@ -290,7 +282,6 @@ class DavinciFramePreviewEngine(
         }
     }
 
-    /** Explicit transport entry point for the next editor UI revision. */
     fun submit(project: TimelineProject, timelineUs: Long, isPlaying: Boolean) {
         if (closed.get()) return
         val safeTimelineUs = timelineUs.coerceIn(0L, project.durationUs.coerceAtLeast(0L))
@@ -340,7 +331,6 @@ class DavinciFramePreviewEngine(
                 Long.MAX_VALUE
             }
 
-            // UI/audio clock is authoritative. Re-anchor pacing on every sample without seeking.
             playAnchorTimelineUs = request.timelineUs
             playAnchorNs = System.nanoTime()
 
@@ -355,7 +345,10 @@ class DavinciFramePreviewEngine(
             stopPlayback()
             when {
                 sessionChanged || wasPlaying || timelineChanged -> active.seekAndRender(request.timelineUs)
-                projectChanged -> active.core.redraw()
+                // MultipleInputVideoGraph.redraw() re-presents its already-processed output frame;
+                // it does not run a changed LUT/spatial shader over the held decoder texture again.
+                // Re-submit the same playhead frame so paused slider/effect changes are visible now.
+                projectChanged -> active.seekAndRender(request.timelineUs)
             }
         }
 
@@ -537,9 +530,6 @@ class DavinciFramePreviewEngine(
             core.flush()
             sources.forEach { source -> source.resetToTimeline(timelineUs) }
 
-            // Input 0 is the top/primary stream, exactly like Transformer. Its timestamp chooses the
-            // composed output timestamp. Secondary streams also queue the next frame so the
-            // compositor can choose the frame covering the primary timestamp.
             sources.forEachIndexed { index, source ->
                 val around = source.decodeAroundTarget()
                 val before = around.atOrBefore
@@ -756,11 +746,10 @@ class DavinciFramePreviewEngine(
         const val SCRUB_DEQUEUE_TIMEOUT_US = 1_000L
         const val REGISTER_RETRY_COUNT = 24
         const val LEGACY_IDLE_PAUSE_MS = 180L
-        const val EXPORT_RELEASE_TIMEOUT_MS = 1_500L
+        const val EXPORT_RELEASE_TIMEOUT_MS = 5_000L
     }
 }
 
-/** First project video track is the top track; CPU-style blending therefore runs bottom-to-top. */
 internal fun activeVideoLayersAt(project: TimelineProject, timeUs: Long): List<TimelineClip> =
     project.tracks
         .withIndex()
@@ -805,13 +794,6 @@ private fun sessionKey(
     },
 )
 
-/**
- * Only state that changes the immutable GL topology belongs in the session key. Spatial FX values
- * and their keyframes are deliberately excluded: the long-lived preview shader reads them from
- * PreviewProjectRegistry on every draw, so a slider can redraw the held frame without rebuilding
- * MediaCodec or the video graph. Qualifier spatial feather parameters remain immutable today and
- * therefore still participate in this key.
- */
 private fun staticSpatialHash(clip: TimelineClip): Int {
     var result = clip.nodeGraph.edges.hashCode()
     clip.nodeGraph.nodes.forEach { node ->
