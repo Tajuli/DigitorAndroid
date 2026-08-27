@@ -264,8 +264,8 @@ class Media3CompositionBuilder {
         compositorOwnsGeometry: Boolean = false,
     ): EditedMediaItem {
         val clipping = MediaItem.ClippingConfiguration.Builder()
-            .setStartPositionMs(clip.sourceInUs / 1000L)
-            .setEndPositionMs(clip.sourceOutUs / 1000L)
+            .setStartPositionUs(clip.sourceInUs)
+            .setEndPositionUs(clip.sourceOutUs)
             .build()
         val mediaItem = MediaItem.Builder()
             .setUri(clip.uri)
