@@ -177,8 +177,9 @@ private class StyledTextReplacementSpan(
         val measured = work.measureText(text, start, end)
 
         if (style.backgroundEnabled) {
+            val backgroundColor = style.backgroundArgb.toInt()
             val background = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = style.backgroundArgb.toInt()
+                color = backgroundColor
                 this.style = Paint.Style.FILL
             }
             val radius = (work.textSize * .16f).coerceAtLeast(2f)
@@ -215,18 +216,21 @@ private class StyledTextReplacementSpan(
         canvas.drawText(text, start, end, baselineX, y.toFloat(), work)
     }
 
-    private fun configuredPaint(source: Paint): Paint = Paint(source).apply {
-        textSize = source.textSize * sizeScale.coerceIn(.35f, 4f)
-        typeface = Typeface.create(
-            when (style.font) {
-                TextFontV2.SANS -> "sans-serif"
-                TextFontV2.SERIF -> "serif"
-                TextFontV2.MONO -> "monospace"
-                TextFontV2.CURSIVE -> "cursive"
-            },
-            if (bold) Typeface.BOLD else Typeface.NORMAL,
-        )
-        isAntiAlias = true
+    private fun configuredPaint(source: Paint): Paint {
+        val font = style.font
+        return Paint(source).apply {
+            textSize = source.textSize * sizeScale.coerceIn(.35f, 4f)
+            typeface = Typeface.create(
+                when (font) {
+                    TextFontV2.SANS -> "sans-serif"
+                    TextFontV2.SERIF -> "serif"
+                    TextFontV2.MONO -> "monospace"
+                    TextFontV2.CURSIVE -> "cursive"
+                },
+                if (bold) Typeface.BOLD else Typeface.NORMAL,
+            )
+            isAntiAlias = true
+        }
     }
 
     private fun horizontalPadding(paint: Paint): Float =
