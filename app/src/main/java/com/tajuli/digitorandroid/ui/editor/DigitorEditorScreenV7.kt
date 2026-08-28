@@ -97,6 +97,7 @@ import com.tajuli.digitorandroid.editor.preview.DavinciFramePreviewEngine
 import com.tajuli.digitorandroid.editor.preview.GpuPreviewSurface
 import com.tajuli.digitorandroid.editor.preview.MultitrackAudioPreviewEngine
 import com.tajuli.digitorandroid.editor.processing.ExportProgress
+import com.tajuli.digitorandroid.editor.processing.ExportQuality
 import com.tajuli.digitorandroid.editor.processing.ProcessingRouter
 import com.tajuli.digitorandroid.editor.render.Media3CompositionBuilder
 import java.io.File
@@ -156,6 +157,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
     var previewStatus by remember { mutableStateOf<String?>(null) }
     var showExportDialog by remember { mutableStateOf(false) }
     var exportName by remember { mutableStateOf("Digitor_${System.currentTimeMillis()}") }
+    var exportQuality by remember { mutableStateOf(ExportQuality.HIGH) }
     var exportFraction by remember { mutableStateOf<Float?>(null) }
     var exportStatus by remember { mutableStateOf<String?>(null) }
 
@@ -273,10 +275,10 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
         if (state.project.durationUs <= 0L) { exportStatus = "Timeline is empty"; return }
         scope.launch {
             stopForEdit()
-            exportFraction = 0f; exportStatus = "Preparing export"
+            exportFraction = 0f; exportStatus = "Preparing ${exportQuality.label} export"
             val temp = File(context.cacheDir, "digitor_export_${System.currentTimeMillis()}.mp4")
             runCatching {
-                val result = router.export(state.project, temp) { progress ->
+                val result = router.export(state.project, temp, exportQuality) { progress ->
                     if (progress is ExportProgress.Stage) {
                         exportStatus = progress.name
                         progress.fraction?.let { exportFraction = it.coerceIn(0f, 1f) }
@@ -288,7 +290,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                         ?: error("Could not open selected save location")
                 }
                 result
-            }.onSuccess { result -> exportFraction = 1f; exportStatus = "Saved · ${result.backend}"; temp.delete() }
+            }.onSuccess { result -> exportFraction = 1f; exportStatus = "Saved · ${result.backend} · ${exportQuality.label}"; temp.delete() }
                 .onFailure { error -> exportFraction = null; exportStatus = error.message ?: "Export failed"; temp.delete() }
         }
     }
@@ -302,9 +304,20 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(value = exportName, onValueChange = { exportName = it }, label = { Text("File name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Text("Quality", fontSize = 10.sp, color = E7Muted)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        ExportQuality.entries.forEach { quality ->
+                            AssistChip(
+                                onClick = { exportQuality = quality },
+                                label = { Text(if (exportQuality == quality) "✓ ${quality.label}" else quality.label, fontSize = 9.sp) },
+                            )
+                        }
+                    }
+                    val targetMbps = exportQuality.videoBitrate(state.project.width, state.project.height, state.project.frameRate) / 1_000_000f
+                    Text("${exportQuality.label} · %.1f Mbps H.264 target".format(targetMbps), fontSize = 9.sp, color = E7Muted)
                     Text("File type", fontSize = 10.sp, color = E7Muted)
                     AssistChip(onClick = {}, label = { Text("MP4 · H.264 / AAC") })
-                    Text("Creator text, fades and audio automation are included in export.", fontSize = 9.sp, color = E7Muted)
+                    Text("Quality changes encoder bitrate; canvas resolution and frame rate stay unchanged.", fontSize = 9.sp, color = E7Muted)
                 }
             },
             confirmButton = {
