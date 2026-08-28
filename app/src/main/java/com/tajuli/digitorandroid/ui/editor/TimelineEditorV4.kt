@@ -32,6 +32,8 @@ import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.ContentCut
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.FitScreen
+import androidx.compose.material.icons.rounded.KeyboardArrowLeft
+import androidx.compose.material.icons.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.LinkOff
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,6 +64,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.ln
@@ -104,11 +108,13 @@ fun TimelineEditorV4(
     val scroll = rememberScrollState()
     val verticalScroll = rememberScrollState()
     val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
     var zoom by remember { mutableStateOf(.18f) }
 
     BoxWithConstraints(modifier.background(T4Panel)) {
         val viewportDp = (maxWidth - 56.dp).coerceAtLeast(120.dp)
         val viewportPx = with(density) { viewportDp.toPx() }
+        val slideStepPx = (viewportPx * .65f).roundToInt().coerceAtLeast(120)
         val durationSec = max(project.durationUs / US_PER_SECOND.toFloat(), 1f)
         val overviewPps = (viewportPx * .08f / durationSec).coerceAtLeast(.02f)
         val fitPps = (viewportPx / durationSec).coerceAtLeast(overviewPps)
@@ -134,6 +140,16 @@ fun TimelineEditorV4(
                 onOverview = { zoom = 0f },
                 onFit = { zoom = fitFraction },
                 onOneFrame = { zoom = 1f },
+                onSlideLeft = {
+                    scope.launch {
+                        scroll.animateScrollTo((scroll.value - slideStepPx).coerceAtLeast(0))
+                    }
+                },
+                onSlideRight = {
+                    scope.launch {
+                        scroll.animateScrollTo((scroll.value + slideStepPx).coerceAtMost(scroll.maxValue))
+                    }
+                },
                 onAddVideoTrack = onAddVideoTrack,
                 onAddAudioTrack = onAddAudioTrack,
                 onSplit = onSplit,
@@ -242,6 +258,8 @@ private fun TimelineToolbarV4(
     onOverview: () -> Unit,
     onFit: () -> Unit,
     onOneFrame: () -> Unit,
+    onSlideLeft: () -> Unit,
+    onSlideRight: () -> Unit,
     onAddVideoTrack: () -> Unit,
     onAddAudioTrack: () -> Unit,
     onSplit: () -> Unit,
@@ -259,10 +277,16 @@ private fun TimelineToolbarV4(
             Spacer(Modifier.weight(1f))
             TinyActionV4("Import", onImport, icon = Icons.Rounded.AddPhotoAlternate)
         }
-        Row(Modifier.fillMaxWidth().height(30.dp).padding(horizontal = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onOverview, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp)) { Text("Overview", fontSize = 7.sp) }
+        Row(Modifier.fillMaxWidth().height(30.dp).padding(horizontal = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onSlideLeft, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Rounded.KeyboardArrowLeft, "Slide timeline left", modifier = Modifier.size(17.dp), tint = T4Accent)
+            }
+            IconButton(onClick = onSlideRight, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Rounded.KeyboardArrowRight, "Slide timeline right", modifier = Modifier.size(17.dp), tint = T4Accent)
+            }
+            TextButton(onClick = onOverview, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 3.dp)) { Text("Overview", fontSize = 7.sp) }
             IconButton(onClick = onFit, modifier = Modifier.size(28.dp)) { Icon(Icons.Rounded.FitScreen, "Fit", modifier = Modifier.size(14.dp)) }
-            Slider(value = zoom, onValueChange = onZoom, modifier = Modifier.weight(1f).padding(horizontal = 4.dp))
+            Slider(value = zoom, onValueChange = onZoom, modifier = Modifier.weight(1f).padding(horizontal = 2.dp))
             Text("1F", Modifier.clickable(onClick = onOneFrame).padding(5.dp), fontSize = 8.sp, color = T4Accent)
         }
     }
