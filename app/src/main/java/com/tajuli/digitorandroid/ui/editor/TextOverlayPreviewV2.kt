@@ -55,11 +55,13 @@ fun TextOverlayPreviewV2(
         TextAlignmentV2.CENTER -> Alignment.Center
         TextAlignmentV2.RIGHT -> Alignment.CenterEnd
     }
-    val fillColor = Color(style.colorArgb.toULong())
-    val strokeColor = Color(style.strokeArgb.toULong())
+    // Text System V2 stores ordinary 32-bit Android ARGB values, not Compose ColorLong values.
+    // Use the Int overload so Compose doesn't interpret the low 32 bits as packed color-space data.
+    val fillColor = Color(style.colorArgb.toInt())
+    val strokeColor = Color(style.strokeArgb.toInt())
     val shadow = if (style.shadowEnabled) {
         Shadow(
-            color = Color(style.shadowArgb.toULong()),
+            color = Color(style.shadowArgb.toInt()),
             offset = Offset(style.shadowDx, style.shadowDy),
             blurRadius = style.shadowRadius,
         )
@@ -79,7 +81,7 @@ fun TextOverlayPreviewV2(
     ) {
         Box(
             Modifier.background(
-                if (style.backgroundEnabled) Color(style.backgroundArgb.toULong()) else Color.Transparent,
+                if (style.backgroundEnabled) Color(style.backgroundArgb.toInt()) else Color.Transparent,
                 RoundedCornerShape(6.dp),
             ).padding(horizontal = 8.dp, vertical = 4.dp),
             contentAlignment = contentAlignment,
