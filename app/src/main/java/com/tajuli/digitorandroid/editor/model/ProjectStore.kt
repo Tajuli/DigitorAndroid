@@ -17,6 +17,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 
 /** Lightweight metadata rendered on the Home screen. */
 data class RecentProjectSummary(
@@ -28,10 +31,24 @@ data class RecentProjectSummary(
 )
 
 /**
+ * Bridge between the existing editor Save button and the app-level naming dialog.
+ * Keeping this outside the editor UI lets both compact and labeled Save actions use the same flow.
+ */
+object ProjectSaveCoordinator {
+    private val _requests = MutableSharedFlow<TimelineProject>(extraBufferCapacity = 4)
+    val requests: SharedFlow<TimelineProject> = _requests.asSharedFlow()
+
+    fun request(project: TimelineProject) {
+        _requests.tryEmit(project)
+    }
+}
+
+/**
  * Project persistence shared by the editor history and the Home screen.
  *
- * Every active project has a stable internal id and a JSON snapshot. Saving also creates a
- * user-visible .digitor.json copy in Downloads/Digitor Projects on Android 10+.
+ * Auto-save writes only the internal recovery snapshot/recent-project entry. Explicit Save Project
+ * asks for a user name and additionally creates a user-visible .digitor.json copy in
+ * Downloads/Digitor Projects on Android 10+.
  */
 class ProjectStore(context: Context) {
     private val appContext = context.applicationContext
@@ -51,6 +68,7 @@ class ProjectStore(context: Context) {
         val recents = upsertRecent(recentProjectsInternal(), id, project, System.currentTimeMillis())
         val committed = prefs.edit()
             .putString(KEY_CURRENT_PROJECT_ID, id)
+            .remove(KEY_CURRENT_PROJECT_TITLE_OVERRIDE)
             .putString(KEY_LAST_PROJECT, raw)
             .putString(projectKey(id), raw)
             .putString(KEY_RECENT_INDEX, gson.toJson(recents))
@@ -66,6 +84,7 @@ class ProjectStore(context: Context) {
         val recents = upsertRecent(recentProjectsInternal(), id, project, System.currentTimeMillis())
         val committed = prefs.edit()
             .putString(KEY_CURRENT_PROJECT_ID, id)
+            .putString(KEY_CURRENT_PROJECT_TITLE_OVERRIDE, project.title)
             .putString(KEY_LAST_PROJECT, raw)
             .putString(KEY_RECENT_INDEX, gson.toJson(recents))
             .commit()
@@ -75,17 +94,31 @@ class ProjectStore(context: Context) {
     fun recentProjects(limit: Int = MAX_RECENTS): List<RecentProjectSummary> =
         recentProjectsInternal().sortedByDescending { it.updatedAtMs }.take(limit.coerceAtLeast(0))
 
+    /**
+     * Existing editor Save action lands here. Do not silently choose a name: emit a request for the
+     * app-level naming dialog. The internal recovery snapshot is already maintained by autoSave().
+     */
     fun save(project: TimelineProject) {
-        val raw = encode(project)
-        val visibleResult = runCatching { writeVisibleBackup(project, raw) }
+        ProjectSaveCoordinator.request(project)
+    }
+
+    /**
+     * Explicit user-confirmed save. The entered name becomes the canonical title used by Recent
+     * Projects and the visible backup filename.
+     */
+    fun saveNamed(project: TimelineProject, requestedName: String): TimelineProject {
+        val name = sanitizeProjectTitle(requestedName)
+        require(name.isNotBlank()) { "Project name is required" }
+        val namedProject = project.copy(title = name)
+        val raw = encode(namedProject)
+        val visibleResult = runCatching { writeVisibleBackup(namedProject, raw) }
         val visibleUri = visibleResult.getOrNull()
-        val id = prefs.getString(KEY_CURRENT_PROJECT_ID, null)
-            ?.takeIf { it.isNotBlank() }
-            ?: UUID.randomUUID().toString()
-        val recents = upsertRecent(recentProjectsInternal(), id, project, System.currentTimeMillis())
+        val id = currentProjectIdOrCreate()
+        val recents = upsertRecent(recentProjectsInternal(), id, namedProject, System.currentTimeMillis())
 
         val committed = prefs.edit()
             .putString(KEY_CURRENT_PROJECT_ID, id)
+            .putString(KEY_CURRENT_PROJECT_TITLE_OVERRIDE, name)
             .putString(KEY_LAST_PROJECT, raw)
             .putString(projectKey(id), raw)
             .putString(KEY_RECENT_INDEX, gson.toJson(recents))
@@ -101,9 +134,37 @@ class ProjectStore(context: Context) {
             visibleUri != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
                 "Project saved · Downloads/Digitor Projects"
             visibleUri != null -> "Project saved · Documents/Digitor Projects"
-            else -> "Project saved in app · backup file unavailable"
+            else -> "Project saved · backup file unavailable"
         }
         showToast(message)
+        return namedProject
+    }
+
+    /**
+     * Crash/close recovery save. This intentionally does not create a Downloads file every time a
+     * slider or timeline edit changes. If the project has already been explicitly named, preserve
+     * that canonical name even when the current in-memory editor instance still has the old title.
+     */
+    fun autoSave(project: TimelineProject): TimelineProject {
+        val id = currentProjectIdOrCreate()
+        val titleOverride = prefs.getString(KEY_CURRENT_PROJECT_TITLE_OVERRIDE, null)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+        val recoveryProject = if (titleOverride != null && project.title != titleOverride) {
+            project.copy(title = titleOverride)
+        } else {
+            project
+        }
+        val raw = encode(recoveryProject)
+        val recents = upsertRecent(recentProjectsInternal(), id, recoveryProject, System.currentTimeMillis())
+        val committed = prefs.edit()
+            .putString(KEY_CURRENT_PROJECT_ID, id)
+            .putString(KEY_LAST_PROJECT, raw)
+            .putString(projectKey(id), raw)
+            .putString(KEY_RECENT_INDEX, gson.toJson(recents))
+            .commit()
+        check(committed) { "Auto-save failed" }
+        return recoveryProject
     }
 
     /** Loads the currently selected project, falling back to the last snapshot/visible backup. */
@@ -137,10 +198,18 @@ class ProjectStore(context: Context) {
     fun clear() {
         prefs.edit()
             .remove(KEY_CURRENT_PROJECT_ID)
+            .remove(KEY_CURRENT_PROJECT_TITLE_OVERRIDE)
             .remove(KEY_LAST_PROJECT)
             .remove(KEY_LAST_PROJECT_URI)
             .commit()
     }
+
+    private fun currentProjectIdOrCreate(): String =
+        prefs.getString(KEY_CURRENT_PROJECT_ID, null)
+            ?.takeIf { it.isNotBlank() }
+            ?: UUID.randomUUID().toString().also { id ->
+                check(prefs.edit().putString(KEY_CURRENT_PROJECT_ID, id).commit()) { "Could not select project" }
+            }
 
     private fun recentProjectsInternal(): List<RecentProjectSummary> {
         val raw = prefs.getString(KEY_RECENT_INDEX, null)?.takeIf { it.isNotBlank() } ?: return emptyList()
@@ -171,12 +240,15 @@ class ProjectStore(context: Context) {
         }
     }
 
+    private fun sanitizeProjectTitle(value: String): String = value
+        .trim()
+        .replace(Regex("[\\/:*?\"<>|]"), "_")
+        .replace(Regex("\\s+"), " ")
+        .take(MAX_PROJECT_TITLE_LENGTH)
+        .trim('.', ' ')
+
     private fun projectFileName(project: TimelineProject): String {
-        val base = project.title.trim()
-            .ifBlank { "Digitor_Project" }
-            .replace(Regex("[^A-Za-z0-9._ -]"), "_")
-            .trim('.', ' ')
-            .ifBlank { "Digitor_Project" }
+        val base = sanitizeProjectTitle(project.title).ifBlank { "Digitor_Project" }
         return if (base.endsWith(PROJECT_EXTENSION, ignoreCase = true)) base else "$base$PROJECT_EXTENSION"
     }
 
@@ -248,11 +320,13 @@ class ProjectStore(context: Context) {
         const val KEY_LAST_PROJECT = "last_project"
         const val KEY_LAST_PROJECT_URI = "last_project_uri"
         const val KEY_CURRENT_PROJECT_ID = "current_project_id"
+        const val KEY_CURRENT_PROJECT_TITLE_OVERRIDE = "current_project_title_override"
         const val KEY_RECENT_INDEX = "recent_project_index"
         const val KEY_PROJECT_PREFIX = "project_"
         const val PROJECT_DIRECTORY = "Digitor Projects"
         const val PROJECT_EXTENSION = ".digitor.json"
         const val PROJECT_MIME = "application/json"
         const val MAX_RECENTS = 12
+        const val MAX_PROJECT_TITLE_LENGTH = 80
     }
 }
