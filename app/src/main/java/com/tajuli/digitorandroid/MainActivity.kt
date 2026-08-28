@@ -57,7 +57,9 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(Unit) {
                     ProjectSaveCoordinator.requests.collect { project ->
                         pendingSaveProject = project
-                        projectName = project.title
+                        projectName = projectStore.load()?.title
+                            ?.takeIf { it.isNotBlank() }
+                            ?: project.title
                     }
                 }
 
