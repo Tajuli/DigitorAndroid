@@ -53,6 +53,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
@@ -74,6 +75,7 @@ private val T4Playhead = Color(0xFFFF4D4D)
 private val T4Magnet = Color(0xFFFFC857)
 private val T4Video = Color(0xFF385B78)
 private val T4Audio = Color(0xFF315F57)
+private val T4Text = Color(0xFF5C4778)
 private const val T4_TRACK_HEIGHT = 38f
 private const val T4_DELETE_TRACK_ACTION = "__digitor_delete_track__:"
 
@@ -106,7 +108,9 @@ fun TimelineEditorV4(
     BoxWithConstraints(modifier.background(T4Panel)) {
         val viewportDp = (maxWidth - 56.dp).coerceAtLeast(120.dp)
         val viewportPx = with(density) { viewportDp.toPx() }
-        val durationSec = max(project.durationUs / US_PER_SECOND.toFloat(), 1f)
+        val textEndUs = project.textOverlays.maxOfOrNull { it.timelineEndUs } ?: 0L
+        val timelineDurationUs = max(project.durationUs, textEndUs)
+        val durationSec = max(timelineDurationUs / US_PER_SECOND.toFloat(), 1f)
         val overviewPps = (viewportPx * .08f / durationSec).coerceAtLeast(.02f)
         val fitPps = (viewportPx / durationSec).coerceAtLeast(overviewPps)
         val oneFramePps = max(fitPps, with(density) { 24.dp.toPx() } * project.frameRate.coerceAtLeast(1))
@@ -119,7 +123,7 @@ fun TimelineEditorV4(
         fun xToTime(xPx: Float): Long {
             val raw = xPx / pps * US_PER_SECOND
             val snapped = (raw / frameUs).roundToLong() * frameUs
-            return snapped.coerceIn(0L, project.durationUs.coerceAtLeast(0L))
+            return snapped.coerceIn(0L, timelineDurationUs.coerceAtLeast(0L))
         }
 
         Column(Modifier.fillMaxSize()) {
@@ -143,6 +147,9 @@ fun TimelineEditorV4(
                     Column(
                         Modifier.fillMaxHeight().verticalScroll(verticalScroll),
                     ) {
+                        if (project.textOverlays.isNotEmpty()) {
+                            TextTrackHeaderV4()
+                        }
                         project.tracks.forEach { track ->
                             TrackHeaderV4(track, track.id == selectedTrackId, onSelectTrack)
                         }
@@ -178,6 +185,15 @@ fun TimelineEditorV4(
                         Column(
                             Modifier.fillMaxSize().verticalScroll(verticalScroll),
                         ) {
+                            if (project.textOverlays.isNotEmpty()) {
+                                TextTimelineLaneV4(
+                                    overlays = project.textOverlays,
+                                    cursorUs = cursorUs,
+                                    pps = pps,
+                                    width = contentWidth,
+                                    onSeek = onSeek,
+                                )
+                            }
                             project.tracks.forEach { track ->
                                 TimelineLaneV4(
                                     project = project,
@@ -261,6 +277,21 @@ private fun TinyActionV4(label: String, onClick: () -> Unit, enabled: Boolean = 
 }
 
 @Composable
+private fun TextTrackHeaderV4() {
+    Row(
+        Modifier.fillMaxWidth().height(T4_TRACK_HEIGHT.dp)
+            .background(Color(0xFF15121A))
+            .border(.5.dp, T4Divider)
+            .padding(horizontal = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.width(3.dp).fillMaxHeight().background(T4Text))
+        Spacer(Modifier.width(5.dp))
+        Text("T1", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = .82f))
+    }
+}
+
+@Composable
 private fun TrackHeaderV4(track: TimelineTrack, selected: Boolean, onSelect: (String) -> Unit) {
     var confirmDelete by remember(track.id) { mutableStateOf(false) }
 
@@ -331,6 +362,55 @@ private fun TimelineRulerV4(width: Dp, durationSec: Float, pps: Float, frameRate
                 val x = sec * pps
                 drawLine(Color.White.copy(alpha = .22f), androidx.compose.ui.geometry.Offset(x, 9f), androidx.compose.ui.geometry.Offset(x, size.height), 1f)
                 sec += step
+            }
+        }
+    }
+}
+
+@Composable
+private fun TextTimelineLaneV4(
+    overlays: List<TextOverlayClip>,
+    cursorUs: Long,
+    pps: Float,
+    width: Dp,
+    onSeek: (Long) -> Unit,
+) {
+    val density = LocalDensity.current
+    val ppsDp = with(density) { pps.toDp().value }
+
+    Box(
+        Modifier.requiredWidth(width).height(T4_TRACK_HEIGHT.dp)
+            .background(Color(0xFF15121A))
+            .border(.5.dp, T4Divider),
+    ) {
+        overlays.forEach { overlay ->
+            val start = (overlay.timelineStartUs / US_PER_SECOND.toFloat() * ppsDp).dp
+            val clipWidth = (overlay.durationUs / US_PER_SECOND.toFloat() * ppsDp).coerceAtLeast(3f).dp
+            val active = cursorUs in overlay.timelineStartUs until overlay.timelineEndUs
+            Box(
+                Modifier.offset(x = start, y = 3.dp)
+                    .width(clipWidth)
+                    .height(31.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(T4Text)
+                    .border(
+                        if (active) 2.dp else .5.dp,
+                        if (active) T4Accent else Color.White.copy(alpha = .16f),
+                        RoundedCornerShape(4.dp),
+                    )
+                    .clickable { onSeek(overlay.timelineStartUs) }
+                    .padding(horizontal = 4.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                if (clipWidth > 20.dp) {
+                    Text(
+                        overlay.text.ifBlank { "Text" },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontSize = 8.sp,
+                        color = Color.White.copy(alpha = .94f),
+                    )
+                }
             }
         }
     }
