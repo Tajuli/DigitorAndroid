@@ -121,6 +121,8 @@ data class TimelineClip(
     val nodeGraph: ClipNodeGraph = ClipNodeGraph.default(),
     val transform: ClipTransform = ClipTransform(),
     val nodeAnimations: NodeAnimations = NodeAnimations(),
+    val transition: ClipTransition = ClipTransition(),
+    val audioMix: AudioMix = AudioMix(),
 ) {
     val durationUs: Long get() = (sourceOutUs - sourceInUs).coerceAtLeast(1L)
     val timelineEndUs: Long get() = timelineStartUs + durationUs
@@ -145,9 +147,13 @@ data class TimelineProject(
         TimelineTrack(name = "V1", kind = TrackKind.VIDEO),
         TimelineTrack(name = "A1", kind = TrackKind.AUDIO),
     ),
+    val textOverlays: List<TextOverlayClip> = emptyList(),
 ) {
     val durationUs: Long
-        get() = tracks.flatMap { it.clips }.maxOfOrNull { it.timelineEndUs } ?: 0L
+        get() = maxOf(
+            tracks.flatMap { it.clips }.maxOfOrNull { it.timelineEndUs } ?: 0L,
+            textOverlays.maxOfOrNull { it.timelineEndUs } ?: 0L,
+        )
 
     fun track(id: String?): TimelineTrack? = tracks.firstOrNull { it.id == id }
     fun clip(id: String?): TimelineClip? = tracks.asSequence().flatMap { it.clips.asSequence() }.firstOrNull { it.id == id }

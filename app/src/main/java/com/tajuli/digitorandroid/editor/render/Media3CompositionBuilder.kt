@@ -28,7 +28,9 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
             previous.colorGrade == clip.colorGrade &&
             previous.nodeGraph == clip.nodeGraph &&
             previous.transform == clip.transform &&
-            previous.nodeAnimations == clip.nodeAnimations
+            previous.nodeAnimations == clip.nodeAnimations &&
+            previous.transition == clip.transition &&
+            previous.audioMix == clip.audioMix
         if (canMerge) {
             result[result.lastIndex] = previous!!.copy(sourceOutUs = clip.sourceOutUs)
         } else {
@@ -113,8 +115,6 @@ class Media3CompositionBuilder {
     /**
      * Builds exactly one audio sequence for one A track. This is the realtime-preview primitive:
      * every A track gets its own audio-only CompositionPlayer and Android mixes their outputs.
-     * A trailing silent gap extends every player to project duration so the chosen master clock
-     * cannot stop just because its last clip ends before another audio/video track.
      */
     fun buildAudioTrackPreview(project: TimelineProject, trackId: String): Composition {
         val problems = project.validate()
@@ -158,6 +158,10 @@ class Media3CompositionBuilder {
                     videoTracks = videoTracks,
                 ),
             )
+            val textEffects = projectTextEffects(project)
+            if (textEffects.isNotEmpty()) {
+                builder.setEffects(Effects(emptyList(), textEffects))
+            }
         }
         return builder.build()
     }
@@ -169,8 +173,6 @@ class Media3CompositionBuilder {
     ): EditedMediaItemSequence {
         val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
         var cursorUs = 0L
-        // Coalescing must only happen when presentation state is identical. This is fine at graph
-        // construction time; later visual slider changes are read live by preview effects/compositor.
         val clips = if (forPreview) coalescePreviewClips(track.clips) else track.sortedClips()
         clips.forEach { clip ->
             if (clip.timelineStartUs > cursorUs) {
@@ -215,7 +217,12 @@ class Media3CompositionBuilder {
         addAudioSequences(project, sequences, forPreview = true)
 
         require(sequences.isNotEmpty()) { "Timeline is empty" }
-        return Composition.Builder(sequences).build()
+        val builder = Composition.Builder(sequences)
+        val textEffects = projectTextEffects(project)
+        if (textEffects.isNotEmpty() && project.tracks.any { it.kind == TrackKind.VIDEO && it.clips.isNotEmpty() }) {
+            builder.setEffects(Effects(emptyList(), textEffects))
+        }
+        return builder.build()
     }
 
     private fun addAudioSequences(
@@ -282,6 +289,11 @@ class Media3CompositionBuilder {
                 else -> SharedVideoPipeline.effectsFor(clip)
             }
             builder.setEffects(Effects(emptyList(), videoEffects))
+        } else {
+            val audioEffects = audioProcessorsFor(clip)
+            if (audioEffects.isNotEmpty()) {
+                builder.setEffects(Effects(audioEffects, emptyList()))
+            }
         }
         return builder.build()
     }

@@ -20,6 +20,13 @@ class CpuExportBackend(private val context: Context) : ExportBackend {
         project: TimelineProject,
         output: File,
         onProgress: (ExportProgress) -> Unit,
+    ): ExportResult = export(project, output, ExportQuality.HIGH, onProgress)
+
+    suspend fun export(
+        project: TimelineProject,
+        output: File,
+        quality: ExportQuality,
+        onProgress: (ExportProgress) -> Unit,
     ): ExportResult = withContext(Dispatchers.Default) {
         val problems = project.validate()
         require(problems.isEmpty()) { problems.joinToString("; ") }
@@ -28,11 +35,18 @@ class CpuExportBackend(private val context: Context) : ExportBackend {
             "CPU fallback currently requires at least one video track"
         }
 
+        val bitrate = quality.videoBitrate(project.width, project.height, project.frameRate)
         val compositor = CpuTimelineCompositor(context)
         val frameDurationUs = 1_000_000L / project.frameRate
         val frameCount = ((project.durationUs + frameDurationUs - 1) / frameDurationUs).toInt()
         try {
-            CpuAvcEncoder(project.width, project.height, project.frameRate, output).use { encoder ->
+            CpuAvcEncoder(
+                project.width,
+                project.height,
+                project.frameRate,
+                output,
+                bitrate = bitrate,
+            ).use { encoder ->
                 for (frameIndex in 0 until frameCount) {
                     val timeUs = frameIndex * frameDurationUs
                     val pixels = compositor.render(project, timeUs)
@@ -40,7 +54,7 @@ class CpuExportBackend(private val context: Context) : ExportBackend {
                     if (frameIndex % 4 == 0 || frameIndex == frameCount - 1) {
                         onProgress(
                             ExportProgress.Stage(
-                                "CPU: transform + color + effects + AVC encode",
+                                "CPU: transform + color + effects + AVC encode · ${quality.label}",
                                 (frameIndex + 1f) / frameCount,
                             )
                         )
@@ -54,7 +68,7 @@ class CpuExportBackend(private val context: Context) : ExportBackend {
         ExportResult(
             output,
             Backend.CPU,
-            "CPU fallback MP4 complete (video-only; CPU audio mixing is not implemented yet).",
+            "CPU fallback MP4 complete · ${quality.label} · ${bitrate / 1_000_000f} Mbps target (video-only; CPU audio mixing is not implemented yet).",
         )
     }
 }

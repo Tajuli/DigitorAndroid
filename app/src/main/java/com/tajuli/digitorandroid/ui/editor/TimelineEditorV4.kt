@@ -7,10 +7,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -31,10 +29,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.ContentCut
 import androidx.compose.material.icons.rounded.Delete
-import androidx.compose.material.icons.rounded.FitScreen
 import androidx.compose.material.icons.rounded.LinkOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -63,7 +60,6 @@ import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
 import kotlin.math.abs
 import kotlin.math.ceil
-import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -79,6 +75,7 @@ private val T4Magnet = Color(0xFFFFC857)
 private val T4Video = Color(0xFF385B78)
 private val T4Audio = Color(0xFF315F57)
 private const val T4_TRACK_HEIGHT = 38f
+private const val T4_DELETE_TRACK_ACTION = "__digitor_delete_track__:"
 
 private data class T4SnapResult(val deltaUs: Long, val magnet: Boolean)
 
@@ -115,7 +112,6 @@ fun TimelineEditorV4(
         val oneFramePps = max(fitPps, with(density) { 24.dp.toPx() } * project.frameRate.coerceAtLeast(1))
         val ratio = (oneFramePps / overviewPps).coerceAtLeast(1f)
         val pps = if (ratio <= 1.0001f) overviewPps else overviewPps * ratio.toDouble().pow(zoom.toDouble()).toFloat()
-        val fitFraction = if (ratio <= 1.0001f) 0f else (ln((fitPps / overviewPps).toDouble()) / ln(ratio.toDouble())).toFloat().coerceIn(0f, 1f)
         val contentWidthPx = max(viewportPx, durationSec * pps)
         val contentWidth = with(density) { contentWidthPx.toDp() }
         val frameUs = (US_PER_SECOND.toDouble() / project.frameRate.coerceAtLeast(1)).roundToLong().coerceAtLeast(1L)
@@ -131,9 +127,6 @@ fun TimelineEditorV4(
                 selectedCount = selectedClipIds.size,
                 zoom = zoom,
                 onZoom = { zoom = it.coerceIn(0f, 1f) },
-                onOverview = { zoom = 0f },
-                onFit = { zoom = fitFraction },
-                onOneFrame = { zoom = 1f },
                 onAddVideoTrack = onAddVideoTrack,
                 onAddAudioTrack = onAddAudioTrack,
                 onSplit = onSplit,
@@ -158,15 +151,7 @@ fun TimelineEditorV4(
 
                 Column(
                     Modifier.horizontalScroll(scroll)
-                        .requiredWidth(contentWidth)
-                        .pointerInput(overviewPps, oneFramePps) {
-                            detectTransformGestures { _, _, zoomChange, _ ->
-                                if (ratio > 1.0001f && zoomChange > 0f) {
-                                    val delta = (ln(zoomChange.toDouble()) / ln(ratio.toDouble())).toFloat()
-                                    zoom = (zoom + delta).coerceIn(0f, 1f)
-                                }
-                            }
-                        },
+                        .requiredWidth(contentWidth),
                 ) {
                     Box(
                         Modifier.requiredWidth(contentWidth).height(24.dp)
@@ -239,9 +224,6 @@ private fun TimelineToolbarV4(
     selectedCount: Int,
     zoom: Float,
     onZoom: (Float) -> Unit,
-    onOverview: () -> Unit,
-    onFit: () -> Unit,
-    onOneFrame: () -> Unit,
     onAddVideoTrack: () -> Unit,
     onAddAudioTrack: () -> Unit,
     onSplit: () -> Unit,
@@ -259,12 +241,11 @@ private fun TimelineToolbarV4(
             Spacer(Modifier.weight(1f))
             TinyActionV4("Import", onImport, icon = Icons.Rounded.AddPhotoAlternate)
         }
-        Row(Modifier.fillMaxWidth().height(30.dp).padding(horizontal = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onOverview, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp)) { Text("Overview", fontSize = 7.sp) }
-            IconButton(onClick = onFit, modifier = Modifier.size(28.dp)) { Icon(Icons.Rounded.FitScreen, "Fit", modifier = Modifier.size(14.dp)) }
-            Slider(value = zoom, onValueChange = onZoom, modifier = Modifier.weight(1f).padding(horizontal = 4.dp))
-            Text("1F", Modifier.clickable(onClick = onOneFrame).padding(5.dp), fontSize = 8.sp, color = T4Accent)
-        }
+        Slider(
+            value = zoom,
+            onValueChange = onZoom,
+            modifier = Modifier.fillMaxWidth().height(30.dp).padding(horizontal = 10.dp),
+        )
     }
 }
 
@@ -281,10 +262,39 @@ private fun TinyActionV4(label: String, onClick: () -> Unit, enabled: Boolean = 
 
 @Composable
 private fun TrackHeaderV4(track: TimelineTrack, selected: Boolean, onSelect: (String) -> Unit) {
+    var confirmDelete by remember(track.id) { mutableStateOf(false) }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete ${track.name}?") },
+            text = {
+                Text(
+                    if (track.clips.isEmpty()) "This track is empty."
+                    else "This will remove ${track.clips.size} clip${if (track.clips.size == 1) "" else "s"} from ${track.name}.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    onSelect(T4_DELETE_TRACK_ACTION + track.id)
+                }) { Text("Delete", color = Color(0xFFFF7474)) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
+        )
+    }
+
     Row(
         Modifier.fillMaxWidth().height(T4_TRACK_HEIGHT.dp)
             .background(if (selected) T4Accent.copy(alpha = .12f) else Color(0xFF121217))
-            .border(.5.dp, T4Divider).clickable { onSelect(track.id) }.padding(horizontal = 5.dp),
+            .border(.5.dp, T4Divider)
+            .pointerInput(track.id) {
+                detectTapGestures(
+                    onTap = { onSelect(track.id) },
+                    onLongPress = { confirmDelete = true },
+                )
+            }
+            .padding(horizontal = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.width(3.dp).fillMaxHeight().background(if (track.kind == TrackKind.VIDEO) Color(0xFF607D9B) else Color(0xFF3E7569)))
