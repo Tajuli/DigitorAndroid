@@ -56,8 +56,9 @@ data class TextAnimationSpecV2(
     val durationUs: Long = 350_000L,
 ) {
     fun normalizedFor(overlayDurationUs: Long): TextAnimationSpecV2 {
-        val maxDuration = (overlayDurationUs.coerceAtLeast(1L) / 2L).coerceAtLeast(1L)
-        return copy(durationUs = durationUs.coerceIn(100_000L, min(2_000_000L, maxDuration)))
+        val upper = min(2_000_000L, (overlayDurationUs.coerceAtLeast(1L) / 2L).coerceAtLeast(1L))
+        val lower = min(100_000L, upper)
+        return copy(durationUs = durationUs.coerceIn(lower, upper))
     }
 }
 
