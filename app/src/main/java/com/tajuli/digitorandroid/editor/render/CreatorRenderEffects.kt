@@ -1,12 +1,13 @@
 package com.tajuli.digitorandroid.editor.render
 
+import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.Typeface
+import android.text.Layout
 import android.text.Spannable
 import android.text.SpannableString
-import android.text.style.BackgroundColorSpan
-import android.text.style.ForegroundColorSpan
-import android.text.style.RelativeSizeSpan
-import android.text.style.StyleSpan
+import android.text.style.AlignmentSpan
+import android.text.style.ReplacementSpan
 import androidx.media3.common.C
 import androidx.media3.common.Effect
 import androidx.media3.common.OverlaySettings
@@ -17,9 +18,15 @@ import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.effect.TextOverlay
 import com.tajuli.digitorandroid.editor.model.AudioMix
+import com.tajuli.digitorandroid.editor.model.TextAlignmentV2
+import com.tajuli.digitorandroid.editor.model.TextFontV2
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
+import com.tajuli.digitorandroid.editor.model.TextStyleV2
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.editor.model.resolvedTextStyleV2
+import com.tajuli.digitorandroid.editor.model.textAnimationFrameV2
+import kotlin.math.ceil
 import kotlin.math.min
 
 @UnstableApi
@@ -83,25 +90,145 @@ private class TimedDigitorTextOverlay(
         if (!spec.activeAt(presentationTimeUs)) {
             return StaticOverlaySettings.Builder().setAlphaScale(0f).build()
         }
+        val frame = spec.textAnimationFrameV2(presentationTimeUs)
         return StaticOverlaySettings.Builder()
-            .setAlphaScale(1f)
+            .setAlphaScale(frame.alpha)
             .setOverlayFrameAnchor(0f, 0f)
             .setBackgroundFrameAnchor(
-                spec.positionX.coerceIn(-1f, 1f),
-                -spec.positionY.coerceIn(-1f, 1f),
+                (spec.positionX + frame.offsetX).coerceIn(-1f, 1f),
+                -(spec.positionY + frame.offsetY).coerceIn(-1f, 1f),
             )
             .build()
     }
 
     private companion object {
         fun styled(spec: TextOverlayClip): SpannableString {
-            val text = SpannableString(spec.text.ifBlank { " " })
+            val content = spec.text.ifBlank { " " }
+            val text = SpannableString(content)
             val flags = Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
-            text.setSpan(ForegroundColorSpan(spec.argb.toInt()), 0, text.length, flags)
-            text.setSpan(RelativeSizeSpan(spec.sizeScale.coerceIn(.35f, 4f)), 0, text.length, flags)
-            if (spec.bold) text.setSpan(StyleSpan(Typeface.BOLD), 0, text.length, flags)
-            if (spec.background) text.setSpan(BackgroundColorSpan(0xB0000000.toInt()), 0, text.length, flags)
+            val style = spec.resolvedTextStyleV2()
+            val alignment = when (style.alignment) {
+                TextAlignmentV2.LEFT -> Layout.Alignment.ALIGN_NORMAL
+                TextAlignmentV2.CENTER -> Layout.Alignment.ALIGN_CENTER
+                TextAlignmentV2.RIGHT -> Layout.Alignment.ALIGN_OPPOSITE
+            }
+            text.setSpan(AlignmentSpan.Standard(alignment), 0, text.length, flags)
+
+            // ReplacementSpan draws fill + independent outline + shadow + background in one pass.
+            // Apply per paragraph so newline layout remains under TextOverlay/StaticLayout control.
+            var lineStart = 0
+            while (lineStart <= content.length) {
+                val newline = content.indexOf('\n', lineStart).let { if (it < 0) content.length else it }
+                if (newline > lineStart) {
+                    text.setSpan(
+                        StyledTextReplacementSpan(style, spec.sizeScale, spec.bold),
+                        lineStart,
+                        newline,
+                        flags,
+                    )
+                }
+                if (newline >= content.length) break
+                lineStart = newline + 1
+            }
             return text
         }
     }
+}
+
+/** Android Canvas text span used by Media3 TextOverlay for V2 export styling. */
+private class StyledTextReplacementSpan(
+    private val style: TextStyleV2,
+    private val sizeScale: Float,
+    private val bold: Boolean,
+) : ReplacementSpan() {
+    override fun getSize(
+        paint: Paint,
+        text: CharSequence,
+        start: Int,
+        end: Int,
+        fm: Paint.FontMetricsInt?,
+    ): Int {
+        val work = configuredPaint(paint)
+        if (fm != null) {
+            val metrics = work.fontMetricsInt
+            fm.top = metrics.top
+            fm.ascent = metrics.ascent
+            fm.descent = metrics.descent
+            fm.bottom = metrics.bottom
+            fm.leading = metrics.leading
+        }
+        return ceil(work.measureText(text, start, end) + horizontalPadding(work) * 2f).toInt()
+    }
+
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint,
+    ) {
+        val work = configuredPaint(paint)
+        val padding = horizontalPadding(work)
+        val baselineX = x + padding
+        val measured = work.measureText(text, start, end)
+
+        if (style.backgroundEnabled) {
+            val background = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = style.backgroundArgb.toInt()
+                this.style = Paint.Style.FILL
+            }
+            val radius = (work.textSize * .16f).coerceAtLeast(2f)
+            canvas.drawRoundRect(
+                x,
+                top.toFloat(),
+                x + measured + padding * 2f,
+                bottom.toFloat(),
+                radius,
+                radius,
+                background,
+            )
+        }
+
+        if (style.shadowEnabled) {
+            work.setShadowLayer(
+                style.shadowRadius,
+                style.shadowDx,
+                style.shadowDy,
+                style.shadowArgb.toInt(),
+            )
+        }
+
+        if (style.strokeWidth > 0f) {
+            work.style = Paint.Style.STROKE
+            work.strokeJoin = Paint.Join.ROUND
+            work.strokeWidth = style.strokeWidth * sizeScale.coerceIn(.35f, 4f)
+            work.color = style.strokeArgb.toInt()
+            canvas.drawText(text, start, end, baselineX, y.toFloat(), work)
+        }
+
+        work.style = Paint.Style.FILL
+        work.color = style.colorArgb.toInt()
+        canvas.drawText(text, start, end, baselineX, y.toFloat(), work)
+    }
+
+    private fun configuredPaint(source: Paint): Paint = Paint(source).apply {
+        textSize = source.textSize * sizeScale.coerceIn(.35f, 4f)
+        typeface = Typeface.create(
+            when (style.font) {
+                TextFontV2.SANS -> "sans-serif"
+                TextFontV2.SERIF -> "serif"
+                TextFontV2.MONO -> "monospace"
+                TextFontV2.CURSIVE -> "cursive"
+            },
+            if (bold) Typeface.BOLD else Typeface.NORMAL,
+        )
+        isAntiAlias = true
+    }
+
+    private fun horizontalPadding(paint: Paint): Float =
+        if (style.backgroundEnabled) (paint.textSize * .18f).coerceAtLeast(3f) else 0f
 }
