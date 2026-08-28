@@ -332,6 +332,15 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                 onImport = ::launchImport,
                 onExport = { showExportDialog = true },
             )
+            ProjectActionsBarV7(
+                canUndo = state.canUndo,
+                canRedo = state.canRedo,
+                exporting = exportFraction != null && exportFraction!! < 1f,
+                onUndo = { stopForEdit(); vm.undo() },
+                onRedo = { stopForEdit(); vm.redo() },
+                onSaveProject = vm::saveProject,
+                onLoadProject = { stopForEdit(); vm.loadProject() },
+            )
             if (exportFraction != null && exportFraction!! < 1f) {
                 Column {
                     LinearProgressIndicator(progress = { exportFraction!!.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth().height(3.dp))
@@ -419,6 +428,57 @@ private fun TopBarV7(
         Button(onClick = onExport, enabled = !exporting, modifier = Modifier.height(32.dp), shape = RoundedCornerShape(7.dp)) {
             Icon(Icons.Rounded.Share, null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(4.dp))
             Text(if (exporting) "${((exportFraction ?: 0f) * 100).roundToInt()}%" else "Export", fontSize = 10.sp)
+        }
+    }
+}
+
+@Composable
+private fun ProjectActionsBarV7(
+    canUndo: Boolean,
+    canRedo: Boolean,
+    exporting: Boolean,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
+    onSaveProject: () -> Unit,
+    onLoadProject: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().height(34.dp).background(Color(0xFF0D0D11))
+            .horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        TextButton(
+            onClick = onUndo,
+            enabled = canUndo && !exporting,
+            modifier = Modifier.height(30.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        ) {
+            Icon(Icons.Rounded.Undo, null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(4.dp)); Text("Undo", fontSize = 9.sp)
+        }
+        TextButton(
+            onClick = onRedo,
+            enabled = canRedo && !exporting,
+            modifier = Modifier.height(30.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        ) {
+            Icon(Icons.Rounded.Redo, null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(4.dp)); Text("Redo", fontSize = 9.sp)
+        }
+        TextButton(
+            onClick = onSaveProject,
+            enabled = !exporting,
+            modifier = Modifier.height(30.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        ) {
+            Icon(Icons.Rounded.Save, null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(4.dp)); Text("Save Project", fontSize = 9.sp)
+        }
+        TextButton(
+            onClick = onLoadProject,
+            enabled = !exporting,
+            modifier = Modifier.height(30.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        ) {
+            Icon(Icons.Rounded.FolderOpen, null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(4.dp)); Text("Load Project", fontSize = 9.sp)
         }
     }
 }
