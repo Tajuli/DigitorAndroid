@@ -151,6 +151,29 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
     }
 
     fun selectTrack(id: String) {
+        val deletePrefix = "__digitor_delete_track__:"
+        if (id.startsWith(deletePrefix)) {
+            val trackId = id.removePrefix(deletePrefix)
+            val state = _state.value
+            val track = state.project.track(trackId) ?: return
+            checkpoint("delete-track")
+            val removedClipIds = track.clips.mapTo(hashSetOf()) { it.id }
+            val nextProject = state.project.copy(tracks = state.project.tracks.filterNot { it.id == trackId })
+            val selectedAffected = state.selectedClipId?.let { it in removedClipIds } == true ||
+                state.selectedClipIds.any { it in removedClipIds }
+            publish(
+                selectionSafeState(
+                    state.copy(
+                        project = nextProject,
+                        selectedTrackId = state.selectedTrackId.takeUnless { it == trackId },
+                        selectedClipId = if (selectedAffected) null else state.selectedClipId,
+                        selectedClipIds = if (selectedAffected) emptySet() else state.selectedClipIds,
+                        status = "${track.name} deleted",
+                    ),
+                ),
+            )
+            return
+        }
         _state.value = _state.value.copy(selectedTrackId = id)
     }
 
