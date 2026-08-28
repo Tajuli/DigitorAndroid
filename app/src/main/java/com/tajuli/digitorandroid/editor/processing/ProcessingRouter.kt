@@ -16,12 +16,19 @@ class ProcessingRouter(context: Context) {
         project: TimelineProject,
         output: File,
         onProgress: (ExportProgress) -> Unit,
+    ): ExportResult = export(project, output, ExportQuality.HIGH, onProgress)
+
+    suspend fun export(
+        project: TimelineProject,
+        output: File,
+        quality: ExportQuality,
+        onProgress: (ExportProgress) -> Unit,
     ): ExportResult {
         if (capabilities.supportsGpuEditing()) {
             val gpuName = capabilities.gpuDescription()
-            onProgress(ExportProgress.Stage("GPU selected · $gpuName", 0f))
+            onProgress(ExportProgress.Stage("GPU selected · $gpuName · ${quality.label}", 0f))
             try {
-                return gpu.export(project, output, onProgress)
+                return gpu.export(project, output, quality, onProgress)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (gpuFailure: Throwable) {
@@ -36,7 +43,7 @@ class ProcessingRouter(context: Context) {
             }
         }
 
-        onProgress(ExportProgress.Stage("No compatible GPU · CPU fallback", 0f))
-        return cpu.export(project, output, onProgress)
+        onProgress(ExportProgress.Stage("No compatible GPU · CPU fallback · ${quality.label}", 0f))
+        return cpu.export(project, output, quality, onProgress)
     }
 }
