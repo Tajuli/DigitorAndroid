@@ -70,13 +70,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -368,6 +366,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                 activeVideoClip = previewClip,
                 activeLayerCount = activeVideoClips.size,
                 textOverlays = activeText,
+                timelineUs = cursorUs,
                 onImport = ::launchImport,
                 qualifierPickerActive = state.qualifierPickerActive,
                 onPickColor = { x, y, width, height ->
@@ -504,6 +503,7 @@ private fun FramePreviewV7(
     activeVideoClip: TimelineClip?,
     activeLayerCount: Int,
     textOverlays: List<TextOverlayClip>,
+    timelineUs: Long,
     onImport: () -> Unit,
     qualifierPickerActive: Boolean,
     onPickColor: (Float, Float, Float, Float) -> Unit,
@@ -530,19 +530,10 @@ private fun FramePreviewV7(
         }
 
         textOverlays.forEach { overlay ->
-            Text(
-                overlay.text,
-                textAlign = TextAlign.Center,
-                fontSize = 22.sp,
-                fontWeight = if (overlay.bold) FontWeight.Bold else FontWeight.Normal,
-                color = Color(overlay.argb.toULong()),
-                modifier = Modifier.graphicsLayer {
-                    translationX = overlay.positionX * previewSize.width * .5f
-                    translationY = overlay.positionY * previewSize.height * .5f
-                    scaleX = overlay.sizeScale.coerceIn(.35f, 4f)
-                    scaleY = overlay.sizeScale.coerceIn(.35f, 4f)
-                }.background(if (overlay.background) Color.Black.copy(alpha = .68f) else Color.Transparent, RoundedCornerShape(5.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            TextOverlayPreviewV2(
+                overlay = overlay,
+                timelineUs = timelineUs,
+                previewSize = previewSize,
             )
         }
 
