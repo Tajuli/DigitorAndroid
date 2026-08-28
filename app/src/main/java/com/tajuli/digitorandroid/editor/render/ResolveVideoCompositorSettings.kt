@@ -10,6 +10,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
+import kotlin.math.min
 
 internal fun resolveCompositionVideoTracks(project: TimelineProject): List<TimelineTrack> =
     project.tracks.filter { track ->
@@ -32,15 +33,8 @@ internal data class ResolveOverlayState(
  * Resolve-style multilayer compositor shared by export and preview.
  *
  * Export is fully snapshot-based. GPU preview can resolve the latest immutable editor snapshot by
- * stable track/clip id, allowing transform and opacity sliders to update without rebuilding the
- * MediaCodec/GL graph.
- *
- * Geometry/alpha math is resolved into [ResolveOverlayState] first, then translated to Media3's
- * [StaticOverlaySettings]. Keeping the math pure gives preview/export one testable contract and
- * prevents single-track shortcuts from silently dropping opacity or transform semantics.
- *
- * Source aspect-ratio correction deliberately does not live here. The project-sized Surface buffer
- * fixes the phone preview display boundary while this compositor remains project-resolution.
+ * stable track/clip id, allowing transform, opacity and fade transitions to update without
+ * rebuilding the MediaCodec/GL graph.
  */
 @UnstableApi
 internal class ResolveVideoCompositorSettings(
@@ -70,7 +64,7 @@ internal class ResolveVideoCompositorSettings(
         val transform = clip.transform.evaluate(localUs)
 
         return ResolveOverlayState(
-            alphaScale = clip.opacity.coerceIn(0f, 1f),
+            alphaScale = (clip.opacity.coerceIn(0f, 1f) * transitionAlpha(clip, localUs)).coerceIn(0f, 1f),
             backgroundX = transform.positionX,
             backgroundY = -transform.positionY,
             scaleX = transform.scaleX,
@@ -90,5 +84,18 @@ internal class ResolveVideoCompositorSettings(
             .setScale(state.scaleX, state.scaleY)
             .setRotationDegrees(state.rotationDegrees)
             .build()
+    }
+
+    private fun transitionAlpha(clip: TimelineClip, localUs: Long): Float {
+        val transition = clip.transition.normalizedFor(clip.durationUs)
+        var alpha = 1f
+        if (transition.fadeInUs > 0L) {
+            alpha = min(alpha, localUs.toFloat() / transition.fadeInUs.toFloat())
+        }
+        if (transition.fadeOutUs > 0L) {
+            val remainingUs = (clip.durationUs - localUs).coerceAtLeast(0L)
+            alpha = min(alpha, remainingUs.toFloat() / transition.fadeOutUs.toFloat())
+        }
+        return alpha.coerceIn(0f, 1f)
     }
 }
