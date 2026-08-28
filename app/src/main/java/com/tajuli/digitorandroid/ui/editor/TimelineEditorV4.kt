@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.ContentCut
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.LinkOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -74,6 +75,7 @@ private val T4Magnet = Color(0xFFFFC857)
 private val T4Video = Color(0xFF385B78)
 private val T4Audio = Color(0xFF315F57)
 private const val T4_TRACK_HEIGHT = 38f
+private const val T4_DELETE_TRACK_ACTION = "__digitor_delete_track__:"
 
 private data class T4SnapResult(val deltaUs: Long, val magnet: Boolean)
 
@@ -260,10 +262,39 @@ private fun TinyActionV4(label: String, onClick: () -> Unit, enabled: Boolean = 
 
 @Composable
 private fun TrackHeaderV4(track: TimelineTrack, selected: Boolean, onSelect: (String) -> Unit) {
+    var confirmDelete by remember(track.id) { mutableStateOf(false) }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete ${track.name}?") },
+            text = {
+                Text(
+                    if (track.clips.isEmpty()) "This track is empty."
+                    else "This will remove ${track.clips.size} clip${if (track.clips.size == 1) "" else "s"} from ${track.name}.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    onSelect(T4_DELETE_TRACK_ACTION + track.id)
+                }) { Text("Delete", color = Color(0xFFFF7474)) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
+        )
+    }
+
     Row(
         Modifier.fillMaxWidth().height(T4_TRACK_HEIGHT.dp)
             .background(if (selected) T4Accent.copy(alpha = .12f) else Color(0xFF121217))
-            .border(.5.dp, T4Divider).clickable { onSelect(track.id) }.padding(horizontal = 5.dp),
+            .border(.5.dp, T4Divider)
+            .pointerInput(track.id) {
+                detectTapGestures(
+                    onTap = { onSelect(track.id) },
+                    onLongPress = { confirmDelete = true },
+                )
+            }
+            .padding(horizontal = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.width(3.dp).fillMaxHeight().background(if (track.kind == TrackKind.VIDEO) Color(0xFF607D9B) else Color(0xFF3E7569)))
