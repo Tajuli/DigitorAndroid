@@ -5,10 +5,12 @@ import android.os.Handler
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.transformer.Composition
+import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult as Media3ExportResult
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
+import androidx.media3.transformer.VideoEncoderSettings
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
@@ -29,8 +31,16 @@ class GpuExportBackend(
         project: TimelineProject,
         output: File,
         onProgress: (ExportProgress) -> Unit,
+    ): ExportResult = export(project, output, ExportQuality.HIGH, onProgress)
+
+    suspend fun export(
+        project: TimelineProject,
+        output: File,
+        quality: ExportQuality,
+        onProgress: (ExportProgress) -> Unit,
     ): ExportResult = suspendCancellableCoroutine { continuation ->
-        onProgress(ExportProgress.Stage("GPU: releasing preview resources", 0.01f))
+        val requestedBitrate = quality.videoBitrate(project.width, project.height, project.frameRate)
+        onProgress(ExportProgress.Stage("GPU: releasing preview resources · ${quality.label}", 0.01f))
         val previewLease = runCatching { PreviewExportCoordinator.acquireExportLease() }
             .getOrElse { error ->
                 if (continuation.isActive) continuation.resumeWithException(error)
@@ -45,7 +55,7 @@ class GpuExportBackend(
         } else {
             "GPU: building multitrack composition"
         }
-        onProgress(ExportProgress.Stage(compositionStage, 0.02f))
+        onProgress(ExportProgress.Stage("$compositionStage · ${quality.label}", 0.02f))
 
         val composition = runCatching { compositionBuilder.build(project) }
             .getOrElse { error ->
@@ -73,20 +83,28 @@ class GpuExportBackend(
         }
 
         val transformer = runCatching {
+            val encoderFactory = DefaultEncoderFactory.Builder(context)
+                .setRequestedVideoEncoderSettings(
+                    VideoEncoderSettings.Builder()
+                        .setBitrate(requestedBitrate)
+                        .build(),
+                )
+                .build()
             Transformer.Builder(context)
                 .setVideoMimeType(MimeTypes.VIDEO_H264)
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                .setEncoderFactory(encoderFactory)
                 .addListener(object : Transformer.Listener {
                     override fun onCompleted(composition: Composition, exportResult: Media3ExportResult) {
                         stopCallbacks()
                         restorePreview()
                         if (continuation.isActive) {
-                            onProgress(ExportProgress.Stage("GPU: complete", 1f))
+                            onProgress(ExportProgress.Stage("GPU: complete · ${quality.label}", 1f))
                             continuation.resume(
                                 ExportResult(
                                     output = output,
                                     backend = Backend.GPU,
-                                    note = "GPU export complete",
+                                    note = "GPU export complete · ${quality.label} · ${requestedBitrate / 1_000_000f} Mbps target",
                                 ),
                             )
                         }
@@ -122,13 +140,13 @@ class GpuExportBackend(
                         val fraction = (progressHolder.progress / 100f).coerceIn(0f, 0.99f)
                         onProgress(
                             ExportProgress.Stage(
-                                "GPU: rendering ${progressHolder.progress}%",
+                                "GPU: rendering ${progressHolder.progress}% · ${quality.label}",
                                 fraction,
                             ),
                         )
                     }
                     Transformer.PROGRESS_STATE_WAITING_FOR_AVAILABILITY -> {
-                        onProgress(ExportProgress.Stage("GPU: preparing export", 0.04f))
+                        onProgress(ExportProgress.Stage("GPU: preparing export · ${quality.label}", 0.04f))
                     }
                 }
                 if (state != Transformer.PROGRESS_STATE_NOT_STARTED && continuation.isActive) {
@@ -143,7 +161,7 @@ class GpuExportBackend(
                 restorePreview()
                 return@Runnable
             }
-            onProgress(ExportProgress.Stage("GPU: MediaCodec + OpenGL export", 0.05f))
+            onProgress(ExportProgress.Stage("GPU: MediaCodec + OpenGL export · ${quality.label}", 0.05f))
             runCatching {
                 transformer.start(composition, output.absolutePath)
                 transformerStarted.set(true)
@@ -165,7 +183,7 @@ class GpuExportBackend(
         // Some Android codec stacks release native decoder/GL resources asynchronously even after
         // MediaCodec.stop/release returns. Give Codec2/SurfaceFlinger a short quiescent window before
         // opening the export decoder + encoder pair.
-        onProgress(ExportProgress.Stage("GPU: waiting for codec release", 0.03f))
+        onProgress(ExportProgress.Stage("GPU: waiting for codec release · ${quality.label}", 0.03f))
         handler.postDelayed(starter, EXPORT_START_GRACE_MS)
     }
 
