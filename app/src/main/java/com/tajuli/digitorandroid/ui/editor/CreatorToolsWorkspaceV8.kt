@@ -6,6 +6,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,7 +15,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.rememberScrollState as rememberVerticalScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -66,7 +66,7 @@ fun CreatorMediaWorkspaceV8(
         }
         HorizontalDivider(color = C8Divider)
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberVerticalScrollState()).padding(8.dp),
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             SectionCardV8("Text / Captions") {
@@ -155,7 +155,7 @@ fun CreatorAudioWorkspaceV8(
             return@Column
         }
         val maxFadeUs = min(clip.durationUs, 5_000_000L).coerceAtLeast(1L)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberVerticalScrollState()).padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             SectionCardV8("Volume") {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("${(clip.audioMix.volume * 100).toInt()}%", fontSize = 8.sp, color = C8Accent, modifier = Modifier.width(42.dp))
@@ -197,7 +197,7 @@ private fun TextEditorV8(item: TextOverlayClip, vm: EditorViewModelV4) {
 }
 
 @Composable
-private fun SectionCardV8(title: String, content: @Composable Column.() -> Unit) {
+private fun SectionCardV8(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column(
         Modifier.fillMaxWidth().background(C8Raised, RoundedCornerShape(7.dp)).padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
