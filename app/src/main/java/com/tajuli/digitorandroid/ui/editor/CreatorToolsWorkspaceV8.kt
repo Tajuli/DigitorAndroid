@@ -1,6 +1,7 @@
 package com.tajuli.digitorandroid.ui.editor
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -13,8 +14,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -26,18 +29,31 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tajuli.digitorandroid.editor.model.TextAlignmentV2
+import com.tajuli.digitorandroid.editor.model.TextAnimationSpecV2
+import com.tajuli.digitorandroid.editor.model.TextAnimationV2
+import com.tajuli.digitorandroid.editor.model.TextFontV2
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
+import com.tajuli.digitorandroid.editor.model.TextStyleV2
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
 import com.tajuli.digitorandroid.editor.model.audioSelection
+import com.tajuli.digitorandroid.editor.model.resolvedEntryAnimationV2
+import com.tajuli.digitorandroid.editor.model.resolvedExitAnimationV2
+import com.tajuli.digitorandroid.editor.model.resolvedTextStyleV2
 import kotlin.math.min
 
 private val C8Panel = Color(0xFF0B0B0F)
@@ -45,6 +61,17 @@ private val C8Raised = Color(0xFF17171C)
 private val C8Divider = Color(0xFF292930)
 private val C8Muted = Color(0xFF909098)
 private val C8Accent = Color(0xFF30E0C3)
+
+private val TextPaletteV2 = listOf(
+    0xFFFFFFFFL,
+    0xFF000000L,
+    0xFFFF5A5FL,
+    0xFFFFD54FL,
+    0xFF4DD0E1L,
+    0xFF66BB6AL,
+    0xFFAB86FFL,
+    0xFFFF8BCBL,
+)
 
 @Composable
 fun CreatorMediaWorkspaceV8(
@@ -62,14 +89,14 @@ fun CreatorMediaWorkspaceV8(
         Row(Modifier.fillMaxWidth().height(36.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Creator tools", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
-            Text(busyOperation ?: "Text · Transition · Retime", fontSize = 8.sp, color = if (busyOperation == null) C8Muted else C8Accent)
+            Text(busyOperation ?: "Text V2 · Transition · Retime", fontSize = 8.sp, color = if (busyOperation == null) C8Muted else C8Accent)
         }
         HorizontalDivider(color = C8Divider)
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            SectionCardV8("Text / Captions") {
+            SectionCardV8("Text / Captions V2") {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     FilledTonalButton(onClick = { vm.addTextAt(cursorUs, caption = false) }) { Text("+ Text", fontSize = 8.sp) }
                     FilledTonalButton(onClick = { vm.addTextAt(cursorUs, caption = true) }) { Text("+ Caption", fontSize = 8.sp) }
@@ -177,6 +204,10 @@ fun CreatorAudioWorkspaceV8(
 
 @Composable
 private fun TextEditorV8(item: TextOverlayClip, vm: EditorViewModelV4) {
+    val style = item.resolvedTextStyleV2()
+    val entry = item.resolvedEntryAnimationV2()
+    val exit = item.resolvedExitAnimationV2()
+
     OutlinedTextField(
         value = item.text,
         onValueChange = { vm.updateSelectedText(text = it) },
@@ -184,15 +215,184 @@ private fun TextEditorV8(item: TextOverlayClip, vm: EditorViewModelV4) {
         modifier = Modifier.fillMaxWidth(),
         maxLines = 3,
     )
+
+    Text("Font", fontSize = 8.sp, color = C8Muted)
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        TextFontV2.entries.forEach { font ->
+            V2ChoiceButton(font.name.lowercase().replaceFirstChar { it.uppercase() }, style.font == font) {
+                vm.commitTextOverlayV2(item.copy(styleV2 = style.copy(font = font)))
+            }
+        }
+    }
+
+    Text("Text color", fontSize = 8.sp, color = C8Muted)
+    ColorEditorV2(style.colorArgb) { color ->
+        vm.commitTextOverlayV2(item.copy(styleV2 = style.copy(colorArgb = color)))
+    }
+
+    Text("Stroke", fontSize = 8.sp, color = C8Muted)
+    CommitSliderV2("Width", style.strokeWidth, 0f..8f) { value ->
+        vm.commitTextOverlayV2(item.copy(styleV2 = style.copy(strokeWidth = value)))
+    }
+    if (style.strokeWidth > 0f) {
+        ColorEditorV2(style.strokeArgb) { color ->
+            vm.commitTextOverlayV2(item.copy(styleV2 = style.copy(strokeArgb = color)))
+        }
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(
+            checked = style.shadowEnabled,
+            onCheckedChange = { enabled ->
+                vm.commitTextOverlayV2(item.copy(styleV2 = style.copy(shadowEnabled = enabled)))
+            },
+        )
+        Text("Shadow", fontSize = 8.sp, color = Color.White.copy(alpha = .72f))
+    }
+    if (style.shadowEnabled) {
+        ColorEditorV2(style.shadowArgb) { color ->
+            vm.commitTextOverlayV2(item.copy(styleV2 = style.copy(shadowArgb = color)))
+        }
+        CommitSliderV2("Blur", style.shadowRadius, 0f..18f) { value ->
+            vm.commitTextOverlayV2(item.copy(styleV2 = style.copy(shadowRadius = value)))
+        }
+        CommitSliderV2("Shadow X", style.shadowDx, -12f..12f) { value ->
+            vm.commitTextOverlayV2(item.copy(styleV2 = style.copy(shadowDx = value)))
+        }
+        CommitSliderV2("Shadow Y", style.shadowDy, -12f..12f) { value ->
+            vm.commitTextOverlayV2(item.copy(styleV2 = style.copy(shadowDy = value)))
+        }
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(
+            checked = style.backgroundEnabled,
+            onCheckedChange = { enabled ->
+                vm.commitTextOverlayV2(item.copy(styleV2 = style.copy(backgroundEnabled = enabled)))
+            },
+        )
+        Text("Background", fontSize = 8.sp, color = Color.White.copy(alpha = .72f))
+    }
+    if (style.backgroundEnabled) {
+        ColorEditorV2(style.backgroundArgb) { color ->
+            vm.commitTextOverlayV2(item.copy(styleV2 = style.copy(backgroundArgb = color)))
+        }
+    }
+
+    Text("Alignment", fontSize = 8.sp, color = C8Muted)
+    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        TextAlignmentV2.entries.forEach { alignment ->
+            V2ChoiceButton(alignment.name.lowercase().replaceFirstChar { it.uppercase() }, style.alignment == alignment) {
+                vm.commitTextOverlayV2(item.copy(styleV2 = style.copy(alignment = alignment)))
+            }
+        }
+    }
+
+    Text("Entry animation", fontSize = 8.sp, color = C8Muted)
+    AnimationEditorV2(item, entry, isEntry = true, vm = vm)
+    Text("Exit animation", fontSize = 8.sp, color = C8Muted)
+    AnimationEditorV2(item, exit, isEntry = false, vm = vm)
+
     CreatorSliderV8("X", item.positionX, -1f..1f) { vm.updateSelectedText(positionX = it) }
     CreatorSliderV8("Y", item.positionY, -1f..1f) { vm.updateSelectedText(positionY = it) }
     CreatorSliderV8("Size", item.sizeScale, .35f..2.5f) { vm.updateSelectedText(sizeScale = it) }
     DurationSliderV8("Duration", item.durationUs, 10_000_000L) { vm.setSelectedTextDuration(it) }
+
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Checkbox(checked = item.background, onCheckedChange = { vm.updateSelectedText(background = it) })
-        Text("Caption background", fontSize = 8.sp, color = Color.White.copy(alpha = .72f))
         Spacer(Modifier.weight(1f))
         TextButton(onClick = vm::deleteSelectedText) { Text("Delete", fontSize = 8.sp, color = Color(0xFFFF6B6B)) }
+    }
+}
+
+@Composable
+private fun AnimationEditorV2(
+    item: TextOverlayClip,
+    spec: TextAnimationSpecV2,
+    isEntry: Boolean,
+    vm: EditorViewModelV4,
+) {
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        listOf(
+            TextAnimationV2.NONE to "None",
+            TextAnimationV2.FADE to "Fade",
+            TextAnimationV2.SLIDE_UP to "Up",
+            TextAnimationV2.SLIDE_DOWN to "Down",
+            TextAnimationV2.SLIDE_LEFT to "Left",
+            TextAnimationV2.SLIDE_RIGHT to "Right",
+        ).forEach { (kind, label) ->
+            V2ChoiceButton(label, spec.kind == kind) {
+                val nextSpec = spec.copy(kind = kind)
+                vm.commitTextOverlayV2(
+                    if (isEntry) item.copy(entryAnimationV2 = nextSpec) else item.copy(exitAnimationV2 = nextSpec),
+                )
+            }
+        }
+    }
+    if (spec.kind != TextAnimationV2.NONE) {
+        CommitSliderV2("Time", spec.durationUs / US_PER_SECOND.toFloat(), .1f..2f) { seconds ->
+            val nextSpec = spec.copy(durationUs = (seconds * US_PER_SECOND).toLong())
+            vm.commitTextOverlayV2(
+                if (isEntry) item.copy(entryAnimationV2 = nextSpec) else item.copy(exitAnimationV2 = nextSpec),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ColorEditorV2(value: Long, onColor: (Long) -> Unit) {
+    var hex by remember(value) { mutableStateOf("%08X".format(value and 0xFFFFFFFFL)) }
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        TextPaletteV2.forEach { color ->
+            Box(
+                Modifier.size(23.dp)
+                    .background(Color(color.toULong()), CircleShape)
+                    .border(if (color == value) 2.dp else 1.dp, if (color == value) C8Accent else C8Divider, CircleShape)
+                    .clickable { onColor(color) },
+            )
+        }
+        OutlinedTextField(
+            value = hex,
+            onValueChange = { input -> hex = input.filter { it.isDigit() || it.lowercaseChar() in 'a'..'f' }.take(8).uppercase() },
+            label = { Text("ARGB", fontSize = 7.sp) },
+            singleLine = true,
+            modifier = Modifier.width(108.dp),
+        )
+        TextButton(
+            enabled = hex.length == 8,
+            onClick = { hex.toLongOrNull(16)?.let(onColor) },
+        ) { Text("Apply", fontSize = 7.sp) }
+    }
+}
+
+@Composable
+private fun V2ChoiceButton(label: String, selected: Boolean, onClick: () -> Unit) {
+    FilledTonalButton(onClick = onClick, modifier = Modifier.height(30.dp), shape = RoundedCornerShape(6.dp)) {
+        Text(if (selected) "✓ $label" else label, fontSize = 7.sp, color = if (selected) C8Accent else Color.White.copy(alpha = .72f))
+    }
+}
+
+@Composable
+private fun CommitSliderV2(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onCommit: (Float) -> Unit,
+) {
+    var draft by remember(value) { mutableFloatStateOf(value.coerceIn(range.start, range.endInclusive)) }
+    Row(Modifier.fillMaxWidth().height(30.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, fontSize = 7.sp, color = C8Muted, modifier = Modifier.width(58.dp))
+        Slider(
+            value = draft,
+            onValueChange = { draft = it },
+            onValueChangeFinished = { onCommit(draft) },
+            valueRange = range,
+            modifier = Modifier.weight(1f),
+        )
+        Text(String.format("%.2f", draft), fontSize = 7.sp, color = C8Muted, modifier = Modifier.width(42.dp))
     }
 }
 
