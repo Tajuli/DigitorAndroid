@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.render.SharedColorPipeline
 import kotlin.math.max
@@ -17,33 +18,65 @@ import kotlin.math.roundToInt
  * flat instead of black. The same shared color LUT is then sampled on CPU, which means Input Color,
  * primary/log wheels, curves and node color changes still show in the fallback preview.
  *
+ * The retriever is intentionally reused across adjacent playback frames. Reopening the media source
+ * for every frame made camera Log fallback playback visibly stutter even when the device could
+ * decode the stream. Android 8.1+ also decodes directly near the requested preview size instead of
+ * decoding a full camera frame and scaling it afterwards.
+ *
  * The whole fallback decode is guarded by PreviewExportCoordinator. Export takes the exclusive side
- * of that barrier before Transformer starts, so MediaMetadataRetriever can never compete with the
- * export decoder/encoder on devices with fragile codec stacks.
+ * of that barrier and releases the cached retriever before Transformer starts, so the software
+ * preview can never compete with the export decoder/encoder on fragile codec stacks.
  */
 internal object SoftwarePreviewRenderer {
     private const val FALLBACK_LUT_SIZE = 17
+
+    private data class RetrieverSession(
+        val uri: String,
+        val retriever: MediaMetadataRetriever,
+        val width: Int,
+        val height: Int,
+    )
+
+    // Access is serialized by PreviewExportCoordinator.previewDecodeGate.
+    private var cachedSession: RetrieverSession? = null
 
     fun render(
         context: Context,
         clip: TimelineClip,
         sourceTimeUs: Long,
-        maxLongEdge: Int = 720,
+        maxLongEdge: Int = 640,
     ): Bitmap? = PreviewExportCoordinator.withSoftwarePreviewDecode {
-        val retriever = MediaMetadataRetriever()
+        val session = sessionFor(context, clip) ?: return@withSoftwarePreviewDecode null
+        val safeSourceUs = sourceTimeUs.coerceIn(
+            clip.sourceInUs,
+            clip.sourceOutUs.coerceAtLeast(clip.sourceInUs),
+        )
+        val safeLongEdge = maxLongEdge.coerceAtLeast(240)
         val decoded = try {
-            retriever.setDataSource(context, Uri.parse(clip.uri))
-            retriever.getFrameAtTime(
-                sourceTimeUs.coerceIn(clip.sourceInUs, clip.sourceOutUs.coerceAtLeast(clip.sourceInUs)),
-                MediaMetadataRetriever.OPTION_CLOSEST,
-            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1 &&
+                session.width > 1 && session.height > 1
+            ) {
+                val target = fittedSize(session.width, session.height, safeLongEdge)
+                session.retriever.getScaledFrameAtTime(
+                    safeSourceUs,
+                    MediaMetadataRetriever.OPTION_CLOSEST,
+                    target.first,
+                    target.second,
+                )
+            } else {
+                session.retriever.getFrameAtTime(
+                    safeSourceUs,
+                    MediaMetadataRetriever.OPTION_CLOSEST,
+                )
+            }
         } catch (_: Throwable) {
+            // A vendor retriever can become poisoned after one decoder error. Drop it so the next
+            // frame gets a clean software session rather than stuttering forever on the same state.
+            releaseCachedDecoderLocked()
             null
-        } finally {
-            runCatching { retriever.release() }
         } ?: return@withSoftwarePreviewDecode null
 
-        val scaled = scaleDown(decoded, maxLongEdge.coerceAtLeast(240))
+        val scaled = scaleDown(decoded, safeLongEdge)
         if (scaled !== decoded) decoded.recycle()
 
         val working = if (scaled.config == Bitmap.Config.ARGB_8888 && scaled.isMutable) {
@@ -60,10 +93,58 @@ internal object SoftwarePreviewRenderer {
         val cube = SharedColorPipeline.buildCubeAtSourceTime(
             clip = clip,
             size = FALLBACK_LUT_SIZE,
-            sourceTimeUs = sourceTimeUs,
+            sourceTimeUs = safeSourceUs,
         )
         applyCubeNearest(working, cube)
         working
+    }
+
+    /** Called only while PreviewExportCoordinator owns the software-decode gate. */
+    internal fun releaseCachedDecoderForExport() {
+        releaseCachedDecoderLocked()
+    }
+
+    private fun sessionFor(context: Context, clip: TimelineClip): RetrieverSession? {
+        cachedSession?.takeIf { it.uri == clip.uri }?.let { return it }
+        releaseCachedDecoderLocked()
+
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(context, Uri.parse(clip.uri))
+            val width = retriever
+                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                ?.toIntOrNull()
+                ?.coerceAtLeast(1)
+                ?: 1
+            val height = retriever
+                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                ?.toIntOrNull()
+                ?.coerceAtLeast(1)
+                ?: 1
+            RetrieverSession(
+                uri = clip.uri,
+                retriever = retriever,
+                width = width,
+                height = height,
+            ).also { cachedSession = it }
+        } catch (_: Throwable) {
+            runCatching { retriever.release() }
+            null
+        }
+    }
+
+    private fun releaseCachedDecoderLocked() {
+        val previous = cachedSession
+        cachedSession = null
+        previous?.let { runCatching { it.retriever.release() } }
+    }
+
+    private fun fittedSize(width: Int, height: Int, maxLongEdge: Int): Pair<Int, Int> {
+        val longest = max(width, height).coerceAtLeast(1)
+        if (longest <= maxLongEdge) return width.coerceAtLeast(2) to height.coerceAtLeast(2)
+        val scale = maxLongEdge.toFloat() / longest.toFloat()
+        return (width * scale).roundToInt().coerceAtLeast(2) to
+            (height * scale).roundToInt().coerceAtLeast(2)
     }
 
     private fun scaleDown(bitmap: Bitmap, maxLongEdge: Int): Bitmap {
