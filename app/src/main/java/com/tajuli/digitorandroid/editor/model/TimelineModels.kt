@@ -117,14 +117,14 @@ data class TimelineClip(
     val sourceOutUs: Long,
     val opacity: Float = 1f,
     val colorGrade: ColorGrade = ColorGrade(),
-    /** Nullable so projects saved before input color management still deserialize safely in Gson. */
-    val inputColorProfileV1: InputColorProfile? = null,
     val linkGroupId: String? = null,
     val nodeGraph: ClipNodeGraph = ClipNodeGraph.default(),
     val transform: ClipTransform = ClipTransform(),
     val nodeAnimations: NodeAnimations = NodeAnimations(),
     val transition: ClipTransition = ClipTransition(),
     val audioMix: AudioMix = AudioMix(),
+    /** Nullable and appended last so legacy Gson projects and positional constructor calls remain safe. */
+    val inputColorProfileV1: InputColorProfile? = null,
 ) {
     val durationUs: Long get() = (sourceOutUs - sourceInUs).coerceAtLeast(1L)
     val timelineEndUs: Long get() = timelineStartUs + durationUs
