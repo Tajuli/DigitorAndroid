@@ -2,9 +2,8 @@ package com.tajuli.digitorandroid.editor.preview
 
 import java.io.Closeable
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.locks.Lock
-import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,7 +18,12 @@ import kotlinx.coroutines.flow.asStateFlow
  */
 internal object PreviewExportCoordinator {
     private val engines = CopyOnWriteArraySet<DavinciFramePreviewEngine>()
-    private val previewDecodeLock = ReentrantReadWriteLock(true)
+
+    // A Semaphore is deliberately used instead of a ReentrantLock/ReadWriteLock: Transformer may
+    // finish on a different application-looper thread than the coroutine that starts export, and a
+    // semaphore can safely be released cross-thread. Software fallback frames take this same gate,
+    // so export waits for any in-flight retriever decode and blocks new fallback decodes until done.
+    private val previewDecodeGate = Semaphore(1, true)
     private val mutableExportActive = MutableStateFlow(false)
     val exportActive: StateFlow<Boolean> = mutableExportActive.asStateFlow()
 
@@ -33,23 +37,21 @@ internal object PreviewExportCoordinator {
 
     /** Software fallback frame decode participates in the same resource barrier as GPU preview. */
     fun <T> withSoftwarePreviewDecode(block: () -> T): T {
-        val lock = previewDecodeLock.readLock()
-        lock.lock()
+        previewDecodeGate.acquireUninterruptibly()
         return try {
             block()
         } finally {
-            lock.unlock()
+            previewDecodeGate.release()
         }
     }
 
     /**
-     * Releases all active preview decode/render sessions before export starts and takes an exclusive
-     * lock against software fallback decoding. Export is allowed to continue only after every
+     * Releases all active preview decode/render sessions before export starts and takes exclusive
+     * ownership of software-preview decoding. Export is allowed to continue only after every
      * preview resource is quiescent.
      */
     fun acquireExportLease(): ExportLease {
-        val exportLock = previewDecodeLock.writeLock()
-        exportLock.lock()
+        previewDecodeGate.acquireUninterruptibly()
         mutableExportActive.value = true
         val attempted = engines.toList()
         val suspended = mutableListOf<DavinciFramePreviewEngine>()
@@ -62,21 +64,20 @@ internal object PreviewExportCoordinator {
                 }
                 suspended += engine
             }
-            return ExportLease(suspended, exportLock)
+            return ExportLease(suspended)
         } catch (error: Throwable) {
             suspended.forEach {
                 it.resumeAfterExternalGpuWork()
                 it.scheduleCurrentFrameRefresh(180L)
             }
             mutableExportActive.value = false
-            exportLock.unlock()
+            previewDecodeGate.release()
             throw error
         }
     }
 
     class ExportLease internal constructor(
         private val engines: List<DavinciFramePreviewEngine>,
-        private val exportLock: Lock,
     ) : Closeable {
         private val closed = AtomicBoolean(false)
 
@@ -90,7 +91,7 @@ internal object PreviewExportCoordinator {
                 }
             } finally {
                 mutableExportActive.value = false
-                exportLock.unlock()
+                previewDecodeGate.release()
             }
         }
     }
