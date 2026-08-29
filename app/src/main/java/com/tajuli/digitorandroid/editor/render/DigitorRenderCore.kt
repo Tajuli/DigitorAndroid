@@ -17,6 +17,9 @@ import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import java.io.Closeable
 import java.util.concurrent.Executor
 
+/** Maximum final-surface size for realtime editing. Export always keeps project resolution. */
+internal const val REALTIME_PREVIEW_LONG_EDGE = 720
+
 /**
  * The one realtime video render graph used by Digitor preview.
  *
@@ -30,6 +33,13 @@ import java.util.concurrent.Executor
  * engine had already normalised it. Some 8-bit S-Log3 files then entered Media3's color conversion
  * path instead of the raw-code path and could stall before the first rendered frame. The render core
  * now treats the prepared layer format as the single source of truth for realtime graph metadata.
+ *
+ * Realtime preview intentionally downsizes only the FINAL compositor/output surface to at most
+ * 720 px on the long edge. Source decoding and per-layer color/spatial effects still receive the
+ * original decoder dimensions, so the shared 33^3 LUT, qualifier/node math and spatial shader are
+ * evaluated on the same source pixels as export. Geometry is normalized in
+ * [ResolveVideoCompositorSettings]. The only approximation is the final display resample; export
+ * remains full project resolution.
  */
 @UnstableApi
 internal class DigitorRenderCore(
@@ -52,6 +62,9 @@ internal class DigitorRenderCore(
     }
 
     private val appContext = context.applicationContext
+    private val previewOutputSize = resolvePreviewOutputSize(project, REALTIME_PREVIEW_LONG_EDGE)
+    private val previewOutputWidth = previewOutputSize.first
+    private val previewOutputHeight = previewOutputSize.second
 
     /**
      * Use exactly the format prepared next to MediaCodec in DavinciFramePreviewEngine. The decoder
@@ -94,12 +107,12 @@ internal class DigitorRenderCore(
     init {
         graph.initialize()
 
-        // Input order stays in project track order. ResolveVideoCompositorSettings therefore owns
-        // the exact same z-order/geometry semantics in preview and Transformer export.
+        // Per-layer effects still run from the original decoder formats. Only the final compositor
+        // target is reduced for realtime display; export uses the full project canvas separately.
         graph.setCompositorSettings(
             ResolveVideoCompositorSettings(
-                outputWidth = project.width,
-                outputHeight = project.height,
+                outputWidth = previewOutputWidth,
+                outputHeight = previewOutputHeight,
                 videoTracks = layers.map { it.track },
                 livePreview = true,
             ),
@@ -123,7 +136,7 @@ internal class DigitorRenderCore(
         outputSurface = surface
         graph.setOutputSurfaceInfo(
             surface?.takeIf { it.isValid }?.let {
-                SurfaceInfo(it, project.width.coerceAtLeast(1), project.height.coerceAtLeast(1))
+                SurfaceInfo(it, previewOutputWidth, previewOutputHeight)
             },
         )
     }
