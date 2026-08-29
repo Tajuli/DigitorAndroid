@@ -6,6 +6,7 @@ import kotlin.math.pow
 
 /** Camera/input profiles converted into the editor's Rec.709 grading working space. */
 enum class InputColorProfile(val displayName: String, val family: String) {
+    NONE("None / Bypass", "Bypass"),
     REC709("Rec.709 / Standard", "Standard"),
     SONY_SLOG2("Sony S-Log2", "Sony"),
     SONY_SLOG3_SGAMUT3_CINE("Sony S-Log3 / S-Gamut3.Cine", "Sony"),
@@ -21,21 +22,24 @@ enum class InputColorProfile(val displayName: String, val family: String) {
     PQ_BT2020("PQ (ST 2084) / BT.2020", "HDR"),
 }
 
-/** Missing legacy Gson field resolves to standard Rec.709 without requiring a project migration. */
+/**
+ * Missing legacy Gson field means no input transform. Imported camera Log footage therefore stays
+ * flat until the editor explicitly chooses a camera/input profile.
+ */
 fun TimelineClip.resolvedInputColorProfile(): InputColorProfile =
-    inputColorProfileV1 ?: InputColorProfile.REC709
+    inputColorProfileV1 ?: InputColorProfile.NONE
 
 /**
  * Deterministic camera-input transform used before node grading.
  *
- * The current renderer is SDR/Rec.709, so camera log/HDR values are decoded to scene linear,
- * converted from the source wide gamut where a profile defines one, highlight-compressed into the
- * SDR working range, then encoded to Rec.709. The node graph therefore receives normalised Rec.709
- * rather than a flat log signal. This same function feeds the shared preview/export LUT builder.
+ * NONE is a true bypass: decoded RGB code values enter the node grade untouched. This lets Log
+ * footage be viewed, graded and exported as a flat image without requiring any Input Color choice.
+ * Other camera/HDR profiles decode to scene linear, convert their source gamut where defined,
+ * compress highlights into the SDR working range and encode to Rec.709.
  */
 object InputColorTransform {
     fun toWorkingRec709(profile: InputColorProfile, r: Float, g: Float, b: Float): FloatArray {
-        if (profile == InputColorProfile.REC709) {
+        if (profile == InputColorProfile.NONE || profile == InputColorProfile.REC709) {
             return floatArrayOf(r.coerceIn(0f, 1f), g.coerceIn(0f, 1f), b.coerceIn(0f, 1f))
         }
 
@@ -61,6 +65,7 @@ object InputColorTransform {
     }
 
     private fun decode(profile: InputColorProfile, code: Float): Float = when (profile) {
+        InputColorProfile.NONE,
         InputColorProfile.REC709 -> rec709Eotf(code)
         InputColorProfile.SONY_SLOG2 -> slog2ToLinear(code)
         InputColorProfile.SONY_SLOG3_SGAMUT3_CINE -> slog3ToLinear(code)
