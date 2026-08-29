@@ -4,6 +4,7 @@ import androidx.media3.common.Effect
 import androidx.media3.common.util.UnstableApi
 import com.tajuli.digitorandroid.editor.model.ColorGraphEvaluator
 import com.tajuli.digitorandroid.editor.model.ColorNode
+import com.tajuli.digitorandroid.editor.model.InputColorProfile
 import com.tajuli.digitorandroid.editor.model.InputColorTransform
 import com.tajuli.digitorandroid.editor.model.QualifiedColorMath
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -49,6 +50,11 @@ object SharedColorPipeline {
     }
 
     private fun MutableList<Effect>.addSpatialQualifierEffects(clip: TimelineClip) {
+        // This pre-filter samples source RGB before the 3D LUT. For managed Log/HDR sources that
+        // would build its mask in the wrong transfer/gamut space, so let the qualifier inside the
+        // transformed LUT handle selection until the spatial shader itself gains input transforms.
+        if (clip.resolvedInputColorProfile() != InputColorProfile.REC709) return
+
         clip.nodeGraph.nodes.forEach { node ->
             // The spatial pre-filter has immutable shader parameters today. If the qualifier itself
             // is animated, do not leave a stale static mask in front of the correctly animated LUT.
