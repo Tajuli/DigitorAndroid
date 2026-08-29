@@ -49,13 +49,14 @@ data class TextOverlayClip(
     val bold: Boolean = true,
     val background: Boolean = false,
     /**
-     * V2 is nullable on purpose. Gson gives missing reference fields null when an older project is
-     * opened, so legacy projects continue to resolve through argb/background/bold without a custom
-     * migration adapter.
+     * V2 fields stay nullable on purpose. Gson gives missing reference fields null when an older
+     * project is opened, so legacy projects keep working without a custom migration adapter.
      */
     val styleV2: TextStyleV2? = null,
     val entryAnimationV2: TextAnimationSpecV2? = null,
     val exitAnimationV2: TextAnimationSpecV2? = null,
+    /** DaVinci-style playhead keyframes for position, size and opacity. */
+    val manualAnimationV2: TextManualAnimationV2? = null,
 ) {
     val durationUs: Long get() = (timelineEndUs - timelineStartUs).coerceAtLeast(1L)
     fun activeAt(timeUs: Long): Boolean = timeUs in timelineStartUs until timelineEndUs
