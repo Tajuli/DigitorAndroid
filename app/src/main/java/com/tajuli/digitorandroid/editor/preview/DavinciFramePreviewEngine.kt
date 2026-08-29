@@ -13,7 +13,9 @@ import android.util.Log
 import android.view.Surface
 import androidx.media3.common.ColorInfo
 import androidx.media3.common.Format
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
@@ -41,8 +43,8 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * There is no ImageReader, Bitmap readback, Compose texture upload or per-tick player seek in the
  * healthy path. [maxPreviewLongEdge] is retained for source compatibility with older callers but is
- * intentionally ignored: exact preview renders at project resolution so the render stages match
- * export pixel geometry.
+ * intentionally ignored: source-pixel processing stays exact and the render core owns final preview
+ * downsampling without changing grading/effect math.
  */
 @UnstableApi
 class DavinciFramePreviewEngine(
@@ -416,7 +418,7 @@ class DavinciFramePreviewEngine(
             previewSurface?.takeIf { it.isValid }?.let(core::setOutputSurface)
 
             val sources = prepared.mapIndexed { index, item ->
-                val codec = MediaCodec.createDecoderByType(item.mime)
+                val codec = createPreviewDecoder(item.mime)
                 try {
                     codec.configure(item.platformFormat, core.inputSurface(index), null, 0)
                     codec.start()
@@ -442,6 +444,42 @@ class DavinciFramePreviewEngine(
             runCatching { core?.close() }
             throw error
         }
+    }
+
+    /**
+     * Keep the normal platform decoder on healthy devices. The captured Unisoc AVC trace showed the
+     * vendor decoder repeatedly accepting input but returning invalid-data/no-picture output for the
+     * camera Log stream. On those devices use Android's software-priority AVC decoder for preview,
+     * matching the already-stable export path while still feeding the exact same GPU render graph.
+     */
+    private fun createPreviewDecoder(mime: String): MediaCodec {
+        if (mime != MimeTypes.VIDEO_H264) return MediaCodec.createDecoderByType(mime)
+
+        val hardwareName = runCatching {
+            MediaCodecSelector.DEFAULT
+                .getDecoderInfos(MimeTypes.VIDEO_H264, false, false)
+                .firstOrNull()
+                ?.name
+        }.getOrNull()
+
+        if (hardwareName?.contains("unisoc", ignoreCase = true) != true) {
+            return MediaCodec.createDecoderByType(mime)
+        }
+
+        val softwareName = runCatching {
+            MediaCodecSelector.PREFER_SOFTWARE
+                .getDecoderInfos(MimeTypes.VIDEO_H264, false, false)
+                .firstOrNull()
+                ?.name
+        }.getOrNull()
+
+        if (!softwareName.isNullOrBlank() && !softwareName.equals(hardwareName, ignoreCase = true)) {
+            Log.i(TAG, "Preview AVC decoder: $hardwareName -> $softwareName")
+            return MediaCodec.createByCodecName(softwareName)
+        }
+
+        Log.w(TAG, "Unisoc AVC decoder detected but no software AVC decoder was available")
+        return MediaCodec.createDecoderByType(mime)
     }
 
     private fun prepareLayer(layer: ActiveLayer): PreparedLayer {
@@ -801,11 +839,11 @@ class DavinciFramePreviewEngine(
         const val TAG = "DigitorSharedPreview"
         const val PLAYBACK_PUMP_MS = 4L
         const val PAUSED_FRAME_RETRY_MS = 8L
-        const val PLAYBACK_LEAD_US = 45_000L
-        const val HARD_RESYNC_US = 300_000L
-        const val MAX_GRAPH_PENDING_FRAMES = 3
-        const val MAX_INPUT_PER_PUMP = 6
-        const val MAX_OUTPUT_PER_PUMP = 8
+        const val PLAYBACK_LEAD_US = 120_000L
+        const val HARD_RESYNC_US = 500_000L
+        const val MAX_GRAPH_PENDING_FRAMES = 4
+        const val MAX_INPUT_PER_PUMP = 8
+        const val MAX_OUTPUT_PER_PUMP = 12
         const val MAX_SCRUB_STEPS = 280
         const val SCRUB_DEQUEUE_TIMEOUT_US = 1_000L
         const val LEGACY_IDLE_PAUSE_MS = 180L
