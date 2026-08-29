@@ -31,6 +31,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.render.REALTIME_PREVIEW_LONG_EDGE
+import com.tajuli.digitorandroid.editor.render.resolvePreviewOutputSize
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -42,10 +44,14 @@ import kotlinx.coroutines.withContext
  * There is no ImageReader, GPU-to-CPU pixel copy, Bitmap upload, or Compose texture upload in the
  * healthy preview path.
  *
+ * Realtime editing uses a 720p-long-edge final Surface buffer while source decoding and the shared
+ * per-layer LUT/spatial pipeline remain at source resolution. That keeps grading/effect math aligned
+ * with full-resolution export and removes the unnecessary project-resolution final GPU surface.
+ *
  * Some vendor codecs can decode a valid camera Log file but never complete the Surface handoff into
  * Media3's multi-input GL graph. In that case a Resolve-style editor must still show the footage as
- * a flat/raw image instead of leaving the viewer black. If the GPU path has not produced its first
- * frame after a short grace period, this host enables [SoftwarePreviewRenderer].
+ * a flat/raw image instead of leaving the viewer black. The software image appears almost
+ * immediately while the GPU path is allowed to keep preparing in the background.
  *
  * Export owns the device video resources exclusively. While an export lease is active the software
  * fallback is disabled as well as the GPU preview, preventing a hidden MediaMetadataRetriever decode
@@ -62,9 +68,15 @@ fun GpuPreviewSurface(
     val exportActive by PreviewExportCoordinator.exportActive.collectAsState()
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
-    val renderWidth = project?.width?.coerceAtLeast(2) ?: 1920
-    val renderHeight = project?.height?.coerceAtLeast(2) ?: 1080
-    val projectAspect = renderWidth.toFloat() / renderHeight.toFloat()
+
+    val sourceWidth = project?.width?.coerceAtLeast(2) ?: 1920
+    val sourceHeight = project?.height?.coerceAtLeast(2) ?: 1080
+    val previewOutputSize = project?.let {
+        resolvePreviewOutputSize(it, REALTIME_PREVIEW_LONG_EDGE)
+    }
+    val renderWidth = previewOutputSize?.first ?: 1280
+    val renderHeight = previewOutputSize?.second ?: 720
+    val projectAspect = sourceWidth.toFloat() / sourceHeight.toFloat()
     val hasVideo = project?.tracks?.any { track ->
         track.kind == TrackKind.VIDEO && !track.muted && track.clips.isNotEmpty()
     } == true
@@ -76,6 +88,8 @@ fun GpuPreviewSurface(
             !hasVideo -> softwareFallbackActive = false
             gpuFrame != null -> softwareFallbackActive = false
             !softwareFallbackActive -> {
+                // Do not make the user stare at a black viewer while a fragile camera codec warms
+                // up. Show the flat/raw software frame quickly and let GPU preparation continue.
                 delay(GPU_FIRST_FRAME_GRACE_MS)
                 if (!PreviewExportCoordinator.exportActive.value && engine.frame.value == null) {
                     softwareFallbackActive = true
@@ -85,9 +99,8 @@ fun GpuPreviewSurface(
     }
 
     val fallbackClip = project?.clip(previewClock.clipId)
-    // The old emergency path intentionally snapped to 100 ms buckets (10 fps). That kept CPU use
-    // low but made camera Log playback visibly jerky. Follow the project frame cadence now, capped
-    // at 30 fps for thermal safety on the devices that need this fallback most.
+    // Follow project frame cadence, capped at 30 fps for thermal safety on devices that need the
+    // software fallback. It still uses the exact shared color LUT for each displayed frame.
     val fallbackPreviewFps = project?.frameRate?.coerceIn(12, 30) ?: 24
     val fallbackFrameStepUs = 1_000_000L / fallbackPreviewFps.toLong()
     val fallbackLocalUs = if (softwareFallbackActive && !exportActive) {
@@ -201,8 +214,8 @@ fun GpuPreviewSurface(
     }
 }
 
-private const val GPU_FIRST_FRAME_GRACE_MS = 700L
-private const val SOFTWARE_PREVIEW_LONG_EDGE = 640
+private const val GPU_FIRST_FRAME_GRACE_MS = 120L
+private const val SOFTWARE_PREVIEW_LONG_EDGE = REALTIME_PREVIEW_LONG_EDGE
 private val PREVIEW_PASTEBOARD_GRAY = Color(0xFF222226)
 
 private class DigitorPreviewSurfaceView(
