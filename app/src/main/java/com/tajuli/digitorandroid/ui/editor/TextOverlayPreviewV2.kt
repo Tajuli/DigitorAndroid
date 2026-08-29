@@ -26,8 +26,9 @@ import com.tajuli.digitorandroid.editor.model.TextFontV2
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.resolvedTextStyleV2
 import com.tajuli.digitorandroid.editor.model.textAnimationFrameV2
+import com.tajuli.digitorandroid.editor.model.textManualFrameV2
 
-/** Compose-side Text System V2 renderer. Export consumes the same model/evaluator. */
+/** Compose-side Text System V2 renderer. Export consumes the same model/evaluators. */
 @Composable
 fun TextOverlayPreviewV2(
     overlay: TextOverlayClip,
@@ -36,8 +37,10 @@ fun TextOverlayPreviewV2(
     modifier: Modifier = Modifier,
 ) {
     val style = overlay.resolvedTextStyleV2()
-    val animation = overlay.textAnimationFrameV2(timelineUs)
-    if (animation.alpha <= 0f) return
+    val preset = overlay.textAnimationFrameV2(timelineUs)
+    val manual = overlay.textManualFrameV2(timelineUs)
+    val combinedAlpha = (preset.alpha * manual.alpha).coerceIn(0f, 1f)
+    if (combinedAlpha <= 0f) return
 
     val fontFamily = when (style.font) {
         TextFontV2.SANS -> FontFamily.SansSerif
@@ -55,8 +58,6 @@ fun TextOverlayPreviewV2(
         TextAlignmentV2.CENTER -> Alignment.Center
         TextAlignmentV2.RIGHT -> Alignment.CenterEnd
     }
-    // Text System V2 stores ordinary 32-bit Android ARGB values, not Compose ColorLong values.
-    // Use the Int overload so Compose doesn't interpret the low 32 bits as packed color-space data.
     val fillColor = Color(style.colorArgb.toInt())
     val strokeColor = Color(style.strokeArgb.toInt())
     val shadow = if (style.shadowEnabled) {
@@ -71,11 +72,11 @@ fun TextOverlayPreviewV2(
 
     Box(
         modifier.graphicsLayer {
-            alpha = animation.alpha
-            translationX = (overlay.positionX + animation.offsetX) * previewSize.width * .5f
-            translationY = (overlay.positionY + animation.offsetY) * previewSize.height * .5f
-            scaleX = overlay.sizeScale.coerceIn(.35f, 4f)
-            scaleY = overlay.sizeScale.coerceIn(.35f, 4f)
+            alpha = combinedAlpha
+            translationX = (manual.positionX + preset.offsetX) * previewSize.width * .5f
+            translationY = (manual.positionY + preset.offsetY) * previewSize.height * .5f
+            scaleX = manual.sizeScale
+            scaleY = manual.sizeScale
         }.widthIn(max = 520.dp),
         contentAlignment = contentAlignment,
     ) {
