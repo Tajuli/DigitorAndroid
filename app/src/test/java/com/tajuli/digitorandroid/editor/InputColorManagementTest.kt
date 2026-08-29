@@ -10,14 +10,22 @@ import org.junit.Test
 
 class InputColorManagementTest {
     @Test
-    fun legacyClipDefaultsToRec709() {
+    fun legacyClipDefaultsToBypass() {
         val clip = TimelineClip(
             uri = "content://test",
             label = "Legacy",
             timelineStartUs = 0L,
             sourceOutUs = 1_000_000L,
         )
-        assertEquals(InputColorProfile.REC709, clip.resolvedInputColorProfile())
+        assertEquals(InputColorProfile.NONE, clip.resolvedInputColorProfile())
+    }
+
+    @Test
+    fun bypassProfileIsIdentity() {
+        val rgb = InputColorTransform.toWorkingRec709(InputColorProfile.NONE, .2f, .4f, .8f)
+        assertEquals(.2f, rgb[0], 0f)
+        assertEquals(.4f, rgb[1], 0f)
+        assertEquals(.8f, rgb[2], 0f)
     }
 
     @Test
@@ -43,9 +51,11 @@ class InputColorManagementTest {
 
     @Test
     fun cameraProfilesProduceFiniteDisplayRange() {
-        InputColorProfile.entries.filterNot { it == InputColorProfile.REC709 }.forEach { profile ->
-            val rgb = InputColorTransform.toWorkingRec709(profile, .25f, .5f, .75f)
-            rgb.forEach { channel -> assertTrue("$profile produced $channel", channel in 0f..1f) }
-        }
+        InputColorProfile.entries
+            .filterNot { it == InputColorProfile.NONE || it == InputColorProfile.REC709 }
+            .forEach { profile ->
+                val rgb = InputColorTransform.toWorkingRec709(profile, .25f, .5f, .75f)
+                rgb.forEach { channel -> assertTrue("$profile produced $channel", channel in 0f..1f) }
+            }
     }
 }
