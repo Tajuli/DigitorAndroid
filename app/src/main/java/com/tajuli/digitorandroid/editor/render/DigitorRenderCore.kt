@@ -1,8 +1,6 @@
 package com.tajuli.digitorandroid.editor.render
 
 import android.content.Context
-import android.media.MediaExtractor
-import android.net.Uri
 import android.view.Surface
 import androidx.media3.common.ColorInfo
 import androidx.media3.common.DebugViewProvider
@@ -11,29 +9,27 @@ import androidx.media3.common.SurfaceInfo
 import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.VideoFrameProcessor
 import androidx.media3.common.VideoGraph
-import androidx.media3.common.util.MediaFormatUtil
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.MultipleInputVideoGraph
-import com.tajuli.digitorandroid.editor.model.InputColorProfile
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
-import com.tajuli.digitorandroid.editor.model.resolvedInputColorProfile
 import java.io.Closeable
 import java.util.concurrent.Executor
 
 /**
  * The one realtime video render graph used by Digitor preview.
  *
- * This deliberately does not own playback, seeking or decoding. MediaCodec producers feed decoded
- * frames into its input Surfaces. The graph applies the exact same 33^3 color LUT, spatial node
- * effects, transform/opacity rules and multilayer compositor that export uses.
+ * MediaCodec owns source decoding. The preview engine deliberately hands this class an SDR-tagged
+ * graph-facing [Format] while the decoder itself keeps the original platform MediaFormat. This is
+ * important for camera Log footage: a flat S-Log/C-Log clip must remain visible even before the user
+ * chooses an Input Color profile, just like Resolve. Digitor therefore previews decoded code values
+ * first; optional camera Log/HDR -> Rec.709 conversion happens later inside [SharedColorPipeline].
  *
- * Source/decoder metadata is normalized with [ParityRenderContract]. Camera Log/HDR clips managed
- * by Digitor are deliberately presented to the graph as SDR code values because the real camera
- * transfer/gamut conversion lives inside [SharedColorPipeline]. This avoids Media3 applying a
- * second color conversion and also lets 10-bit S-Log/HLG/PQ decoder surfaces enter the SDR
- * compositor instead of being rejected before the first preview frame.
+ * Re-reading source ColorInfo here used to re-introduce camera/container metadata after the preview
+ * engine had already normalised it. Some 8-bit S-Log3 files then entered Media3's color conversion
+ * path instead of the raw-code path and could stall before the first rendered frame. The render core
+ * now treats the prepared layer format as the single source of truth for realtime graph metadata.
  */
 @UnstableApi
 internal class DigitorRenderCore(
@@ -57,29 +53,20 @@ internal class DigitorRenderCore(
 
     private val appContext = context.applicationContext
 
-    // MediaCodec is still configured with the original platform MediaFormat in the preview engine.
-    // Only the graph-facing metadata is normalized here. For an explicitly managed camera profile,
-    // or for source metadata that Android classifies as HDR, keep the decoded code values on the SDR
-    // graph path and let Digitor's own input LUT perform Log/HDR -> Rec.709 before node grading.
+    /**
+     * Use exactly the format prepared next to MediaCodec in DavinciFramePreviewEngine. The decoder
+     * remains configured with the untouched source MediaFormat, so this does not alter codec/profile
+     * support or pixel decoding; it only tells the GL graph to display the decoded code values on an
+     * SDR path. Rotation still follows the same decoder-output normalization as export.
+     */
     private val renderFormats: List<Format> = layers.map { layer ->
-        val decoded = ParityRenderContract.decoderOutputFormat(
-            resolveSourceVideoFormat(appContext, layer.clip),
-        )
-        val managedInput = layer.clip.resolvedInputColorProfile() != InputColorProfile.REC709
-        if (managedInput || ColorInfo.isTransferHdr(decoded.colorInfo)) {
-            decoded.buildUpon()
-                .setColorInfo(ColorInfo.SDR_BT709_LIMITED)
-                .build()
-        } else {
-            decoded
-        }
+        ParityRenderContract.decoderOutputFormat(layer.format)
+            .buildUpon()
+            .setColorInfo(ColorInfo.SDR_BT709_LIMITED)
+            .build()
     }
 
-    // Transformer chooses one common graph output color from the first decoded video input. Each
-    // MultipleInputVideoGraph preprocessor converts its source into this color before compositing.
-    private val outputColorInfo: ColorInfo = renderFormats.firstOrNull()
-        ?.let(ParityRenderContract::videoGraphOutputColor)
-        ?: ColorInfo.SDR_BT709_LIMITED
+    private val outputColorInfo: ColorInfo = ColorInfo.SDR_BT709_LIMITED
 
     private val graph: MultipleInputVideoGraph = MultipleInputVideoGraph.Factory().create(
         appContext,
@@ -105,13 +92,6 @@ internal class DigitorRenderCore(
     private var outputSurface: Surface? = null
 
     init {
-        require(!ColorInfo.isTransferHdr(outputColorInfo)) {
-            "Realtime compositor output must stay SDR after Digitor input normalization"
-        }
-        require(renderFormats.none { ColorInfo.isTransferHdr(it.colorInfo) }) {
-            "Realtime compositor inputs must stay SDR after Digitor input normalization"
-        }
-
         graph.initialize()
 
         // Input order stays in project track order. ResolveVideoCompositorSettings therefore owns
@@ -165,24 +145,5 @@ internal class DigitorRenderCore(
     override fun close() {
         outputSurface = null
         graph.release()
-    }
-
-    private companion object {
-        fun resolveSourceVideoFormat(context: Context, clip: TimelineClip): Format {
-            val extractor = MediaExtractor()
-            try {
-                extractor.setDataSource(context, Uri.parse(clip.uri), null)
-                for (index in 0 until extractor.trackCount) {
-                    val mediaFormat = extractor.getTrackFormat(index)
-                    val mime = mediaFormat.getString(android.media.MediaFormat.KEY_MIME)
-                    if (mime?.startsWith("video/") == true) {
-                        return MediaFormatUtil.createFormatFromMediaFormat(mediaFormat)
-                    }
-                }
-                error("No video track in ${clip.label}")
-            } finally {
-                extractor.release()
-            }
-        }
     }
 }
