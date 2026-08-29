@@ -117,6 +117,8 @@ data class TimelineClip(
     val sourceOutUs: Long,
     val opacity: Float = 1f,
     val colorGrade: ColorGrade = ColorGrade(),
+    /** Nullable so projects saved before input color management still deserialize safely in Gson. */
+    val inputColorProfileV1: InputColorProfile? = null,
     val linkGroupId: String? = null,
     val nodeGraph: ClipNodeGraph = ClipNodeGraph.default(),
     val transform: ClipTransform = ClipTransform(),
