@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.render
 
+import android.os.Build
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
@@ -175,6 +176,14 @@ class Media3CompositionBuilder {
         require(sequences.isNotEmpty()) { "Timeline is empty" }
         val builder = Composition.Builder(sequences)
         if (videoTracks.isNotEmpty()) {
+            // Digitor's camera-log workflow intentionally treats decoder output as editable code
+            // values. Media3 defaults HDR-tagged input to KEEP_HDR, which can switch camera files
+            // onto a device HDR decoder/encoder path even though Digitor outputs SDR H.264 and owns
+            // the Log/HDR -> working-space conversion itself. On Android 10+ interpret such metadata
+            // as SDR so None/Bypass stays flat and selected Input Color profiles receive raw values.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                builder.setHdrMode(Composition.HDR_MODE_EXPERIMENTAL_FORCE_INTERPRET_HDR_AS_SDR)
+            }
             builder.setVideoCompositorSettings(
                 ResolveVideoCompositorSettings(
                     outputWidth = project.width,
