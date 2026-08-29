@@ -85,8 +85,13 @@ fun GpuPreviewSurface(
     }
 
     val fallbackClip = project?.clip(previewClock.clipId)
+    // The old emergency path intentionally snapped to 100 ms buckets (10 fps). That kept CPU use
+    // low but made camera Log playback visibly jerky. Follow the project frame cadence now, capped
+    // at 30 fps for thermal safety on the devices that need this fallback most.
+    val fallbackPreviewFps = project?.frameRate?.coerceIn(12, 30) ?: 24
+    val fallbackFrameStepUs = 1_000_000L / fallbackPreviewFps.toLong()
     val fallbackLocalUs = if (softwareFallbackActive && !exportActive) {
-        (previewClock.localUs / SOFTWARE_FRAME_STEP_US) * SOFTWARE_FRAME_STEP_US
+        (previewClock.localUs / fallbackFrameStepUs) * fallbackFrameStepUs
     } else {
         0L
     }
@@ -110,7 +115,7 @@ fun GpuPreviewSurface(
                 context = context.applicationContext,
                 clip = clip,
                 sourceTimeUs = sourceUs,
-                maxLongEdge = 720,
+                maxLongEdge = SOFTWARE_PREVIEW_LONG_EDGE,
             )
         }
     }
@@ -197,7 +202,7 @@ fun GpuPreviewSurface(
 }
 
 private const val GPU_FIRST_FRAME_GRACE_MS = 700L
-private const val SOFTWARE_FRAME_STEP_US = 100_000L
+private const val SOFTWARE_PREVIEW_LONG_EDGE = 640
 private val PREVIEW_PASTEBOARD_GRAY = Color(0xFF222226)
 
 private class DigitorPreviewSurfaceView(
