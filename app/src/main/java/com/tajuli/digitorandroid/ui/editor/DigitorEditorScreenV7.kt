@@ -43,6 +43,7 @@ import androidx.compose.material.icons.rounded.Redo
 import androidx.compose.material.icons.rounded.Replay10
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.TextFields
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Undo
 import androidx.compose.material.icons.rounded.VideoLibrary
@@ -112,13 +113,15 @@ private val E7Muted = Color(0xFF909098)
 private val E7Accent = Color(0xFF30E0C3)
 private val E7PreviewPasteboard = Color(0xFF222226)
 
+/** First five entries intentionally match the primary mobile workflow order. */
 private enum class WorkspaceV7(val label: String, val icon: ImageVector) {
     EDIT("Edit", Icons.Rounded.ContentCut),
+    CORRECTION("Correction", Icons.Rounded.Tune),
+    EFFECTS("Effects", Icons.Rounded.AutoAwesome),
+    COLOR("Color", Icons.Rounded.Palette),
+    TEXT("Text", Icons.Rounded.TextFields),
     AUDIO("Audio", Icons.Rounded.Audiotrack),
     MEDIA("Media", Icons.Rounded.VideoLibrary),
-    CORRECTION("Correction", Icons.Rounded.Tune),
-    COLOR("Color", Icons.Rounded.Palette),
-    EFFECTS("Effects", Icons.Rounded.AutoAwesome),
     NODES("Nodes", Icons.Rounded.AccountTree),
 }
 
@@ -249,7 +252,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
             playAnchorCursorUs = target; playAnchorRealtimeMs = SystemClock.elapsedRealtime()
         }
         val activeVideo = state.project.topmostVideoClipAt(target)
-        if (activeVideo != null && selectedClip == null) vm.selectClip(activeVideo.id)
+        if (activeVideo != null && selectedClip == null && workspace != WorkspaceV7.TEXT) vm.selectClip(activeVideo.id)
     }
 
     fun stopForEdit() {
@@ -386,21 +389,40 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                         onAddAudioTrack = { vm.addTrack(TrackKind.AUDIO) }, onSplit = { vm.splitSelectedAt(cursorUs) }, onDelete = vm::deleteSelected,
                         onUnlink = vm::unlinkSelected, onImport = ::launchImport, modifier = Modifier.fillMaxSize(),
                     )
-                    WorkspaceV7.AUDIO -> CreatorAudioWorkspaceV8(state.project, state.selectedClipId, state.selectedClipIds, vm, Modifier.fillMaxSize())
-                    WorkspaceV7.MEDIA -> CreatorMediaWorkspaceV8(state.project, selectedClip, state.selectedTextId, cursorUs, state.busyOperation, vm, Modifier.fillMaxSize())
-                    WorkspaceV7.COLOR -> KeyframedColorWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
-                    WorkspaceV7.NODES -> NodeGraphV4(selectedClip, vm, Modifier.fillMaxSize())
                     WorkspaceV7.CORRECTION -> KeyframedCorrectionWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
                     WorkspaceV7.EFFECTS -> KeyframedEffectsWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
+                    WorkspaceV7.COLOR -> KeyframedColorWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
+                    WorkspaceV7.TEXT -> TextWorkspaceV9(
+                        project = state.project,
+                        selectedTextId = state.selectedTextId,
+                        cursorUs = cursorUs,
+                        frameRate = state.project.frameRate,
+                        vm = vm,
+                        onSeek = ::seekTimeline,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    WorkspaceV7.AUDIO -> CreatorAudioWorkspaceV8(state.project, state.selectedClipId, state.selectedClipIds, vm, Modifier.fillMaxSize())
+                    WorkspaceV7.MEDIA -> CreatorMediaWorkspaceV8(state.project, selectedClip, state.selectedTextId, cursorUs, state.busyOperation, vm, Modifier.fillMaxSize())
+                    WorkspaceV7.NODES -> NodeGraphV4(selectedClip, vm, Modifier.fillMaxSize())
                 }
             }
             WorkspaceBarV7(
                 selected = workspace,
                 onSelected = { next ->
                     workspace = next
-                    val editsClip = next == WorkspaceV7.EDIT || next == WorkspaceV7.COLOR || next == WorkspaceV7.CORRECTION || next == WorkspaceV7.NODES || next == WorkspaceV7.EFFECTS || next == WorkspaceV7.MEDIA
-                    val selectedIsActiveVideo = selectedClip?.let { clip -> state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs } == true
-                    if (editsClip && state.selectedTextId == null && !selectedIsActiveVideo && previewClip != null) vm.selectClip(previewClip.id)
+                    if (next == WorkspaceV7.TEXT) {
+                        val textTarget = state.project.activeTextOverlaysAt(cursorUs).lastOrNull()
+                            ?: state.project.textOverlays.lastOrNull()
+                        if (textTarget != null) vm.selectTextOverlay(textTarget.id)
+                    } else {
+                        val clipWorkspace = next == WorkspaceV7.EDIT || next == WorkspaceV7.CORRECTION ||
+                            next == WorkspaceV7.EFFECTS || next == WorkspaceV7.COLOR || next == WorkspaceV7.NODES ||
+                            next == WorkspaceV7.MEDIA
+                        val selectedIsActiveVideo = selectedClip?.let { clip ->
+                            state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs
+                        } == true
+                        if (clipWorkspace && !selectedIsActiveVideo && previewClip != null) vm.selectClip(previewClip.id)
+                    }
                     if (next != WorkspaceV7.COLOR && state.qualifierPickerActive) vm.setQualifierPickerActive(false)
                 },
                 modifier = Modifier.fillMaxWidth().height(66.dp),
