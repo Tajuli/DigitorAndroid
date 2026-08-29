@@ -228,7 +228,6 @@ fun KeyframedColorWorkspaceV5(
     val evaluatedNode = evaluated.clip?.nodeGraph?.selectedNode()
     AutoKeyColorV5(clip, baseNode, evaluatedNode, evaluated.sourceTimeUs)
     Column(modifier) {
-        InputColorProfileBarV1(clip, vm)
         if (clip != null && baseNode != null && (baseNode.kind == NodeKind.SERIAL || baseNode.kind == NodeKind.PARALLEL)) {
             NodeDomainKeyframeBarV5(clip, baseNode, NodeAnimationDomain.COLOR, frameRate)
         }
