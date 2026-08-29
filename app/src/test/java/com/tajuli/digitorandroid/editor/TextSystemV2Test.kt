@@ -4,10 +4,13 @@ import com.tajuli.digitorandroid.editor.model.TextAlignmentV2
 import com.tajuli.digitorandroid.editor.model.TextAnimationSpecV2
 import com.tajuli.digitorandroid.editor.model.TextAnimationV2
 import com.tajuli.digitorandroid.editor.model.TextFontV2
+import com.tajuli.digitorandroid.editor.model.TextManualAnimationV2
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TextStyleV2
+import com.tajuli.digitorandroid.editor.model.TextTransformKeyframeV2
 import com.tajuli.digitorandroid.editor.model.resolvedTextStyleV2
 import com.tajuli.digitorandroid.editor.model.textAnimationFrameV2
+import com.tajuli.digitorandroid.editor.model.textManualFrameV2
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -81,5 +84,45 @@ class TextSystemV2Test {
         val clip = TextOverlayClip(text = "A", timelineStartUs = 1_000L, timelineEndUs = 2_000L)
         assertEquals(0f, clip.textAnimationFrameV2(999L).alpha, 0f)
         assertEquals(0f, clip.textAnimationFrameV2(2_000L).alpha, 0f)
+    }
+
+    @Test
+    fun manualKeyframesInterpolatePositionSizeAndOpacity() {
+        val clip = TextOverlayClip(
+            text = "Keyframed",
+            timelineStartUs = 1_000_000L,
+            timelineEndUs = 3_000_000L,
+            manualAnimationV2 = TextManualAnimationV2(
+                listOf(
+                    TextTransformKeyframeV2(0L, -1f, -.5f, .5f, 0f),
+                    TextTransformKeyframeV2(2_000_000L, 1f, .5f, 1.5f, 1f),
+                ),
+            ),
+        )
+
+        val middle = clip.textManualFrameV2(2_000_000L)
+        assertEquals(0f, middle.positionX, .001f)
+        assertEquals(0f, middle.positionY, .001f)
+        assertEquals(1f, middle.sizeScale, .001f)
+        assertEquals(.5f, middle.alpha, .001f)
+    }
+
+    @Test
+    fun oneManualKeyframeHoldsItsValueAcrossClip() {
+        val clip = TextOverlayClip(
+            text = "Hold",
+            timelineStartUs = 0L,
+            timelineEndUs = 2_000_000L,
+            manualAnimationV2 = TextManualAnimationV2(
+                listOf(TextTransformKeyframeV2(1_000_000L, .4f, -.2f, 1.3f, .8f)),
+            ),
+        )
+
+        val early = clip.textManualFrameV2(100_000L)
+        val late = clip.textManualFrameV2(1_900_000L)
+        assertEquals(.4f, early.positionX, 0f)
+        assertEquals(.4f, late.positionX, 0f)
+        assertEquals(1.3f, late.sizeScale, 0f)
+        assertEquals(.8f, late.alpha, 0f)
     }
 }
