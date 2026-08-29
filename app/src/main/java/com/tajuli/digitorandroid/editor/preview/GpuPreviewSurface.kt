@@ -45,28 +45,11 @@ import kotlinx.coroutines.withContext
  * Some vendor codecs can decode a valid camera Log file but never complete the Surface handoff into
  * Media3's multi-input GL graph. In that case a Resolve-style editor must still show the footage as
  * a flat/raw image instead of leaving the viewer black. If the GPU path has not produced its first
- * frame after a short grace period, this host enables [SoftwarePreviewRenderer]. That fallback
- * decodes a lower-resolution playhead frame and samples the same color LUT on CPU, so the clip stays
- * editable and Input Color / color grading changes remain visible while the GPU path is unavailable.
+ * frame after a short grace period, this host enables [SoftwarePreviewRenderer].
  *
- * Two sizes intentionally exist here:
- * - the Compose/SurfaceView size is the physical on-screen viewer size;
- * - the Surface buffer size is fixed to the project canvas resolution.
- *
- * DigitorRenderCore renders project-resolution pixels and its SurfaceInfo also describes that same
- * project size. Keeping the actual Surface buffer at that exact size prevents an EGL viewport that
- * is larger than the native Surface buffer, which otherwise shows only a cropped/zoomed portion of
- * the rendered frame on smaller phone displays. SurfaceFlinger then scales the completed project
- * frame down to the center-fitted viewer without changing its geometry.
- *
- * The workspace outside the fitted project canvas is deliberately blackish gray. The project
- * canvas itself remains the rendered Surface, so scaling a clip below 100% exposes the canvas
- * around it while the outer pasteboard keeps the canvas boundary visible.
- *
- * A Surface can legally lose its displayed buffer while the editor is paused, after an Android
- * lifecycle transition, or while preview GPU resources are rebuilt. A paused decoder has no pump
- * that would naturally repaint it, so this host explicitly asks the engine to re-submit the last
- * visible playhead frame after Surface/lifecycle/topology changes.
+ * Export owns the device video resources exclusively. While an export lease is active the software
+ * fallback is disabled as well as the GPU preview, preventing a hidden MediaMetadataRetriever decode
+ * from racing Transformer and crashing fragile vendor codec stacks.
  */
 @Composable
 fun GpuPreviewSurface(
@@ -76,6 +59,7 @@ fun GpuPreviewSurface(
     val project by PreviewProjectRegistry.flow.collectAsState()
     val gpuFrame by engine.frame.collectAsState()
     val previewClock by PreviewTransformClock.flow.collectAsState()
+    val exportActive by PreviewExportCoordinator.exportActive.collectAsState()
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
     val renderWidth = project?.width?.coerceAtLeast(2) ?: 1920
@@ -85,25 +69,23 @@ fun GpuPreviewSurface(
         track.kind == TrackKind.VIDEO && !track.muted && track.clips.isNotEmpty()
     } == true
 
-    // Once a device proves that its GPU Surface path is stalled, keep the software path active for
-    // the current editor session. If a real GPU frame ever arrives we immediately hand display back
-    // to the exact realtime pipeline.
     var softwareFallbackActive by remember(engine) { mutableStateOf(false) }
-    LaunchedEffect(engine, hasVideo, gpuFrame?.timelineUs, gpuFrame?.bitmap) {
+    LaunchedEffect(engine, hasVideo, gpuFrame?.timelineUs, gpuFrame?.bitmap, exportActive) {
         when {
+            exportActive -> softwareFallbackActive = false
             !hasVideo -> softwareFallbackActive = false
             gpuFrame != null -> softwareFallbackActive = false
             !softwareFallbackActive -> {
                 delay(GPU_FIRST_FRAME_GRACE_MS)
-                if (engine.frame.value == null) softwareFallbackActive = true
+                if (!PreviewExportCoordinator.exportActive.value && engine.frame.value == null) {
+                    softwareFallbackActive = true
+                }
             }
         }
     }
 
     val fallbackClip = project?.clip(previewClock.clipId)
-    // During playback cap software fallback decode to ~10 fps. Paused grading still refreshes as
-    // soon as the immutable project snapshot changes, even when playhead time does not move.
-    val fallbackLocalUs = if (softwareFallbackActive) {
+    val fallbackLocalUs = if (softwareFallbackActive && !exportActive) {
         (previewClock.localUs / SOFTWARE_FRAME_STEP_US) * SOFTWARE_FRAME_STEP_US
     } else {
         0L
@@ -111,12 +93,13 @@ fun GpuPreviewSurface(
     val fallbackBitmap by produceState<Bitmap?>(
         initialValue = null,
         softwareFallbackActive,
+        exportActive,
         project,
         fallbackClip?.id,
         fallbackLocalUs,
     ) {
         val clip = fallbackClip
-        if (!softwareFallbackActive || clip == null) {
+        if (exportActive || !softwareFallbackActive || clip == null) {
             value = null
             return@produceState
         }
@@ -132,7 +115,6 @@ fun GpuPreviewSurface(
         }
     }
 
-    // Recycle only after Compose has switched away from the old fallback bitmap.
     DisposableEffect(fallbackBitmap) {
         val bitmap = fallbackBitmap
         onDispose {
@@ -140,9 +122,6 @@ fun GpuPreviewSurface(
         }
     }
 
-    // Only structural video changes participate in this key. Color/transform slider snapshots do
-    // not cause a second decode, but importing/moving/trimming a clip (and therefore rebuilding the
-    // decoder/GL session topology) gets a one-shot self-healing paused-frame refresh.
     val videoTopologyKey = project?.tracks
         ?.filter { track -> track.kind == TrackKind.VIDEO && !track.muted }
         ?.map { track ->
@@ -157,16 +136,13 @@ fun GpuPreviewSurface(
             }
         }
 
-    LaunchedEffect(engine, videoTopologyKey) {
-        if (project != null) engine.scheduleCurrentFrameRefresh(140L)
+    LaunchedEffect(engine, videoTopologyKey, exportActive) {
+        if (project != null && !exportActive) engine.scheduleCurrentFrameRefresh(140L)
     }
 
-    // Some devices preserve the SurfaceView object while discarding its last buffer when the app
-    // is backgrounded, so surfaceCreated() is not guaranteed to fire on return. ON_RESUME is the
-    // second repaint trigger for that case.
     DisposableEffect(lifecycleOwner, engine) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
+            if (event == Lifecycle.Event.ON_RESUME && !PreviewExportCoordinator.exportActive.value) {
                 engine.scheduleCurrentFrameRefresh(80L)
             }
         }
@@ -209,7 +185,7 @@ fun GpuPreviewSurface(
         )
 
         val softwareFrame = fallbackBitmap
-        if (softwareFallbackActive && softwareFrame != null && !softwareFrame.isRecycled) {
+        if (!exportActive && softwareFallbackActive && softwareFrame != null && !softwareFrame.isRecycled) {
             Image(
                 bitmap = softwareFrame.asImageBitmap(),
                 contentDescription = "Software fallback preview",
@@ -237,12 +213,8 @@ private class DigitorPreviewSurfaceView(
     private var bufferHeight = initialBufferHeight.coerceAtLeast(2)
 
     init {
-        // The render core advertises project.width/project.height in SurfaceInfo. Make the native
-        // Surface buffer the same size so OpenGL's output viewport maps 1:1 to the project frame.
         holder.setFixedSize(bufferWidth, bufferHeight)
         holder.addCallback(this)
-        // Keep this SurfaceView in the normal hierarchy so Compose controls/overlays can remain
-        // above it. We intentionally do not use setZOrderOnTop(true).
     }
 
     fun bind(
@@ -276,7 +248,7 @@ private class DigitorPreviewSurfaceView(
     override fun surfaceCreated(holder: SurfaceHolder) {
         attachedSurface = holder.surface
         engine.attachSurface(holder.surface)
-        engine.scheduleCurrentFrameRefresh(80L)
+        if (!PreviewExportCoordinator.exportActive.value) engine.scheduleCurrentFrameRefresh(80L)
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -285,7 +257,7 @@ private class DigitorPreviewSurfaceView(
             attachedSurface = holder.surface
         }
         engine.attachSurface(holder.surface)
-        engine.scheduleCurrentFrameRefresh(80L)
+        if (!PreviewExportCoordinator.exportActive.value) engine.scheduleCurrentFrameRefresh(80L)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
