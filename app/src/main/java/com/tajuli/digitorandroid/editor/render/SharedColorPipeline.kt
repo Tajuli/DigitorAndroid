@@ -13,9 +13,8 @@ import com.tajuli.digitorandroid.editor.model.resolvedInputColorProfile
 /**
  * Single source of truth for GPU color processing.
  *
- * Camera log/HDR input transforms run first, then Correction/Color node snapshots. The LUT effect
- * is timestamp-aware and shared by preview and export. Static grades still upload only once;
- * animated grades rebuild the cube for the current source timestamp and update the same GL texture.
+ * Optional camera log/HDR input transforms run first, then Correction/Color node snapshots. NONE is
+ * a true bypass, so flat source code values can go straight into grading and export.
  */
 @UnstableApi
 object SharedColorPipeline {
@@ -28,11 +27,6 @@ object SharedColorPipeline {
         add(AnimatedNodeColorLut(clip, EXPORT_LUT_SIZE, preview = false))
     }
 
-    /**
-     * Exact realtime color path. It uses the export LUT resolution and export qualifier pre-filter,
-     * but resolves the latest immutable clip snapshot so correction/color sliders do not rebuild
-     * MediaCodec. Preview and export therefore execute the same color math at the same LUT size.
-     */
     fun exactPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         addSpatialQualifierEffects(clip)
         add(AnimatedNodeColorLut(clip, EXPORT_LUT_SIZE, preview = true))
@@ -50,14 +44,12 @@ object SharedColorPipeline {
     }
 
     private fun MutableList<Effect>.addSpatialQualifierEffects(clip: TimelineClip) {
-        // This pre-filter samples source RGB before the 3D LUT. For managed Log/HDR sources that
-        // would build its mask in the wrong transfer/gamut space, so let the qualifier inside the
-        // transformed LUT handle selection until the spatial shader itself gains input transforms.
-        if (clip.resolvedInputColorProfile() != InputColorProfile.REC709) return
+        // This pre-filter samples source RGB before the 3D LUT. NONE/Rec.709 use those RGB code
+        // values directly, so the mask is valid. Managed Log/HDR transforms stay inside the LUT.
+        val profile = clip.resolvedInputColorProfile()
+        if (profile != InputColorProfile.NONE && profile != InputColorProfile.REC709) return
 
         clip.nodeGraph.nodes.forEach { node ->
-            // The spatial pre-filter has immutable shader parameters today. If the qualifier itself
-            // is animated, do not leave a stale static mask in front of the correctly animated LUT.
             if (!clip.nodeAnimations.qualifierIsAnimated(node.id)) {
                 QualifierSpatialFeatherEffect.fromNode(node)?.let(::add)
             }
