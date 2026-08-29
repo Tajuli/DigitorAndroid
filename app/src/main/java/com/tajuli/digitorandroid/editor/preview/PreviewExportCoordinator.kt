@@ -56,6 +56,11 @@ internal object PreviewExportCoordinator {
         val attempted = engines.toList()
         val suspended = mutableListOf<DavinciFramePreviewEngine>()
         try {
+            // SoftwarePreviewRenderer now keeps one retriever warm between adjacent fallback frames
+            // for smooth Log playback. We own previewDecodeGate here, so it is safe and necessary to
+            // tear that cached decoder down before Transformer opens the export decoder/encoder.
+            SoftwarePreviewRenderer.releaseCachedDecoderForExport()
+
             attempted.forEach { engine ->
                 if (!engine.suspendForExternalGpuWork()) {
                     throw IllegalStateException(
