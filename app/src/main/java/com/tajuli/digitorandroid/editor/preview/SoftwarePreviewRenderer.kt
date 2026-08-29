@@ -48,9 +48,12 @@ internal object SoftwarePreviewRenderer {
         val working = if (scaled.config == Bitmap.Config.ARGB_8888 && scaled.isMutable) {
             scaled
         } else {
-            scaled.copy(Bitmap.Config.ARGB_8888, true).also {
-                if (it !== scaled) scaled.recycle()
+            val copied = scaled.copy(Bitmap.Config.ARGB_8888, true) ?: run {
+                if (!scaled.isRecycled) scaled.recycle()
+                return null
             }
+            if (copied !== scaled && !scaled.isRecycled) scaled.recycle()
+            copied
         }
 
         val cube = SharedColorPipeline.buildCubeAtSourceTime(
