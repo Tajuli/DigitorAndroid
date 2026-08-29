@@ -1,12 +1,10 @@
 package com.tajuli.digitorandroid.editor.render
 
 import com.tajuli.digitorandroid.editor.model.TimelineClip
-import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertSame
 import org.junit.Test
 
 class StableGpuExportCompositionBuilderTest {
@@ -63,70 +61,31 @@ class StableGpuExportCompositionBuilderTest {
     }
 
     @Test
-    fun singleVideoTrackGetsInvisibleConcurrentSentinel() {
-        val clip = TimelineClip(
-            id = "clip-1",
+    fun emptySentinelTrackIsAlwaysTransparent() {
+        val realClip = TimelineClip(
             uri = "content://test/source",
             label = "source",
-            timelineStartUs = 250_000L,
-            sourceInUs = 500_000L,
-            sourceOutUs = 2_500_000L,
-            opacity = 0.61f,
-            linkGroupId = "linked",
+            timelineStartUs = 0L,
+            sourceOutUs = 1_000_000L,
         )
-        val track = TimelineTrack(
+        val realTrack = TimelineTrack(
             id = "v1",
             name = "V1",
             kind = TrackKind.VIDEO,
-            clips = listOf(clip),
+            clips = listOf(realClip),
         )
-        val project = TimelineProject(tracks = listOf(track))
-
-        val prepared = withSingleLayerCompositorSentinel(project)
-        val videoTracks = resolveCompositionVideoTracks(prepared)
-
-        assertEquals(2, videoTracks.size)
-        assertEquals(track, videoTracks[0])
-        val sentinel = videoTracks[1]
-        assertEquals(1, sentinel.clips.size)
-        assertEquals(clip.uri, sentinel.clips.single().uri)
-        assertEquals(clip.timelineStartUs, sentinel.clips.single().timelineStartUs)
-        assertEquals(clip.sourceInUs, sentinel.clips.single().sourceInUs)
-        assertEquals(clip.sourceOutUs, sentinel.clips.single().sourceOutUs)
-        assertEquals(0f, sentinel.clips.single().opacity, 0f)
-        assertEquals(null, sentinel.clips.single().linkGroupId)
-    }
-
-    @Test
-    fun multiVideoTrackProjectIsNotRewritten() {
-        val first = TimelineTrack(
-            id = "v1",
-            name = "V1",
+        val sentinelTrack = TimelineTrack(
+            id = "sentinel",
+            name = "Compositor gap sentinel",
             kind = TrackKind.VIDEO,
-            clips = listOf(
-                TimelineClip(
-                    uri = "content://test/one",
-                    label = "one",
-                    timelineStartUs = 0L,
-                    sourceOutUs = 1_000_000L,
-                ),
-            ),
+            clips = emptyList(),
         )
-        val second = TimelineTrack(
-            id = "v2",
-            name = "V2",
-            kind = TrackKind.VIDEO,
-            clips = listOf(
-                TimelineClip(
-                    uri = "content://test/two",
-                    label = "two",
-                    timelineStartUs = 0L,
-                    sourceOutUs = 1_000_000L,
-                ),
-            ),
+        val compositor = ResolveVideoCompositorSettings(
+            outputWidth = 1920,
+            outputHeight = 1080,
+            videoTracks = listOf(realTrack, sentinelTrack),
         )
-        val project = TimelineProject(tracks = listOf(first, second))
 
-        assertSame(project, withSingleLayerCompositorSentinel(project))
+        assertEquals(null, compositor.resolveOverlayState(1, 500_000L))
     }
 }
