@@ -32,7 +32,7 @@ internal object PreviewExportCoordinator {
     }
 
     /** Software fallback frame decode participates in the same resource barrier as GPU preview. */
-    inline fun <T> withSoftwarePreviewDecode(block: () -> T): T {
+    fun <T> withSoftwarePreviewDecode(block: () -> T): T {
         val lock = previewDecodeLock.readLock()
         lock.lock()
         return try {
