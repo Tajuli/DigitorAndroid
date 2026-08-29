@@ -74,6 +74,7 @@ private enum class ColorPage(val title: String) {
     PRIMARY("Primary Wheels"),
     LOG("Log Wheels"),
     CURVES("RGB Curves"),
+    INPUT("Input Color"),
     QUALIFIER("HSL Qualifier"),
 }
 
@@ -119,6 +120,7 @@ fun ColorWorkspaceV4(
             ColorPage.PRIMARY -> PrimaryPage(node, vm, Modifier.fillMaxSize())
             ColorPage.LOG -> LogPage(node, vm, Modifier.fillMaxSize())
             ColorPage.CURVES -> CurvesPage(node, vm, Modifier.fillMaxSize())
+            ColorPage.INPUT -> InputColorProfileBarV1(clip, vm, Modifier.fillMaxSize())
             ColorPage.QUALIFIER -> ResolveQualifierPanelV4(node, vm, Modifier.fillMaxSize())
         }
     }
