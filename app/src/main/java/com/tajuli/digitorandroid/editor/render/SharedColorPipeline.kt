@@ -4,15 +4,17 @@ import androidx.media3.common.Effect
 import androidx.media3.common.util.UnstableApi
 import com.tajuli.digitorandroid.editor.model.ColorGraphEvaluator
 import com.tajuli.digitorandroid.editor.model.ColorNode
+import com.tajuli.digitorandroid.editor.model.InputColorTransform
 import com.tajuli.digitorandroid.editor.model.QualifiedColorMath
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.resolvedInputColorProfile
 
 /**
  * Single source of truth for GPU color processing.
  *
- * Correction/Color node snapshots can be keyframed. The LUT effect is timestamp-aware and is
- * shared by preview and export. Static grades still upload only once; animated grades rebuild the
- * cube for the current source timestamp and update the same GL texture.
+ * Camera log/HDR input transforms run first, then Correction/Color node snapshots. The LUT effect
+ * is timestamp-aware and shared by preview and export. Static grades still upload only once;
+ * animated grades rebuild the cube for the current source timestamp and update the same GL texture.
  */
 @UnstableApi
 object SharedColorPipeline {
@@ -67,16 +69,23 @@ object SharedColorPipeline {
         val last = (size - 1).toFloat()
         val evaluatedGraph = clip.nodeAnimations.evaluateGraph(clip.nodeGraph, sourceTimeUs)
         val graphPlan = ColorGraphEvaluator.compile(evaluatedGraph)
+        val inputProfile = clip.resolvedInputColorProfile()
         val nodeTransform: (ColorNode, Float, Float, Float) -> FloatArray = { node, r, g, b ->
             QualifiedColorMath.applyNode(node, r, g, b)
         }
         return Array(size) { rIndex ->
             Array(size) { gIndex ->
                 IntArray(size) { bIndex ->
+                    val input = InputColorTransform.toWorkingRec709(
+                        inputProfile,
+                        rIndex / last,
+                        gIndex / last,
+                        bIndex / last,
+                    )
                     val rgb = graphPlan.apply(
-                        r = rIndex / last,
-                        g = gIndex / last,
-                        b = bIndex / last,
+                        r = input[0],
+                        g = input[1],
+                        b = input[2],
                         nodeTransform = nodeTransform,
                     )
                     val r = (rgb[0] * 255f + .5f).toInt().coerceIn(0, 255)
