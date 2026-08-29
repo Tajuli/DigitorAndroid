@@ -2,7 +2,6 @@ package com.tajuli.digitorandroid.editor.model
 
 import kotlin.math.min
 
-/** System-font families that are available on every supported Android device. */
 enum class TextFontV2 {
     SANS,
     SERIF,
@@ -25,10 +24,6 @@ enum class TextAnimationV2 {
     SLIDE_RIGHT,
 }
 
-/**
- * Creator-facing text styling. Values are intentionally platform-neutral so the Compose preview
- * and Media3 export renderer can consume exactly the same project metadata.
- */
 data class TextStyleV2(
     val font: TextFontV2 = TextFontV2.SANS,
     val colorArgb: Long = 0xFFFFFFFFL,
@@ -62,6 +57,61 @@ data class TextAnimationSpecV2(
     }
 }
 
+/** A manual playhead keyframe, stored in local text-clip time. */
+data class TextTransformKeyframeV2(
+    val localUs: Long,
+    val positionX: Float,
+    val positionY: Float,
+    val sizeScale: Float,
+    val alpha: Float,
+) {
+    fun normalizedFor(durationUs: Long): TextTransformKeyframeV2 = copy(
+        localUs = localUs.coerceIn(0L, durationUs.coerceAtLeast(1L)),
+        positionX = positionX.coerceIn(-1f, 1f),
+        positionY = positionY.coerceIn(-1f, 1f),
+        sizeScale = sizeScale.coerceIn(.35f, 4f),
+        alpha = alpha.coerceIn(0f, 1f),
+    )
+}
+
+data class TextManualAnimationV2(
+    val keyframes: List<TextTransformKeyframeV2> = emptyList(),
+) {
+    fun normalizedFor(durationUs: Long): TextManualAnimationV2 {
+        val normalized = keyframes
+            .map { it.normalizedFor(durationUs) }
+            .sortedBy { it.localUs }
+            .groupBy { it.localUs }
+            .map { (_, sameTime) -> sameTime.last() }
+        return copy(keyframes = normalized)
+    }
+
+    fun keyframeNear(localUs: Long, toleranceUs: Long): TextTransformKeyframeV2? =
+        keyframes.minByOrNull { kotlin.math.abs(it.localUs - localUs) }
+            ?.takeIf { kotlin.math.abs(it.localUs - localUs) <= toleranceUs.coerceAtLeast(0L) }
+
+    fun withKeyframe(
+        keyframe: TextTransformKeyframeV2,
+        durationUs: Long,
+        toleranceUs: Long,
+    ): TextManualAnimationV2 {
+        val normalizedKey = keyframe.normalizedFor(durationUs)
+        val kept = keyframes.filter { kotlin.math.abs(it.localUs - normalizedKey.localUs) > toleranceUs.coerceAtLeast(0L) }
+        return copy(keyframes = (kept + normalizedKey).sortedBy { it.localUs }).normalizedFor(durationUs)
+    }
+
+    fun withoutKeyframeNear(localUs: Long, toleranceUs: Long): TextManualAnimationV2 = copy(
+        keyframes = keyframes.filter { kotlin.math.abs(it.localUs - localUs) > toleranceUs.coerceAtLeast(0L) },
+    )
+}
+
+data class TextManualFrameV2(
+    val positionX: Float,
+    val positionY: Float,
+    val sizeScale: Float,
+    val alpha: Float,
+)
+
 data class TextAnimationFrameV2(
     val alpha: Float = 1f,
     /** Normalized project offset. +X right, +Y down. */
@@ -69,7 +119,6 @@ data class TextAnimationFrameV2(
     val offsetY: Float = 0f,
 )
 
-/** Resolve V1 text metadata into V2 defaults without requiring a project migration. */
 fun TextOverlayClip.resolvedTextStyleV2(): TextStyleV2 =
     (styleV2 ?: TextStyleV2(
         colorArgb = argb,
@@ -82,10 +131,41 @@ fun TextOverlayClip.resolvedEntryAnimationV2(): TextAnimationSpecV2 =
 fun TextOverlayClip.resolvedExitAnimationV2(): TextAnimationSpecV2 =
     (exitAnimationV2 ?: TextAnimationSpecV2()).normalizedFor(durationUs)
 
+fun TextOverlayClip.resolvedManualAnimationV2(): TextManualAnimationV2 =
+    (manualAnimationV2 ?: TextManualAnimationV2()).normalizedFor(durationUs)
+
 /**
- * Shared animation evaluator used by realtime Compose preview and Media3 export overlays.
- * Slide distance is expressed in normalized canvas coordinates so it scales with project size.
+ * DaVinci-style manual transform evaluator. One keyframe holds its value; two or more keyframes
+ * interpolate linearly between playhead positions. With no keyframes, legacy base properties win.
  */
+fun TextOverlayClip.textManualFrameV2(timeUs: Long): TextManualFrameV2 {
+    val fallback = TextManualFrameV2(
+        positionX = positionX.coerceIn(-1f, 1f),
+        positionY = positionY.coerceIn(-1f, 1f),
+        sizeScale = sizeScale.coerceIn(.35f, 4f),
+        alpha = 1f,
+    )
+    if (!activeAt(timeUs)) return fallback.copy(alpha = 0f)
+
+    val frames = resolvedManualAnimationV2().keyframes
+    if (frames.isEmpty()) return fallback
+    val localUs = (timeUs - timelineStartUs).coerceIn(0L, durationUs)
+    if (frames.size == 1 || localUs <= frames.first().localUs) return frames.first().asManualFrame()
+    if (localUs >= frames.last().localUs) return frames.last().asManualFrame()
+
+    val rightIndex = frames.indexOfFirst { it.localUs >= localUs }.coerceAtLeast(1)
+    val left = frames[rightIndex - 1]
+    val right = frames[rightIndex]
+    val span = (right.localUs - left.localUs).coerceAtLeast(1L)
+    val t = ((localUs - left.localUs).toFloat() / span.toFloat()).coerceIn(0f, 1f)
+    return TextManualFrameV2(
+        positionX = lerp(left.positionX, right.positionX, t),
+        positionY = lerp(left.positionY, right.positionY, t),
+        sizeScale = lerp(left.sizeScale, right.sizeScale, t),
+        alpha = lerp(left.alpha, right.alpha, t),
+    )
+}
+
 fun TextOverlayClip.textAnimationFrameV2(timeUs: Long): TextAnimationFrameV2 {
     if (!activeAt(timeUs)) return TextAnimationFrameV2(alpha = 0f)
 
@@ -111,6 +191,15 @@ fun TextOverlayClip.textAnimationFrameV2(timeUs: Long): TextAnimationFrameV2 {
         offsetY = entryFrame.offsetY + exitFrame.offsetY,
     )
 }
+
+private fun TextTransformKeyframeV2.asManualFrame() = TextManualFrameV2(
+    positionX = positionX,
+    positionY = positionY,
+    sizeScale = sizeScale,
+    alpha = alpha,
+)
+
+private fun lerp(a: Float, b: Float, t: Float): Float = a + (b - a) * t.coerceIn(0f, 1f)
 
 private fun smooth(value: Float): Float {
     val t = value.coerceIn(0f, 1f)
