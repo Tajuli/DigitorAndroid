@@ -14,9 +14,11 @@ import androidx.media3.common.VideoGraph
 import androidx.media3.common.util.MediaFormatUtil
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.MultipleInputVideoGraph
+import com.tajuli.digitorandroid.editor.model.InputColorProfile
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
+import com.tajuli.digitorandroid.editor.model.resolvedInputColorProfile
 import java.io.Closeable
 import java.util.concurrent.Executor
 
@@ -27,10 +29,11 @@ import java.util.concurrent.Executor
  * frames into its input Surfaces. The graph applies the exact same 33^3 color LUT, spatial node
  * effects, transform/opacity rules and multilayer compositor that export uses.
  *
- * Source/decoder metadata is normalized with [ParityRenderContract], including the same SDR graph
- * output-color rule used by Media3 Transformer. Every input preprocessor converts into that common
- * graph color before the compositor, exactly like Transformer, so mixed SDR source metadata does not
- * require a preview-only rejection path.
+ * Source/decoder metadata is normalized with [ParityRenderContract]. Camera Log/HDR clips managed
+ * by Digitor are deliberately presented to the graph as SDR code values because the real camera
+ * transfer/gamut conversion lives inside [SharedColorPipeline]. This avoids Media3 applying a
+ * second color conversion and also lets 10-bit S-Log/HLG/PQ decoder surfaces enter the SDR
+ * compositor instead of being rejected before the first preview frame.
  */
 @UnstableApi
 internal class DigitorRenderCore(
@@ -54,10 +57,22 @@ internal class DigitorRenderCore(
 
     private val appContext = context.applicationContext
 
-    // Mirror the decoded Format that Transformer hands to VideoEncoderGraphInput: valid ColorInfo
-    // plus the same 90/270-degree decoder rotation normalization.
+    // MediaCodec is still configured with the original platform MediaFormat in the preview engine.
+    // Only the graph-facing metadata is normalized here. For an explicitly managed camera profile,
+    // or for source metadata that Android classifies as HDR, keep the decoded code values on the SDR
+    // graph path and let Digitor's own input LUT perform Log/HDR -> Rec.709 before node grading.
     private val renderFormats: List<Format> = layers.map { layer ->
-        ParityRenderContract.decoderOutputFormat(resolveSourceVideoFormat(appContext, layer.clip))
+        val decoded = ParityRenderContract.decoderOutputFormat(
+            resolveSourceVideoFormat(appContext, layer.clip),
+        )
+        val managedInput = layer.clip.resolvedInputColorProfile() != InputColorProfile.REC709
+        if (managedInput || ColorInfo.isTransferHdr(decoded.colorInfo)) {
+            decoded.buildUpon()
+                .setColorInfo(ColorInfo.SDR_BT709_LIMITED)
+                .build()
+        } else {
+            decoded
+        }
     }
 
     // Transformer chooses one common graph output color from the first decoded video input. Each
@@ -91,10 +106,10 @@ internal class DigitorRenderCore(
 
     init {
         require(!ColorInfo.isTransferHdr(outputColorInfo)) {
-            "Pixel-parity realtime compositor currently supports SDR input only"
+            "Realtime compositor output must stay SDR after Digitor input normalization"
         }
         require(renderFormats.none { ColorInfo.isTransferHdr(it.colorInfo) }) {
-            "Pixel-parity realtime compositor currently supports SDR input only"
+            "Realtime compositor inputs must stay SDR after Digitor input normalization"
         }
 
         graph.initialize()
