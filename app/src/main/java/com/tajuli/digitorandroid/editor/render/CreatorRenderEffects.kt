@@ -26,6 +26,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.resolvedTextStyleV2
 import com.tajuli.digitorandroid.editor.model.textAnimationFrameV2
+import com.tajuli.digitorandroid.editor.model.textManualFrameV2
 import kotlin.math.ceil
 import kotlin.math.min
 
@@ -80,29 +81,39 @@ private class ClipGainProvider(
 private class TimedDigitorTextOverlay(
     private val spec: TextOverlayClip,
 ) : TextOverlay() {
-    private val visibleText: SpannableString = styled(spec)
+    private val staticVisibleText: SpannableString = styled(spec, spec.sizeScale)
     private val hiddenText = SpannableString("")
 
-    override fun getText(presentationTimeUs: Long): SpannableString =
-        if (spec.activeAt(presentationTimeUs)) visibleText else hiddenText
+    override fun getText(presentationTimeUs: Long): SpannableString {
+        if (!spec.activeAt(presentationTimeUs)) return hiddenText
+        val manual = spec.textManualFrameV2(presentationTimeUs)
+        return if (spec.manualAnimationV2?.keyframes.isNullOrEmpty()) {
+            staticVisibleText
+        } else {
+            // Media3 TextOverlay lays out a Spannable per frame. Rebuilding only when manual size
+            // keyframes exist keeps normal text cheap while preserving preview/export parity.
+            styled(spec, manual.sizeScale)
+        }
+    }
 
     override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings {
         if (!spec.activeAt(presentationTimeUs)) {
             return StaticOverlaySettings.Builder().setAlphaScale(0f).build()
         }
-        val frame = spec.textAnimationFrameV2(presentationTimeUs)
+        val preset = spec.textAnimationFrameV2(presentationTimeUs)
+        val manual = spec.textManualFrameV2(presentationTimeUs)
         return StaticOverlaySettings.Builder()
-            .setAlphaScale(frame.alpha)
+            .setAlphaScale((preset.alpha * manual.alpha).coerceIn(0f, 1f))
             .setOverlayFrameAnchor(0f, 0f)
             .setBackgroundFrameAnchor(
-                (spec.positionX + frame.offsetX).coerceIn(-1f, 1f),
-                -(spec.positionY + frame.offsetY).coerceIn(-1f, 1f),
+                (manual.positionX + preset.offsetX).coerceIn(-1f, 1f),
+                -(manual.positionY + preset.offsetY).coerceIn(-1f, 1f),
             )
             .build()
     }
 
     private companion object {
-        fun styled(spec: TextOverlayClip): SpannableString {
+        fun styled(spec: TextOverlayClip, sizeScale: Float): SpannableString {
             val content = spec.text.ifBlank { " " }
             val text = SpannableString(content)
             val flags = Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
@@ -114,14 +125,12 @@ private class TimedDigitorTextOverlay(
             }
             text.setSpan(AlignmentSpan.Standard(alignment), 0, text.length, flags)
 
-            // ReplacementSpan draws fill + independent outline + shadow + background in one pass.
-            // Apply per paragraph so newline layout remains under TextOverlay/StaticLayout control.
             var lineStart = 0
             while (lineStart <= content.length) {
                 val newline = content.indexOf('\n', lineStart).let { if (it < 0) content.length else it }
                 if (newline > lineStart) {
                     text.setSpan(
-                        StyledTextReplacementSpan(style, spec.sizeScale, spec.bold),
+                        StyledTextReplacementSpan(style, sizeScale, spec.bold),
                         lineStart,
                         newline,
                         flags,
@@ -135,7 +144,6 @@ private class TimedDigitorTextOverlay(
     }
 }
 
-/** Android Canvas text span used by Media3 TextOverlay for V2 export styling. */
 private class StyledTextReplacementSpan(
     private val style: TextStyleV2,
     private val sizeScale: Float,
