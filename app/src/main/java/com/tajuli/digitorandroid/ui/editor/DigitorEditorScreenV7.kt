@@ -274,25 +274,56 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
 
     fun startExport(destination: Uri) {
         if (state.project.durationUs <= 0L) { exportStatus = "Timeline is empty"; return }
+        val exportProject = state.project
+        val exportCursorUs = cursorUs
+        val exportQualitySnapshot = exportQuality
+        val exportHasAudio = exportProject.tracks.any { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
         scope.launch {
             stopForEdit()
-            exportFraction = 0f; exportStatus = "Preparing ${exportQuality.label} export"
+            // Pausing is not enough on low-memory devices: CompositionPlayer keeps its decoder and
+            // audio graph alive. Release those preview resources before Transformer opens export AV.
+            runCatching { audioPreview.suspendForExternalWork() }
+            exportFraction = 0f
+            exportStatus = "Preparing ${exportQualitySnapshot.label} export"
             val temp = File(context.cacheDir, "digitor_export_${System.currentTimeMillis()}.mp4")
-            runCatching {
-                val result = router.export(state.project, temp, exportQuality) { progress ->
+            try {
+                val result = router.export(exportProject, temp, exportQualitySnapshot) { progress ->
                     if (progress is ExportProgress.Stage) {
                         exportStatus = progress.name
                         progress.fraction?.let { exportFraction = it.coerceIn(0f, 1f) }
                     }
                 }
-                exportStatus = "Saving file…"; exportFraction = max(exportFraction ?: 0f, .99f)
+                exportStatus = "Saving file…"
+                exportFraction = max(exportFraction ?: 0f, .99f)
                 withContext(Dispatchers.IO) {
-                    context.contentResolver.openOutputStream(destination, "w")?.use { output -> temp.inputStream().use { it.copyTo(output, 1024 * 1024) } }
-                        ?: error("Could not open selected save location")
+                    context.contentResolver.openOutputStream(destination, "w")?.use { output ->
+                        temp.inputStream().use { it.copyTo(output, 1024 * 1024) }
+                    } ?: error("Could not open selected save location")
                 }
-                result
-            }.onSuccess { result -> exportFraction = 1f; exportStatus = "Saved · ${result.backend} · ${exportQuality.label}"; temp.delete() }
-                .onFailure { error -> exportFraction = null; exportStatus = error.message ?: "Export failed"; temp.delete() }
+                exportFraction = 1f
+                exportStatus = "Saved · ${result.backend} · ${exportQualitySnapshot.label}"
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                exportFraction = null
+                exportStatus = error.message ?: "Export failed"
+            } finally {
+                temp.delete()
+                if (exportHasAudio) {
+                    try {
+                        val maxStartUs = (exportProject.durationUs - 1L).coerceAtLeast(0L)
+                        audioPreview.rebuild(
+                            exportProject,
+                            exportCursorUs.coerceIn(0L, maxStartUs) / 1000L,
+                            resumePlayback = false,
+                        )
+                    } catch (_: CancellationException) {
+                        // Screen is leaving; no preview rebuild is needed.
+                    } catch (error: Throwable) {
+                        previewStatus = "Audio preview: ${error.message ?: "unavailable"}"
+                    }
+                }
+            }
         }
     }
 
@@ -331,12 +362,15 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
         )
     }
 
+    val currentExportFraction = exportFraction
+    val exportingNow = currentExportFraction != null && currentExportFraction < 1f
+
     Surface(Modifier.fillMaxSize(), color = E7Shell) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
             TopBarV7(
                 title = selectedClip?.label ?: state.project.textOverlays.firstOrNull { it.id == state.selectedTextId }?.text ?: previewClip?.label ?: "New project",
                 status = exportStatus ?: state.busyOperation ?: previewStatus ?: state.status,
-                exportFraction = exportFraction,
+                exportFraction = currentExportFraction,
                 canUndo = state.canUndo,
                 canRedo = state.canRedo,
                 onUndo = { stopForEdit(); vm.undo() },
@@ -349,16 +383,17 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
             ProjectActionsBarV7(
                 canUndo = state.canUndo,
                 canRedo = state.canRedo,
-                exporting = exportFraction != null && exportFraction!! < 1f,
+                exporting = exportingNow,
                 onUndo = { stopForEdit(); vm.undo() },
                 onRedo = { stopForEdit(); vm.redo() },
                 onSaveProject = vm::saveProject,
                 onLoadProject = { stopForEdit(); vm.loadProject() },
             )
-            if (exportFraction != null && exportFraction!! < 1f) {
+            if (exportingNow) {
+                val stableProgress = currentExportFraction ?: 0f
                 Column {
-                    LinearProgressIndicator(progress = { exportFraction!!.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth().height(3.dp))
-                    Text("${((exportFraction ?: 0f) * 100).roundToInt()}%  ${exportStatus.orEmpty()}", fontSize = 9.sp, color = E7Muted, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp))
+                    LinearProgressIndicator(progress = { stableProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth().height(3.dp))
+                    Text("${(stableProgress * 100).roundToInt()}%  ${exportStatus.orEmpty()}", fontSize = 9.sp, color = E7Muted, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp))
                 }
             }
 
