@@ -13,7 +13,6 @@ import android.util.Log
 import android.view.Surface
 import androidx.media3.common.ColorInfo
 import androidx.media3.common.Format
-import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -418,14 +417,11 @@ class DavinciFramePreviewEngine(
             previewSurface?.takeIf { it.isValid }?.let(core::setOutputSurface)
 
             val sources = prepared.mapIndexed { index, item ->
-                val codec = createPreviewDecoder(item.mime)
-                try {
-                    codec.configure(item.platformFormat, core.inputSurface(index), null, 0)
-                    codec.start()
-                } catch (error: Throwable) {
-                    runCatching { codec.release() }
-                    throw error
-                }
+                val codec = createConfiguredPreviewDecoder(
+                    mime = item.mime,
+                    format = item.platformFormat,
+                    outputSurface = core.inputSurface(index),
+                )
                 DecoderSource(
                     inputIndex = index,
                     clip = item.layer.clip,
@@ -447,39 +443,58 @@ class DavinciFramePreviewEngine(
     }
 
     /**
-     * Keep the normal platform decoder on healthy devices. The captured Unisoc AVC trace showed the
-     * vendor decoder repeatedly accepting input but returning invalid-data/no-picture output for the
-     * camera Log stream. On those devices use Android's software-priority AVC decoder for preview,
-     * matching the already-stable export path while still feeding the exact same GPU render graph.
+     * Device policy: always try the platform-default decoder first. On Android devices that normally
+     * resolves to the vendor hardware decoder, giving the fastest/lowest-power preview. We do not
+     * blacklist a chipset or camera profile up front. If codec creation/configuration/start actually
+     * fails, retry the same stream with Media3's software-priority decoder list. Runtime stalls are
+     * still covered by GpuPreviewSurface's first-frame fallback, so healthy devices stay on hardware.
      */
-    private fun createPreviewDecoder(mime: String): MediaCodec {
-        if (mime != MimeTypes.VIDEO_H264) return MediaCodec.createDecoderByType(mime)
+    private fun createConfiguredPreviewDecoder(
+        mime: String,
+        format: MediaFormat,
+        outputSurface: Surface,
+    ): MediaCodec {
+        var primary: MediaCodec? = null
+        var primaryName: String? = null
+        try {
+            primary = MediaCodec.createDecoderByType(mime)
+            primaryName = runCatching { primary.name }.getOrNull()
+            primary.configure(format, outputSurface, null, 0)
+            primary.start()
+            Log.i(TAG, "Preview decoder primary: ${primaryName ?: mime}")
+            return primary
+        } catch (primaryError: Throwable) {
+            runCatching { primary?.stop() }
+            runCatching { primary?.release() }
 
-        val hardwareName = runCatching {
-            MediaCodecSelector.DEFAULT
-                .getDecoderInfos(MimeTypes.VIDEO_H264, false, false)
-                .firstOrNull()
-                ?.name
-        }.getOrNull()
+            val softwareName = runCatching {
+                MediaCodecSelector.PREFER_SOFTWARE
+                    .getDecoderInfos(mime, false, false)
+                    .map { it.name }
+                    .firstOrNull { candidate ->
+                        primaryName == null || !candidate.equals(primaryName, ignoreCase = true)
+                    }
+            }.getOrNull()
 
-        if (hardwareName?.contains("unisoc", ignoreCase = true) != true) {
-            return MediaCodec.createDecoderByType(mime)
+            if (softwareName.isNullOrBlank()) throw primaryError
+
+            val fallback = MediaCodec.createByCodecName(softwareName)
+            try {
+                fallback.configure(format, outputSurface, null, 0)
+                fallback.start()
+                Log.w(
+                    TAG,
+                    "Preview decoder fallback: ${primaryName ?: mime} -> $softwareName",
+                    primaryError,
+                )
+                return fallback
+            } catch (fallbackError: Throwable) {
+                runCatching { fallback.stop() }
+                runCatching { fallback.release() }
+                fallbackError.addSuppressed(primaryError)
+                throw fallbackError
+            }
         }
-
-        val softwareName = runCatching {
-            MediaCodecSelector.PREFER_SOFTWARE
-                .getDecoderInfos(MimeTypes.VIDEO_H264, false, false)
-                .firstOrNull()
-                ?.name
-        }.getOrNull()
-
-        if (!softwareName.isNullOrBlank() && !softwareName.equals(hardwareName, ignoreCase = true)) {
-            Log.i(TAG, "Preview AVC decoder: $hardwareName -> $softwareName")
-            return MediaCodec.createByCodecName(softwareName)
-        }
-
-        Log.w(TAG, "Unisoc AVC decoder detected but no software AVC decoder was available")
-        return MediaCodec.createDecoderByType(mime)
     }
 
     private fun prepareLayer(layer: ActiveLayer): PreparedLayer {
