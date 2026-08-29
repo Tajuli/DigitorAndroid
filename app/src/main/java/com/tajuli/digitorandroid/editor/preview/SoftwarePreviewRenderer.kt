@@ -17,8 +17,9 @@ import kotlin.math.roundToInt
  * flat instead of black. The same shared color LUT is then sampled on CPU, which means Input Color,
  * primary/log wheels, curves and node color changes still show in the fallback preview.
  *
- * This path is intentionally preview-only and lower resolution. Healthy devices remain on the exact
- * GPU path; fallback exists so unsupported Surface handoffs never make footage uneditable.
+ * The whole fallback decode is guarded by PreviewExportCoordinator. Export takes the exclusive side
+ * of that barrier before Transformer starts, so MediaMetadataRetriever can never compete with the
+ * export decoder/encoder on devices with fragile codec stacks.
  */
 internal object SoftwarePreviewRenderer {
     private const val FALLBACK_LUT_SIZE = 17
@@ -28,7 +29,7 @@ internal object SoftwarePreviewRenderer {
         clip: TimelineClip,
         sourceTimeUs: Long,
         maxLongEdge: Int = 720,
-    ): Bitmap? {
+    ): Bitmap? = PreviewExportCoordinator.withSoftwarePreviewDecode {
         val retriever = MediaMetadataRetriever()
         val decoded = try {
             retriever.setDataSource(context, Uri.parse(clip.uri))
@@ -40,7 +41,7 @@ internal object SoftwarePreviewRenderer {
             null
         } finally {
             runCatching { retriever.release() }
-        } ?: return null
+        } ?: return@withSoftwarePreviewDecode null
 
         val scaled = scaleDown(decoded, maxLongEdge.coerceAtLeast(240))
         if (scaled !== decoded) decoded.recycle()
@@ -50,7 +51,7 @@ internal object SoftwarePreviewRenderer {
         } else {
             val copied = scaled.copy(Bitmap.Config.ARGB_8888, true) ?: run {
                 if (!scaled.isRecycled) scaled.recycle()
-                return null
+                return@withSoftwarePreviewDecode null
             }
             if (copied !== scaled && !scaled.isRecycled) scaled.recycle()
             copied
@@ -62,7 +63,7 @@ internal object SoftwarePreviewRenderer {
             sourceTimeUs = sourceTimeUs,
         )
         applyCubeNearest(working, cube)
-        return working
+        working
     }
 
     private fun scaleDown(bitmap: Bitmap, maxLongEdge: Int): Bitmap {
