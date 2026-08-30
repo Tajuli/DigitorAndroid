@@ -407,9 +407,12 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                 timelineUs = cursorUs,
                 onImport = ::launchImport,
                 qualifierPickerActive = state.qualifierPickerActive,
-                onPickColor = { x, y, width, height ->
+                onPickColor = { red, green, blue ->
                     val target = selectedClip?.takeIf { clip -> state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs } ?: previewClip
-                    target?.let { clip -> if (clip.id != selectedClip?.id) vm.selectClip(clip.id); vm.pickQualifierFromPreview(cursorUs, x, y, width, height) }
+                    target?.let { clip ->
+                        if (clip.id != selectedClip?.id) vm.selectClip(clip.id)
+                        applyQualifierPickedColor(vm, red, green, blue)
+                    }
                 },
                 modifier = Modifier.fillMaxWidth().weight(1f),
             )
@@ -563,13 +566,18 @@ private fun FramePreviewV7(
     timelineUs: Long,
     onImport: () -> Unit,
     qualifierPickerActive: Boolean,
-    onPickColor: (Float, Float, Float, Float) -> Unit,
+    onPickColor: (Float, Float, Float) -> Unit,
     modifier: Modifier,
 ) {
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
     Box(modifier.background(E7PreviewPasteboard).onSizeChanged { previewSize = it }, contentAlignment = Alignment.Center) {
         if (hasVideo) {
-            GpuPreviewSurface(engine = previewEngine, modifier = Modifier.fillMaxSize())
+            GpuPreviewSurface(
+                engine = previewEngine,
+                qualifierPickerActive = qualifierPickerActive && activeVideoClip != null,
+                onQualifierColorSample = onPickColor,
+                modifier = Modifier.fillMaxSize(),
+            )
             val fallbackBitmap = frame?.bitmap
             if (fallbackBitmap != null && !fallbackBitmap.isRecycled) {
                 Image(bitmap = fallbackBitmap.asImageBitmap(), contentDescription = "CPU fallback preview", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
@@ -597,9 +605,7 @@ private fun FramePreviewV7(
         Text("GPU Preview · $activeLayerCount ${if (activeLayerCount == 1) "layer" else "layers"}", modifier = Modifier.align(Alignment.TopStart).padding(10.dp).background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 4.dp), fontSize = 9.sp, color = Color.White.copy(alpha = .72f))
 
         if (qualifierPickerActive && activeVideoClip != null) {
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .05f)).pointerInput(previewSize) {
-                detectTapGestures { pos -> onPickColor(pos.x, pos.y, previewSize.width.toFloat(), previewSize.height.toFloat()) }
-            }, contentAlignment = Alignment.TopCenter) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .05f)), contentAlignment = Alignment.TopCenter) {
                 Row(Modifier.padding(top = 9.dp).background(Color.Black.copy(alpha = .76f), RoundedCornerShape(6.dp)).padding(horizontal = 9.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Rounded.Colorize, null, modifier = Modifier.size(15.dp), tint = E7Accent); Spacer(Modifier.width(5.dp)); Text("Tap the color to qualify selected layer", fontSize = 9.sp, color = Color.White)
                 }
