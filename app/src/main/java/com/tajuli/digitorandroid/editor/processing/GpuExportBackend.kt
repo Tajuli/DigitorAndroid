@@ -117,9 +117,9 @@ class GpuExportBackend(
 
             // Some Unisoc AVC hardware decoders accept camera H.264 during configuration but then
             // repeatedly return invalid-data errors while draining the stream. Prefer the software
-            // AVC decoder there, but keep DefaultAssetLoaderFactory rather than replacing it with a
-            // bare ExoPlayerAssetLoader.Factory. DefaultAssetLoaderFactory is critical for image
-            // inputs such as the blank-frame sentinel used by video -> text-only-tail exports.
+            // AVC decoder there, but preserve Media3's DefaultAssetLoaderFactory. A bare
+            // ExoPlayerAssetLoader.Factory cannot load still-image MediaItems, while the default
+            // factory dispatches images to ImageAssetLoader and normal A/V to ExoPlayerAssetLoader.
             if (preferredAvcDecoderIsUnisoc()) {
                 val selector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
                     val delegate = if (mimeType == MimeTypes.VIDEO_H264) {
