@@ -177,4 +177,34 @@ class StableGpuExportCompositionBuilderTest {
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
     }
+
+    @Test
+    fun titleTailStillRequiresCompositorWhenAssignedToUpperEmptyTrack() {
+        val video = TimelineClip(
+            id = "video",
+            uri = "content://test/video",
+            label = "video",
+            timelineStartUs = 0L,
+            sourceOutUs = 10_000_000L,
+        )
+        val project = TimelineProject(
+            tracks = listOf(
+                TimelineTrack(id = "v1", name = "V1", kind = TrackKind.VIDEO, clips = listOf(video)),
+                TimelineTrack(id = "v2", name = "V2", kind = TrackKind.VIDEO),
+            ),
+            textOverlays = listOf(
+                TextOverlayClip(
+                    id = "upper-tail",
+                    text = "Upper title",
+                    timelineStartUs = 10_000_000L,
+                    timelineEndUs = 13_000_000L,
+                    videoTrackIdV3 = "v2",
+                ),
+            ),
+        )
+
+        assertTrue(canUseDirectSingleInputExport(project))
+        assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
+        assertEquals(13_000_000L, project.durationUs)
+    }
 }
