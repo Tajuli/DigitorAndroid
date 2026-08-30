@@ -32,6 +32,10 @@ import kotlin.math.roundToInt
  * and could make an 8-bit source look more banded than it really was. No artificial dither/noise is
  * added here, so the fallback does not deliberately diverge from the shared color transform.
  *
+ * Static grades reuse one flattened 33^3 cube across frames. Animated correction/color grades key
+ * the cache by source timestamp, preserving frame-accurate animation while avoiding expensive cube
+ * regeneration during ordinary fallback playback.
+ *
  * The whole fallback decode is guarded by PreviewExportCoordinator. Export takes the exclusive side
  * of that barrier and releases the cached retriever before Transformer starts, so the software
  * preview can never compete with the export decoder/encoder on fragile codec stacks.
@@ -46,8 +50,24 @@ internal object SoftwarePreviewRenderer {
         val height: Int,
     )
 
+    private data class LutKey(
+        val clipId: String,
+        val nodeGraphHash: Int,
+        val legacyGradeHash: Int,
+        val inputProfileHash: Int,
+        val animationRevision: Long,
+        val animatedSourceUs: Long,
+    )
+
+    private data class CachedLut(
+        val key: LutKey,
+        val size: Int,
+        val colors: IntArray,
+    )
+
     // Access is serialized by PreviewExportCoordinator.previewDecodeGate.
     private var cachedSession: RetrieverSession? = null
+    private var cachedLut: CachedLut? = null
 
     fun render(
         context: Context,
@@ -105,12 +125,7 @@ internal object SoftwarePreviewRenderer {
             copied
         }
 
-        val cube = SharedColorPipeline.buildCubeAtSourceTime(
-            clip = clip,
-            size = FALLBACK_LUT_SIZE,
-            sourceTimeUs = safeSourceUs,
-        )
-        applyCubeTetrahedral(working, cube)
+        applyCubeTetrahedral(working, lutFor(clip, safeSourceUs))
         working
     }
 
@@ -154,6 +169,34 @@ internal object SoftwarePreviewRenderer {
         previous?.let { runCatching { it.retriever.release() } }
     }
 
+    private fun lutFor(clip: TimelineClip, sourceTimeUs: Long): CachedLut {
+        val key = LutKey(
+            clipId = clip.id,
+            nodeGraphHash = clip.nodeGraph.hashCode(),
+            legacyGradeHash = clip.colorGrade.hashCode(),
+            inputProfileHash = clip.inputColorProfileV1?.hashCode() ?: 0,
+            animationRevision = clip.nodeAnimations.revision,
+            animatedSourceUs = if (clip.nodeAnimations.hasColorAnimation) sourceTimeUs else Long.MIN_VALUE,
+        )
+        cachedLut?.takeIf { it.key == key }?.let { return it }
+
+        val cube = SharedColorPipeline.buildCubeAtSourceTime(
+            clip = clip,
+            size = FALLBACK_LUT_SIZE,
+            sourceTimeUs = sourceTimeUs,
+        )
+        val size = cube.size
+        val flat = IntArray(size * size * size)
+        for (r in 0 until size) {
+            for (g in 0 until size) {
+                for (b in 0 until size) {
+                    flat[b + size * (g + size * r)] = cube[r][g][b]
+                }
+            }
+        }
+        return CachedLut(key, size, flat).also { cachedLut = it }
+    }
+
     private fun fittedSize(width: Int, height: Int, maxLongEdge: Int): Pair<Int, Int> {
         val longest = max(width, height).coerceAtLeast(1)
         if (longest <= maxLongEdge) return width.coerceAtLeast(2) to height.coerceAtLeast(2)
@@ -178,19 +221,12 @@ internal object SoftwarePreviewRenderer {
      */
     private fun applyCubeTetrahedral(
         bitmap: Bitmap,
-        cube: Array<Array<IntArray>>,
+        lut: CachedLut,
     ) {
-        val size = cube.size
+        val size = lut.size
         if (size < 2) return
         val last = size - 1
-        val flat = IntArray(size * size * size)
-        for (r in 0 until size) {
-            for (g in 0 until size) {
-                for (b in 0 until size) {
-                    flat[b + size * (g + size * r)] = cube[r][g][b]
-                }
-            }
-        }
+        val flat = lut.colors
 
         fun colorAt(r: Int, g: Int, b: Int): Int = flat[b + size * (g + size * r)]
 
