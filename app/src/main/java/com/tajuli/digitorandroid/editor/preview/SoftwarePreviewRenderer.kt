@@ -27,12 +27,17 @@ import kotlin.math.roundToInt
  * potentially long GOP walk and gives the viewer something useful almost immediately. The caller
  * can then request OPTION_CLOSEST for the exact target and replace the placeholder when it arrives.
  *
+ * The fallback uses the same 33^3 cube density as exact GPU preview/export and tetrahedral sampling
+ * instead of nearest-cell lookup. The old 17^3 nearest path visibly posterized smooth Log gradients
+ * and could make an 8-bit source look more banded than it really was. No artificial dither/noise is
+ * added here, so the fallback does not deliberately diverge from the shared color transform.
+ *
  * The whole fallback decode is guarded by PreviewExportCoordinator. Export takes the exclusive side
  * of that barrier and releases the cached retriever before Transformer starts, so the software
  * preview can never compete with the export decoder/encoder on fragile codec stacks.
  */
 internal object SoftwarePreviewRenderer {
-    private const val FALLBACK_LUT_SIZE = 17
+    private const val FALLBACK_LUT_SIZE = 33
 
     private data class RetrieverSession(
         val uri: String,
@@ -105,7 +110,7 @@ internal object SoftwarePreviewRenderer {
             size = FALLBACK_LUT_SIZE,
             sourceTimeUs = safeSourceUs,
         )
-        applyCubeNearest(working, cube)
+        applyCubeTetrahedral(working, cube)
         working
     }
 
@@ -166,27 +171,137 @@ internal object SoftwarePreviewRenderer {
         return Bitmap.createScaledBitmap(bitmap, width, height, true)
     }
 
-    private fun applyCubeNearest(
+    /**
+     * Four-corner tetrahedral 3D-LUT interpolation. Compared with nearest lookup this keeps smooth
+     * Log ramps continuous between cube cells while using half the corner reads of trilinear (4 vs
+     * 8), which matters on the low-end devices most likely to be running this emergency path.
+     */
+    private fun applyCubeTetrahedral(
         bitmap: Bitmap,
         cube: Array<Array<IntArray>>,
     ) {
-        if (cube.isEmpty()) return
+        val size = cube.size
+        if (size < 2) return
+        val last = size - 1
+        val flat = IntArray(size * size * size)
+        for (r in 0 until size) {
+            for (g in 0 until size) {
+                for (b in 0 until size) {
+                    flat[b + size * (g + size * r)] = cube[r][g][b]
+                }
+            }
+        }
+
+        fun colorAt(r: Int, g: Int, b: Int): Int = flat[b + size * (g + size * r)]
+
+        fun blend(c0: Int, c1: Int, c2: Int, c3: Int, w0: Float, w1: Float, w2: Float, w3: Float): Int {
+            fun channel(shift: Int): Int {
+                val value =
+                    ((c0 ushr shift) and 0xFF) * w0 +
+                        ((c1 ushr shift) and 0xFF) * w1 +
+                        ((c2 ushr shift) and 0xFF) * w2 +
+                        ((c3 ushr shift) and 0xFF) * w3
+                return (value + .5f).toInt().coerceIn(0, 255)
+            }
+            return (channel(16) shl 16) or (channel(8) shl 8) or channel(0)
+        }
+
         val width = bitmap.width
         val height = bitmap.height
         val pixels = IntArray(width * height)
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-        val last = cube.size - 1
+        val scale = last / 255f
 
         for (index in pixels.indices) {
-            val color = pixels[index]
-            val a = color ushr 24 and 0xFF
-            val r = color ushr 16 and 0xFF
-            val g = color ushr 8 and 0xFF
-            val b = color and 0xFF
-            val ri = ((r / 255f) * last).roundToInt().coerceIn(0, last)
-            val gi = ((g / 255f) * last).roundToInt().coerceIn(0, last)
-            val bi = ((b / 255f) * last).roundToInt().coerceIn(0, last)
-            pixels[index] = (a shl 24) or (cube[ri][gi][bi] and 0x00FFFFFF)
+            val input = pixels[index]
+            val alpha = input ushr 24 and 0xFF
+            val rs = ((input ushr 16) and 0xFF) * scale
+            val gs = ((input ushr 8) and 0xFF) * scale
+            val bs = (input and 0xFF) * scale
+
+            val r0 = rs.toInt().coerceIn(0, last)
+            val g0 = gs.toInt().coerceIn(0, last)
+            val b0 = bs.toInt().coerceIn(0, last)
+            val r1 = (r0 + 1).coerceAtMost(last)
+            val g1 = (g0 + 1).coerceAtMost(last)
+            val b1 = (b0 + 1).coerceAtMost(last)
+            val fr = if (r0 == last) 0f else rs - r0
+            val fg = if (g0 == last) 0f else gs - g0
+            val fb = if (b0 == last) 0f else bs - b0
+
+            val c000 = colorAt(r0, g0, b0)
+            val rgb = if (fr >= fg) {
+                if (fg >= fb) {
+                    blend(
+                        c000,
+                        colorAt(r1, g0, b0),
+                        colorAt(r1, g1, b0),
+                        colorAt(r1, g1, b1),
+                        1f - fr,
+                        fr - fg,
+                        fg - fb,
+                        fb,
+                    )
+                } else if (fr >= fb) {
+                    blend(
+                        c000,
+                        colorAt(r1, g0, b0),
+                        colorAt(r1, g0, b1),
+                        colorAt(r1, g1, b1),
+                        1f - fr,
+                        fr - fb,
+                        fb - fg,
+                        fg,
+                    )
+                } else {
+                    blend(
+                        c000,
+                        colorAt(r0, g0, b1),
+                        colorAt(r1, g0, b1),
+                        colorAt(r1, g1, b1),
+                        1f - fb,
+                        fb - fr,
+                        fr - fg,
+                        fg,
+                    )
+                }
+            } else {
+                if (fb >= fg) {
+                    blend(
+                        c000,
+                        colorAt(r0, g0, b1),
+                        colorAt(r0, g1, b1),
+                        colorAt(r1, g1, b1),
+                        1f - fb,
+                        fb - fg,
+                        fg - fr,
+                        fr,
+                    )
+                } else if (fb >= fr) {
+                    blend(
+                        c000,
+                        colorAt(r0, g1, b0),
+                        colorAt(r0, g1, b1),
+                        colorAt(r1, g1, b1),
+                        1f - fg,
+                        fg - fb,
+                        fb - fr,
+                        fr,
+                    )
+                } else {
+                    blend(
+                        c000,
+                        colorAt(r0, g1, b0),
+                        colorAt(r1, g1, b0),
+                        colorAt(r1, g1, b1),
+                        1f - fg,
+                        fg - fr,
+                        fr - fb,
+                        fb,
+                    )
+                }
+            }
+            pixels[index] = (alpha shl 24) or rgb
         }
 
         bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
