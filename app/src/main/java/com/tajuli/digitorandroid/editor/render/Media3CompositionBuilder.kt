@@ -16,6 +16,8 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 private const val SINGLE_LAYER_GAP_SENTINEL_ID = "__digitor_gap_sentinel"
+private const val BLANK_PNG_DATA_URI =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEElEQVR4nGNgYGD4D8UQBgAd9AP9yOH2qAAAAABJRU5ErkJggg=="
 
 internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip> {
     if (clips.size < 2) return clips
@@ -149,7 +151,7 @@ class Media3CompositionBuilder {
         val compositorTracks = if (videoTracks.size == 1) {
             videoTracks + TimelineTrack(
                 id = SINGLE_LAYER_GAP_SENTINEL_ID,
-                name = "Compositor gap sentinel",
+                name = "Compositor blank-frame sentinel",
                 kind = TrackKind.VIDEO,
                 clips = emptyList(),
             )
@@ -161,14 +163,14 @@ class Media3CompositionBuilder {
             sequences += buildCompositedVideoSequence(project, track, forPreview = false)
         }
 
-        // Media3 Transformer chooses SingleInputVideoGraph for one video sequence and rejects our
-        // custom ResolveVideoCompositorSettings in that mode. Previously Digitor duplicated the real
-        // source track at opacity=0 to force MultipleInputVideoGraph. Camera Log footage is commonly
-        // HEVC, and opening a second decoder for the same HEVC source can exhaust vendor codec slots
-        // once the export encoder is also active. A full-duration gap sequence is a compositor input
-        // but opens no source decoder, preserving the exact compositor path with one decoder only.
+        // A pure Media3 video gap contains no source frames. Composition-level text effects need a
+        // continuous frame stream even when the timeline is in a video-free region (for example,
+        // video 0-60s followed by a title at 60-63s). Feed a tiny static black image for the whole
+        // project and keep its compositor alpha at zero via the empty sentinel track. This creates
+        // encoder timestamps/frames without holding the previous video's last frame or opening a
+        // second hardware video decoder.
         if (videoTracks.size == 1) {
-            sequences += buildVideoGapSentinelSequence(project.durationUs)
+            sequences += buildVideoBlankFrameSentinelSequence(project)
         }
 
         addAudioSequences(project, sequences, forPreview = false)
@@ -199,10 +201,20 @@ class Media3CompositionBuilder {
         return builder.build()
     }
 
-    private fun buildVideoGapSentinelSequence(durationUs: Long): EditedMediaItemSequence {
-        val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
-        builder.addGap(durationUs.coerceAtLeast(1L))
-        return builder.build()
+    private fun buildVideoBlankFrameSentinelSequence(project: TimelineProject): EditedMediaItemSequence {
+        val durationUs = project.durationUs.coerceAtLeast(1L)
+        val durationMs = ((durationUs + 999L) / 1000L).coerceAtLeast(1L)
+        val imageMediaItem = MediaItem.Builder()
+            .setUri(BLANK_PNG_DATA_URI)
+            .setMimeType("image/png")
+            .setImageDurationMs(durationMs)
+            .build()
+        val imageItem = EditedMediaItem.Builder(imageMediaItem)
+            .setFrameRate(project.frameRate.coerceAtLeast(1))
+            .build()
+        return EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
+            .addItem(imageItem)
+            .build()
     }
 
     private fun buildCompositedVideoSequence(
