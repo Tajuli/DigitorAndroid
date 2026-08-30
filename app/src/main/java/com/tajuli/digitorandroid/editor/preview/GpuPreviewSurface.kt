@@ -318,7 +318,7 @@ fun GpuPreviewSurface(
                         }
                     }
                 },
-            )
+            ) {}
         }
     }
 }
