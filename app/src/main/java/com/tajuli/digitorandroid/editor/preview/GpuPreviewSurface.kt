@@ -33,6 +33,7 @@ import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.render.REALTIME_PREVIEW_LONG_EDGE
 import com.tajuli.digitorandroid.editor.render.resolvePreviewOutputSize
+import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -44,14 +45,15 @@ import kotlinx.coroutines.withContext
  * There is no ImageReader, GPU-to-CPU pixel copy, Bitmap upload, or Compose texture upload in the
  * healthy preview path.
  *
- * Realtime editing uses a 720p-long-edge final Surface buffer while source decoding and the shared
- * per-layer LUT/spatial pipeline remain at source resolution. That keeps grading/effect math aligned
- * with full-resolution export and removes the unnecessary project-resolution final GPU surface.
+ * Realtime editing uses a 720p-long-edge final Surface buffer while the render core keeps the full
+ * project compositor canvas. This avoids changing Media3 overlay geometry while still reducing the
+ * final display surface. Source decoding and the shared LUT/spatial pipeline remain source-accurate.
  *
- * Some vendor codecs can decode a valid camera Log file but never complete the Surface handoff into
- * Media3's multi-input GL graph. In that case a Resolve-style editor must still show the footage as
- * a flat/raw image instead of leaving the viewer black. The software image appears almost
- * immediately while the GPU path is allowed to keep preparing in the background.
+ * Some vendor codecs can decode a valid camera Log file but take too long to deliver a requested GPU
+ * frame. Fallback activation is timestamp-aware: an old successful GPU frame does not count as the
+ * frame for a new playhead seek. On a large stale seek we immediately expose the fallback path. Its
+ * first decode uses the closest sync frame for fast visibility, then replaces it with the exact
+ * requested frame while the GPU path keeps working in parallel.
  *
  * Export owns the device video resources exclusively. While an export lease is active the software
  * fallback is disabled as well as the GPU preview, preventing a hidden MediaMetadataRetriever decode
@@ -81,15 +83,30 @@ fun GpuPreviewSurface(
         track.kind == TrackKind.VIDEO && !track.muted && track.clips.isNotEmpty()
     } == true
 
+    val fallbackClip = project?.clip(previewClock.clipId)
+    val requestedTimelineUs = fallbackClip?.let { clip ->
+        (clip.timelineStartUs + previewClock.localUs)
+            .coerceIn(clip.timelineStartUs, clip.timelineEndUs.coerceAtLeast(clip.timelineStartUs))
+    }
+    val gpuDeltaUs = if (gpuFrame != null && requestedTimelineUs != null) {
+        abs(gpuFrame!!.timelineUs - requestedTimelineUs)
+    } else {
+        Long.MAX_VALUE
+    }
+    val gpuFrameFresh = gpuFrame != null &&
+        (requestedTimelineUs == null || gpuDeltaUs <= GPU_FRAME_FRESH_TOLERANCE_US)
+    val staleRequestedFrame = gpuFrame != null &&
+        requestedTimelineUs != null &&
+        gpuDeltaUs > STALE_FRAME_FALLBACK_US
+
     var softwareFallbackActive by remember(engine) { mutableStateOf(false) }
-    LaunchedEffect(engine, hasVideo, gpuFrame?.timelineUs, gpuFrame?.bitmap, exportActive) {
+
+    // First-ever frame: allow a very short GPU grace period, then show fallback rather than black.
+    LaunchedEffect(engine, hasVideo, gpuFrame?.timelineUs, exportActive) {
         when {
             exportActive -> softwareFallbackActive = false
             !hasVideo -> softwareFallbackActive = false
-            gpuFrame != null -> softwareFallbackActive = false
-            !softwareFallbackActive -> {
-                // Do not make the user stare at a black viewer while a fragile camera codec warms
-                // up. Show the flat/raw software frame quickly and let GPU preparation continue.
+            gpuFrame == null -> {
                 delay(GPU_FIRST_FRAME_GRACE_MS)
                 if (!PreviewExportCoordinator.exportActive.value && engine.frame.value == null) {
                     softwareFallbackActive = true
@@ -98,9 +115,25 @@ fun GpuPreviewSurface(
         }
     }
 
-    val fallbackClip = project?.clip(previewClock.clipId)
+    // Seeking after a GPU frame already exists used to remain black because `gpuFrame != null` was
+    // treated as ready even when that frame belonged to the old cursor position. Large timestamp
+    // mismatch now activates fallback immediately; a fresh GPU frame turns it off again.
+    LaunchedEffect(
+        staleRequestedFrame,
+        requestedTimelineUs,
+        gpuFrame?.timelineUs,
+        gpuFrameFresh,
+        exportActive,
+    ) {
+        when {
+            exportActive -> softwareFallbackActive = false
+            gpuFrameFresh -> softwareFallbackActive = false
+            staleRequestedFrame -> softwareFallbackActive = true
+        }
+    }
+
     // Follow project frame cadence, capped at 30 fps for thermal safety on devices that need the
-    // software fallback. It still uses the exact shared color LUT for each displayed frame.
+    // software fallback. It still uses the shared color LUT for each displayed frame.
     val fallbackPreviewFps = project?.frameRate?.coerceIn(12, 30) ?: 24
     val fallbackFrameStepUs = 1_000_000L / fallbackPreviewFps.toLong()
     val fallbackLocalUs = if (softwareFallbackActive && !exportActive) {
@@ -123,14 +156,33 @@ fun GpuPreviewSurface(
         }
         val sourceUs = (clip.sourceInUs + fallbackLocalUs)
             .coerceIn(clip.sourceInUs, clip.sourceOutUs.coerceAtLeast(clip.sourceInUs))
-        value = withContext(Dispatchers.Default) {
+
+        // A freshly activated fallback should not make the user wait for a long GOP walk. Show a
+        // small nearest-keyframe placeholder first. `produceState` keeps that value visible while
+        // the exact OPTION_CLOSEST decode below is still running.
+        if (value == null) {
+            val fastFrame = withContext(Dispatchers.Default) {
+                SoftwarePreviewRenderer.render(
+                    context = context.applicationContext,
+                    clip = clip,
+                    sourceTimeUs = sourceUs,
+                    maxLongEdge = FAST_PLACEHOLDER_LONG_EDGE,
+                    closestSyncOnly = true,
+                )
+            }
+            if (fastFrame != null) value = fastFrame
+        }
+
+        val exactFrame = withContext(Dispatchers.Default) {
             SoftwarePreviewRenderer.render(
                 context = context.applicationContext,
                 clip = clip,
                 sourceTimeUs = sourceUs,
                 maxLongEdge = SOFTWARE_PREVIEW_LONG_EDGE,
+                closestSyncOnly = false,
             )
         }
+        if (exactFrame != null) value = exactFrame
     }
 
     DisposableEffect(fallbackBitmap) {
@@ -203,7 +255,13 @@ fun GpuPreviewSurface(
         )
 
         val softwareFrame = fallbackBitmap
-        if (!exportActive && softwareFallbackActive && softwareFrame != null && !softwareFrame.isRecycled) {
+        if (
+            !exportActive &&
+            softwareFallbackActive &&
+            !gpuFrameFresh &&
+            softwareFrame != null &&
+            !softwareFrame.isRecycled
+        ) {
             Image(
                 bitmap = softwareFrame.asImageBitmap(),
                 contentDescription = "Software fallback preview",
@@ -214,7 +272,10 @@ fun GpuPreviewSurface(
     }
 }
 
-private const val GPU_FIRST_FRAME_GRACE_MS = 120L
+private const val GPU_FIRST_FRAME_GRACE_MS = 80L
+private const val GPU_FRAME_FRESH_TOLERANCE_US = 180_000L
+private const val STALE_FRAME_FALLBACK_US = 250_000L
+private const val FAST_PLACEHOLDER_LONG_EDGE = 480
 private const val SOFTWARE_PREVIEW_LONG_EDGE = REALTIME_PREVIEW_LONG_EDGE
 private val PREVIEW_PASTEBOARD_GRAY = Color(0xFF222226)
 
