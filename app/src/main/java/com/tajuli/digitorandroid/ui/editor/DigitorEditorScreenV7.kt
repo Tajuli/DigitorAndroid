@@ -178,7 +178,7 @@ fun DigitorEditorScreenV7(
         if (uris.isNotEmpty()) {
             isPlaying = false
             runCatching { audioPreview.pause() }
-            vm.importUris(uris)
+            vm.importUrisAppendAwareV12(uris)
         }
     }
     fun launchImport() = mediaPicker.launch(vm.selectedImportMimeTypes())
@@ -256,7 +256,8 @@ fun DigitorEditorScreenV7(
             playAnchorCursorUs = target; playAnchorRealtimeMs = SystemClock.elapsedRealtime()
         }
         val activeVideo = state.project.topmostVideoClipAt(target)
-        if (activeVideo != null && selectedClip == null && workspace != WorkspaceV7.TEXT) vm.selectClip(activeVideo.id)
+        val textSelectedNow = vm.state.value.selectedTextId != null || TimelineTextSelectionBusV10.selectedTextId.value != null
+        if (activeVideo != null && selectedClip == null && !textSelectedNow && workspace != WorkspaceV7.TEXT) vm.selectClip(activeVideo.id)
     }
 
     fun stopForEdit() {
