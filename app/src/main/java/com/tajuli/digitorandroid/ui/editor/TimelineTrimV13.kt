@@ -4,7 +4,6 @@ import android.app.Application
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import com.tajuli.digitorandroid.editor.model.ProjectStore
-import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
@@ -29,7 +28,8 @@ fun EditorViewModelV4.resizeTextStartV13(textId: String, requestedStartUs: Long)
             .forEach { add(it.timelineEndUs) }
     }.maxOrNull() ?: 0L
 
-    val latestStartUs = (current.timelineEndUs - MIN_TRIM_DURATION_US_V13).coerceAtLeast(previousEndUs)
+    val latestStartUs = current.timelineEndUs - MIN_TRIM_DURATION_US_V13
+    if (previousEndUs > latestStartUs) return
     val newStartUs = requestedStartUs.coerceIn(previousEndUs, latestStartUs)
     if (newStartUs == current.timelineStartUs) return
 
@@ -59,6 +59,7 @@ fun EditorViewModelV4.resizeTextEndV13(textId: String, requestedEndUs: Long) {
 
     val minEndUs = current.timelineStartUs + MIN_TRIM_DURATION_US_V13
     val maxEndUs = nextStartUs ?: Long.MAX_VALUE / 4
+    if (maxEndUs < minEndUs) return
     val newEndUs = requestedEndUs.coerceIn(minEndUs, maxEndUs)
     if (newEndUs == current.timelineEndUs) return
 
@@ -74,7 +75,7 @@ fun EditorViewModelV4.resizeTextEndV13(textId: String, requestedEndUs: Long) {
 
 /**
  * Trim/extend the left edge of a VIDEO clip. A split clip can be pulled back into source media that
- * still exists before sourceInUs. The timeline end stays fixed.
+ * still exists before sourceInUs. The timeline end stays fixed. Linked source audio follows.
  */
 fun EditorViewModelV4.resizeVideoClipStartV13(clipId: String, requestedStartUs: Long) {
     val snapshot = state.value
@@ -82,7 +83,7 @@ fun EditorViewModelV4.resizeVideoClipStartV13(clipId: String, requestedStartUs: 
     val track = snapshot.project.trackContaining(clipId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return
     val linkedIds = snapshot.project.linkedClipIds(clipId)
 
-    val previousEndUs = buildList<Long> {
+    val videoPreviousEndUs = buildList<Long> {
         track.clips.filter { it.id !in linkedIds && it.timelineEndUs <= clip.timelineStartUs }
             .forEach { add(it.timelineEndUs) }
         snapshot.project.textOverlaysForVideoTrackV3(track.id)
@@ -90,9 +91,21 @@ fun EditorViewModelV4.resizeVideoClipStartV13(clipId: String, requestedStartUs: 
             .forEach { add(it.timelineEndUs) }
     }.maxOrNull() ?: 0L
 
+    val linkedAudio = linkedIds.mapNotNull(snapshot.project::clip)
+        .filter { snapshot.project.trackContaining(it.id)?.kind == TrackKind.AUDIO }
+    val linkedAudioPreviousEndUs = linkedAudio.mapNotNull { audio ->
+        val owner = snapshot.project.trackContaining(audio.id) ?: return@mapNotNull null
+        owner.clips.filter { it.id !in linkedIds && it.timelineEndUs <= audio.timelineStartUs }
+            .maxOfOrNull { it.timelineEndUs }
+    }.maxOrNull() ?: 0L
+    val linkedSourceEarliestUs = linkedAudio.maxOfOrNull { audio ->
+        (audio.timelineStartUs - audio.sourceInUs).coerceAtLeast(0L)
+    } ?: 0L
+
     val sourceEarliestTimelineUs = (clip.timelineStartUs - clip.sourceInUs).coerceAtLeast(0L)
-    val earliestUs = maxOf(previousEndUs, sourceEarliestTimelineUs)
+    val earliestUs = maxOf(videoPreviousEndUs, linkedAudioPreviousEndUs, sourceEarliestTimelineUs, linkedSourceEarliestUs)
     val latestUs = clip.timelineEndUs - MIN_TRIM_DURATION_US_V13
+    if (earliestUs > latestUs) return
     val newStartUs = requestedStartUs.coerceIn(earliestUs, latestUs)
     if (newStartUs == clip.timelineStartUs) return
 
@@ -107,8 +120,10 @@ fun EditorViewModelV4.resizeVideoClipStartV13(clipId: String, requestedStartUs: 
             when {
                 item.id == clipId -> updatedVideo
                 item.id in linkedIds && candidate.kind == TrackKind.AUDIO -> {
-                    val audioSourceIn = (item.sourceInUs + timelineDeltaUs).coerceAtLeast(0L)
-                    item.copy(timelineStartUs = newStartUs, sourceInUs = audioSourceIn)
+                    item.copy(
+                        timelineStartUs = newStartUs,
+                        sourceInUs = (item.sourceInUs + timelineDeltaUs).coerceAtLeast(0L),
+                    )
                 }
                 else -> item
             }
@@ -128,8 +143,8 @@ fun EditorViewModelV4.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long
     val linkedIds = snapshot.project.linkedClipIds(clipId)
 
     val sourceDurationUs = sourceDurationUsV13(clip)
-    val maxBySourceUs = clip.timelineStartUs + (sourceDurationUs - clip.sourceInUs).coerceAtLeast(MIN_TRIM_DURATION_US_V13)
-    val nextStartUs = buildList<Long> {
+    val maxByVideoSourceUs = clip.timelineStartUs + (sourceDurationUs - clip.sourceInUs).coerceAtLeast(1L)
+    val nextVideoItemStartUs = buildList<Long> {
         track.clips.filter { it.id !in linkedIds && it.timelineStartUs >= clip.timelineEndUs }
             .forEach { add(it.timelineStartUs) }
         snapshot.project.textOverlaysForVideoTrackV3(track.id)
@@ -137,8 +152,26 @@ fun EditorViewModelV4.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long
             .forEach { add(it.timelineStartUs) }
     }.minOrNull()
 
+    val linkedAudio = linkedIds.mapNotNull(snapshot.project::clip)
+        .filter { snapshot.project.trackContaining(it.id)?.kind == TrackKind.AUDIO }
+    val maxByAudioSourceUs = linkedAudio.minOfOrNull { audio ->
+        val availableDurationUs = (sourceDurationUsV13(audio) - audio.sourceInUs).coerceAtLeast(1L)
+        audio.timelineStartUs + availableDurationUs
+    }
+    val nextAudioItemStartUs = linkedAudio.mapNotNull { audio ->
+        val owner = snapshot.project.trackContaining(audio.id) ?: return@mapNotNull null
+        owner.clips.filter { it.id !in linkedIds && it.timelineStartUs >= audio.timelineEndUs }
+            .minOfOrNull { it.timelineStartUs }
+    }.minOrNull()
+
     val minEndUs = clip.timelineStartUs + MIN_TRIM_DURATION_US_V13
-    val maxEndUs = minOf(maxBySourceUs, nextStartUs ?: Long.MAX_VALUE / 4)
+    val maxEndUs = listOfNotNull(
+        maxByVideoSourceUs,
+        nextVideoItemStartUs,
+        maxByAudioSourceUs,
+        nextAudioItemStartUs,
+    ).minOrNull() ?: maxByVideoSourceUs
+    if (maxEndUs < minEndUs) return
     val newEndUs = requestedEndUs.coerceIn(minEndUs, maxEndUs)
     if (newEndUs == clip.timelineEndUs) return
 
