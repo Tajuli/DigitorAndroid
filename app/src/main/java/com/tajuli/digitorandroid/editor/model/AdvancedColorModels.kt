@@ -192,7 +192,6 @@ object AdvancedColorMath {
         var hsl = rgbToHsl(r, g, b)
         hsl[0] = wrap01(hsl[0] + c.hue / 360f)
         hsl[1] = (hsl[1] * (1f + c.saturation / 100f)).coerceIn(0f, 1f)
-        hsl[1] = applyColorBoost(hsl[1], c.colorBoost)
         val highlightWeight = smoothstep(.55f, 1f, hsl[2])
         val shadowWeight = 1f - smoothstep(0f, .45f, hsl[2])
         hsl[2] = (hsl[2] + c.highlights / 100f * .20f * highlightWeight + c.shadows / 100f * .20f * shadowWeight)
@@ -261,20 +260,6 @@ object AdvancedColorMath {
         }
 
         return floatArrayOf(r.coerceIn(0f, 1f), g.coerceIn(0f, 1f), b.coerceIn(0f, 1f))
-    }
-
-    /**
-     * Resolve-style Color Boost behavior: low-saturation colors receive proportionally more chroma
-     * gain, while already-saturated colors are protected. Neutral pixels stay neutral, so the
-     * control cannot invent a hue in grayscale areas. This is Digitor's deterministic implementation
-     * rather than an attempt to reproduce Resolve's proprietary internal formula.
-     */
-    private fun applyColorBoost(saturation: Float, amount: Float): Float {
-        val s = saturation.coerceIn(0f, 1f)
-        val strength = (amount / 100f).coerceIn(-1f, 1f)
-        if (abs(strength) <= .000001f || s <= .000001f) return s
-        val lowSaturationWeight = (1f - s) * (1f - s)
-        return (s * (1f + strength * 1.5f * lowSaturationWeight)).coerceIn(0f, 1f)
     }
 
     private fun primaryChannel(value: Float, lum: Float, lift: Float, gamma: Float, gain: Float, offset: Float): Float {
