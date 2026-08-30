@@ -77,6 +77,7 @@ fun TextOverlayPreviewV2(
             translationY = (manual.positionY + preset.offsetY) * previewSize.height * .5f
             scaleX = manual.sizeScale
             scaleY = manual.sizeScale
+            rotationZ = manual.rotationDegrees
         }.widthIn(max = 520.dp),
         contentAlignment = contentAlignment,
     ) {
