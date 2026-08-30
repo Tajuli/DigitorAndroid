@@ -119,10 +119,11 @@ class StableGpuExportCompositionBuilderTest {
 
         assertTrue(canUseDirectSingleInputExport(project))
         assertTrue(textOverlaysAreCoveredByRealVideoV14(project))
+        assertTrue(shouldUseStableSingleInputExportV17(project))
     }
 
     @Test
-    fun titleOnUpperTrackOverLowerVideoCanUseStableSingleInputExport() {
+    fun titleOnUpperTrackOverLowerVideoUsesStableSingleInputExport() {
         val video = TimelineClip(
             id = "video",
             uri = "content://test/video",
@@ -146,10 +147,10 @@ class StableGpuExportCompositionBuilderTest {
             ),
         )
 
-        // V2 is an editor/timeline assignment. With only one real decoded video stream and the title
-        // fully covered by that stream, TextOverlay is safely applied after the single input frame.
+        // Exact device regression: V2 is timeline semantics, not a second decoded video input.
         assertTrue(canUseDirectSingleInputExport(project))
         assertTrue(textOverlaysAreCoveredByRealVideoV14(project))
+        assertTrue(shouldUseStableSingleInputExportV17(project))
     }
 
     @Test
@@ -178,6 +179,7 @@ class StableGpuExportCompositionBuilderTest {
 
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
+        assertFalse(shouldUseStableSingleInputExportV17(project))
         assertEquals(13_000_000L, project.durationUs)
     }
 
@@ -207,6 +209,7 @@ class StableGpuExportCompositionBuilderTest {
 
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
+        assertFalse(shouldUseStableSingleInputExportV17(project))
     }
 
     @Test
@@ -236,6 +239,7 @@ class StableGpuExportCompositionBuilderTest {
 
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
+        assertFalse(shouldUseStableSingleInputExportV17(project))
         assertEquals(13_000_000L, project.durationUs)
     }
 }
