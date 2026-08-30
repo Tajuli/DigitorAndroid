@@ -68,7 +68,9 @@ private fun Int.evenAtLeastTwo(): Int {
 }
 
 @UnstableApi
-class Media3CompositionBuilder {
+class Media3CompositionBuilder(
+    private val blankFrameUri: String = BLANK_PNG_DATA_URI,
+) {
     fun build(project: TimelineProject): Composition = buildExport(project)
 
     fun buildPreview(project: TimelineProject): Composition = buildPreviewInternal(project)
@@ -168,10 +170,10 @@ class Media3CompositionBuilder {
         // A pure Media3 video gap contains no source frames. Composition-level text effects need a
         // continuous frame stream even when the timeline is in a video-free region (for example,
         // video 0-60s followed by a title at 60-63s). Feed a tiny static black image for the whole
-        // project and keep its compositor alpha at zero via the empty sentinel track. This creates
-        // encoder timestamps/frames without holding the previous video's last frame or opening a
-        // second hardware video decoder. The same sentinel is added to multitrack compositions when
-        // a title reaches an interval where none of the real video tracks has frames.
+        // project and keep its compositor alpha at zero via the empty sentinel track. GpuExportBackend
+        // supplies this as a real app-cache PNG file on device; the data URI default remains only for
+        // non-export/internal callers. This creates encoder timestamps/frames without holding the
+        // previous video's last frame or opening a second hardware video decoder.
         if (needsBlankFrameSentinel) {
             sequences += buildVideoBlankFrameSentinelSequence(project)
         }
@@ -181,11 +183,6 @@ class Media3CompositionBuilder {
         require(sequences.isNotEmpty()) { "Timeline is empty" }
         val builder = Composition.Builder(sequences)
         if (videoTracks.isNotEmpty()) {
-            // Digitor's camera-log workflow intentionally treats decoder output as editable code
-            // values. Media3 defaults HDR-tagged input to KEEP_HDR, which can switch camera files
-            // onto a device HDR decoder/encoder path even though Digitor outputs SDR H.264 and owns
-            // the Log/HDR -> working-space conversion itself. On Android 10+ interpret such metadata
-            // as SDR so None/Bypass stays flat and selected Input Color profiles receive raw values.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 builder.setHdrMode(Composition.HDR_MODE_EXPERIMENTAL_FORCE_INTERPRET_HDR_AS_SDR)
             }
@@ -208,7 +205,7 @@ class Media3CompositionBuilder {
         val durationUs = project.durationUs.coerceAtLeast(1L)
         val durationMs = ((durationUs + 999L) / 1000L).coerceAtLeast(1L)
         val imageMediaItem = MediaItem.Builder()
-            .setUri(BLANK_PNG_DATA_URI)
+            .setUri(blankFrameUri)
             .setMimeType("image/png")
             .setImageDurationMs(durationMs)
             .build()
