@@ -57,10 +57,23 @@ data class TextOverlayClip(
     val exitAnimationV2: TextAnimationSpecV2? = null,
     /** DaVinci-style playhead keyframes for position, size and opacity. */
     val manualAnimationV2: TextManualAnimationV2? = null,
+    /**
+     * V3 Resolve-style lane binding. Titles live on a real VIDEO track (V1/V2/V3...) instead of
+     * a synthetic T1 lane. Nullable preserves old saved projects; legacy text resolves to V1/top
+     * available video track until the user explicitly moves it.
+     */
+    val videoTrackIdV3: String? = null,
 ) {
     val durationUs: Long get() = (timelineEndUs - timelineStartUs).coerceAtLeast(1L)
     fun activeAt(timeUs: Long): Boolean = timeUs in timelineStartUs until timelineEndUs
 }
+
+fun TextOverlayClip.resolvedVideoTrackIdV3(project: TimelineProject): String? =
+    videoTrackIdV3?.takeIf { id -> project.track(id)?.kind == TrackKind.VIDEO }
+        ?: project.tracks.firstOrNull { it.kind == TrackKind.VIDEO }?.id
+
+fun TimelineProject.textOverlaysForVideoTrackV3(trackId: String): List<TextOverlayClip> =
+    textOverlays.filter { it.resolvedVideoTrackIdV3(this) == trackId }
 
 fun TimelineProject.activeTextOverlaysAt(timeUs: Long): List<TextOverlayClip> =
     textOverlays.filter { it.activeAt(timeUs) }
