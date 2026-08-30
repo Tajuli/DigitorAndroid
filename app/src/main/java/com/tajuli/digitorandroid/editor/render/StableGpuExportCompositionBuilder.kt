@@ -32,9 +32,14 @@ internal class StableGpuExportCompositionBuilder(
     private val sharedBuilder: Media3CompositionBuilder = Media3CompositionBuilder(),
 ) {
     fun build(project: TimelineProject): Composition =
-        if (canUseDirectSingleInputExport(project)) {
+        if (canUseDirectSingleInputExport(project) && textOverlaysAreCoveredByRealVideoV14(project)) {
             buildDirectSingleInput(project)
         } else {
+            // A composition-level text overlay that extends into a video gap (for example a title
+            // after the last clip) needs actual blank video frames for that interval. Some devices
+            // fail the SingleInputVideoGraph path when the sequence ends with a pure gap + overlay.
+            // The shared compositor path already owns full-duration blank-gap generation and is the
+            // Resolve-style path used for layered video, so route text-only gaps through it too.
             sharedBuilder.build(project)
         }
 
@@ -219,6 +224,23 @@ internal fun findLinkedEmbeddedAudioMirror(
                     audio.sourceOutUs == video.sourceOutUs
             }
         }
+}
+
+/**
+ * Direct SingleInputVideoGraph export is safe only while every title frame sits on top of a real
+ * decoded video frame. If a title crosses a blank V-track interval, especially after the final
+ * media clip, use the compositor path so Media3 produces full-duration blank video frames first.
+ */
+internal fun textOverlaysAreCoveredByRealVideoV14(project: TimelineProject): Boolean {
+    if (project.textOverlays.isEmpty()) return true
+    val clips = resolveCompositionVideoTracks(project).flatMap { it.clips }
+    if (clips.isEmpty()) return false
+    return project.textOverlays.all { overlay ->
+        clips.any { clip ->
+            overlay.timelineStartUs >= clip.timelineStartUs &&
+                overlay.timelineEndUs <= clip.timelineEndUs
+        }
+    }
 }
 
 /**
