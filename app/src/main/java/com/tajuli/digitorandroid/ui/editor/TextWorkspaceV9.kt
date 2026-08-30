@@ -3,6 +3,7 @@ package com.tajuli.digitorandroid.ui.editor
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,9 +26,12 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -35,7 +39,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,11 +55,13 @@ import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TextStyleV2
 import com.tajuli.digitorandroid.editor.model.TextTransformKeyframeV2
 import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
 import com.tajuli.digitorandroid.editor.model.resolvedEntryAnimationV2
 import com.tajuli.digitorandroid.editor.model.resolvedExitAnimationV2
 import com.tajuli.digitorandroid.editor.model.resolvedManualAnimationV2
 import com.tajuli.digitorandroid.editor.model.resolvedTextStyleV2
+import com.tajuli.digitorandroid.editor.model.resolvedVideoTrackIdV3
 import com.tajuli.digitorandroid.editor.model.textManualFrameV2
 import kotlin.math.max
 
@@ -63,22 +71,13 @@ private val TX9Divider = Color(0xFF292930)
 private val TX9Muted = Color(0xFF909098)
 private val TX9Accent = Color(0xFF30E0C3)
 private val TX9Key = Color(0xFFFFC857)
+private val TX9Danger = Color(0xFFFF7474)
 
 private enum class TextPageV9(val label: String) {
     INSPECTOR("Inspector"),
-    ANIMATE("Animate"),
+    ANIMATE("Keyframes"),
     TEMPLATES("Templates"),
 }
-
-private data class TextTemplateV9(
-    val label: String,
-    val style: TextStyleV2,
-    val bold: Boolean = true,
-    val positionY: Float = 0f,
-    val sizeScale: Float = 1f,
-    val entry: TextAnimationSpecV2 = TextAnimationSpecV2(),
-    val exit: TextAnimationSpecV2 = TextAnimationSpecV2(),
-)
 
 private val TextPaletteV9 = listOf(
     0xFFFFFFFFL,
@@ -91,86 +90,6 @@ private val TextPaletteV9 = listOf(
     0xFFFF8BCBL,
 )
 
-private val TextTemplatesV9 = listOf(
-    TextTemplateV9(
-        label = "Clean",
-        style = TextStyleV2(font = TextFontV2.SANS, colorArgb = 0xFFFFFFFFL),
-    ),
-    TextTemplateV9(
-        label = "Subtitle",
-        style = TextStyleV2(
-            font = TextFontV2.SANS,
-            colorArgb = 0xFFFFFFFFL,
-            backgroundEnabled = true,
-            backgroundArgb = 0xB0000000L,
-        ),
-        positionY = .72f,
-        sizeScale = .78f,
-        entry = TextAnimationSpecV2(TextAnimationV2.FADE, 220_000L),
-        exit = TextAnimationSpecV2(TextAnimationV2.FADE, 220_000L),
-    ),
-    TextTemplateV9(
-        label = "Bold Pop",
-        style = TextStyleV2(
-            font = TextFontV2.SANS,
-            colorArgb = 0xFFFFD54FL,
-            strokeWidth = 3.2f,
-            strokeArgb = 0xFF101010L,
-            shadowEnabled = true,
-            shadowArgb = 0x90000000L,
-            shadowRadius = 7f,
-            shadowDy = 4f,
-        ),
-        sizeScale = 1.12f,
-        entry = TextAnimationSpecV2(TextAnimationV2.SLIDE_UP, 320_000L),
-        exit = TextAnimationSpecV2(TextAnimationV2.FADE, 260_000L),
-    ),
-    TextTemplateV9(
-        label = "Neon",
-        style = TextStyleV2(
-            font = TextFontV2.SANS,
-            colorArgb = 0xFF65F5FFL,
-            strokeWidth = 1.4f,
-            strokeArgb = 0xFF12333CL,
-            shadowEnabled = true,
-            shadowArgb = 0xCC32E9FFL,
-            shadowRadius = 12f,
-        ),
-        entry = TextAnimationSpecV2(TextAnimationV2.SLIDE_LEFT, 380_000L),
-        exit = TextAnimationSpecV2(TextAnimationV2.FADE, 300_000L),
-    ),
-    TextTemplateV9(
-        label = "Creator",
-        style = TextStyleV2(
-            font = TextFontV2.CURSIVE,
-            colorArgb = 0xFFFFFFFFL,
-            strokeWidth = 2f,
-            strokeArgb = 0xFF171717L,
-            shadowEnabled = true,
-            shadowArgb = 0xA0000000L,
-            shadowRadius = 5f,
-            shadowDy = 2f,
-        ),
-        sizeScale = 1.08f,
-        entry = TextAnimationSpecV2(TextAnimationV2.SLIDE_RIGHT, 340_000L),
-        exit = TextAnimationSpecV2(TextAnimationV2.FADE, 260_000L),
-    ),
-    TextTemplateV9(
-        label = "Cinematic",
-        style = TextStyleV2(
-            font = TextFontV2.SERIF,
-            colorArgb = 0xFFF4F0E8L,
-            shadowEnabled = true,
-            shadowArgb = 0xA0000000L,
-            shadowRadius = 8f,
-        ),
-        bold = false,
-        sizeScale = .92f,
-        entry = TextAnimationSpecV2(TextAnimationV2.FADE, 650_000L),
-        exit = TextAnimationSpecV2(TextAnimationV2.FADE, 650_000L),
-    ),
-)
-
 @Composable
 fun TextWorkspaceV9(
     project: TimelineProject,
@@ -181,23 +100,43 @@ fun TextWorkspaceV9(
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val timelineSelectedTextId by TimelineTextSelectionBusV10.selectedTextId.collectAsState()
     val selected = project.textOverlays.firstOrNull { it.id == selectedTextId }
+    val targetTrack = vm.selectedVideoTrackForTextV10()
     var page by remember { mutableStateOf(TextPageV9.INSPECTOR) }
+
+    LaunchedEffect(timelineSelectedTextId, project.textOverlays) {
+        val pending = timelineSelectedTextId
+        if (pending != null && pending != selectedTextId && project.textOverlays.any { it.id == pending }) {
+            vm.selectTextOverlay(pending)
+        }
+    }
 
     Column(modifier.background(TX9Panel)) {
         Row(
-            Modifier.fillMaxWidth().height(36.dp).padding(horizontal = 8.dp),
+            Modifier.fillMaxWidth().height(38.dp).padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Text", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            Column {
+                Text("Text", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Add to ${targetTrack?.name ?: "select a V track"}",
+                    fontSize = 7.sp,
+                    color = TX9Muted,
+                )
+            }
             Spacer(Modifier.weight(1f))
-            FilledTonalButton(onClick = { vm.addTextAt(cursorUs, caption = false) }, modifier = Modifier.height(30.dp)) {
-                Text("+ Text", fontSize = 8.sp)
-            }
+            FilledTonalButton(
+                onClick = { vm.addTextAtSelectedVideoTrackV10(cursorUs, caption = false) },
+                enabled = targetTrack != null,
+                modifier = Modifier.height(30.dp),
+            ) { Text("+ Text", fontSize = 8.sp) }
             Spacer(Modifier.width(5.dp))
-            FilledTonalButton(onClick = { vm.addTextAt(cursorUs, caption = true) }, modifier = Modifier.height(30.dp)) {
-                Text("+ Caption", fontSize = 8.sp)
-            }
+            FilledTonalButton(
+                onClick = { vm.addTextAtSelectedVideoTrackV10(cursorUs, caption = true) },
+                enabled = targetTrack != null,
+                modifier = Modifier.height(30.dp),
+            ) { Text("+ Caption", fontSize = 8.sp) }
         }
         HorizontalDivider(color = TX9Divider)
 
@@ -206,14 +145,25 @@ fun TextWorkspaceV9(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 7.dp, vertical = 5.dp),
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
             ) {
-                project.textOverlays.forEach { item ->
+                project.textOverlays.sortedBy { it.timelineStartUs }.forEach { item ->
+                    val trackName = project.track(item.resolvedVideoTrackIdV3(project))?.name ?: "V?"
+                    val selectedChip = item.id == selectedTextId
                     Text(
-                        item.text.ifBlank { "Text" }.take(18),
+                        "$trackName · ${item.text.ifBlank { "Text" }.take(15)}",
                         fontSize = 8.sp,
-                        color = if (item.id == selectedTextId) TX9Accent else Color.White.copy(alpha = .7f),
+                        color = if (selectedChip) TX9Accent else Color.White.copy(alpha = .72f),
                         modifier = Modifier
                             .background(TX9Raised, RoundedCornerShape(5.dp))
-                            .clickable { vm.selectTextOverlay(item.id) }
+                            .border(
+                                if (selectedChip) 1.dp else .5.dp,
+                                if (selectedChip) TX9Accent else TX9Divider,
+                                RoundedCornerShape(5.dp),
+                            )
+                            .clickable {
+                                TimelineTextSelectionBusV10.select(item.id)
+                                vm.selectTextOverlay(item.id)
+                                onSeek(item.timelineStartUs)
+                            }
                             .padding(horizontal = 7.dp, vertical = 5.dp),
                     )
                 }
@@ -232,34 +182,55 @@ fun TextWorkspaceV9(
         }
         HorizontalDivider(color = TX9Divider)
 
-        if (selected == null) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Add or select a text clip", fontSize = 9.sp, color = TX9Muted)
-            }
-            return@Column
-        }
-
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(7.dp),
         ) {
             when (page) {
-                TextPageV9.INSPECTOR -> TextInspectorV9(selected, vm)
-                TextPageV9.ANIMATE -> TextAnimateV9(selected, cursorUs, frameRate, vm, onSeek)
-                TextPageV9.TEMPLATES -> TextTemplatesPanelV9(selected, vm)
+                TextPageV9.INSPECTOR -> {
+                    if (selected == null) EmptyTextV9("Select a title in the timeline or add a new one")
+                    else TextInspectorV9(project, selected, vm)
+                }
+                TextPageV9.ANIMATE -> {
+                    if (selected == null) EmptyTextV9("Select a title to animate")
+                    else TextAnimateV9(selected, cursorUs, frameRate, vm, onSeek)
+                }
+                TextPageV9.TEMPLATES -> TextTemplatesPanelV10(
+                    selected = selected,
+                    targetTrackName = targetTrack?.name,
+                    cursorUs = cursorUs,
+                    vm = vm,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun TextInspectorV9(item: TextOverlayClip, vm: EditorViewModelV4) {
+private fun EmptyTextV9(message: String) {
+    Box(Modifier.fillMaxWidth().height(90.dp), contentAlignment = Alignment.Center) {
+        Text(message, fontSize = 9.sp, color = TX9Muted)
+    }
+}
+
+@Composable
+private fun TextInspectorV9(project: TimelineProject, item: TextOverlayClip, vm: EditorViewModelV4) {
     val style = item.resolvedTextStyleV2()
+    val assignedTrackId = item.resolvedVideoTrackIdV3(project)
+
+    Text("Video track", fontSize = 8.sp, color = TX9Muted)
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        project.tracks.filter { it.kind == TrackKind.VIDEO }.forEach { track ->
+            ChoiceV9(track.name, assignedTrackId == track.id) {
+                vm.moveSelectedTextToVideoTrackV10(track.id)
+            }
+        }
+    }
 
     OutlinedTextField(
         value = item.text,
         onValueChange = { vm.updateSelectedText(text = it) },
-        label = { Text("Text", fontSize = 8.sp) },
+        label = { Text("Selected text", fontSize = 8.sp) },
         modifier = Modifier.fillMaxWidth(),
         maxLines = 3,
     )
@@ -274,10 +245,7 @@ private fun TextInspectorV9(item: TextOverlayClip, vm: EditorViewModelV4) {
     }
 
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Checkbox(
-            checked = item.bold,
-            onCheckedChange = { vm.commitTextOverlayV2(item.copy(bold = it)) },
-        )
+        Checkbox(checked = item.bold, onCheckedChange = { vm.commitTextOverlayV2(item.copy(bold = it)) })
         Text("Bold", fontSize = 8.sp, color = Color.White.copy(alpha = .75f))
     }
 
@@ -344,12 +312,15 @@ private fun TextInspectorV9(item: TextOverlayClip, vm: EditorViewModelV4) {
     CreatorSliderV9("X", item.positionX, -1f..1f) { vm.updateSelectedText(positionX = it) }
     CreatorSliderV9("Y", item.positionY, -1f..1f) { vm.updateSelectedText(positionY = it) }
     CreatorSliderV9("Size", item.sizeScale, .35f..2.5f) { vm.updateSelectedText(sizeScale = it) }
-    DurationSliderV9("Duration", item.durationUs, 10_000_000L) { vm.setSelectedTextDuration(it) }
+    DurationSliderV9("Duration", item.durationUs, 15_000_000L) { vm.setSelectedTextDuration(it) }
 
     Row {
         Spacer(Modifier.weight(1f))
-        TextButton(onClick = vm::deleteSelectedText) {
-            Text("Delete text", fontSize = 8.sp, color = Color(0xFFFF7474))
+        TextButton(onClick = {
+            TimelineTextSelectionBusV10.clear(item.id)
+            vm.deleteSelectedText()
+        }) {
+            Text("Delete text", fontSize = 8.sp, color = TX9Danger)
         }
     }
 }
@@ -375,16 +346,16 @@ private fun TextAnimateV9(
     )
     val currentKey = animation.keyframeNear(localUs, toleranceUs)
 
-    Text("Manual keyframes", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+    Text("DaVinci-style manual keyframes", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
     Text(
-        "Move the playhead, add a diamond, then change X / Y / Size / Opacity. Values interpolate between keyframes.",
+        "Place the playhead anywhere inside this title. Changing X, Y, Size or Opacity creates/updates a diamond at that frame; values interpolate between diamonds.",
         fontSize = 7.sp,
         color = TX9Muted,
     )
 
     if (!inside) {
         Button(onClick = { onSeek(item.timelineStartUs) }, modifier = Modifier.height(32.dp)) {
-            Text("Go to text clip", fontSize = 8.sp)
+            Text("Go to title", fontSize = 8.sp)
         }
     } else {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -415,7 +386,11 @@ private fun TextAnimateV9(
                 },
                 modifier = Modifier.height(32.dp),
             ) {
-                Text(if (currentKey != null) "◆ Remove" else "◇ Add keyframe", fontSize = 8.sp, color = if (currentKey != null) TX9Key else Color.Unspecified)
+                Text(
+                    if (currentKey != null) "◆ Remove" else "◇ Add keyframe",
+                    fontSize = 8.sp,
+                    color = if (currentKey != null) TX9Key else Color.Unspecified,
+                )
             }
         }
 
@@ -436,7 +411,7 @@ private fun TextAnimateV9(
 
         CommitSliderV9("X ◆", evaluated.positionX, -1f..1f) { commitFrame(evaluated.copy(positionX = it)) }
         CommitSliderV9("Y ◆", evaluated.positionY, -1f..1f) { commitFrame(evaluated.copy(positionY = it)) }
-        CommitSliderV9("Size ◆", evaluated.sizeScale, .35f..2.5f) { commitFrame(evaluated.copy(sizeScale = it)) }
+        CommitSliderV9("Size ◆", evaluated.sizeScale, .35f..3f) { commitFrame(evaluated.copy(sizeScale = it)) }
         CommitSliderV9("Opacity ◆", evaluated.alpha, 0f..1f) { commitFrame(evaluated.copy(alpha = it)) }
     }
 
@@ -462,7 +437,7 @@ private fun TextAnimateV9(
 
     HorizontalDivider(color = TX9Divider)
     Text("Quick in / out", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
-    Text("Optional preset motion can be combined with manual keyframes.", fontSize = 7.sp, color = TX9Muted)
+    Text("Preset motion can be combined with manual keyframes.", fontSize = 7.sp, color = TX9Muted)
     QuickAnimationV9("Entry", item, item.resolvedEntryAnimationV2(), true, vm)
     QuickAnimationV9("Exit", item, item.resolvedExitAnimationV2(), false, vm)
 }
@@ -504,44 +479,94 @@ private fun QuickAnimationV9(
 }
 
 @Composable
-private fun TextTemplatesPanelV9(item: TextOverlayClip, vm: EditorViewModelV4) {
-    Text("Ready text templates", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+private fun TextTemplatesPanelV10(
+    selected: TextOverlayClip?,
+    targetTrackName: String?,
+    cursorUs: Long,
+    vm: EditorViewModelV4,
+) {
+    var category by remember { mutableStateOf("All") }
+    var draggingId by remember { mutableStateOf<String?>(null) }
+    val filtered = remember(category) {
+        if (category == "All") TextTemplateCatalogV10 else TextTemplateCatalogV10.filter { it.category == category }
+    }
+
+    Text("Animated title templates", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
     Text(
-        "One-tap social templates. Apply a template, then fine-tune it in Inspector or Animate.",
+        "Tap Apply to style the selected title. Hold and drag any card, then release to drop a NEW title on ${targetTrackName ?: "the selected V track"} at the playhead.",
         fontSize = 7.sp,
         color = TX9Muted,
     )
 
-    TextTemplatesV9.forEach { template ->
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        TextTemplateCategoriesV10.forEach { item ->
+            ChoiceV9(item, category == item) { category = item }
+        }
+    }
+
+    if (draggingId != null) {
+        Surface(
+            modifier = Modifier.fillMaxWidth().border(1.dp, TX9Accent, RoundedCornerShape(8.dp)),
+            shape = RoundedCornerShape(8.dp),
+            color = TX9Accent.copy(alpha = .09f),
+        ) {
+            Text(
+                "Release → ${targetTrackName ?: "V track"} · ${formatSecondsV9(cursorUs)}",
+                modifier = Modifier.padding(10.dp),
+                fontSize = 9.sp,
+                color = TX9Accent,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+
+    filtered.forEach { template ->
+        val dragging = draggingId == template.id
         Row(
-            Modifier.fillMaxWidth().background(TX9Raised, RoundedCornerShape(7.dp)).padding(8.dp),
+            Modifier.fillMaxWidth()
+                .alpha(if (dragging) .62f else 1f)
+                .background(TX9Raised, RoundedCornerShape(8.dp))
+                .border(if (dragging) 1.dp else .5.dp, if (dragging) TX9Accent else TX9Divider, RoundedCornerShape(8.dp))
+                .pointerInput(template.id, targetTrackName, cursorUs) {
+                    detectDragGesturesAfterLongPress(
+                        onDragStart = { draggingId = template.id },
+                        onDragEnd = {
+                            draggingId = null
+                            if (targetTrackName != null) {
+                                vm.addTextAtSelectedVideoTrackV10(cursorUs, template = template)
+                            }
+                        },
+                        onDragCancel = { draggingId = null },
+                    ) { change, _ -> change.consume() }
+                }
+                .padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            Box(
+                Modifier.size(36.dp).background(Color(template.style.backgroundArgb.toInt()).copy(alpha = if (template.style.backgroundEnabled) 1f else .12f), RoundedCornerShape(6.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("Aa", fontSize = 11.sp, color = Color(template.style.colorArgb.toInt()), fontWeight = if (template.bold) FontWeight.Bold else FontWeight.Normal)
+            }
+            Spacer(Modifier.width(8.dp))
             Column(Modifier.weight(1f)) {
                 Text(template.label, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "${template.style.font.name.lowercase()} · ${template.entry.kind.name.lowercase().replace('_', ' ')}",
+                    "${template.category} · ${if (template.manualKeyframes.isNotEmpty()) "keyframed" else template.entry.kind.name.lowercase().replace('_', ' ')}",
                     fontSize = 7.sp,
                     color = TX9Muted,
                 )
+                Text("hold + drag to insert", fontSize = 6.sp, color = TX9Accent.copy(alpha = .8f))
             }
             Button(
                 onClick = {
-                    vm.commitTextOverlayV2(
-                        item.copy(
-                            styleV2 = template.style,
-                            bold = template.bold,
-                            positionY = template.positionY,
-                            sizeScale = template.sizeScale,
-                            entryAnimationV2 = template.entry,
-                            exitAnimationV2 = template.exit,
-                            manualAnimationV2 = null,
-                        ),
-                    )
+                    if (selected != null) vm.applyTemplateToSelectedTextV10(template)
+                    else if (targetTrackName != null) vm.addTextAtSelectedVideoTrackV10(cursorUs, template = template)
                 },
+                enabled = selected != null || targetTrackName != null,
                 modifier = Modifier.height(31.dp),
             ) {
-                Text("Apply", fontSize = 8.sp)
+                Text(if (selected != null) "Apply" else "Add", fontSize = 8.sp)
             }
         }
     }
@@ -594,7 +619,7 @@ private fun CommitSliderV9(
 ) {
     var draft by remember(value) { mutableFloatStateOf(value.coerceIn(range.start, range.endInclusive)) }
     Row(Modifier.fillMaxWidth().height(30.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, fontSize = 7.sp, color = TX9Muted, modifier = Modifier.width(64.dp))
+        Text(label, fontSize = 7.sp, color = TX9Muted, modifier = Modifier.width(70.dp))
         Slider(
             value = draft,
             onValueChange = { draft = it },
@@ -622,16 +647,17 @@ private fun CreatorSliderV9(
 
 @Composable
 private fun DurationSliderV9(label: String, valueUs: Long, maxUs: Long, onChange: (Long) -> Unit) {
-    val safeMax = maxUs.coerceAtLeast(1L)
-    val seconds = valueUs.coerceAtLeast(0L) / US_PER_SECOND.toFloat()
+    val maxSeconds = (maxUs / US_PER_SECOND.toFloat()).coerceAtLeast(.2f)
+    val seconds = (valueUs / US_PER_SECOND.toFloat()).coerceIn(.1f, maxSeconds)
     Row(Modifier.fillMaxWidth().height(30.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, fontSize = 7.sp, color = TX9Muted, modifier = Modifier.width(58.dp))
+        Text(label, fontSize = 7.sp, color = TX9Muted, modifier = Modifier.width(64.dp))
         Slider(
-            value = (valueUs.toFloat() / safeMax.toFloat()).coerceIn(0f, 1f),
-            onValueChange = { onChange((it * safeMax).toLong()) },
+            value = seconds,
+            onValueChange = { onChange((it * US_PER_SECOND).toLong()) },
+            valueRange = .1f..maxSeconds,
             modifier = Modifier.weight(1f),
         )
-        Text(String.format("%.1fs", seconds), fontSize = 7.sp, color = TX9Muted, modifier = Modifier.width(38.dp))
+        Text(String.format("%.1fs", seconds), fontSize = 7.sp, color = TX9Muted, modifier = Modifier.width(42.dp))
     }
 }
 
