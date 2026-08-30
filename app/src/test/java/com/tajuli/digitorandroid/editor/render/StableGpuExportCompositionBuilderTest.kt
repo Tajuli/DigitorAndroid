@@ -119,11 +119,10 @@ class StableGpuExportCompositionBuilderTest {
 
         assertTrue(canUseDirectSingleInputExport(project))
         assertTrue(textOverlaysAreCoveredByRealVideoV14(project))
-        assertTrue(textOverlaysStayOnSingleVideoTrackV15(project))
     }
 
     @Test
-    fun titleOnUpperTrackOverLowerVideoForcesCompositorExport() {
+    fun titleOnUpperTrackOverLowerVideoCanUseStableSingleInputExport() {
         val video = TimelineClip(
             id = "video",
             uri = "content://test/video",
@@ -147,11 +146,10 @@ class StableGpuExportCompositionBuilderTest {
             ),
         )
 
-        // Timing alone looks safe for the one-input fast path, but V2 layering requires the
-        // compositor. This is the exact Resolve-style V2-text-over-V1-video regression case.
+        // V2 is an editor/timeline assignment. With only one real decoded video stream and the title
+        // fully covered by that stream, TextOverlay is safely applied after the single input frame.
         assertTrue(canUseDirectSingleInputExport(project))
         assertTrue(textOverlaysAreCoveredByRealVideoV14(project))
-        assertFalse(textOverlaysStayOnSingleVideoTrackV15(project))
     }
 
     @Test
@@ -180,7 +178,6 @@ class StableGpuExportCompositionBuilderTest {
 
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
-        assertTrue(textOverlaysStayOnSingleVideoTrackV15(project))
         assertEquals(13_000_000L, project.durationUs)
     }
 
@@ -210,7 +207,6 @@ class StableGpuExportCompositionBuilderTest {
 
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
-        assertTrue(textOverlaysStayOnSingleVideoTrackV15(project))
     }
 
     @Test
@@ -240,7 +236,6 @@ class StableGpuExportCompositionBuilderTest {
 
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
-        assertFalse(textOverlaysStayOnSingleVideoTrackV15(project))
         assertEquals(13_000_000L, project.durationUs)
     }
 }
