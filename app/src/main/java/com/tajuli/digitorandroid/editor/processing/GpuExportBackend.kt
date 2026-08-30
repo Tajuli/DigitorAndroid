@@ -101,6 +101,12 @@ class GpuExportBackend(
             previewLease.close()
         }
 
+        fun cleanupFailedOutput() {
+            runCatching {
+                if (output.exists()) output.delete()
+            }
+        }
+
         val transformer = runCatching {
             val encoderFactory = DefaultEncoderFactory.Builder(context)
                 .setRequestedVideoEncoderSettings(
@@ -171,12 +177,14 @@ class GpuExportBackend(
                     ) {
                         stopCallbacks()
                         restorePreview()
+                        cleanupFailedOutput()
                         if (continuation.isActive) continuation.resumeWithException(exportException)
                     }
                 })
                 .build()
         }.getOrElse { error ->
             restorePreview()
+            cleanupFailedOutput()
             if (continuation.isActive) continuation.resumeWithException(error)
             return@suspendCancellableCoroutine
         }
@@ -213,6 +221,7 @@ class GpuExportBackend(
         val starter = Runnable {
             if (!continuation.isActive) {
                 restorePreview()
+                cleanupFailedOutput()
                 return@Runnable
             }
             onProgress(ExportProgress.Stage("GPU: MediaCodec + OpenGL export · ${quality.label}", 0.05f))
@@ -223,6 +232,7 @@ class GpuExportBackend(
             }.onFailure { error ->
                 stopCallbacks()
                 restorePreview()
+                cleanupFailedOutput()
                 if (continuation.isActive) continuation.resumeWithException(error)
             }
         }
@@ -231,7 +241,14 @@ class GpuExportBackend(
         continuation.invokeOnCancellation {
             stopCallbacks()
             restorePreview()
-            if (transformerStarted.get()) handler.post { runCatching { transformer.cancel() } }
+            if (transformerStarted.get()) {
+                handler.post {
+                    runCatching { transformer.cancel() }
+                    cleanupFailedOutput()
+                }
+            } else {
+                cleanupFailedOutput()
+            }
         }
 
         // Some Android codec stacks release native decoder/GL resources asynchronously even after
