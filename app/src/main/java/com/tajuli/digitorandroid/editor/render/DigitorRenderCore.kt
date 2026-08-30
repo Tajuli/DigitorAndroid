@@ -34,12 +34,11 @@ internal const val REALTIME_PREVIEW_LONG_EDGE = 720
  * path instead of the raw-code path and could stall before the first rendered frame. The render core
  * now treats the prepared layer format as the single source of truth for realtime graph metadata.
  *
- * Realtime preview intentionally downsizes only the FINAL compositor/output surface to at most
- * 720 px on the long edge. Source decoding and per-layer color/spatial effects still receive the
- * original decoder dimensions, so the shared 33^3 LUT, qualifier/node math and spatial shader are
- * evaluated on the same source pixels as export. Geometry is normalized in
- * [ResolveVideoCompositorSettings]. The only approximation is the final display resample; export
- * remains full project resolution.
+ * IMPORTANT: the compositor keeps the full project canvas. Overlay scale/position semantics in
+ * Media3 are relative to that canvas; shrinking the compositor itself made a scale=1 source larger
+ * than the canvas and therefore looked zoomed/cropped. Only the final viewer Surface is reduced to
+ * at most 720 px on the long edge. Source decoding, color/spatial effects and compositor geometry
+ * therefore stay export-compatible, and the final presentation is simply downsampled for display.
  */
 @UnstableApi
 internal class DigitorRenderCore(
@@ -107,12 +106,12 @@ internal class DigitorRenderCore(
     init {
         graph.initialize()
 
-        // Per-layer effects still run from the original decoder formats. Only the final compositor
-        // target is reduced for realtime display; export uses the full project canvas separately.
+        // Keep compositor geometry on the exact project canvas. The SurfaceInfo below owns the
+        // realtime 720p presentation size, so a scale=1 clip no longer gets cropped/zoomed.
         graph.setCompositorSettings(
             ResolveVideoCompositorSettings(
-                outputWidth = previewOutputWidth,
-                outputHeight = previewOutputHeight,
+                outputWidth = project.width,
+                outputHeight = project.height,
                 videoTracks = layers.map { it.track },
                 livePreview = true,
             ),
