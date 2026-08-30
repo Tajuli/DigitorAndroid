@@ -14,6 +14,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.resolvedVideoTrackIdV3
 
 /**
  * Stable export composition builder.
@@ -32,14 +33,18 @@ internal class StableGpuExportCompositionBuilder(
     private val sharedBuilder: Media3CompositionBuilder = Media3CompositionBuilder(),
 ) {
     fun build(project: TimelineProject): Composition =
-        if (canUseDirectSingleInputExport(project) && textOverlaysAreCoveredByRealVideoV14(project)) {
+        if (
+            canUseDirectSingleInputExport(project) &&
+            textOverlaysAreCoveredByRealVideoV14(project) &&
+            textOverlaysStayOnSingleVideoTrackV15(project)
+        ) {
             buildDirectSingleInput(project)
         } else {
-            // A composition-level text overlay that extends into a video gap (for example a title
-            // after the last clip) needs actual blank video frames for that interval. Some devices
-            // fail the SingleInputVideoGraph path when the sequence ends with a pure gap + overlay.
-            // The shared compositor path already owns full-duration blank-gap generation and is the
-            // Resolve-style path used for layered video, so route text-only gaps through it too.
+            // Resolve-style title placement is part of V-track compositing semantics. A title that
+            // sits on V2 above a V1 clip must not be flattened through the one-input fast path even
+            // when its time range is fully covered by the V1 frame. Route cross-track titles and
+            // title-only gaps through the shared compositor so track layering and blank-frame
+            // generation stay deterministic on device GPU stacks.
             sharedBuilder.build(project)
         }
 
@@ -240,6 +245,19 @@ internal fun textOverlaysAreCoveredByRealVideoV14(project: TimelineProject): Boo
             overlay.timelineStartUs >= clip.timelineStartUs &&
                 overlay.timelineEndUs <= clip.timelineEndUs
         }
+    }
+}
+
+/**
+ * The one-input fast path has no V-track layering concept. Keep it only when every title belongs to
+ * the same real V track that owns the sole decoded video stream. A V2/V3 title above V1 must use the
+ * compositor even if its time interval is fully covered by V1 video.
+ */
+internal fun textOverlaysStayOnSingleVideoTrackV15(project: TimelineProject): Boolean {
+    if (project.textOverlays.isEmpty()) return true
+    val singleVideoTrack = resolveCompositionVideoTracks(project).singleOrNull() ?: return false
+    return project.textOverlays.all { overlay ->
+        overlay.resolvedVideoTrackIdV3(project) == singleVideoTrack.id
     }
 }
 
