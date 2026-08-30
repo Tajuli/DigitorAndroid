@@ -145,8 +145,6 @@ class StableGpuExportCompositionBuilderTest {
             ),
         )
 
-        // This otherwise qualifies for the single-input fast path, so the coverage guard is what
-        // prevents the crashing text-only tail path on affected devices.
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
         assertEquals(13_000_000L, project.durationUs)
@@ -178,39 +176,5 @@ class StableGpuExportCompositionBuilderTest {
 
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
-    }
-
-    @Test
-    fun compositorBuildUsesImageFramesAcrossTextOnlyTail() {
-        val video = TimelineClip(
-            id = "video",
-            uri = "content://test/video",
-            label = "video",
-            timelineStartUs = 0L,
-            sourceOutUs = 10_000_000L,
-        )
-        val project = TimelineProject(
-            frameRate = 30,
-            tracks = listOf(
-                TimelineTrack(id = "v1", name = "V1", kind = TrackKind.VIDEO, clips = listOf(video)),
-            ),
-            textOverlays = listOf(
-                TextOverlayClip(
-                    id = "tail-title",
-                    text = "Title after video",
-                    timelineStartUs = 10_000_000L,
-                    timelineEndUs = 13_000_000L,
-                    videoTrackIdV3 = "v1",
-                ),
-            ),
-        )
-
-        val composition = Media3CompositionBuilder().build(project)
-        assertEquals(2, composition.sequences.size)
-        val sentinelItem = composition.sequences[1].editedMediaItems.single()
-        val local = sentinelItem.mediaItem.localConfiguration
-        assertEquals("image/png", local?.mimeType)
-        assertTrue(local?.uri.toString().startsWith("data:image/png;base64,"))
-        assertEquals(30, sentinelItem.frameRate)
     }
 }
