@@ -94,7 +94,7 @@ class StableGpuExportCompositionBuilderTest {
     }
 
     @Test
-    fun titleFullyInsideVideoCanKeepDirectSingleInputExport() {
+    fun titleFullyInsideSameVideoTrackCanKeepDirectSingleInputExport() {
         val video = TimelineClip(
             id = "video",
             uri = "content://test/video",
@@ -119,6 +119,39 @@ class StableGpuExportCompositionBuilderTest {
 
         assertTrue(canUseDirectSingleInputExport(project))
         assertTrue(textOverlaysAreCoveredByRealVideoV14(project))
+        assertTrue(textOverlaysStayOnSingleVideoTrackV15(project))
+    }
+
+    @Test
+    fun titleOnUpperTrackOverLowerVideoForcesCompositorExport() {
+        val video = TimelineClip(
+            id = "video",
+            uri = "content://test/video",
+            label = "video",
+            timelineStartUs = 0L,
+            sourceOutUs = 10_000_000L,
+        )
+        val project = TimelineProject(
+            tracks = listOf(
+                TimelineTrack(id = "v1", name = "V1", kind = TrackKind.VIDEO, clips = listOf(video)),
+                TimelineTrack(id = "v2", name = "V2", kind = TrackKind.VIDEO),
+            ),
+            textOverlays = listOf(
+                TextOverlayClip(
+                    id = "upper-title",
+                    text = "Upper title",
+                    timelineStartUs = 2_000_000L,
+                    timelineEndUs = 6_000_000L,
+                    videoTrackIdV3 = "v2",
+                ),
+            ),
+        )
+
+        // Timing alone looks safe for the one-input fast path, but V2 layering requires the
+        // compositor. This is the exact Resolve-style V2-text-over-V1-video regression case.
+        assertTrue(canUseDirectSingleInputExport(project))
+        assertTrue(textOverlaysAreCoveredByRealVideoV14(project))
+        assertFalse(textOverlaysStayOnSingleVideoTrackV15(project))
     }
 
     @Test
@@ -147,6 +180,7 @@ class StableGpuExportCompositionBuilderTest {
 
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
+        assertTrue(textOverlaysStayOnSingleVideoTrackV15(project))
         assertEquals(13_000_000L, project.durationUs)
     }
 
@@ -176,6 +210,7 @@ class StableGpuExportCompositionBuilderTest {
 
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
+        assertTrue(textOverlaysStayOnSingleVideoTrackV15(project))
     }
 
     @Test
@@ -205,6 +240,7 @@ class StableGpuExportCompositionBuilderTest {
 
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
+        assertFalse(textOverlaysStayOnSingleVideoTrackV15(project))
         assertEquals(13_000_000L, project.durationUs)
     }
 }
