@@ -16,6 +16,12 @@ private val sourceDurationCacheV13 = ConcurrentHashMap<String, Long>()
 
 /** Resize the left edge of a title while keeping its right edge fixed. */
 fun EditorViewModelV4.resizeTextStartV13(textId: String, requestedStartUs: Long) {
+    val activeVm = ActiveEditorVmRegistryV14.current()
+    if (activeVm != null && activeVm !== this) {
+        activeVm.resizeTextStartV13(textId, requestedStartUs)
+        return
+    }
+
     val snapshot = state.value
     val current = snapshot.project.textOverlays.firstOrNull { it.id == textId } ?: return
     val trackId = current.resolvedVideoTrackIdV3(snapshot.project) ?: return
@@ -45,6 +51,12 @@ fun EditorViewModelV4.resizeTextStartV13(textId: String, requestedStartUs: Long)
 
 /** Resize the right edge of a title with no fixed maximum duration. */
 fun EditorViewModelV4.resizeTextEndV13(textId: String, requestedEndUs: Long) {
+    val activeVm = ActiveEditorVmRegistryV14.current()
+    if (activeVm != null && activeVm !== this) {
+        activeVm.resizeTextEndV13(textId, requestedEndUs)
+        return
+    }
+
     val snapshot = state.value
     val current = snapshot.project.textOverlays.firstOrNull { it.id == textId } ?: return
     val trackId = current.resolvedVideoTrackIdV3(snapshot.project) ?: return
@@ -78,6 +90,12 @@ fun EditorViewModelV4.resizeTextEndV13(textId: String, requestedEndUs: Long) {
  * still exists before sourceInUs. The timeline end stays fixed. Linked source audio follows.
  */
 fun EditorViewModelV4.resizeVideoClipStartV13(clipId: String, requestedStartUs: Long) {
+    val activeVm = ActiveEditorVmRegistryV14.current()
+    if (activeVm != null && activeVm !== this) {
+        activeVm.resizeVideoClipStartV13(clipId, requestedStartUs)
+        return
+    }
+
     val snapshot = state.value
     val clip = snapshot.project.clip(clipId) ?: return
     val track = snapshot.project.trackContaining(clipId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return
@@ -137,6 +155,12 @@ fun EditorViewModelV4.resizeVideoClipStartV13(clipId: String, requestedStartUs: 
  * were trimmed away by the split, up to the original media duration. Linked source audio follows.
  */
 fun EditorViewModelV4.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long) {
+    val activeVm = ActiveEditorVmRegistryV14.current()
+    if (activeVm != null && activeVm !== this) {
+        activeVm.resizeVideoClipEndV13(clipId, requestedEndUs)
+        return
+    }
+
     val snapshot = state.value
     val clip = snapshot.project.clip(clipId) ?: return
     val track = snapshot.project.trackContaining(clipId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return
