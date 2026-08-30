@@ -1,6 +1,7 @@
 package com.tajuli.digitorandroid.editor.model
 
 import com.tajuli.digitorandroid.ui.editor.TextTemplateCatalogV10
+import com.tajuli.digitorandroid.ui.editor.appendTextStartV11
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -55,6 +56,35 @@ class TextTrackAndTemplateV10Test {
         assertTrue(project.videoTrackSlotAvailableV3(v1.id, 3_000_000L, 4_000_000L))
         // V2 is independent, so a title there can sit over V1's video and remain visible.
         assertTrue(project.videoTrackSlotAvailableV3(v2.id, 500_000L, 1_500_000L))
+    }
+
+    @Test
+    fun newText_appendsAfterLastItemOnSelectedVideoTrack() {
+        val firstVideo = TimelineClip(
+            uri = "file://one.mp4",
+            label = "One",
+            timelineStartUs = 0L,
+            sourceOutUs = 2_000_000L,
+        )
+        val v1 = TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(firstVideo))
+        val title = TextOverlayClip(
+            text = "Title",
+            timelineStartUs = 2_000_000L,
+            timelineEndUs = 4_000_000L,
+            videoTrackIdV3 = v1.id,
+        )
+        val project = TimelineProject(tracks = listOf(v1), textOverlays = listOf(title))
+
+        // Playhead position must not force a new title into an earlier gap once V1 already has items.
+        assertEquals(4_000_000L, project.appendTextStartV11(v1.id, 500_000L))
+    }
+
+    @Test
+    fun newText_onEmptyVideoTrack_usesPlayhead() {
+        val v1 = TimelineTrack(name = "V1", kind = TrackKind.VIDEO)
+        val project = TimelineProject(tracks = listOf(v1))
+
+        assertEquals(1_500_000L, project.appendTextStartV11(v1.id, 1_500_000L))
     }
 
     @Test
