@@ -503,28 +503,34 @@ private fun TextClipV10(
         }
 
         if (selected) {
-            EdgeHandleV13(
+            EdgeHandleV14(
                 left = true,
                 onPreviewDeltaPx = { deltaPx ->
                     val deltaUs = deltaPx / pps * US_PER_SECOND
                     previewStartUs = (overlay.timelineStartUs + deltaUs.roundToLong())
                         .coerceIn(0L, overlay.timelineEndUs - T4_MIN_TRIM_US)
                 },
-                onCommit = {
-                    previewStartUs?.let { vm.resizeTextStartV13(overlay.id, it) }
+                onCommitDeltaPx = { deltaPx ->
+                    val deltaUs = deltaPx / pps * US_PER_SECOND
+                    val targetStartUs = (overlay.timelineStartUs + deltaUs.roundToLong())
+                        .coerceIn(0L, overlay.timelineEndUs - T4_MIN_TRIM_US)
+                    vm.resizeTextStartV13(overlay.id, targetStartUs)
                     previewStartUs = null
                 },
                 onCancel = { previewStartUs = null },
             )
-            EdgeHandleV13(
+            EdgeHandleV14(
                 left = false,
                 onPreviewDeltaPx = { deltaPx ->
                     val deltaUs = deltaPx / pps * US_PER_SECOND
                     previewEndUs = (overlay.timelineEndUs + deltaUs.roundToLong())
                         .coerceAtLeast(overlay.timelineStartUs + T4_MIN_TRIM_US)
                 },
-                onCommit = {
-                    previewEndUs?.let { vm.resizeTextEndV13(overlay.id, it) }
+                onCommitDeltaPx = { deltaPx ->
+                    val deltaUs = deltaPx / pps * US_PER_SECOND
+                    val targetEndUs = (overlay.timelineEndUs + deltaUs.roundToLong())
+                        .coerceAtLeast(overlay.timelineStartUs + T4_MIN_TRIM_US)
+                    vm.resizeTextEndV13(overlay.id, targetEndUs)
                     previewEndUs = null
                 },
                 onCancel = { previewEndUs = null },
@@ -624,28 +630,34 @@ private fun ClipV4(
         }
 
         if (selected && track.kind == TrackKind.VIDEO) {
-            EdgeHandleV13(
+            EdgeHandleV14(
                 left = true,
                 onPreviewDeltaPx = { deltaPx ->
                     val deltaUs = deltaPx / pps * US_PER_SECOND
                     previewStartUs = (clip.timelineStartUs + deltaUs.roundToLong())
                         .coerceIn(0L, clip.timelineEndUs - T4_MIN_TRIM_US)
                 },
-                onCommit = {
-                    previewStartUs?.let { vm.resizeVideoClipStartV13(clip.id, it) }
+                onCommitDeltaPx = { deltaPx ->
+                    val deltaUs = deltaPx / pps * US_PER_SECOND
+                    val targetStartUs = (clip.timelineStartUs + deltaUs.roundToLong())
+                        .coerceIn(0L, clip.timelineEndUs - T4_MIN_TRIM_US)
+                    vm.resizeVideoClipStartV13(clip.id, targetStartUs)
                     previewStartUs = null
                 },
                 onCancel = { previewStartUs = null },
             )
-            EdgeHandleV13(
+            EdgeHandleV14(
                 left = false,
                 onPreviewDeltaPx = { deltaPx ->
                     val deltaUs = deltaPx / pps * US_PER_SECOND
                     previewEndUs = (clip.timelineEndUs + deltaUs.roundToLong())
                         .coerceAtLeast(clip.timelineStartUs + T4_MIN_TRIM_US)
                 },
-                onCommit = {
-                    previewEndUs?.let { vm.resizeVideoClipEndV13(clip.id, it) }
+                onCommitDeltaPx = { deltaPx ->
+                    val deltaUs = deltaPx / pps * US_PER_SECOND
+                    val targetEndUs = (clip.timelineEndUs + deltaUs.roundToLong())
+                        .coerceAtLeast(clip.timelineStartUs + T4_MIN_TRIM_US)
+                    vm.resizeVideoClipEndV13(clip.id, targetEndUs)
                     previewEndUs = null
                 },
                 onCancel = { previewEndUs = null },
@@ -655,10 +667,10 @@ private fun ClipV4(
 }
 
 @Composable
-private fun EdgeHandleV13(
+private fun androidx.compose.foundation.layout.BoxScope.EdgeHandleV14(
     left: Boolean,
     onPreviewDeltaPx: (Float) -> Unit,
-    onCommit: () -> Unit,
+    onCommitDeltaPx: (Float) -> Unit,
     onCancel: () -> Unit,
 ) {
     var totalPx by remember { mutableFloatStateOf(0f) }
@@ -671,8 +683,15 @@ private fun EdgeHandleV13(
             .pointerInput(left) {
                 detectDragGestures(
                     onDragStart = { totalPx = 0f },
-                    onDragEnd = { onCommit(); totalPx = 0f },
-                    onDragCancel = { onCancel(); totalPx = 0f },
+                    onDragEnd = {
+                        val committedDeltaPx = totalPx
+                        onCommitDeltaPx(committedDeltaPx)
+                        totalPx = 0f
+                    },
+                    onDragCancel = {
+                        onCancel()
+                        totalPx = 0f
+                    },
                 ) { change, drag ->
                     change.consume()
                     totalPx += drag.x
