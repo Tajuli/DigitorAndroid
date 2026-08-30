@@ -53,8 +53,11 @@ fun EditorViewModelV4.addTextAtSelectedVideoTrackV10(
 ) {
     val snapshot = state.value
     val track = selectedVideoTrackForTextV10() ?: return
-    val startUs = timelineUs.coerceAtLeast(0L)
-    val endUs = snapshot.project.fitTextEndV10(track.id, startUs, 3_000_000L) ?: return
+    // Match media-import behaviour: once a V track contains timeline items, a newly added title is
+    // appended after the last video/text item instead of being inserted into an earlier empty gap.
+    // On an empty V track the playhead is still a useful insertion point.
+    val startUs = snapshot.project.appendTextStartV11(track.id, timelineUs)
+    val endUs = startUs + 3_000_000L
     var overlay = TextOverlayClip(
         text = when {
             template != null -> template.label
@@ -137,21 +140,17 @@ fun EditorViewModelV4.applyTemplateToSelectedTextV10(template: TextTemplatePrese
     TimelineTextSelectionBusV10.select(selected.id)
 }
 
-/** Find a legal title duration in the selected V-track gap, without inserting over a video/title. */
-private fun TimelineProject.fitTextEndV10(trackId: String, startUs: Long, preferredDurationUs: Long): Long? {
-    val track = track(trackId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return null
-    val safeStart = startUs.coerceAtLeast(0L)
-    val media = track.clips
-    val titles = textOverlaysForVideoTrackV3(trackId)
-    val occupiedAtStart = media.any { safeStart in it.timelineStartUs until it.timelineEndUs } ||
-        titles.any { safeStart in it.timelineStartUs until it.timelineEndUs }
-    if (occupiedAtStart) return null
-
-    val nextStartUs = (media.map { it.timelineStartUs } + titles.map { it.timelineStartUs })
-        .filter { it > safeStart }
-        .minOrNull()
-    val endUs = minOf(safeStart + preferredDurationUs.coerceAtLeast(100_000L), nextStartUs ?: Long.MAX_VALUE)
-    return endUs.takeIf { it - safeStart >= 100_000L }
+/**
+ * Resolve-style append point for a new text/title item.
+ * If the V track already has either media or text, append after whichever item ends last.
+ * Otherwise keep the requested playhead position.
+ */
+internal fun TimelineProject.appendTextStartV11(trackId: String, requestedUs: Long): Long {
+    val track = track(trackId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return requestedUs.coerceAtLeast(0L)
+    val mediaEndUs = track.clips.maxOfOrNull { it.timelineEndUs } ?: 0L
+    val textEndUs = textOverlaysForVideoTrackV3(trackId).maxOfOrNull { it.timelineEndUs } ?: 0L
+    val occupiedEndUs = maxOf(mediaEndUs, textEndUs)
+    return if (occupiedEndUs > 0L) occupiedEndUs else requestedUs.coerceAtLeast(0L)
 }
 
 private fun EditorViewModelV4.commitTextProjectV10(
