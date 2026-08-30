@@ -47,28 +47,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
-/**
- * Direct display surface for the editor GPU preview.
- *
- * MediaCodec frames are composited by DigitorRenderCore/OpenGL straight into this SurfaceView.
- * There is no ImageReader, Bitmap readback, Compose texture upload or per-tick player seek in the
- * healthy preview path. PixelCopy is used only for an explicit HSL-picker tap and copies a tiny
- * neighborhood from the already-rendered Surface; it never opens another decoder.
- *
- * Realtime editing uses a 720p-long-edge final Surface buffer while the render core keeps the full
- * project compositor canvas. This avoids changing Media3 overlay geometry while still reducing the
- * final display surface. Source decoding and the shared LUT/spatial pipeline remain source-accurate.
- *
- * Some vendor codecs can decode a valid camera Log file but take too long to deliver a requested GPU
- * frame. Fallback activation is timestamp-aware: an old successful GPU frame does not count as the
- * frame for a new playhead seek. On a large stale seek we immediately expose the fallback path. Its
- * first decode uses the closest sync frame for fast visibility, then replaces it with the exact
- * requested frame while the GPU path keeps working in parallel.
- *
- * Export owns the device video resources exclusively. While an export lease is active the software
- * fallback is disabled as well as the GPU preview, preventing a hidden MediaMetadataRetriever decode
- * from racing Transformer and crashing fragile vendor codec stacks.
- */
+/** Direct display surface for the editor GPU preview. */
 @Composable
 fun GpuPreviewSurface(
     engine: DavinciFramePreviewEngine,
@@ -85,9 +64,7 @@ fun GpuPreviewSurface(
 
     val sourceWidth = project?.width?.coerceAtLeast(2) ?: 1920
     val sourceHeight = project?.height?.coerceAtLeast(2) ?: 1080
-    val previewOutputSize = project?.let {
-        resolvePreviewOutputSize(it, REALTIME_PREVIEW_LONG_EDGE)
-    }
+    val previewOutputSize = project?.let { resolvePreviewOutputSize(it, REALTIME_PREVIEW_LONG_EDGE) }
     val renderWidth = previewOutputSize?.first ?: 1280
     val renderHeight = previewOutputSize?.second ?: 720
     val projectAspect = sourceWidth.toFloat() / sourceHeight.toFloat()
@@ -95,7 +72,11 @@ fun GpuPreviewSurface(
         track.kind == TrackKind.VIDEO && !track.muted && track.clips.isNotEmpty()
     } == true
 
-    val fallbackClip = project?.clip(previewClock.clipId)
+    // PreviewTransformClock is cleared whenever the playhead is not inside a video clip. The
+    // underlying SurfaceView may still physically contain the last decoded frame, so activeClip is
+    // also used below to cover that stale Surface with the pasteboard until a real clip is active.
+    val activeClip = project?.clip(previewClock.clipId)
+    val fallbackClip = activeClip
     val requestedTimelineUs = fallbackClip?.let { clip ->
         (clip.timelineStartUs + previewClock.localUs)
             .coerceIn(clip.timelineStartUs, clip.timelineEndUs.coerceAtLeast(clip.timelineStartUs))
@@ -114,7 +95,6 @@ fun GpuPreviewSurface(
     var softwareFallbackActive by remember(engine) { mutableStateOf(false) }
     var previewView by remember(engine) { mutableStateOf<DigitorPreviewSurfaceView?>(null) }
 
-    // First-ever frame: allow a very short GPU grace period, then show fallback rather than black.
     LaunchedEffect(engine, hasVideo, gpuFrame?.timelineUs, exportActive) {
         when {
             exportActive -> softwareFallbackActive = false
@@ -128,9 +108,6 @@ fun GpuPreviewSurface(
         }
     }
 
-    // Seeking after a GPU frame already exists used to remain black because `gpuFrame != null` was
-    // treated as ready even when that frame belonged to the old cursor position. Large timestamp
-    // mismatch now activates fallback immediately; a fresh GPU frame turns it off again.
     LaunchedEffect(
         staleRequestedFrame,
         requestedTimelineUs,
@@ -145,8 +122,6 @@ fun GpuPreviewSurface(
         }
     }
 
-    // Follow project frame cadence, capped at 30 fps for thermal safety on devices that need the
-    // software fallback. It still uses the shared color LUT for each displayed frame.
     val fallbackPreviewFps = project?.frameRate?.coerceIn(12, 30) ?: 24
     val fallbackFrameStepUs = 1_000_000L / fallbackPreviewFps.toLong()
     val fallbackLocalUs = if (softwareFallbackActive && !exportActive) {
@@ -170,9 +145,6 @@ fun GpuPreviewSurface(
         val sourceUs = (clip.sourceInUs + fallbackLocalUs)
             .coerceIn(clip.sourceInUs, clip.sourceOutUs.coerceAtLeast(clip.sourceInUs))
 
-        // A freshly activated fallback should not make the user wait for a long GOP walk. Show a
-        // small nearest-keyframe placeholder first. `produceState` keeps that value visible while
-        // the exact OPTION_CLOSEST decode below is still running.
         if (value == null) {
             val fastFrame = withContext(Dispatchers.Default) {
                 SoftwarePreviewRenderer.render(
@@ -237,11 +209,7 @@ fun GpuPreviewSurface(
         modifier = modifier.background(PREVIEW_PASTEBOARD_GRAY),
         contentAlignment = Alignment.Center,
     ) {
-        val availableAspect = if (maxHeight.value > 0f) {
-            maxWidth.value / maxHeight.value
-        } else {
-            projectAspect
-        }
+        val availableAspect = if (maxHeight.value > 0f) maxWidth.value / maxHeight.value else projectAspect
         val fittedModifier = if (availableAspect > projectAspect) {
             Modifier.fillMaxHeight().aspectRatio(projectAspect)
         } else {
@@ -260,21 +228,13 @@ fun GpuPreviewSurface(
             },
             update = { view ->
                 if (previewView !== view) previewView = view
-                view.bind(
-                    nextEngine = engine,
-                    nextBufferWidth = renderWidth,
-                    nextBufferHeight = renderHeight,
-                )
+                view.bind(nextEngine = engine, nextBufferWidth = renderWidth, nextBufferHeight = renderHeight)
             },
         )
 
         val softwareFrame = fallbackBitmap
         val showingSoftwareFrame =
-            !exportActive &&
-                softwareFallbackActive &&
-                !gpuFrameFresh &&
-                softwareFrame != null &&
-                !softwareFrame.isRecycled
+            !exportActive && softwareFallbackActive && !gpuFrameFresh && softwareFrame != null && !softwareFrame.isRecycled
 
         if (showingSoftwareFrame && softwareFrame != null) {
             Image(
@@ -285,10 +245,14 @@ fun GpuPreviewSurface(
             )
         }
 
-        // HSL qualification samples the pixels the user can already see. When fallback is on, read
-        // its in-memory bitmap. Otherwise PixelCopy reads a tiny Surface neighborhood asynchronously.
-        // Neither route opens MediaMetadataRetriever or another MediaCodec decoder.
-        if (qualifierPickerActive && onQualifierColorSample != null && !exportActive) {
+        // Do not hold the last decoded image after the playhead leaves the clip. SurfaceView keeps
+        // its previous buffer by design, so cover it until PreviewTransformClock points to a real
+        // active video clip again.
+        if (activeClip == null) {
+            Box(fittedModifier.background(PREVIEW_PASTEBOARD_GRAY))
+        }
+
+        if (qualifierPickerActive && onQualifierColorSample != null && !exportActive && activeClip != null) {
             Box(
                 fittedModifier.pointerInput(
                     previewView,
@@ -338,7 +302,6 @@ private fun sampleBitmapFitColor(
     viewHeight: Float,
 ): FloatArray? {
     if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0 || viewWidth <= 0f || viewHeight <= 0f) return null
-
     val scale = min(viewWidth / bitmap.width.toFloat(), viewHeight / bitmap.height.toFloat())
     val shownWidth = bitmap.width * scale
     val shownHeight = bitmap.height * scale
@@ -346,12 +309,8 @@ private fun sampleBitmapFitColor(
     val top = (viewHeight - shownHeight) * .5f
     if (tapX < left || tapX >= left + shownWidth || tapY < top || tapY >= top + shownHeight) return null
 
-    val centerX = (((tapX - left) / shownWidth) * bitmap.width)
-        .toInt()
-        .coerceIn(0, bitmap.width - 1)
-    val centerY = (((tapY - top) / shownHeight) * bitmap.height)
-        .toInt()
-        .coerceIn(0, bitmap.height - 1)
+    val centerX = (((tapX - left) / shownWidth) * bitmap.width).toInt().coerceIn(0, bitmap.width - 1)
+    val centerY = (((tapY - top) / shownHeight) * bitmap.height).toInt().coerceIn(0, bitmap.height - 1)
     return averageBitmapNeighborhood(bitmap, centerX, centerY)
 }
 
@@ -380,7 +339,6 @@ private class DigitorPreviewSurfaceView(
     initialBufferWidth: Int,
     initialBufferHeight: Int,
 ) : SurfaceView(context), SurfaceHolder.Callback {
-
     private var engine: DavinciFramePreviewEngine = initialEngine
     private var attachedSurface: android.view.Surface? = null
     private var bufferWidth = initialBufferWidth.coerceAtLeast(2)
@@ -392,26 +350,19 @@ private class DigitorPreviewSurfaceView(
         holder.addCallback(this)
     }
 
-    fun bind(
-        nextEngine: DavinciFramePreviewEngine,
-        nextBufferWidth: Int,
-        nextBufferHeight: Int,
-    ) {
+    fun bind(nextEngine: DavinciFramePreviewEngine, nextBufferWidth: Int, nextBufferHeight: Int) {
         val safeWidth = nextBufferWidth.coerceAtLeast(2)
         val safeHeight = nextBufferHeight.coerceAtLeast(2)
         val engineChanged = engine !== nextEngine
-
         if (engineChanged) {
             attachedSurface?.let { engine.detachSurface(it) }
             engine = nextEngine
         }
-
         if (bufferWidth != safeWidth || bufferHeight != safeHeight) {
             bufferWidth = safeWidth
             bufferHeight = safeHeight
             holder.setFixedSize(bufferWidth, bufferHeight)
         }
-
         if (engineChanged) {
             attachedSurface?.takeIf { it.isValid }?.let {
                 engine.attachSurface(it)
@@ -420,20 +371,11 @@ private class DigitorPreviewSurfaceView(
         }
     }
 
-    fun sampleVisibleColor(
-        normalizedX: Float,
-        normalizedY: Float,
-        onColor: (Float, Float, Float) -> Unit,
-    ) {
+    fun sampleVisibleColor(normalizedX: Float, normalizedY: Float, onColor: (Float, Float, Float) -> Unit) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
         val surface = attachedSurface?.takeIf { it.isValid } ?: holder.surface.takeIf { it.isValid } ?: return
-
-        val centerX = (normalizedX.coerceIn(0f, 1f) * (bufferWidth - 1))
-            .toInt()
-            .coerceIn(0, bufferWidth - 1)
-        val centerY = (normalizedY.coerceIn(0f, 1f) * (bufferHeight - 1))
-            .toInt()
-            .coerceIn(0, bufferHeight - 1)
+        val centerX = (normalizedX.coerceIn(0f, 1f) * (bufferWidth - 1)).toInt().coerceIn(0, bufferWidth - 1)
+        val centerY = (normalizedY.coerceIn(0f, 1f) * (bufferHeight - 1)).toInt().coerceIn(0, bufferHeight - 1)
         val sourceRect = Rect(
             (centerX - 1).coerceAtLeast(0),
             (centerY - 1).coerceAtLeast(0),
@@ -451,11 +393,7 @@ private class DigitorPreviewSurfaceView(
                 { result ->
                     try {
                         if (result == PixelCopy.SUCCESS && !sample.isRecycled) {
-                            val rgb = averageBitmapNeighborhood(
-                                sample,
-                                sample.width / 2,
-                                sample.height / 2,
-                            )
+                            val rgb = averageBitmapNeighborhood(sample, sample.width / 2, sample.height / 2)
                             onColor(rgb[0], rgb[1], rgb[2])
                         }
                     } finally {
