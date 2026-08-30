@@ -117,6 +117,7 @@ class StableGpuExportCompositionBuilderTest {
             ),
         )
 
+        assertTrue(canUseDirectSingleInputExport(project))
         assertTrue(textOverlaysAreCoveredByRealVideoV14(project))
     }
 
@@ -144,6 +145,9 @@ class StableGpuExportCompositionBuilderTest {
             ),
         )
 
+        // This otherwise qualifies for the single-input fast path, so the coverage guard is what
+        // prevents the crashing text-only tail path on affected devices.
+        assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
         assertEquals(13_000_000L, project.durationUs)
     }
@@ -172,6 +176,7 @@ class StableGpuExportCompositionBuilderTest {
             ),
         )
 
+        assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
     }
 }
