@@ -109,6 +109,7 @@ private class TimedDigitorTextOverlay(
                 (manual.positionX + preset.offsetX).coerceIn(-1f, 1f),
                 -(manual.positionY + preset.offsetY).coerceIn(-1f, 1f),
             )
+            .setRotationDegrees(manual.rotationDegrees)
             .build()
     }
 
