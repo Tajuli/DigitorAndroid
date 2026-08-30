@@ -117,6 +117,10 @@ fun EditWorkspaceV5(
                 onDelete = onDelete,
                 onUnlink = onUnlink,
                 onImport = onImport,
+                onSelectText = vm::selectTextOverlay,
+                onMoveText = vm::moveTextOverlayV10,
+                onMoveTextToTrack = vm::moveTextOverlayToVideoTrackV10,
+                onDeleteText = vm::deleteSelectedText,
                 modifier = Modifier.fillMaxSize(),
             )
 
