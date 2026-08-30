@@ -78,14 +78,10 @@ private val T4Magnet = Color(0xFFFFC857)
 private val T4Video = Color(0xFF385B78)
 private val T4Audio = Color(0xFF315F57)
 private val T4Text = Color(0xFF675089)
-private const val T4_AUDIO_TRACK_HEIGHT = 38f
-private const val T4_VIDEO_TRACK_HEIGHT = 58f
+private const val T4_TRACK_HEIGHT = 38f
 private const val T4_DELETE_TRACK_ACTION = "__digitor_delete_track__:"
 
 private data class T4SnapResult(val deltaUs: Long, val magnet: Boolean)
-
-private fun TimelineTrack.heightV10(): Dp =
-    if (kind == TrackKind.VIDEO) T4_VIDEO_TRACK_HEIGHT.dp else T4_AUDIO_TRACK_HEIGHT.dp
 
 @Composable
 fun TimelineEditorV4(
@@ -104,6 +100,10 @@ fun TimelineEditorV4(
     onDelete: () -> Unit,
     onUnlink: () -> Unit,
     onImport: () -> Unit,
+    onSelectText: (String) -> Unit = {},
+    onMoveText: (String, Long) -> Unit = { _, _ -> },
+    onMoveTextToTrack: (String, String) -> Unit = { _, _ -> },
+    onDeleteText: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val scroll = rememberScrollState()
@@ -134,20 +134,20 @@ fun TimelineEditorV4(
 
         Column(Modifier.fillMaxSize()) {
             TimelineToolbarV4(
-                selectedCount = selectedClipIds.size,
+                selectedClipCount = selectedClipIds.size,
+                textSelected = selectedTextId != null,
                 zoom = zoom,
                 onZoom = { zoom = it.coerceIn(0f, 1f) },
                 onAddVideoTrack = onAddVideoTrack,
                 onAddAudioTrack = onAddAudioTrack,
                 onSplit = onSplit,
-                onDelete = onDelete,
+                onDelete = { if (selectedTextId != null) onDeleteText() else onDelete() },
                 onUnlink = onUnlink,
                 onImport = onImport,
             )
 
             Row(Modifier.weight(1f)) {
                 Column(Modifier.width(56.dp)) {
-                    // Deliberately blank: Resolve-style ruler alignment without a redundant "TC" label.
                     Box(Modifier.fillMaxWidth().height(24.dp).background(Color(0xFF111116)))
                     Column(Modifier.fillMaxHeight().verticalScroll(verticalScroll)) {
                         project.tracks.forEach { track ->
@@ -198,9 +198,12 @@ fun TimelineEditorV4(
                                     onMoveClipToTrack = onMoveClipToTrack,
                                     onSelectText = { overlay ->
                                         TimelineTextSelectionBusV10.select(overlay.id)
+                                        onSelectText(overlay.id)
                                         onSelectTrack(track.id)
                                         onSeek(overlay.timelineStartUs)
                                     },
+                                    onMoveText = onMoveText,
+                                    onMoveTextToTrack = onMoveTextToTrack,
                                 )
                             }
                         }
@@ -233,7 +236,8 @@ fun TimelineEditorV4(
 
 @Composable
 private fun TimelineToolbarV4(
-    selectedCount: Int,
+    selectedClipCount: Int,
+    textSelected: Boolean,
     zoom: Float,
     onZoom: (Float) -> Unit,
     onAddVideoTrack: () -> Unit,
@@ -247,9 +251,9 @@ private fun TimelineToolbarV4(
         Row(Modifier.fillMaxWidth().height(34.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             TinyActionV4("+V", onAddVideoTrack)
             TinyActionV4("+A", onAddAudioTrack)
-            TinyActionV4("Split", onSplit, selectedCount > 0, Icons.Rounded.ContentCut)
-            TinyActionV4("Delete", onDelete, selectedCount > 0, Icons.Rounded.Delete)
-            TinyActionV4("Unlink", onUnlink, selectedCount > 1, Icons.Rounded.LinkOff)
+            TinyActionV4("Split", onSplit, selectedClipCount > 0, Icons.Rounded.ContentCut)
+            TinyActionV4("Delete", onDelete, selectedClipCount > 0 || textSelected, Icons.Rounded.Delete)
+            TinyActionV4("Unlink", onUnlink, selectedClipCount > 1, Icons.Rounded.LinkOff)
             Spacer(Modifier.weight(1f))
             TinyActionV4("Import", onImport, icon = Icons.Rounded.AddPhotoAlternate)
         }
@@ -297,7 +301,7 @@ private fun TrackHeaderV4(track: TimelineTrack, selected: Boolean, onSelect: (St
     }
 
     Row(
-        Modifier.fillMaxWidth().height(track.heightV10())
+        Modifier.fillMaxWidth().height(T4_TRACK_HEIGHT.dp)
             .background(if (selected) T4Accent.copy(alpha = .12f) else Color(0xFF121217))
             .border(.5.dp, T4Divider)
             .pointerInput(track.id) {
@@ -314,10 +318,7 @@ private fun TrackHeaderV4(track: TimelineTrack, selected: Boolean, onSelect: (St
                 .background(if (track.kind == TrackKind.VIDEO) Color(0xFF607D9B) else Color(0xFF3E7569)),
         )
         Spacer(Modifier.width(5.dp))
-        Column {
-            Text(track.name, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = .8f))
-            if (track.kind == TrackKind.VIDEO) Text("video · titles", fontSize = 6.sp, color = T4Muted)
-        }
+        Text(track.name, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = .8f))
     }
 }
 
@@ -378,10 +379,12 @@ private fun TimelineLaneV4(
     onMoveClip: (String, String, Long) -> Unit,
     onMoveClipToTrack: (String, String) -> Unit,
     onSelectText: (TextOverlayClip) -> Unit,
+    onMoveText: (String, Long) -> Unit,
+    onMoveTextToTrack: (String, String) -> Unit,
 ) {
     val isVideo = track.kind == TrackKind.VIDEO
     Box(
-        Modifier.requiredWidth(width).height(track.heightV10())
+        Modifier.requiredWidth(width).height(T4_TRACK_HEIGHT.dp)
             .background(if (isVideo) Color(0xFF10141A) else Color(0xFF101713))
             .border(.5.dp, T4Divider),
     ) {
@@ -393,7 +396,6 @@ private fun TimelineLaneV4(
                 selected = clip.id in selectedClipIds,
                 cursorUs = cursorUs,
                 pps = pps,
-                compact = isVideo,
                 onSelectClip = onSelectClip,
                 onMoveClip = onMoveClip,
                 onMoveClipToTrack = onMoveClipToTrack,
@@ -402,10 +404,15 @@ private fun TimelineLaneV4(
         if (isVideo) {
             textOverlays.forEach { overlay ->
                 TextClipV10(
+                    project = project,
+                    track = track,
                     overlay = overlay,
                     selected = overlay.id == selectedTextId,
+                    cursorUs = cursorUs,
                     pps = pps,
                     onSelect = { onSelectText(overlay) },
+                    onMoveText = onMoveText,
+                    onMoveTextToTrack = onMoveTextToTrack,
                 )
             }
         }
@@ -414,38 +421,112 @@ private fun TimelineLaneV4(
 
 @Composable
 private fun TextClipV10(
+    project: TimelineProject,
+    track: TimelineTrack,
     overlay: TextOverlayClip,
     selected: Boolean,
+    cursorUs: Long,
     pps: Float,
     onSelect: () -> Unit,
+    onMoveText: (String, Long) -> Unit,
+    onMoveTextToTrack: (String, String) -> Unit,
 ) {
     val density = LocalDensity.current
     val ppsDp = with(density) { pps.toDp().value }
     val start = (overlay.timelineStartUs / US_PER_SECOND.toFloat() * ppsDp).dp
     val width = (overlay.durationUs / US_PER_SECOND.toFloat() * ppsDp).coerceAtLeast(3f).dp
+    val frameUs = (US_PER_SECOND.toDouble() / project.frameRate.coerceAtLeast(1)).roundToLong().coerceAtLeast(1L)
+    val compatible = project.tracks.filter { it.kind == TrackKind.VIDEO }
+    val sourceIndex = compatible.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
+    val trackPx = with(density) { T4_TRACK_HEIGHT.dp.toPx() }
+    var rawDragX by remember(overlay.id) { mutableStateOf(0f) }
+    var dragY by remember(overlay.id) { mutableStateOf(0f) }
+    var displayDeltaUs by remember(overlay.id) { mutableStateOf(0L) }
+    var magnetActive by remember(overlay.id) { mutableStateOf(false) }
+
     Box(
-        Modifier.offset(x = start, y = 32.dp)
+        Modifier.offset(x = start, y = 3.dp)
             .width(width)
-            .height(22.dp)
+            .height(31.dp)
+            .graphicsLayer {
+                translationX = displayDeltaUs / US_PER_SECOND.toFloat() * pps
+                translationY = dragY
+            }
             .clip(RoundedCornerShape(4.dp))
             .background(T4Text)
             .border(
-                if (selected) 2.dp else .5.dp,
-                if (selected) T4Accent else Color.White.copy(alpha = .16f),
+                if (selected || magnetActive) 2.dp else .5.dp,
+                when {
+                    magnetActive -> T4Magnet
+                    selected -> T4Accent
+                    else -> Color.White.copy(alpha = .16f)
+                },
                 RoundedCornerShape(4.dp),
             )
             .clickable(onClick = onSelect)
+            .pointerInput(overlay.id, track.id, pps, project, cursorUs) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = {
+                        rawDragX = 0f
+                        dragY = 0f
+                        displayDeltaUs = 0L
+                        magnetActive = false
+                        onSelect()
+                    },
+                    onDragEnd = {
+                        val delta = displayDeltaUs
+                        if (delta != 0L) onMoveText(overlay.id, delta)
+
+                        val shift = (dragY / trackPx).roundToInt()
+                        if (shift != 0 && compatible.isNotEmpty()) {
+                            val target = compatible[(sourceIndex + shift).coerceIn(0, compatible.lastIndex)]
+                            if (target.id != track.id) onMoveTextToTrack(overlay.id, target.id)
+                        }
+                        rawDragX = 0f
+                        dragY = 0f
+                        displayDeltaUs = 0L
+                        magnetActive = false
+                    },
+                    onDragCancel = {
+                        rawDragX = 0f
+                        dragY = 0f
+                        displayDeltaUs = 0L
+                        magnetActive = false
+                    },
+                ) { change, drag ->
+                    change.consume()
+                    rawDragX += drag.x
+                    dragY += drag.y
+                    val rawUs = rawDragX / pps * US_PER_SECOND
+                    val result = resolveTextMagneticDelta(
+                        project = project,
+                        trackId = track.id,
+                        textId = overlay.id,
+                        rawDeltaUs = rawUs.roundToLong(),
+                        cursorUs = cursorUs,
+                        pps = pps,
+                        frameUs = frameUs,
+                    )
+                    displayDeltaUs = result.deltaUs
+                    magnetActive = result.magnet
+                }
+            }
             .padding(horizontal = 4.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
         if (width > 20.dp) {
-            Text(
-                overlay.text.ifBlank { "Text" },
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                fontSize = 7.sp,
-                color = Color.White.copy(alpha = .96f),
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    overlay.text.ifBlank { "Text" },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontSize = 8.sp,
+                    color = Color.White.copy(alpha = .96f),
+                    modifier = Modifier.weight(1f),
+                )
+                if (magnetActive) Text("SNAP", fontSize = 6.sp, color = T4Magnet)
+                else Text("T", fontSize = 6.sp, color = Color.White.copy(alpha = .55f))
+            }
         }
     }
 }
@@ -458,7 +539,6 @@ private fun ClipV4(
     selected: Boolean,
     cursorUs: Long,
     pps: Float,
-    compact: Boolean,
     onSelectClip: (String) -> Unit,
     onMoveClip: (String, String, Long) -> Unit,
     onMoveClipToTrack: (String, String) -> Unit,
@@ -470,14 +550,14 @@ private fun ClipV4(
     val frameUs = (US_PER_SECOND.toDouble() / project.frameRate.coerceAtLeast(1)).roundToLong().coerceAtLeast(1L)
     val compatible = project.tracks.filter { it.kind == track.kind }
     val sourceIndex = compatible.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
-    val trackPx = with(density) { track.heightV10().toPx() }
+    val trackPx = with(density) { T4_TRACK_HEIGHT.dp.toPx() }
     var rawDragX by remember(clip.id) { mutableStateOf(0f) }
     var dragY by remember(clip.id) { mutableStateOf(0f) }
     var displayDeltaUs by remember(clip.id) { mutableStateOf(0L) }
     var magnetActive by remember(clip.id) { mutableStateOf(false) }
 
     Box(
-        Modifier.offset(x = start, y = 3.dp).width(width).height(if (compact) 25.dp else 31.dp)
+        Modifier.offset(x = start, y = 3.dp).width(width).height(31.dp)
             .graphicsLayer {
                 translationX = displayDeltaUs / US_PER_SECOND.toFloat() * pps
                 translationY = dragY
@@ -553,7 +633,7 @@ private fun ClipV4(
                     clip.label,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    fontSize = if (compact) 7.sp else 8.sp,
+                    fontSize = 8.sp,
                     color = Color.White.copy(alpha = .9f),
                     modifier = Modifier.weight(1f),
                 )
@@ -562,6 +642,67 @@ private fun ClipV4(
             }
         }
     }
+}
+
+private fun resolveTextMagneticDelta(
+    project: TimelineProject,
+    trackId: String,
+    textId: String,
+    rawDeltaUs: Long,
+    cursorUs: Long,
+    pps: Float,
+    frameUs: Long,
+): T4SnapResult {
+    val target = project.textOverlays.firstOrNull { it.id == textId } ?: return T4SnapResult(0L, false)
+    val track = project.track(trackId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return T4SnapResult(0L, false)
+    val laneItems = buildList<Pair<Long, Long>> {
+        track.clips.forEach { add(it.timelineStartUs to it.timelineEndUs) }
+        project.textOverlaysForVideoTrackV3(trackId)
+            .filterNot { it.id == textId }
+            .forEach { add(it.timelineStartUs to it.timelineEndUs) }
+    }
+    val previous = laneItems.filter { it.second <= target.timelineStartUs }.maxByOrNull { it.second }
+    val next = laneItems.filter { it.first >= target.timelineEndUs }.minByOrNull { it.first }
+    val lower = max(-target.timelineStartUs, previous?.let { it.second - target.timelineStartUs } ?: Long.MIN_VALUE / 4)
+    val upper = next?.let { it.first - target.timelineEndUs } ?: Long.MAX_VALUE / 4
+    if (lower > upper) return T4SnapResult(0L, false)
+
+    val frameDelta = ((rawDeltaUs.toDouble() / frameUs).roundToLong() * frameUs).coerceIn(lower, upper)
+    val thresholdUs = ((14f / pps.coerceAtLeast(.001f)) * US_PER_SECOND)
+        .roundToLong()
+        .coerceIn(frameUs, 500_000L)
+
+    val anchors = linkedSetOf<Long>()
+    anchors += 0L
+    anchors += cursorUs.coerceAtLeast(0L)
+    project.tracks.flatMap { it.clips }.forEach { other ->
+        anchors += other.timelineStartUs
+        anchors += other.timelineEndUs
+    }
+    project.textOverlays.filterNot { it.id == textId }.forEach { other ->
+        anchors += other.timelineStartUs
+        anchors += other.timelineEndUs
+    }
+
+    var best = frameDelta
+    var bestDistance = Long.MAX_VALUE
+    val edges = longArrayOf(target.timelineStartUs, target.timelineEndUs)
+    edges.forEach { edge ->
+        anchors.forEach { anchor ->
+            val candidate = anchor - edge
+            if (candidate < lower || candidate > upper) return@forEach
+            val distance = abs(candidate - frameDelta)
+            if (distance <= thresholdUs && distance < bestDistance) {
+                best = candidate
+                bestDistance = distance
+            }
+        }
+    }
+
+    return T4SnapResult(
+        deltaUs = best.coerceIn(lower, upper),
+        magnet = bestDistance != Long.MAX_VALUE && best != frameDelta,
+    )
 }
 
 private fun resolveMagneticDelta(
