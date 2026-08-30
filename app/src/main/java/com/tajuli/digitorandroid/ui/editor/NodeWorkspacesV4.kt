@@ -153,6 +153,7 @@ fun CorrectionWorkspaceV4(clip: TimelineClip?, vm: EditorViewModelV4, modifier: 
             CorrectionSliderV4("Exposure", c.exposure, -5f..5f) { vm.setSelectedNodeCorrection("Exposure", it) }
             CorrectionSliderV4("Contrast", c.contrast, -100f..100f) { vm.setSelectedNodeCorrection("Contrast", it) }
             CorrectionSliderV4("Saturation", c.saturation, -100f..100f) { vm.setSelectedNodeCorrection("Saturation", it) }
+            CorrectionSliderV4("Color Boost", c.colorBoost, -100f..100f) { vm.setSelectedNodeCorrection("Color Boost", it) }
             CorrectionSliderV4("Temperature", c.temperature, -100f..100f) { vm.setSelectedNodeCorrection("Temperature", it) }
             CorrectionSliderV4("Tint", c.tint, -100f..100f) { vm.setSelectedNodeCorrection("Tint", it) }
             CorrectionSliderV4("Highlights", c.highlights, -100f..100f) { vm.setSelectedNodeCorrection("Highlights", it) }
