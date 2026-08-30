@@ -2,10 +2,17 @@ package com.tajuli.digitorandroid.editor.preview
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Rect
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.view.PixelCopy
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -23,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -34,6 +42,7 @@ import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.render.REALTIME_PREVIEW_LONG_EDGE
 import com.tajuli.digitorandroid.editor.render.resolvePreviewOutputSize
 import kotlin.math.abs
+import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -42,8 +51,9 @@ import kotlinx.coroutines.withContext
  * Direct display surface for the editor GPU preview.
  *
  * MediaCodec frames are composited by DigitorRenderCore/OpenGL straight into this SurfaceView.
- * There is no ImageReader, GPU-to-CPU pixel copy, Bitmap upload, or Compose texture upload in the
- * healthy preview path.
+ * There is no ImageReader, Bitmap readback, Compose texture upload or per-tick player seek in the
+ * healthy preview path. PixelCopy is used only for an explicit HSL-picker tap and copies a tiny
+ * neighborhood from the already-rendered Surface; it never opens another decoder.
  *
  * Realtime editing uses a 720p-long-edge final Surface buffer while the render core keeps the full
  * project compositor canvas. This avoids changing Media3 overlay geometry while still reducing the
@@ -62,6 +72,8 @@ import kotlinx.coroutines.withContext
 @Composable
 fun GpuPreviewSurface(
     engine: DavinciFramePreviewEngine,
+    qualifierPickerActive: Boolean = false,
+    onQualifierColorSample: ((Float, Float, Float) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val project by PreviewProjectRegistry.flow.collectAsState()
@@ -100,6 +112,7 @@ fun GpuPreviewSurface(
         gpuDeltaUs > STALE_FRAME_FALLBACK_US
 
     var softwareFallbackActive by remember(engine) { mutableStateOf(false) }
+    var previewView by remember(engine) { mutableStateOf<DigitorPreviewSurfaceView?>(null) }
 
     // First-ever frame: allow a very short GPU grace period, then show fallback rather than black.
     LaunchedEffect(engine, hasVideo, gpuFrame?.timelineUs, exportActive) {
@@ -243,9 +256,10 @@ fun GpuPreviewSurface(
                     initialEngine = engine,
                     initialBufferWidth = renderWidth,
                     initialBufferHeight = renderHeight,
-                )
+                ).also { previewView = it }
             },
             update = { view ->
+                if (previewView !== view) previewView = view
                 view.bind(
                     nextEngine = engine,
                     nextBufferWidth = renderWidth,
@@ -255,18 +269,55 @@ fun GpuPreviewSurface(
         )
 
         val softwareFrame = fallbackBitmap
-        if (
+        val showingSoftwareFrame =
             !exportActive &&
-            softwareFallbackActive &&
-            !gpuFrameFresh &&
-            softwareFrame != null &&
-            !softwareFrame.isRecycled
-        ) {
+                softwareFallbackActive &&
+                !gpuFrameFresh &&
+                softwareFrame != null &&
+                !softwareFrame.isRecycled
+
+        if (showingSoftwareFrame && softwareFrame != null) {
             Image(
                 bitmap = softwareFrame.asImageBitmap(),
                 contentDescription = "Software fallback preview",
                 modifier = fittedModifier,
                 contentScale = ContentScale.Fit,
+            )
+        }
+
+        // HSL qualification samples the pixels the user can already see. When fallback is on, read
+        // its in-memory bitmap. Otherwise PixelCopy reads a tiny Surface neighborhood asynchronously.
+        // Neither route opens MediaMetadataRetriever or another MediaCodec decoder.
+        if (qualifierPickerActive && onQualifierColorSample != null && !exportActive) {
+            Box(
+                fittedModifier.pointerInput(
+                    previewView,
+                    softwareFrame,
+                    showingSoftwareFrame,
+                    renderWidth,
+                    renderHeight,
+                ) {
+                    detectTapGestures { pos ->
+                        val callback = onQualifierColorSample
+                        if (callback == null || size.width <= 0 || size.height <= 0) return@detectTapGestures
+
+                        if (showingSoftwareFrame && softwareFrame != null && !softwareFrame.isRecycled) {
+                            sampleBitmapFitColor(
+                                bitmap = softwareFrame,
+                                tapX = pos.x,
+                                tapY = pos.y,
+                                viewWidth = size.width.toFloat(),
+                                viewHeight = size.height.toFloat(),
+                            )?.let { rgb -> callback(rgb[0], rgb[1], rgb[2]) }
+                        } else {
+                            previewView?.sampleVisibleColor(
+                                normalizedX = (pos.x / size.width.toFloat()).coerceIn(0f, 1f),
+                                normalizedY = (pos.y / size.height.toFloat()).coerceIn(0f, 1f),
+                                onColor = callback,
+                            )
+                        }
+                    }
+                },
             )
         }
     }
@@ -279,6 +330,50 @@ private const val FAST_PLACEHOLDER_LONG_EDGE = 480
 private const val SOFTWARE_PREVIEW_LONG_EDGE = REALTIME_PREVIEW_LONG_EDGE
 private val PREVIEW_PASTEBOARD_GRAY = Color(0xFF222226)
 
+private fun sampleBitmapFitColor(
+    bitmap: Bitmap,
+    tapX: Float,
+    tapY: Float,
+    viewWidth: Float,
+    viewHeight: Float,
+): FloatArray? {
+    if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0 || viewWidth <= 0f || viewHeight <= 0f) return null
+
+    val scale = min(viewWidth / bitmap.width.toFloat(), viewHeight / bitmap.height.toFloat())
+    val shownWidth = bitmap.width * scale
+    val shownHeight = bitmap.height * scale
+    val left = (viewWidth - shownWidth) * .5f
+    val top = (viewHeight - shownHeight) * .5f
+    if (tapX < left || tapX >= left + shownWidth || tapY < top || tapY >= top + shownHeight) return null
+
+    val centerX = (((tapX - left) / shownWidth) * bitmap.width)
+        .toInt()
+        .coerceIn(0, bitmap.width - 1)
+    val centerY = (((tapY - top) / shownHeight) * bitmap.height)
+        .toInt()
+        .coerceIn(0, bitmap.height - 1)
+    return averageBitmapNeighborhood(bitmap, centerX, centerY)
+}
+
+private fun averageBitmapNeighborhood(bitmap: Bitmap, centerX: Int, centerY: Int): FloatArray {
+    var rr = 0f
+    var gg = 0f
+    var bb = 0f
+    var count = 0
+    for (dy in -1..1) {
+        for (dx in -1..1) {
+            val x = (centerX + dx).coerceIn(0, bitmap.width - 1)
+            val y = (centerY + dy).coerceIn(0, bitmap.height - 1)
+            val color = bitmap.getPixel(x, y)
+            rr += ((color ushr 16) and 0xFF) / 255f
+            gg += ((color ushr 8) and 0xFF) / 255f
+            bb += (color and 0xFF) / 255f
+            count++
+        }
+    }
+    return floatArrayOf(rr / count, gg / count, bb / count)
+}
+
 private class DigitorPreviewSurfaceView(
     context: Context,
     initialEngine: DavinciFramePreviewEngine,
@@ -290,6 +385,7 @@ private class DigitorPreviewSurfaceView(
     private var attachedSurface: android.view.Surface? = null
     private var bufferWidth = initialBufferWidth.coerceAtLeast(2)
     private var bufferHeight = initialBufferHeight.coerceAtLeast(2)
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     init {
         holder.setFixedSize(bufferWidth, bufferHeight)
@@ -321,6 +417,55 @@ private class DigitorPreviewSurfaceView(
                 engine.attachSurface(it)
                 engine.scheduleCurrentFrameRefresh(80L)
             }
+        }
+    }
+
+    fun sampleVisibleColor(
+        normalizedX: Float,
+        normalizedY: Float,
+        onColor: (Float, Float, Float) -> Unit,
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+        val surface = attachedSurface?.takeIf { it.isValid } ?: holder.surface.takeIf { it.isValid } ?: return
+
+        val centerX = (normalizedX.coerceIn(0f, 1f) * (bufferWidth - 1))
+            .toInt()
+            .coerceIn(0, bufferWidth - 1)
+        val centerY = (normalizedY.coerceIn(0f, 1f) * (bufferHeight - 1))
+            .toInt()
+            .coerceIn(0, bufferHeight - 1)
+        val sourceRect = Rect(
+            (centerX - 1).coerceAtLeast(0),
+            (centerY - 1).coerceAtLeast(0),
+            (centerX + 2).coerceAtMost(bufferWidth),
+            (centerY + 2).coerceAtMost(bufferHeight),
+        )
+        if (sourceRect.width() <= 0 || sourceRect.height() <= 0) return
+
+        val sample = Bitmap.createBitmap(sourceRect.width(), sourceRect.height(), Bitmap.Config.ARGB_8888)
+        try {
+            PixelCopy.request(
+                surface,
+                sourceRect,
+                sample,
+                { result ->
+                    try {
+                        if (result == PixelCopy.SUCCESS && !sample.isRecycled) {
+                            val rgb = averageBitmapNeighborhood(
+                                sample,
+                                sample.width / 2,
+                                sample.height / 2,
+                            )
+                            onColor(rgb[0], rgb[1], rgb[2])
+                        }
+                    } finally {
+                        if (!sample.isRecycled) sample.recycle()
+                    }
+                },
+                mainHandler,
+            )
+        } catch (_: Throwable) {
+            if (!sample.isRecycled) sample.recycle()
         }
     }
 
