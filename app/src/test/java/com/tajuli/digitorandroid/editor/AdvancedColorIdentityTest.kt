@@ -3,6 +3,7 @@ package com.tajuli.digitorandroid.editor
 import com.tajuli.digitorandroid.editor.model.AdvancedColorMath
 import com.tajuli.digitorandroid.editor.model.ColorNode
 import com.tajuli.digitorandroid.editor.model.Curve5
+import com.tajuli.digitorandroid.editor.model.NodeCorrections
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.NodePosition
 import org.junit.Assert.assertEquals
@@ -36,5 +37,21 @@ class AdvancedColorIdentityTest {
             assertEquals(input[1], output[1], 0.000001f)
             assertEquals(input[2], output[2], 0.000001f)
         }
+    }
+
+    @Test
+    fun legacyColorBoostValueIsIgnored() {
+        val node = ColorNode(
+            kind = NodeKind.SERIAL,
+            label = "legacy-color-boost",
+            position = NodePosition(0f, 0f),
+            corrections = NodeCorrections(colorBoost = 100f),
+        )
+        val input = floatArrayOf(.55f, .50f, .45f)
+        val output = AdvancedColorMath.applyNode(node, input[0], input[1], input[2])
+
+        assertEquals(input[0], output[0], 0.000001f)
+        assertEquals(input[1], output[1], 0.000001f)
+        assertEquals(input[2], output[2], 0.000001f)
     }
 }

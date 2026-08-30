@@ -3,6 +3,7 @@ package com.tajuli.digitorandroid.ui.editor
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -96,6 +97,7 @@ fun NodeGraphV4(clip: TimelineClip?, vm: EditorViewModelV4, modifier: Modifier =
                             .width(88.dp).height(52.dp).clip(RoundedCornerShape(6.dp))
                             .background(nodeColorV4(node.kind))
                             .border(if (selected) 2.dp else 1.dp, if (selected) N4Accent else Color.White.copy(alpha = .2f), RoundedCornerShape(6.dp))
+                            .clickable { vm.selectNode(node.id) }
                             .pointerInput(node.id, node.position) {
                                 detectDragGesturesAfterLongPress(
                                     onDragStart = { moved = false; vm.selectNode(node.id) },

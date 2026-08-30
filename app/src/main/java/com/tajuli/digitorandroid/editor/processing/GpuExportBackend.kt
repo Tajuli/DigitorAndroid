@@ -3,9 +3,13 @@ package com.tajuli.digitorandroid.editor.processing
 import android.content.Context
 import android.os.Handler
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.util.Clock
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.transformer.Composition
+import androidx.media3.transformer.DefaultDecoderFactory
 import androidx.media3.transformer.DefaultEncoderFactory
+import androidx.media3.transformer.ExoPlayerAssetLoader
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult as Media3ExportResult
 import androidx.media3.transformer.ProgressHolder
@@ -90,10 +94,41 @@ class GpuExportBackend(
                         .build(),
                 )
                 .build()
-            Transformer.Builder(context)
+
+            val transformerBuilder = Transformer.Builder(context)
                 .setVideoMimeType(MimeTypes.VIDEO_H264)
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
                 .setEncoderFactory(encoderFactory)
+
+            // Some Unisoc AVC hardware decoders accept camera H.264 during configuration but then
+            // repeatedly return invalid-data errors while draining the stream. In that situation
+            // Transformer can terminate in vendor Codec2/VSP code before it can report a normal
+            // ExportException. Keep hardware decoding everywhere else, but on devices whose
+            // preferred AVC decoder is a Unisoc implementation, prefer Android's software AVC
+            // decoder for export. Other MIME types keep the platform's normal decoder priority.
+            if (preferredAvcDecoderIsUnisoc()) {
+                val selector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
+                    val delegate = if (mimeType == MimeTypes.VIDEO_H264) {
+                        MediaCodecSelector.PREFER_SOFTWARE
+                    } else {
+                        MediaCodecSelector.DEFAULT
+                    }
+                    delegate.getDecoderInfos(
+                        mimeType,
+                        requiresSecureDecoder,
+                        requiresTunnelingDecoder,
+                    )
+                }
+                val decoderFactory = DefaultDecoderFactory.Builder(context)
+                    .setMediaCodecSelector(selector)
+                    .setEnableDecoderFallback(true)
+                    .build()
+                transformerBuilder.setAssetLoaderFactory(
+                    ExoPlayerAssetLoader.Factory(context, decoderFactory, Clock.DEFAULT),
+                )
+            }
+
+            transformerBuilder
                 .addListener(object : Transformer.Listener {
                     override fun onCompleted(composition: Composition, exportResult: Media3ExportResult) {
                         stopCallbacks()
@@ -186,6 +221,14 @@ class GpuExportBackend(
         onProgress(ExportProgress.Stage("GPU: waiting for codec release · ${quality.label}", 0.03f))
         handler.postDelayed(starter, EXPORT_START_GRACE_MS)
     }
+
+    private fun preferredAvcDecoderIsUnisoc(): Boolean = runCatching {
+        MediaCodecSelector.DEFAULT
+            .getDecoderInfos(MimeTypes.VIDEO_H264, false, false)
+            .firstOrNull()
+            ?.name
+            ?.contains("unisoc", ignoreCase = true) == true
+    }.getOrDefault(false)
 
     private companion object {
         const val EXPORT_START_GRACE_MS = 350L

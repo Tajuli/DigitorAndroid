@@ -43,6 +43,7 @@ import androidx.compose.material.icons.rounded.Redo
 import androidx.compose.material.icons.rounded.Replay10
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.TextFields
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Undo
 import androidx.compose.material.icons.rounded.VideoLibrary
@@ -70,13 +71,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -114,13 +113,15 @@ private val E7Muted = Color(0xFF909098)
 private val E7Accent = Color(0xFF30E0C3)
 private val E7PreviewPasteboard = Color(0xFF222226)
 
+/** First five entries intentionally match the primary mobile workflow order. */
 private enum class WorkspaceV7(val label: String, val icon: ImageVector) {
     EDIT("Edit", Icons.Rounded.ContentCut),
+    CORRECTION("Correction", Icons.Rounded.Tune),
+    EFFECTS("Effects", Icons.Rounded.AutoAwesome),
+    COLOR("Color", Icons.Rounded.Palette),
+    TEXT("Text", Icons.Rounded.TextFields),
     AUDIO("Audio", Icons.Rounded.Audiotrack),
     MEDIA("Media", Icons.Rounded.VideoLibrary),
-    CORRECTION("Correction", Icons.Rounded.Tune),
-    COLOR("Color", Icons.Rounded.Palette),
-    EFFECTS("Effects", Icons.Rounded.AutoAwesome),
     NODES("Nodes", Icons.Rounded.AccountTree),
 }
 
@@ -251,7 +252,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
             playAnchorCursorUs = target; playAnchorRealtimeMs = SystemClock.elapsedRealtime()
         }
         val activeVideo = state.project.topmostVideoClipAt(target)
-        if (activeVideo != null && selectedClip == null) vm.selectClip(activeVideo.id)
+        if (activeVideo != null && selectedClip == null && workspace != WorkspaceV7.TEXT) vm.selectClip(activeVideo.id)
     }
 
     fun stopForEdit() {
@@ -273,25 +274,56 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
 
     fun startExport(destination: Uri) {
         if (state.project.durationUs <= 0L) { exportStatus = "Timeline is empty"; return }
+        val exportProject = state.project
+        val exportCursorUs = cursorUs
+        val exportQualitySnapshot = exportQuality
+        val exportHasAudio = exportProject.tracks.any { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
         scope.launch {
             stopForEdit()
-            exportFraction = 0f; exportStatus = "Preparing ${exportQuality.label} export"
+            // Pausing is not enough on low-memory devices: CompositionPlayer keeps its decoder and
+            // audio graph alive. Release those preview resources before Transformer opens export AV.
+            runCatching { audioPreview.suspendForExternalWork() }
+            exportFraction = 0f
+            exportStatus = "Preparing ${exportQualitySnapshot.label} export"
             val temp = File(context.cacheDir, "digitor_export_${System.currentTimeMillis()}.mp4")
-            runCatching {
-                val result = router.export(state.project, temp, exportQuality) { progress ->
+            try {
+                val result = router.export(exportProject, temp, exportQualitySnapshot) { progress ->
                     if (progress is ExportProgress.Stage) {
                         exportStatus = progress.name
                         progress.fraction?.let { exportFraction = it.coerceIn(0f, 1f) }
                     }
                 }
-                exportStatus = "Saving file…"; exportFraction = max(exportFraction ?: 0f, .99f)
+                exportStatus = "Saving file…"
+                exportFraction = max(exportFraction ?: 0f, .99f)
                 withContext(Dispatchers.IO) {
-                    context.contentResolver.openOutputStream(destination, "w")?.use { output -> temp.inputStream().use { it.copyTo(output, 1024 * 1024) } }
-                        ?: error("Could not open selected save location")
+                    context.contentResolver.openOutputStream(destination, "w")?.use { output ->
+                        temp.inputStream().use { it.copyTo(output, 1024 * 1024) }
+                    } ?: error("Could not open selected save location")
                 }
-                result
-            }.onSuccess { result -> exportFraction = 1f; exportStatus = "Saved · ${result.backend} · ${exportQuality.label}"; temp.delete() }
-                .onFailure { error -> exportFraction = null; exportStatus = error.message ?: "Export failed"; temp.delete() }
+                exportFraction = 1f
+                exportStatus = "Saved · ${result.backend} · ${exportQualitySnapshot.label}"
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                exportFraction = null
+                exportStatus = error.message ?: "Export failed"
+            } finally {
+                temp.delete()
+                if (exportHasAudio) {
+                    try {
+                        val maxStartUs = (exportProject.durationUs - 1L).coerceAtLeast(0L)
+                        audioPreview.rebuild(
+                            exportProject,
+                            exportCursorUs.coerceIn(0L, maxStartUs) / 1000L,
+                            resumePlayback = false,
+                        )
+                    } catch (_: CancellationException) {
+                        // Screen is leaving; no preview rebuild is needed.
+                    } catch (error: Throwable) {
+                        previewStatus = "Audio preview: ${error.message ?: "unavailable"}"
+                    }
+                }
+            }
         }
     }
 
@@ -330,12 +362,15 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
         )
     }
 
+    val currentExportFraction = exportFraction
+    val exportingNow = currentExportFraction != null && currentExportFraction < 1f
+
     Surface(Modifier.fillMaxSize(), color = E7Shell) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
             TopBarV7(
                 title = selectedClip?.label ?: state.project.textOverlays.firstOrNull { it.id == state.selectedTextId }?.text ?: previewClip?.label ?: "New project",
                 status = exportStatus ?: state.busyOperation ?: previewStatus ?: state.status,
-                exportFraction = exportFraction,
+                exportFraction = currentExportFraction,
                 canUndo = state.canUndo,
                 canRedo = state.canRedo,
                 onUndo = { stopForEdit(); vm.undo() },
@@ -348,16 +383,17 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
             ProjectActionsBarV7(
                 canUndo = state.canUndo,
                 canRedo = state.canRedo,
-                exporting = exportFraction != null && exportFraction!! < 1f,
+                exporting = exportingNow,
                 onUndo = { stopForEdit(); vm.undo() },
                 onRedo = { stopForEdit(); vm.redo() },
                 onSaveProject = vm::saveProject,
                 onLoadProject = { stopForEdit(); vm.loadProject() },
             )
-            if (exportFraction != null && exportFraction!! < 1f) {
+            if (exportingNow) {
+                val stableProgress = currentExportFraction ?: 0f
                 Column {
-                    LinearProgressIndicator(progress = { exportFraction!!.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth().height(3.dp))
-                    Text("${((exportFraction ?: 0f) * 100).roundToInt()}%  ${exportStatus.orEmpty()}", fontSize = 9.sp, color = E7Muted, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp))
+                    LinearProgressIndicator(progress = { stableProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth().height(3.dp))
+                    Text("${(stableProgress * 100).roundToInt()}%  ${exportStatus.orEmpty()}", fontSize = 9.sp, color = E7Muted, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp))
                 }
             }
 
@@ -368,11 +404,15 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                 activeVideoClip = previewClip,
                 activeLayerCount = activeVideoClips.size,
                 textOverlays = activeText,
+                timelineUs = cursorUs,
                 onImport = ::launchImport,
                 qualifierPickerActive = state.qualifierPickerActive,
-                onPickColor = { x, y, width, height ->
+                onPickColor = { red, green, blue ->
                     val target = selectedClip?.takeIf { clip -> state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs } ?: previewClip
-                    target?.let { clip -> if (clip.id != selectedClip?.id) vm.selectClip(clip.id); vm.pickQualifierFromPreview(cursorUs, x, y, width, height) }
+                    target?.let { clip ->
+                        if (clip.id != selectedClip?.id) vm.selectClip(clip.id)
+                        applyQualifierPickedColor(vm, red, green, blue)
+                    }
                 },
                 modifier = Modifier.fillMaxWidth().weight(1f),
             )
@@ -387,21 +427,40 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                         onAddAudioTrack = { vm.addTrack(TrackKind.AUDIO) }, onSplit = { vm.splitSelectedAt(cursorUs) }, onDelete = vm::deleteSelected,
                         onUnlink = vm::unlinkSelected, onImport = ::launchImport, modifier = Modifier.fillMaxSize(),
                     )
-                    WorkspaceV7.AUDIO -> CreatorAudioWorkspaceV8(state.project, state.selectedClipId, state.selectedClipIds, vm, Modifier.fillMaxSize())
-                    WorkspaceV7.MEDIA -> CreatorMediaWorkspaceV8(state.project, selectedClip, state.selectedTextId, cursorUs, state.busyOperation, vm, Modifier.fillMaxSize())
-                    WorkspaceV7.COLOR -> KeyframedColorWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
-                    WorkspaceV7.NODES -> NodeGraphV4(selectedClip, vm, Modifier.fillMaxSize())
                     WorkspaceV7.CORRECTION -> KeyframedCorrectionWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
                     WorkspaceV7.EFFECTS -> KeyframedEffectsWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
+                    WorkspaceV7.COLOR -> KeyframedColorWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
+                    WorkspaceV7.TEXT -> TextWorkspaceV9(
+                        project = state.project,
+                        selectedTextId = state.selectedTextId,
+                        cursorUs = cursorUs,
+                        frameRate = state.project.frameRate,
+                        vm = vm,
+                        onSeek = ::seekTimeline,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    WorkspaceV7.AUDIO -> CreatorAudioWorkspaceV8(state.project, state.selectedClipId, state.selectedClipIds, vm, Modifier.fillMaxSize())
+                    WorkspaceV7.MEDIA -> CreatorMediaWorkspaceV8(state.project, selectedClip, state.selectedTextId, cursorUs, state.busyOperation, vm, Modifier.fillMaxSize())
+                    WorkspaceV7.NODES -> NodeGraphV4(selectedClip, vm, Modifier.fillMaxSize())
                 }
             }
             WorkspaceBarV7(
                 selected = workspace,
                 onSelected = { next ->
                     workspace = next
-                    val editsClip = next == WorkspaceV7.EDIT || next == WorkspaceV7.COLOR || next == WorkspaceV7.CORRECTION || next == WorkspaceV7.NODES || next == WorkspaceV7.EFFECTS || next == WorkspaceV7.MEDIA
-                    val selectedIsActiveVideo = selectedClip?.let { clip -> state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs } == true
-                    if (editsClip && state.selectedTextId == null && !selectedIsActiveVideo && previewClip != null) vm.selectClip(previewClip.id)
+                    if (next == WorkspaceV7.TEXT) {
+                        val textTarget = state.project.activeTextOverlaysAt(cursorUs).lastOrNull()
+                            ?: state.project.textOverlays.lastOrNull()
+                        if (textTarget != null) vm.selectTextOverlay(textTarget.id)
+                    } else {
+                        val clipWorkspace = next == WorkspaceV7.EDIT || next == WorkspaceV7.CORRECTION ||
+                            next == WorkspaceV7.EFFECTS || next == WorkspaceV7.COLOR || next == WorkspaceV7.NODES ||
+                            next == WorkspaceV7.MEDIA
+                        val selectedIsActiveVideo = selectedClip?.let { clip ->
+                            state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs
+                        } == true
+                        if (clipWorkspace && !selectedIsActiveVideo && previewClip != null) vm.selectClip(previewClip.id)
+                    }
                     if (next != WorkspaceV7.COLOR && state.qualifierPickerActive) vm.setQualifierPickerActive(false)
                 },
                 modifier = Modifier.fillMaxWidth().height(66.dp),
@@ -504,15 +563,21 @@ private fun FramePreviewV7(
     activeVideoClip: TimelineClip?,
     activeLayerCount: Int,
     textOverlays: List<TextOverlayClip>,
+    timelineUs: Long,
     onImport: () -> Unit,
     qualifierPickerActive: Boolean,
-    onPickColor: (Float, Float, Float, Float) -> Unit,
+    onPickColor: (Float, Float, Float) -> Unit,
     modifier: Modifier,
 ) {
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
     Box(modifier.background(E7PreviewPasteboard).onSizeChanged { previewSize = it }, contentAlignment = Alignment.Center) {
         if (hasVideo) {
-            GpuPreviewSurface(engine = previewEngine, modifier = Modifier.fillMaxSize())
+            GpuPreviewSurface(
+                engine = previewEngine,
+                qualifierPickerActive = qualifierPickerActive && activeVideoClip != null,
+                onQualifierColorSample = onPickColor,
+                modifier = Modifier.fillMaxSize(),
+            )
             val fallbackBitmap = frame?.bitmap
             if (fallbackBitmap != null && !fallbackBitmap.isRecycled) {
                 Image(bitmap = fallbackBitmap.asImageBitmap(), contentDescription = "CPU fallback preview", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
@@ -530,28 +595,17 @@ private fun FramePreviewV7(
         }
 
         textOverlays.forEach { overlay ->
-            Text(
-                overlay.text,
-                textAlign = TextAlign.Center,
-                fontSize = 22.sp,
-                fontWeight = if (overlay.bold) FontWeight.Bold else FontWeight.Normal,
-                color = Color(overlay.argb.toULong()),
-                modifier = Modifier.graphicsLayer {
-                    translationX = overlay.positionX * previewSize.width * .5f
-                    translationY = overlay.positionY * previewSize.height * .5f
-                    scaleX = overlay.sizeScale.coerceIn(.35f, 4f)
-                    scaleY = overlay.sizeScale.coerceIn(.35f, 4f)
-                }.background(if (overlay.background) Color.Black.copy(alpha = .68f) else Color.Transparent, RoundedCornerShape(5.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            TextOverlayPreviewV2(
+                overlay = overlay,
+                timelineUs = timelineUs,
+                previewSize = previewSize,
             )
         }
 
         Text("GPU Preview · $activeLayerCount ${if (activeLayerCount == 1) "layer" else "layers"}", modifier = Modifier.align(Alignment.TopStart).padding(10.dp).background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 4.dp), fontSize = 9.sp, color = Color.White.copy(alpha = .72f))
 
         if (qualifierPickerActive && activeVideoClip != null) {
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .05f)).pointerInput(previewSize) {
-                detectTapGestures { pos -> onPickColor(pos.x, pos.y, previewSize.width.toFloat(), previewSize.height.toFloat()) }
-            }, contentAlignment = Alignment.TopCenter) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .05f)), contentAlignment = Alignment.TopCenter) {
                 Row(Modifier.padding(top = 9.dp).background(Color.Black.copy(alpha = .76f), RoundedCornerShape(6.dp)).padding(horizontal = 9.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Rounded.Colorize, null, modifier = Modifier.size(15.dp), tint = E7Accent); Spacer(Modifier.width(5.dp)); Text("Tap the color to qualify selected layer", fontSize = 9.sp, color = Color.White)
                 }

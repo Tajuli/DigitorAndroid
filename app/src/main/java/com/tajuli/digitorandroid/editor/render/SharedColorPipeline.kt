@@ -4,15 +4,17 @@ import androidx.media3.common.Effect
 import androidx.media3.common.util.UnstableApi
 import com.tajuli.digitorandroid.editor.model.ColorGraphEvaluator
 import com.tajuli.digitorandroid.editor.model.ColorNode
+import com.tajuli.digitorandroid.editor.model.InputColorProfile
+import com.tajuli.digitorandroid.editor.model.InputColorTransform
 import com.tajuli.digitorandroid.editor.model.QualifiedColorMath
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.resolvedInputColorProfile
 
 /**
  * Single source of truth for GPU color processing.
  *
- * Correction/Color node snapshots can be keyframed. The LUT effect is timestamp-aware and is
- * shared by preview and export. Static grades still upload only once; animated grades rebuild the
- * cube for the current source timestamp and update the same GL texture.
+ * Optional camera log/HDR input transforms run first, then Correction/Color node snapshots. NONE is
+ * a true bypass, so flat source code values can go straight into grading and export.
  */
 @UnstableApi
 object SharedColorPipeline {
@@ -25,11 +27,6 @@ object SharedColorPipeline {
         add(AnimatedNodeColorLut(clip, EXPORT_LUT_SIZE, preview = false))
     }
 
-    /**
-     * Exact realtime color path. It uses the export LUT resolution and export qualifier pre-filter,
-     * but resolves the latest immutable clip snapshot so correction/color sliders do not rebuild
-     * MediaCodec. Preview and export therefore execute the same color math at the same LUT size.
-     */
     fun exactPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         addSpatialQualifierEffects(clip)
         add(AnimatedNodeColorLut(clip, EXPORT_LUT_SIZE, preview = true))
@@ -47,9 +44,12 @@ object SharedColorPipeline {
     }
 
     private fun MutableList<Effect>.addSpatialQualifierEffects(clip: TimelineClip) {
+        // This pre-filter samples source RGB before the 3D LUT. NONE/Rec.709 use those RGB code
+        // values directly, so the mask is valid. Managed Log/HDR transforms stay inside the LUT.
+        val profile = clip.resolvedInputColorProfile()
+        if (profile != InputColorProfile.NONE && profile != InputColorProfile.REC709) return
+
         clip.nodeGraph.nodes.forEach { node ->
-            // The spatial pre-filter has immutable shader parameters today. If the qualifier itself
-            // is animated, do not leave a stale static mask in front of the correctly animated LUT.
             if (!clip.nodeAnimations.qualifierIsAnimated(node.id)) {
                 QualifierSpatialFeatherEffect.fromNode(node)?.let(::add)
             }
@@ -67,16 +67,23 @@ object SharedColorPipeline {
         val last = (size - 1).toFloat()
         val evaluatedGraph = clip.nodeAnimations.evaluateGraph(clip.nodeGraph, sourceTimeUs)
         val graphPlan = ColorGraphEvaluator.compile(evaluatedGraph)
+        val inputProfile = clip.resolvedInputColorProfile()
         val nodeTransform: (ColorNode, Float, Float, Float) -> FloatArray = { node, r, g, b ->
             QualifiedColorMath.applyNode(node, r, g, b)
         }
         return Array(size) { rIndex ->
             Array(size) { gIndex ->
                 IntArray(size) { bIndex ->
+                    val input = InputColorTransform.toWorkingRec709(
+                        inputProfile,
+                        rIndex / last,
+                        gIndex / last,
+                        bIndex / last,
+                    )
                     val rgb = graphPlan.apply(
-                        r = rIndex / last,
-                        g = gIndex / last,
-                        b = bIndex / last,
+                        r = input[0],
+                        g = input[1],
+                        b = input[2],
                         nodeTransform = nodeTransform,
                     )
                     val r = (rgb[0] * 255f + .5f).toInt().coerceIn(0, 255)

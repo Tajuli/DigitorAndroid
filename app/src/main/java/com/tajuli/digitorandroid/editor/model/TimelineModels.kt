@@ -123,6 +123,8 @@ data class TimelineClip(
     val nodeAnimations: NodeAnimations = NodeAnimations(),
     val transition: ClipTransition = ClipTransition(),
     val audioMix: AudioMix = AudioMix(),
+    /** Nullable and appended last so legacy Gson projects and positional constructor calls remain safe. */
+    val inputColorProfileV1: InputColorProfile? = null,
 ) {
     val durationUs: Long get() = (sourceOutUs - sourceInUs).coerceAtLeast(1L)
     val timelineEndUs: Long get() = timelineStartUs + durationUs

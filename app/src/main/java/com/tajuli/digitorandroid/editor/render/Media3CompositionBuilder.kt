@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.render
 
+import android.os.Build
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
@@ -13,6 +14,8 @@ import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import kotlin.math.max
 import kotlin.math.roundToInt
+
+private const val SINGLE_LAYER_GAP_SENTINEL_ID = "__digitor_gap_sentinel"
 
 internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip> {
     if (clips.size < 2) return clips
@@ -30,7 +33,8 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
             previous.transform == clip.transform &&
             previous.nodeAnimations == clip.nodeAnimations &&
             previous.transition == clip.transition &&
-            previous.audioMix == clip.audioMix
+            previous.audioMix == clip.audioMix &&
+            previous.inputColorProfileV1 == clip.inputColorProfileV1
         if (canMerge) {
             result[result.lastIndex] = previous!!.copy(sourceOutUs = clip.sourceOutUs)
         } else {
@@ -142,20 +146,49 @@ class Media3CompositionBuilder {
 
         val sequences = mutableListOf<EditedMediaItemSequence>()
         val videoTracks = resolveCompositionVideoTracks(project)
+        val compositorTracks = if (videoTracks.size == 1) {
+            videoTracks + TimelineTrack(
+                id = SINGLE_LAYER_GAP_SENTINEL_ID,
+                name = "Compositor gap sentinel",
+                kind = TrackKind.VIDEO,
+                clips = emptyList(),
+            )
+        } else {
+            videoTracks
+        }
 
         videoTracks.forEach { track ->
             sequences += buildCompositedVideoSequence(project, track, forPreview = false)
         }
+
+        // Media3 Transformer chooses SingleInputVideoGraph for one video sequence and rejects our
+        // custom ResolveVideoCompositorSettings in that mode. Previously Digitor duplicated the real
+        // source track at opacity=0 to force MultipleInputVideoGraph. Camera Log footage is commonly
+        // HEVC, and opening a second decoder for the same HEVC source can exhaust vendor codec slots
+        // once the export encoder is also active. A full-duration gap sequence is a compositor input
+        // but opens no source decoder, preserving the exact compositor path with one decoder only.
+        if (videoTracks.size == 1) {
+            sequences += buildVideoGapSentinelSequence(project.durationUs)
+        }
+
         addAudioSequences(project, sequences, forPreview = false)
 
         require(sequences.isNotEmpty()) { "Timeline is empty" }
         val builder = Composition.Builder(sequences)
         if (videoTracks.isNotEmpty()) {
+            // Digitor's camera-log workflow intentionally treats decoder output as editable code
+            // values. Media3 defaults HDR-tagged input to KEEP_HDR, which can switch camera files
+            // onto a device HDR decoder/encoder path even though Digitor outputs SDR H.264 and owns
+            // the Log/HDR -> working-space conversion itself. On Android 10+ interpret such metadata
+            // as SDR so None/Bypass stays flat and selected Input Color profiles receive raw values.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                builder.setHdrMode(Composition.HDR_MODE_EXPERIMENTAL_FORCE_INTERPRET_HDR_AS_SDR)
+            }
             builder.setVideoCompositorSettings(
                 ResolveVideoCompositorSettings(
                     outputWidth = project.width,
                     outputHeight = project.height,
-                    videoTracks = videoTracks,
+                    videoTracks = compositorTracks,
                 ),
             )
             val textEffects = projectTextEffects(project)
@@ -163,6 +196,12 @@ class Media3CompositionBuilder {
                 builder.setEffects(Effects(emptyList(), textEffects))
             }
         }
+        return builder.build()
+    }
+
+    private fun buildVideoGapSentinelSequence(durationUs: Long): EditedMediaItemSequence {
+        val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
+        builder.addGap(durationUs.coerceAtLeast(1L))
         return builder.build()
     }
 

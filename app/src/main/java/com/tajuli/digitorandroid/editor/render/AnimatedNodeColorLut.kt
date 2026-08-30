@@ -14,9 +14,9 @@ import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
  * Timestamp-aware 3D LUT used for Correction and Color.
  *
  * In preview mode the long-lived GL effect resolves the latest clip snapshot on every frame. This
- * makes correction/color controls visible immediately without stop/setComposition/prepare. Export
- * stays deterministic and snapshot-based. Both modes use the exact same composition-time to
- * source-time mapping from [ParityRenderContract].
+ * makes correction/color controls and camera input-profile changes visible immediately without
+ * stop/setComposition/prepare. Export stays deterministic and snapshot-based. Both modes use the
+ * exact same composition-time to source-time mapping from [ParityRenderContract].
  */
 @UnstableApi
 internal class AnimatedNodeColorLut(
@@ -69,9 +69,11 @@ internal class AnimatedNodeColorLut(
 
     private fun visualRevision(current: TimelineClip): Long {
         // Immutable data classes make hashCode a cheap stable change token for static grades. Keep
-        // animation revision separate so keyed updates also invalidate the LUT.
+        // animation revision separate so keyed updates also invalidate the LUT. Input profile is
+        // part of the visual transform and therefore must invalidate the cached cube as well.
         var result = current.nodeGraph.hashCode().toLong()
         result = result * 31L + current.colorGrade.hashCode().toLong()
+        result = result * 31L + (current.inputColorProfileV1?.hashCode()?.toLong() ?: 0L)
         result = result * 31L + current.nodeAnimations.revision
         return result
     }
