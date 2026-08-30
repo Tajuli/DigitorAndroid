@@ -78,7 +78,7 @@ private class ClipGainProvider(
 }
 
 @UnstableApi
-private class TimedDigitorTextOverlay(
+internal class TimedDigitorTextOverlay(
     private val spec: TextOverlayClip,
 ) : TextOverlay() {
     private val staticVisibleText: SpannableString = styled(spec, spec.sizeScale)
