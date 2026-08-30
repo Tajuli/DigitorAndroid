@@ -23,6 +23,10 @@ import kotlin.math.roundToInt
  * decode the stream. Android 8.1+ also decodes directly near the requested preview size instead of
  * decoding a full camera frame and scaling it afterwards.
  *
+ * For a newly requested seek we can first ask for the closest sync/key frame. That path avoids a
+ * potentially long GOP walk and gives the viewer something useful almost immediately. The caller
+ * can then request OPTION_CLOSEST for the exact target and replace the placeholder when it arrives.
+ *
  * The whole fallback decode is guarded by PreviewExportCoordinator. Export takes the exclusive side
  * of that barrier and releases the cached retriever before Transformer starts, so the software
  * preview can never compete with the export decoder/encoder on fragile codec stacks.
@@ -45,6 +49,7 @@ internal object SoftwarePreviewRenderer {
         clip: TimelineClip,
         sourceTimeUs: Long,
         maxLongEdge: Int = 640,
+        closestSyncOnly: Boolean = false,
     ): Bitmap? = PreviewExportCoordinator.withSoftwarePreviewDecode {
         val session = sessionFor(context, clip) ?: return@withSoftwarePreviewDecode null
         val safeSourceUs = sourceTimeUs.coerceIn(
@@ -52,6 +57,11 @@ internal object SoftwarePreviewRenderer {
             clip.sourceOutUs.coerceAtLeast(clip.sourceInUs),
         )
         val safeLongEdge = maxLongEdge.coerceAtLeast(240)
+        val option = if (closestSyncOnly) {
+            MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+        } else {
+            MediaMetadataRetriever.OPTION_CLOSEST
+        }
         val decoded = try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1 &&
                 session.width > 1 && session.height > 1
@@ -59,14 +69,14 @@ internal object SoftwarePreviewRenderer {
                 val target = fittedSize(session.width, session.height, safeLongEdge)
                 session.retriever.getScaledFrameAtTime(
                     safeSourceUs,
-                    MediaMetadataRetriever.OPTION_CLOSEST,
+                    option,
                     target.first,
                     target.second,
                 )
             } else {
                 session.retriever.getFrameAtTime(
                     safeSourceUs,
-                    MediaMetadataRetriever.OPTION_CLOSEST,
+                    option,
                 )
             }
         } catch (_: Throwable) {
