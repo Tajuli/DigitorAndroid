@@ -38,7 +38,7 @@ internal class StableGpuExportCompositionBuilder(
     private val sharedBuilder: Media3CompositionBuilder = Media3CompositionBuilder(),
 ) {
     fun build(project: TimelineProject): Composition =
-        if (canUseDirectSingleInputExport(project) && textOverlaysAreCoveredByRealVideoV14(project)) {
+        if (shouldUseStableSingleInputExportV17(project)) {
             buildDirectSingleInput(project)
         } else {
             // A composition-level title that reaches a video-free timeline interval needs actual
@@ -202,6 +202,10 @@ internal class StableGpuExportCompositionBuilder(
             .build()
     }
 }
+
+/** Final export router decision kept separate so V-track text regressions are unit-testable. */
+internal fun shouldUseStableSingleInputExportV17(project: TimelineProject): Boolean =
+    canUseDirectSingleInputExport(project) && textOverlaysAreCoveredByRealVideoV14(project)
 
 /**
  * Returns the normal imported A-track mirror when every video clip has exactly one linked audio clip
