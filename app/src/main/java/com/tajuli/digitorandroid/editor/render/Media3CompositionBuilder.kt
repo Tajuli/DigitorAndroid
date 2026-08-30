@@ -148,7 +148,9 @@ class Media3CompositionBuilder {
 
         val sequences = mutableListOf<EditedMediaItemSequence>()
         val videoTracks = resolveCompositionVideoTracks(project)
-        val compositorTracks = if (videoTracks.size == 1) {
+        val needsBlankFrameSentinel = videoTracks.isNotEmpty() &&
+            (videoTracks.size == 1 || !textOverlaysAreCoveredByRealVideoV14(project))
+        val compositorTracks = if (needsBlankFrameSentinel) {
             videoTracks + TimelineTrack(
                 id = SINGLE_LAYER_GAP_SENTINEL_ID,
                 name = "Compositor blank-frame sentinel",
@@ -168,8 +170,9 @@ class Media3CompositionBuilder {
         // video 0-60s followed by a title at 60-63s). Feed a tiny static black image for the whole
         // project and keep its compositor alpha at zero via the empty sentinel track. This creates
         // encoder timestamps/frames without holding the previous video's last frame or opening a
-        // second hardware video decoder.
-        if (videoTracks.size == 1) {
+        // second hardware video decoder. The same sentinel is added to multitrack compositions when
+        // a title reaches an interval where none of the real video tracks has frames.
+        if (needsBlankFrameSentinel) {
             sequences += buildVideoBlankFrameSentinelSequence(project)
         }
 
