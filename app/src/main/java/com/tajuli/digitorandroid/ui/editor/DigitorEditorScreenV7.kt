@@ -280,6 +280,8 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
         val exportHasAudio = exportProject.tracks.any { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
         scope.launch {
             stopForEdit()
+            // Pausing is not enough on low-memory devices: CompositionPlayer keeps its decoder and
+            // audio graph alive. Release those preview resources before Transformer opens export AV.
             runCatching { audioPreview.suspendForExternalWork() }
             exportFraction = 0f
             exportStatus = "Preparing ${exportQualitySnapshot.label} export"
@@ -316,6 +318,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                             resumePlayback = false,
                         )
                     } catch (_: CancellationException) {
+                        // Screen is leaving; no preview rebuild is needed.
                     } catch (error: Throwable) {
                         previewStatus = "Audio preview: ${error.message ?: "unavailable"}"
                     }
@@ -351,42 +354,49 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
             },
             confirmButton = {
                 Button(onClick = {
-                    val base = exportName.trim().ifEmpty { "Digitor" }.removeSuffix(".mp4")
-                    showExportDialog = false
-                    saveDocument.launch("$base.mp4")
-                }) { Text("Export") }
+                    val base = exportName.trim().ifEmpty { "Digitor_export" }.removeSuffix(".mp4")
+                    showExportDialog = false; saveDocument.launch("$base.mp4")
+                }) { Icon(Icons.Rounded.Save, null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(5.dp)); Text("Choose location") }
             },
             dismissButton = { TextButton(onClick = { showExportDialog = false }) { Text("Cancel") } },
         )
     }
 
-    Surface(Modifier.fillMaxSize().background(E7Shell), color = E7Shell) {
+    val currentExportFraction = exportFraction
+    val exportingNow = currentExportFraction != null && currentExportFraction < 1f
+
+    Surface(Modifier.fillMaxSize(), color = E7Shell) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
             TopBarV7(
-                title = state.project.title,
-                status = exportStatus ?: previewStatus ?: state.status,
-                exportFraction = exportFraction,
+                title = selectedClip?.label ?: state.project.textOverlays.firstOrNull { it.id == state.selectedTextId }?.text ?: previewClip?.label ?: "New project",
+                status = exportStatus ?: state.busyOperation ?: previewStatus ?: state.status,
+                exportFraction = currentExportFraction,
                 canUndo = state.canUndo,
                 canRedo = state.canRedo,
-                onUndo = vm::undo,
-                onRedo = vm::redo,
+                onUndo = { stopForEdit(); vm.undo() },
+                onRedo = { stopForEdit(); vm.redo() },
                 onSaveProject = vm::saveProject,
-                onLoadProject = vm::loadProject,
+                onLoadProject = { stopForEdit(); vm.loadProject() },
                 onImport = ::launchImport,
                 onExport = { showExportDialog = true },
             )
-            if (exportFraction != null && exportFraction!! < 1f) {
-                LinearProgressIndicator(progress = { exportFraction ?: 0f }, modifier = Modifier.fillMaxWidth().height(2.dp))
-            }
             ProjectActionsBarV7(
                 canUndo = state.canUndo,
                 canRedo = state.canRedo,
-                exporting = exportFraction != null && exportFraction!! < 1f,
-                onUndo = vm::undo,
-                onRedo = vm::redo,
+                exporting = exportingNow,
+                onUndo = { stopForEdit(); vm.undo() },
+                onRedo = { stopForEdit(); vm.redo() },
                 onSaveProject = vm::saveProject,
-                onLoadProject = vm::loadProject,
+                onLoadProject = { stopForEdit(); vm.loadProject() },
             )
+            if (exportingNow) {
+                val stableProgress = currentExportFraction ?: 0f
+                Column {
+                    LinearProgressIndicator(progress = { stableProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth().height(3.dp))
+                    Text("${(stableProgress * 100).roundToInt()}%  ${exportStatus.orEmpty()}", fontSize = 9.sp, color = E7Muted, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp))
+                }
+            }
+
             FramePreviewV7(
                 previewEngine = previewEngine,
                 frame = previewFrame,
@@ -397,18 +407,17 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                 timelineUs = cursorUs,
                 onImport = ::launchImport,
                 qualifierPickerActive = state.qualifierPickerActive,
-                onPickColor = { x, y, size -> vm.pickQualifierFromPreview(cursorUs, x, y, size, size) },
+                onPickColor = { red, green, blue ->
+                    val target = selectedClip?.takeIf { clip -> state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs } ?: previewClip
+                    target?.let { clip ->
+                        if (clip.id != selectedClip?.id) vm.selectClip(clip.id)
+                        applyQualifierPickedColor(vm, red, green, blue)
+                    }
+                },
                 modifier = Modifier.fillMaxWidth().weight(1f),
             )
-            TransportV7(
-                enabled = hasMedia,
-                isPlaying = isPlaying,
-                cursorUs = cursorUs,
-                durationUs = state.project.durationUs,
-                onBack = { seekTimeline(cursorUs - 10 * US_PER_SECOND) },
-                onPlayPause = ::togglePlayback,
-                onForward = { seekTimeline(cursorUs + 10 * US_PER_SECOND) },
-            )
+            TransportV7(enabled = hasMedia, isPlaying = isPlaying, cursorUs = cursorUs, durationUs = state.project.durationUs, onBack = { seekTimeline(cursorUs - 10 * US_PER_SECOND) }, onPlayPause = ::togglePlayback, onForward = { seekTimeline(cursorUs + 10 * US_PER_SECOND) })
+
             Box(Modifier.fillMaxWidth().height(290.dp)) {
                 when (workspace) {
                     WorkspaceV7.EDIT -> EditWorkspaceV5(
@@ -440,10 +449,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                 onSelected = { next ->
                     workspace = next
                     if (next == WorkspaceV7.TEXT) {
-                        val timelineSelectedId = TimelineTextSelectionBusV10.selectedTextId.value
-                        val textTarget = timelineSelectedId
-                            ?.let { id -> state.project.textOverlays.firstOrNull { it.id == id } }
-                            ?: state.project.activeTextOverlaysAt(cursorUs).lastOrNull()
+                        val textTarget = state.project.activeTextOverlaysAt(cursorUs).lastOrNull()
                             ?: state.project.textOverlays.lastOrNull()
                         if (textTarget != null) vm.selectTextOverlay(textTarget.id)
                     } else {
@@ -589,7 +595,11 @@ private fun FramePreviewV7(
         }
 
         textOverlays.forEach { overlay ->
-            TextOverlayPreviewV2(overlay = overlay, timelineUs = timelineUs, previewSize = previewSize)
+            TextOverlayPreviewV2(
+                overlay = overlay,
+                timelineUs = timelineUs,
+                previewSize = previewSize,
+            )
         }
 
         Text("GPU Preview · $activeLayerCount ${if (activeLayerCount == 1) "layer" else "layers"}", modifier = Modifier.align(Alignment.TopStart).padding(10.dp).background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 4.dp), fontSize = 9.sp, color = Color.White.copy(alpha = .72f))
