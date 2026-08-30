@@ -114,13 +114,17 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                BackHandler(enabled = destination == DESTINATION_EDITOR) {
+                fun returnToHome() {
                     latestEditorProject?.let { project ->
                         runCatching { projectStore.autoSave(project) }
                     }
                     destination = DESTINATION_HOME
                     latestEditorProject = null
                     recentRefresh++
+                }
+
+                BackHandler(enabled = destination == DESTINATION_EDITOR) {
+                    returnToHome()
                 }
 
                 when (destination) {
@@ -138,7 +142,10 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        DigitorEditorScreenV7(vm = editorVm)
+                        DigitorEditorScreenV7(
+                            vm = editorVm,
+                            onHome = ::returnToHome,
+                        )
                     }
 
                     else -> {
