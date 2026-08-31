@@ -29,6 +29,7 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
     sorted.forEach { clip ->
         val previous = result.lastOrNull()
         val canMerge = previous != null &&
+            !previous.isImageV21 && !clip.isImageV21 &&
             previous.uri == clip.uri &&
             previous.timelineEndUs == clip.timelineStartUs &&
             previous.sourceOutUs == clip.sourceInUs &&
@@ -39,7 +40,9 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
             previous.nodeAnimations == clip.nodeAnimations &&
             previous.transition == clip.transition &&
             previous.audioMix == clip.audioMix &&
-            previous.inputColorProfileV1 == clip.inputColorProfileV1
+            previous.inputColorProfileV1 == clip.inputColorProfileV1 &&
+            previous.visualMediaV21 == clip.visualMediaV21 &&
+            previous.sourceMimeTypeV21 == clip.sourceMimeTypeV21
         if (canMerge) {
             result[result.lastIndex] = previous!!.copy(sourceOutUs = clip.sourceOutUs)
         } else {
@@ -179,10 +182,6 @@ class Media3CompositionBuilder(
             sequences += buildCompositedVideoSequence(project, track, forPreview = false)
         }
 
-        // A pure Media3 video gap contains no source frames. Composition-level overlays need a
-        // continuous frame stream even when the timeline is in a video-free region. Feed a tiny
-        // static black image for the whole project and keep its compositor alpha at zero via the
-        // empty sentinel track. This creates encoder timestamps without holding the previous frame.
         if (needsBlankFrameSentinel || pureTextVideo) {
             sequences += buildVideoBlankFrameSentinelSequence(project)
         }
@@ -210,8 +209,6 @@ class Media3CompositionBuilder(
             }
 
             pureTextVideo -> {
-                // With no real V clip, the static black image is the actual project video stream.
-                // Scale it to the canvas first, then draw all timed text/visual overlays on top.
                 val videoEffects = buildList<Effect> {
                     add(
                         Presentation.createForWidthAndHeight(
@@ -262,6 +259,7 @@ class Media3CompositionBuilder(
                     kind = TrackKind.VIDEO,
                     forPreview = forPreview,
                     compositorOwnsGeometry = true,
+                    projectFrameRate = project.frameRate,
                 ),
             )
             cursorUs = clip.timelineEndUs
@@ -286,7 +284,14 @@ class Media3CompositionBuilder(
                     if (clip.timelineStartUs > cursorUs) {
                         videoBuilder.addGap(clip.timelineStartUs - cursorUs)
                     }
-                    videoBuilder.addItem(toEditedMediaItem(clip, TrackKind.VIDEO, forPreview = true))
+                    videoBuilder.addItem(
+                        toEditedMediaItem(
+                            clip = clip,
+                            kind = TrackKind.VIDEO,
+                            forPreview = true,
+                            projectFrameRate = project.frameRate,
+                        ),
+                    )
                     cursorUs = clip.timelineEndUs
                 }
                 sequences += videoBuilder.build()
@@ -333,7 +338,14 @@ class Media3CompositionBuilder(
             if (clip.timelineStartUs > cursorUs) {
                 audioBuilder.addGap(clip.timelineStartUs - cursorUs)
             }
-            audioBuilder.addItem(toEditedMediaItem(clip, TrackKind.AUDIO, forPreview))
+            audioBuilder.addItem(
+                toEditedMediaItem(
+                    clip = clip,
+                    kind = TrackKind.AUDIO,
+                    forPreview = forPreview,
+                    projectFrameRate = project.frameRate,
+                ),
+            )
             cursorUs = clip.timelineEndUs
         }
         if (extendToProjectDuration && project.durationUs > cursorUs) {
@@ -347,19 +359,34 @@ class Media3CompositionBuilder(
         kind: TrackKind,
         forPreview: Boolean,
         compositorOwnsGeometry: Boolean = false,
+        projectFrameRate: Int,
     ): EditedMediaItem {
-        val clipping = MediaItem.ClippingConfiguration.Builder()
-            .setStartPositionUs(clip.sourceInUs)
-            .setEndPositionUs(clip.sourceOutUs)
-            .build()
-        val mediaItem = MediaItem.Builder()
-            .setUri(clip.uri)
-            .setClippingConfiguration(clipping)
-            .build()
+        val mediaItem = if (kind == TrackKind.VIDEO && clip.isImageV21) {
+            val durationMs = ((clip.durationUs + 999L) / 1000L).coerceAtLeast(1L)
+            MediaItem.Builder()
+                .setUri(clip.uri)
+                .apply { clip.sourceMimeTypeV21?.takeIf { it.isNotBlank() }?.let(::setMimeType) }
+                .setImageDurationMs(durationMs)
+                .build()
+        } else {
+            val clipping = MediaItem.ClippingConfiguration.Builder()
+                .setStartPositionUs(clip.sourceInUs)
+                .setEndPositionUs(clip.sourceOutUs)
+                .build()
+            MediaItem.Builder()
+                .setUri(clip.uri)
+                .setClippingConfiguration(clipping)
+                .build()
+        }
 
         val builder = EditedMediaItem.Builder(mediaItem)
             .setDurationUs(clip.durationUs)
         if (kind == TrackKind.VIDEO) {
+            if (clip.isImageV21) {
+                builder.setFrameRate(projectFrameRate.coerceAtLeast(1))
+            }
+            // This is intentionally identical for image and video TimelineClip items. Corrections,
+            // Resolve node color, effects, transform/keyframes and opacity therefore use one path.
             val videoEffects = when {
                 forPreview && compositorOwnsGeometry -> SharedVideoPipeline.compositedPreviewEffectsFor(clip)
                 forPreview -> SharedVideoPipeline.previewEffectsFor(clip)

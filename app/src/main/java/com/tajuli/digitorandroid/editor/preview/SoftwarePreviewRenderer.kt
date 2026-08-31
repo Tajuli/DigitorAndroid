@@ -2,6 +2,7 @@ package com.tajuli.digitorandroid.editor.preview
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
@@ -13,6 +14,11 @@ import kotlin.math.roundToInt
 /**
  * Emergency software preview used when a device/codec can decode a clip but the MediaCodec ->
  * Media3 GPU graph never produces its first frame.
+ *
+ * Native still-image TimelineClip items also intentionally use this path. The realtime GPU transport
+ * is MediaExtractor/MediaCodec based and therefore has no encoded video track to open for a JPEG or
+ * PNG. Static images are decoded with BitmapFactory, passed through the same shared color LUT, and
+ * then displayed by GpuPreviewSurface while keeping the clip itself timeline-native.
  *
  * Camera Log clips are decoded as visible code values first, so an untouched S-Log/C-Log clip stays
  * flat instead of black. The same shared color LUT is then sampled on CPU, which means Input Color,
@@ -76,12 +82,22 @@ internal object SoftwarePreviewRenderer {
         maxLongEdge: Int = 640,
         closestSyncOnly: Boolean = false,
     ): Bitmap? = PreviewExportCoordinator.withSoftwarePreviewDecode {
-        val session = sessionFor(context, clip) ?: return@withSoftwarePreviewDecode null
+        val safeLongEdge = maxLongEdge.coerceAtLeast(240)
         val safeSourceUs = sourceTimeUs.coerceIn(
             clip.sourceInUs,
             clip.sourceOutUs.coerceAtLeast(clip.sourceInUs),
         )
-        val safeLongEdge = maxLongEdge.coerceAtLeast(240)
+
+        if (clip.isImageV21) {
+            return@withSoftwarePreviewDecode renderStillImage(
+                context = context,
+                clip = clip,
+                sourceTimeUs = safeSourceUs,
+                maxLongEdge = safeLongEdge,
+            )
+        }
+
+        val session = sessionFor(context, clip) ?: return@withSoftwarePreviewDecode null
         val option = if (closestSyncOnly) {
             MediaMetadataRetriever.OPTION_CLOSEST_SYNC
         } else {
@@ -114,19 +130,53 @@ internal object SoftwarePreviewRenderer {
         val scaled = scaleDown(decoded, safeLongEdge)
         if (scaled !== decoded) decoded.recycle()
 
-        val working = if (scaled.config == Bitmap.Config.ARGB_8888 && scaled.isMutable) {
-            scaled
-        } else {
-            val copied = scaled.copy(Bitmap.Config.ARGB_8888, true) ?: run {
-                if (!scaled.isRecycled) scaled.recycle()
-                return@withSoftwarePreviewDecode null
-            }
-            if (copied !== scaled && !scaled.isRecycled) scaled.recycle()
-            copied
-        }
-
+        val working = mutableArgb8888(scaled) ?: return@withSoftwarePreviewDecode null
         applyCubeTetrahedral(working, lutFor(clip, safeSourceUs))
         working
+    }
+
+    private fun renderStillImage(
+        context: Context,
+        clip: TimelineClip,
+        sourceTimeUs: Long,
+        maxLongEdge: Int,
+    ): Bitmap? {
+        val uri = runCatching { Uri.parse(clip.uri) }.getOrNull() ?: return null
+        val resolver = context.contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        runCatching {
+            resolver.openInputStream(uri)?.use { input -> BitmapFactory.decodeStream(input, null, bounds) }
+        }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        var sample = 1
+        while (max(bounds.outWidth / sample, bounds.outHeight / sample) > maxLongEdge * 2) {
+            sample *= 2
+        }
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sample.coerceAtLeast(1)
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val decoded = runCatching {
+            resolver.openInputStream(uri)?.use { input -> BitmapFactory.decodeStream(input, null, options) }
+        }.getOrNull() ?: return null
+
+        val scaled = scaleDown(decoded, maxLongEdge)
+        if (scaled !== decoded) decoded.recycle()
+        val working = mutableArgb8888(scaled) ?: return null
+        applyCubeTetrahedral(working, lutFor(clip, sourceTimeUs))
+        return working
+    }
+
+    private fun mutableArgb8888(bitmap: Bitmap): Bitmap? {
+        if (bitmap.config == Bitmap.Config.ARGB_8888 && bitmap.isMutable) return bitmap
+        val copied = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (copied == null) {
+            if (!bitmap.isRecycled) bitmap.recycle()
+            return null
+        }
+        if (copied !== bitmap && !bitmap.isRecycled) bitmap.recycle()
+        return copied
     }
 
     /** Called only while PreviewExportCoordinator owns the software-decode gate. */
