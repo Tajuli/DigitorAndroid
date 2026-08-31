@@ -93,7 +93,7 @@ fun CreatorMediaWorkspaceV8(
             Text("Creator tools", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
             Text(
-                busyOperation ?: "Text V2 · Transition · Retime",
+                busyOperation ?: "Text V2 · Transition V22 · Retime",
                 fontSize = 8.sp,
                 color = if (busyOperation == null) C8Muted else C8Accent,
             )
@@ -140,19 +140,9 @@ fun CreatorMediaWorkspaceV8(
 
             SectionCardV8("Transition") {
                 if (!selectedIsVideo) {
-                    Text("Select a video clip", fontSize = 8.sp, color = C8Muted)
+                    Text("Select the clip after a cut", fontSize = 8.sp, color = C8Muted)
                 } else {
-                    val clip = selectedClip!!
-                    val maxFadeUs = min(clip.durationUs / 2L, 3_000_000L).coerceAtLeast(1L)
-                    DurationSliderV8("Fade in", clip.transition.fadeInUs, maxFadeUs) { value ->
-                        vm.setSelectedTransition(value, clip.transition.fadeOutUs)
-                    }
-                    DurationSliderV8("Fade out", clip.transition.fadeOutUs, maxFadeUs) { value ->
-                        vm.setSelectedTransition(clip.transition.fadeInUs, value)
-                    }
-                    TextButton(onClick = { vm.setSelectedTransition(0L, 0L) }) {
-                        Text("None", fontSize = 8.sp)
-                    }
+                    TransitionPickerV22(project, selectedClip!!, vm)
                 }
             }
 
