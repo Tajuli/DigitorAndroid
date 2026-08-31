@@ -15,6 +15,7 @@ Native Android mobile video-editor foundation for **Digitor**.
 - Native Kotlin + Jetpack Compose UI with a black/gray editor theme and white primary content
 - Video/audio import through Android's document picker
 - Multitrack V/A timeline with real gaps and per-track overlap validation
+- Source-aware audio waveforms inside A-track clips with background MediaCodec decode, memory cache and disposable disk cache
 - Video and text clips share the same single lane on each V track; there is no separate title lane
 - A V track can contain `video -> text -> video`, while text on an upper V track can overlay video on a lower V track
 - New video/text/template insertion appends after the last item on the selected V track; an empty V track uses the playhead
@@ -107,6 +108,8 @@ Within one V track, video and text items cannot occupy the same time range. Betw
 
 `Media3CompositionBuilder` uses `EditedMediaItemSequence.Builder.addGap()` to preserve media start times. The export router keeps straightforward one-video edits on Media3's stable single-input graph and only creates a multi-input compositor graph when the timeline actually requires layering or video-free title coverage.
 
+Audio waveforms are source-derived editor metadata. A single cached source envelope is reused by split clips, and timeline drawing maps each clip's `sourceInUs..sourceOutUs` range so trimmed media shows the correct waveform segment. Waveform failure never blocks audio preview or export.
+
 ## CPU fallback scope
 
 CPU fallback exports video MP4 and handles visual multitrack compositing/color. **CPU audio mixing and the full GPU text/title feature set are not yet parity-complete on the CPU fallback path.** GPU export supports audio tracks through Media3 Composition/AAC.
@@ -136,7 +139,7 @@ CI also compiles instrumentation tests and runs device-side render parity plus p
 ## Next milestones
 
 - CPU PCM decode/multitrack audio mixer + AAC encoder
-- waveform generation and audio mixer UI
+- full audio mixer UI
 - advanced ripple/roll/slip editing tools
 - true cross-dissolve/overlap transitions where the render architecture supports them safely
 - image/sticker/shape overlay items with the same free V-track semantics as text
