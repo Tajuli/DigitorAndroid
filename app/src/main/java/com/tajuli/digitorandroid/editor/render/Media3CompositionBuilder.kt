@@ -14,6 +14,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.hasCompositionOverlaysV19
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -70,13 +71,12 @@ private fun Int.evenAtLeastTwo(): Int {
 }
 
 /**
- * A TextOverlay is an effect, not a source stream. If a project contains titles but no playable
- * video clips, Transformer still needs a real video source to produce frames/timestamps for those
- * titles. This helper is intentionally model-only so the pure-text routing can be regression tested
- * on the JVM without constructing Android MediaItems.
+ * Composition-level overlays are effects, not source streams. If a project contains text/images/
+ * stickers/shapes but no playable video clips, Transformer still needs a real video source to
+ * produce frames/timestamps for those overlays. Historical function name retained for tests/API.
  */
 internal fun needsPureTextVideoSourceV18(project: TimelineProject): Boolean =
-    project.textOverlays.isNotEmpty() && resolveCompositionVideoTracks(project).isEmpty()
+    project.hasCompositionOverlaysV19() && resolveCompositionVideoTracks(project).isEmpty()
 
 @UnstableApi
 class Media3CompositionBuilder(
@@ -179,13 +179,10 @@ class Media3CompositionBuilder(
             sequences += buildCompositedVideoSequence(project, track, forPreview = false)
         }
 
-        // A pure Media3 video gap contains no source frames. Composition-level text effects need a
-        // continuous frame stream even when the timeline is in a video-free region (for example,
-        // video 0-60s followed by a title at 60-63s). Feed a tiny static black image for the whole
-        // project and keep its compositor alpha at zero via the empty sentinel track. GpuExportBackend
-        // supplies this as a real app-cache PNG file on device; the data URI default remains only for
-        // non-export/internal callers. This creates encoder timestamps/frames without holding the
-        // previous video's last frame or opening a second hardware video decoder.
+        // A pure Media3 video gap contains no source frames. Composition-level overlays need a
+        // continuous frame stream even when the timeline is in a video-free region. Feed a tiny
+        // static black image for the whole project and keep its compositor alpha at zero via the
+        // empty sentinel track. This creates encoder timestamps without holding the previous frame.
         if (needsBlankFrameSentinel || pureTextVideo) {
             sequences += buildVideoBlankFrameSentinelSequence(project)
         }
@@ -213,10 +210,8 @@ class Media3CompositionBuilder(
             }
 
             pureTextVideo -> {
-                // No real V clip exists, so the static black image is the actual video stream rather
-                // than a zero-alpha compositor sentinel. Scale that 2x2 source to the project canvas
-                // first, then draw all timed text overlays on top. This supports title-card projects
-                // and Text + Audio timelines without requiring a multi-input video compositor.
+                // With no real V clip, the static black image is the actual project video stream.
+                // Scale it to the canvas first, then draw all timed text/visual overlays on top.
                 val videoEffects = buildList<Effect> {
                     add(
                         Presentation.createForWidthAndHeight(
