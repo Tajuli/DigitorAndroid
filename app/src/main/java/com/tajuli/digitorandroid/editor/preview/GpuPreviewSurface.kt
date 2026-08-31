@@ -30,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -72,10 +73,11 @@ fun GpuPreviewSurface(
         track.kind == TrackKind.VIDEO && !track.muted && track.clips.isNotEmpty()
     } == true
 
-    // PreviewTransformClock is cleared whenever the playhead is not inside a video clip. The
+    // PreviewTransformClock is cleared whenever the playhead is not inside a visual clip. The
     // underlying SurfaceView may still physically contain the last decoded frame, so activeClip is
-    // also used below to cover that stale Surface with the pasteboard until a real clip is active.
+    // also used below to cover that stale Surface until a real clip is active.
     val activeClip = project?.clip(previewClock.clipId)
+    val activeIsImage = activeClip?.isImageV21 == true
     val fallbackClip = activeClip
     val requestedTimelineUs = fallbackClip?.let { clip ->
         (clip.timelineStartUs + previewClock.localUs)
@@ -86,7 +88,9 @@ fun GpuPreviewSurface(
     } else {
         Long.MAX_VALUE
     }
-    val gpuFrameFresh = gpuFrame != null &&
+    // A MediaExtractor/MediaCodec GPU frame can never represent a native JPEG/PNG TimelineClip.
+    // Even if a previous video frame is still resident, force the image through software decode.
+    val gpuFrameFresh = !activeIsImage && gpuFrame != null &&
         (requestedTimelineUs == null || gpuDeltaUs <= GPU_FRAME_FRESH_TOLERANCE_US)
     val staleRequestedFrame = gpuFrame != null &&
         requestedTimelineUs != null &&
@@ -95,9 +99,10 @@ fun GpuPreviewSurface(
     var softwareFallbackActive by remember(engine) { mutableStateOf(false) }
     var previewView by remember(engine) { mutableStateOf<DigitorPreviewSurfaceView?>(null) }
 
-    LaunchedEffect(engine, hasVideo, gpuFrame?.timelineUs, exportActive) {
+    LaunchedEffect(engine, hasVideo, activeIsImage, gpuFrame?.timelineUs, exportActive) {
         when {
             exportActive -> softwareFallbackActive = false
+            activeIsImage -> softwareFallbackActive = true
             !hasVideo -> softwareFallbackActive = false
             gpuFrame == null -> {
                 delay(GPU_FIRST_FRAME_GRACE_MS)
@@ -113,10 +118,12 @@ fun GpuPreviewSurface(
         requestedTimelineUs,
         gpuFrame?.timelineUs,
         gpuFrameFresh,
+        activeIsImage,
         exportActive,
     ) {
         when {
             exportActive -> softwareFallbackActive = false
+            activeIsImage -> softwareFallbackActive = true
             gpuFrameFresh -> softwareFallbackActive = false
             staleRequestedFrame -> softwareFallbackActive = true
         }
@@ -136,6 +143,9 @@ fun GpuPreviewSurface(
         project,
         fallbackClip?.id,
         fallbackLocalUs,
+        fallbackClip?.nodeGraph,
+        fallbackClip?.colorGrade,
+        fallbackClip?.nodeAnimations?.revision,
     ) {
         val clip = fallbackClip
         if (exportActive || !softwareFallbackActive || clip == null) {
@@ -187,6 +197,7 @@ fun GpuPreviewSurface(
                     clip.timelineStartUs.toString(),
                     clip.sourceInUs.toString(),
                     clip.sourceOutUs.toString(),
+                    clip.isImageV21.toString(),
                 )
             }
         }
@@ -237,17 +248,30 @@ fun GpuPreviewSurface(
             !exportActive && softwareFallbackActive && !gpuFrameFresh && softwareFrame != null && !softwareFrame.isRecycled
 
         if (showingSoftwareFrame && softwareFrame != null) {
+            val transform = fallbackClip?.transform?.evaluate(fallbackLocalUs)
+            val imageModifier = if (fallbackClip?.isImageV21 == true && transform != null) {
+                fittedModifier.graphicsLayer {
+                    alpha = fallbackClip.opacity.coerceIn(0f, 1f)
+                    scaleX = transform.scaleX
+                    scaleY = transform.scaleY
+                    rotationZ = transform.rotationDegrees
+                    translationX = transform.positionX * size.width * .5f
+                    translationY = transform.positionY * size.height * .5f
+                }
+            } else {
+                fittedModifier
+            }
             Image(
                 bitmap = softwareFrame.asImageBitmap(),
-                contentDescription = "Software fallback preview",
-                modifier = fittedModifier,
+                contentDescription = if (fallbackClip?.isImageV21 == true) "Still image preview" else "Software fallback preview",
+                modifier = imageModifier,
                 contentScale = ContentScale.Fit,
             )
         }
 
         // Do not hold the last decoded image after the playhead leaves the clip. SurfaceView keeps
         // its previous buffer by design, so cover it until PreviewTransformClock points to a real
-        // active video clip again.
+        // active visual clip again.
         if (activeClip == null) {
             Box(fittedModifier.background(PREVIEW_PASTEBOARD_GRAY))
         }
@@ -414,12 +438,11 @@ private class DigitorPreviewSurfaceView(
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        if (attachedSurface !== holder.surface) {
-            attachedSurface?.let { engine.detachSurface(it) }
-            attachedSurface = holder.surface
+        attachedSurface = holder.surface
+        if (holder.surface.isValid) {
+            engine.attachSurface(holder.surface)
+            if (!PreviewExportCoordinator.exportActive.value) engine.scheduleCurrentFrameRefresh(80L)
         }
-        engine.attachSurface(holder.surface)
-        if (!PreviewExportCoordinator.exportActive.value) engine.scheduleCurrentFrameRefresh(80L)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
