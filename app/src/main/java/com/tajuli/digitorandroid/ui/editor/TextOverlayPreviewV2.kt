@@ -21,6 +21,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.tajuli.digitorandroid.editor.model.TextAlignmentV2
 import com.tajuli.digitorandroid.editor.model.TextFontV2
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
@@ -71,14 +72,17 @@ fun TextOverlayPreviewV2(
     }
 
     Box(
-        modifier.graphicsLayer {
-            alpha = combinedAlpha
-            translationX = (manual.positionX + preset.offsetX) * previewSize.width * .5f
-            translationY = (manual.positionY + preset.offsetY) * previewSize.height * .5f
-            scaleX = manual.sizeScale
-            scaleY = manual.sizeScale
-            rotationZ = manual.rotationDegrees
-        }.widthIn(max = 520.dp),
+        modifier
+            .zIndex(PreviewOverlayLayerOrderV19.zFor(overlay.videoTrackIdV3))
+            .graphicsLayer {
+                alpha = combinedAlpha
+                translationX = (manual.positionX + preset.offsetX) * previewSize.width * .5f
+                translationY = (manual.positionY + preset.offsetY) * previewSize.height * .5f
+                scaleX = manual.sizeScale
+                scaleY = manual.sizeScale
+                rotationZ = manual.rotationDegrees
+            }
+            .widthIn(max = 520.dp),
         contentAlignment = contentAlignment,
     ) {
         Box(
