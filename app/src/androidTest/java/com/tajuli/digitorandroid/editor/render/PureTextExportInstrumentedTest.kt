@@ -11,10 +11,13 @@ import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.tajuli.digitorandroid.editor.model.ShapePresetV19
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.VisualOverlayClipV19
+import com.tajuli.digitorandroid.editor.model.VisualOverlayKindV19
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -23,30 +26,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Runtime regression for a project containing a title but no imported video clips. */
+/** Runtime regressions for composition overlays without imported video clips. */
 @UnstableApi
 @RunWith(AndroidJUnit4::class)
 class PureTextExportInstrumentedTest {
 
     @Test
     fun pureTextTimelineExportsNonEmptyMp4() {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val context = instrumentation.targetContext
-        val supportDir = File(context.cacheDir, "pure_text_export_test").apply { mkdirs() }
-        val blank = File(supportDir, "black.png")
-        val output = File(supportDir, "pure_text.mp4")
-        if (output.exists()) output.delete()
-
-        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
-        try {
-            bitmap.eraseColor(Color.BLACK)
-            blank.outputStream().use { stream ->
-                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream))
-            }
-        } finally {
-            bitmap.recycle()
-        }
-
         val project = TimelineProject(
             width = 320,
             height = 240,
@@ -66,6 +52,60 @@ class PureTextExportInstrumentedTest {
         )
 
         assertTrue(needsPureTextVideoSourceV18(project))
+        exportOverlayOnlyProject(project, "pure_text")
+    }
+
+    @Test
+    fun pureShapeOverlayTimelineExportsNonEmptyMp4() {
+        val project = TimelineProject(
+            width = 320,
+            height = 240,
+            frameRate = 24,
+            tracks = listOf(
+                TimelineTrack(id = "v1", name = "V1", kind = TrackKind.VIDEO),
+            ),
+            visualOverlaysV19 = listOf(
+                VisualOverlayClipV19(
+                    id = "shape-only",
+                    kind = VisualOverlayKindV19.SHAPE,
+                    label = "Shape",
+                    timelineStartUs = 0L,
+                    timelineEndUs = 1_000_000L,
+                    shapePreset = ShapePresetV19.CIRCLE,
+                    colorArgb = 0xFFFFD54FL,
+                    scale = .35f,
+                    positionX = .2f,
+                    positionY = -.1f,
+                    rotationDegrees = 25f,
+                    opacity = .8f,
+                    videoTrackIdV19 = "v1",
+                ),
+            ),
+        )
+
+        assertTrue(needsPureTextVideoSourceV18(project))
+        exportOverlayOnlyProject(project, "pure_shape")
+    }
+
+    private fun exportOverlayOnlyProject(project: TimelineProject, name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        VisualOverlayRenderEnvironmentV19.install(context)
+        val supportDir = File(context.cacheDir, "composition_overlay_export_test").apply { mkdirs() }
+        val blank = File(supportDir, "$name-black.png")
+        val output = File(supportDir, "$name.mp4")
+        if (output.exists()) output.delete()
+
+        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        try {
+            bitmap.eraseColor(Color.BLACK)
+            blank.outputStream().use { stream ->
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream))
+            }
+        } finally {
+            bitmap.recycle()
+        }
+
         val composition = Media3CompositionBuilder(Uri.fromFile(blank).toString()).build(project)
         val done = CountDownLatch(1)
         val failure = AtomicReference<Throwable?>(null)
@@ -96,9 +136,9 @@ class PureTextExportInstrumentedTest {
                 transformer.start(composition, output.absolutePath)
             }
 
-            assertTrue("Timed out waiting for pure-text export", done.await(30, TimeUnit.SECONDS))
-            failure.get()?.let { throw AssertionError("Pure-text export failed", it) }
-            assertTrue("Pure-text export produced no bytes", output.exists() && output.length() > 0L)
+            assertTrue("Timed out waiting for $name export", done.await(30, TimeUnit.SECONDS))
+            failure.get()?.let { throw AssertionError("$name export failed", it) }
+            assertTrue("$name export produced no bytes", output.exists() && output.length() > 0L)
         } finally {
             instrumentation.runOnMainSync {
                 transformerRef.get()?.let { transformer -> runCatching { transformer.cancel() } }
