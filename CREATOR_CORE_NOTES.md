@@ -23,7 +23,21 @@ This document describes the current creator/editor behavior on the active Androi
 - Reverse video derived render
 - Freeze-frame derived clip insertion
 - Audio clip volume, fade-in and fade-out through Media3 `GainProcessor`
+- Source-aware audio waveforms rendered inside A-track clips with background decode and memory/disk caching
 - Home navigation that autosaves before leaving the editor
+
+## Audio waveform contract
+
+Waveforms are editor metadata derived from the source audio and are never required to reopen or export a project.
+
+- Audio decoding runs off the UI thread through Android `MediaExtractor` + `MediaCodec`.
+- One normalized source envelope is shared by clips that reference the same media URI, including split clips.
+- Timeline drawing maps each clip's `sourceInUs..sourceOutUs` range into the source waveform, so trimmed/split clips display the correct section instead of stretching the full source.
+- Long sources dynamically compact the peak envelope to a bounded 8192 samples rather than growing memory with media duration.
+- PCM 8-bit, 16-bit, float, 24-bit packed and 32-bit decoder output are handled when exposed by the device codec.
+- Waveforms use an in-memory LRU plus disposable disk cache under the app cache directory; cache identity includes URI plus available source length/modified metadata.
+- Timeline rendering limits draw columns per clip so deep zoom does not create an unbounded number of Canvas draw operations.
+- Decode failure is non-fatal: the audio clip remains editable/playable and displays a neutral center line.
 
 ## Text/title timeline contract
 
@@ -74,6 +88,6 @@ Derived-media operations deliberately produce ordinary timeline media so the pro
 ## Current gaps
 
 - Advanced ripple/roll/slip tools are still future work.
-- Waveforms and a full audio mixer UI are still future work.
+- A full audio mixer UI is still future work.
 - CPU fallback is not yet feature-parity-complete for the full GPU text/title stack.
 - HDR/10-bit realtime parity remains outside the current supported contract.
