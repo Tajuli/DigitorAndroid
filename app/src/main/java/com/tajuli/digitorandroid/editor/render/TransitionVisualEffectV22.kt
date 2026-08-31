@@ -88,12 +88,10 @@ internal class TransitionVisualEffectV22 private constructor(
                 }
                 val transition = currentClip.transition.normalizedFor(currentClip.durationUs)
                 val durationUs = transition.resolvedDurationUsV22.coerceAtLeast(1L)
-                val localUs = if (outgoingGhost) {
-                    presentationTimeUs.coerceAtLeast(0L)
-                } else {
-                    (ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs) - currentClip.sourceInUs)
-                        .coerceAtLeast(0L)
-                }
+                // Media3 GL effects receive composition presentation time. Use the same canonical
+                // mapping as animated color/spatial effects for both normal and virtual ghost clips.
+                val localUs = (ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs) - currentClip.sourceInUs)
+                    .coerceAtLeast(0L)
                 val progress = (localUs.toDouble() / durationUs.toDouble()).toFloat().coerceIn(0f, 1f)
 
                 program.use()
