@@ -621,6 +621,10 @@ private fun ClipV4(
             .padding(horizontal = if (selected && track.kind == TrackKind.VIDEO) 9.dp else 3.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
+        if (track.kind == TrackKind.AUDIO) {
+            TimelineAudioWaveformV15(clip, Modifier.fillMaxSize())
+        }
+
         if (width > 24.dp) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(clip.label, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 8.sp, color = Color.White.copy(alpha = .9f), modifier = Modifier.weight(1f))
