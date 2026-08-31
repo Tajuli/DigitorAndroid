@@ -2,6 +2,7 @@ package com.tajuli.digitorandroid.ui.editor
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Box
@@ -84,6 +85,7 @@ internal fun VisualOverlayTimelineItemV19(
             .clip(RoundedCornerShape(4.dp))
             .background(VOT19Fill)
             .border(if (selected) 2.dp else .5.dp, if (selected) VOT19Accent else VOT19Border, RoundedCornerShape(4.dp))
+            .clickable { vm.selectVisualOverlayV19(overlay.id) }
             .pointerInput(overlay.id, track.id, pps, project) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = {
@@ -115,12 +117,6 @@ internal fun VisualOverlayTimelineItemV19(
                     val rawUs = rawDragX / pps.coerceAtLeast(.001f) * US_PER_SECOND
                     displayDeltaUs = (rawUs / frameUs).roundToLong() * frameUs
                 }
-            }
-            .pointerInput(overlay.id) {
-                detectDragGestures(
-                    onDragStart = { vm.selectVisualOverlayV19(overlay.id) },
-                    onDrag = { _, _ -> },
-                )
             }
             .padding(horizontal = if (selected) 9.dp else 4.dp),
         contentAlignment = Alignment.CenterStart,
