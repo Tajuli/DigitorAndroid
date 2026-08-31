@@ -6,18 +6,21 @@ This document describes the current creator/editor behavior on the active Androi
 
 - Snapshot Undo/Redo with drag/slider coalescing
 - Project Save/Load plus automatic restore of the latest saved project
-- Resolve-style V/A timeline with free video/text placement on V tracks
-- Video and text clips share the same lane inside each V track; separate V tracks may overlap
-- New media/text/template insertion appends after the last item on the selected V track
-- Press-and-hold title movement in time and between V1/V2/V3…
-- Independent title selection even when another video is underneath at the same timestamp
-- Left/right resize handles for titles and media clips
+- Resolve-style V/A timeline with free video/text/visual-overlay placement on V tracks
+- Video, text and visual overlay clips share the same lane inside each V track; separate V tracks may overlap
+- New media/text/template/visual insertion appends after the last item on the selected V track
+- Press-and-hold title/visual movement in time and between V1/V2/V3…
+- Independent title/visual selection even when another video is underneath at the same timestamp
+- Left/right resize handles for titles, visual overlays and media clips
 - Split media can be extended back into available source frames, bounded by neighboring items
 - Manual Text and Caption overlays with styling, position, size and background controls
+- Image, Sticker and Shape visual overlays with position, scale, rotation, opacity and duration controls
+- Built-in sticker presets: Heart, Star, Lightning, Check, Arrow and Smile
+- Built-in shape presets: Rectangle, Circle, Triangle and Arrow
 - Playhead-based manual title keyframes for X, Y, Size and Opacity
 - Timed entry/exit title animation presets
 - 28 data-driven animated title templates with hold-drag-release insertion
-- Preview text overlay and Media3 composition-level text export overlay
+- Preview text/visual overlays and Media3 composition-level overlay export
 - Compositor-native Fade In / Fade Out transitions
 - Speed bake (0.25x-4x core support; UI presets) with Media3 `EditedMediaItem.setSpeed`
 - Reverse video derived render
@@ -45,11 +48,37 @@ Titles are timeline items assigned to normal VIDEO tracks rather than a syntheti
 
 - V1 may contain `video -> text -> video` sequentially.
 - V2/V3 titles may overlap V1 video and render above the lower video track.
-- Inside one V track, video/text items may not overlap each other.
+- Inside one V track, video/text/visual items may not overlap each other.
 - The selected V track controls where newly added text/captions/templates are inserted.
 - If the selected V track already contains items, insertion starts after the last item; an empty V track uses the playhead.
 - Long-press title drag changes time and may move the title vertically between V tracks.
 - Title edge handles change start/end duration without a fixed three-second limit.
+
+## Visual overlay contract
+
+Images, stickers and shapes use one persisted `VisualOverlayClipV19` model rather than three independent editor systems.
+
+- Every visual overlay is assigned to a normal VIDEO track and participates in that lane's occupancy rules.
+- An overlay may overlap media on another V track, but it cannot overlap media, text or another visual item on its own V track.
+- Image overlays persist a content URI; the editor requests persistable read access when the document provider supports it.
+- Sticker and shape overlays are generated from deterministic vector-style raster sources and do not require bundled image assets.
+- Inspector controls expose normalized X/Y position, project-width-relative scale, clockwise rotation, opacity and duration.
+- Timeline items support long-press horizontal movement, vertical V-track movement and left/right duration trim handles.
+- Old project JSON remains readable because the project-level visual overlay field is nullable and resolves to an empty list when absent.
+- Invalid transform/timing values are normalized before commit; visual durations have a 100 ms minimum.
+
+## Visual overlay preview/export contract
+
+Preview and GPU export consume the same persisted overlay values.
+
+- Compose preview uses the same decoded/generated bitmap source as Media3 export.
+- Media3 renders images, stickers and shapes as timed composition-level `BitmapOverlay` layers.
+- Project V-track order determines composition overlay z-order; upper V tracks are rendered above lower V tracks.
+- A one-video timeline whose overlays stay inside real video coverage remains on the stable single-input export path.
+- If any composition overlay reaches a video-free interval, the shared blank-frame path supplies continuous encoder frames.
+- Overlay-only and Overlay + Audio projects use the synthetic black frame source as their full-duration video canvas.
+- Imported image decoding is bounded/downsampled and cached in memory to avoid repeatedly decoding large source images during preview/export.
+- Missing/unreadable image data fails visually to a small placeholder instead of crashing editor playback.
 
 ## Text animation contract
 
@@ -89,5 +118,5 @@ Derived-media operations deliberately produce ordinary timeline media so the pro
 
 - Advanced ripple/roll/slip tools are still future work.
 - A full audio mixer UI is still future work.
-- CPU fallback is not yet feature-parity-complete for the full GPU text/title stack.
+- CPU fallback is not yet feature-parity-complete for the full GPU composition-overlay stack.
 - HDR/10-bit realtime parity remains outside the current supported contract.
