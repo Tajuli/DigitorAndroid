@@ -9,9 +9,11 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.resolvedVideoTrackIdV3
 import com.tajuli.digitorandroid.editor.model.textOverlaysForVideoTrackV3
+import com.tajuli.digitorandroid.editor.model.visualOverlaysForVideoTrackV19
 import java.util.concurrent.ConcurrentHashMap
 
 private const val MIN_TRIM_DURATION_US_V13 = 100_000L
+private const val MIN_IMAGE_DURATION_US_V21 = 5_000_000L
 private val sourceDurationCacheV13 = ConcurrentHashMap<String, Long>()
 
 /** Resize the left edge of a title while keeping its right edge fixed. */
@@ -31,6 +33,9 @@ fun EditorViewModelV4.resizeTextStartV13(textId: String, requestedStartUs: Long)
         track.clips.filter { it.timelineEndUs <= current.timelineStartUs }.forEach { add(it.timelineEndUs) }
         snapshot.project.textOverlaysForVideoTrackV3(trackId)
             .filter { it.id != textId && it.timelineEndUs <= current.timelineStartUs }
+            .forEach { add(it.timelineEndUs) }
+        snapshot.project.visualOverlaysForVideoTrackV19(trackId)
+            .filter { it.timelineEndUs <= current.timelineStartUs }
             .forEach { add(it.timelineEndUs) }
     }.maxOrNull() ?: 0L
 
@@ -67,6 +72,9 @@ fun EditorViewModelV4.resizeTextEndV13(textId: String, requestedEndUs: Long) {
         snapshot.project.textOverlaysForVideoTrackV3(trackId)
             .filter { it.id != textId && it.timelineStartUs >= current.timelineEndUs }
             .forEach { add(it.timelineStartUs) }
+        snapshot.project.visualOverlaysForVideoTrackV19(trackId)
+            .filter { it.timelineStartUs >= current.timelineEndUs }
+            .forEach { add(it.timelineStartUs) }
     }.minOrNull()
 
     val minEndUs = current.timelineStartUs + MIN_TRIM_DURATION_US_V13
@@ -86,8 +94,9 @@ fun EditorViewModelV4.resizeTextEndV13(textId: String, requestedEndUs: Long) {
 }
 
 /**
- * Trim/extend the left edge of a VIDEO clip. A split clip can be pulled back into source media that
- * still exists before sourceInUs. The timeline end stays fixed. Linked source audio follows.
+ * Trim/extend the left edge of a V-track media clip. Still images have no finite source-media edge:
+ * their right edge stays fixed, sourceOut simply becomes the new timeline duration, and they may not
+ * be shortened below five seconds. Moving-video clips keep the historic source-aware trim rules.
  */
 fun EditorViewModelV4.resizeVideoClipStartV13(clipId: String, requestedStartUs: Long) {
     val activeVm = ActiveEditorVmRegistryV14.current()
@@ -99,12 +108,19 @@ fun EditorViewModelV4.resizeVideoClipStartV13(clipId: String, requestedStartUs: 
     val snapshot = state.value
     val clip = snapshot.project.clip(clipId) ?: return
     val track = snapshot.project.trackContaining(clipId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return
-    val linkedIds = snapshot.project.linkedClipIds(clipId)
+    if (clip.isImageV21) {
+        resizeImageClipStartV21(snapshot.project, track.id, clip, requestedStartUs)
+        return
+    }
 
+    val linkedIds = snapshot.project.linkedClipIds(clipId)
     val videoPreviousEndUs = buildList<Long> {
         track.clips.filter { it.id !in linkedIds && it.timelineEndUs <= clip.timelineStartUs }
             .forEach { add(it.timelineEndUs) }
         snapshot.project.textOverlaysForVideoTrackV3(track.id)
+            .filter { it.timelineEndUs <= clip.timelineStartUs }
+            .forEach { add(it.timelineEndUs) }
+        snapshot.project.visualOverlaysForVideoTrackV19(track.id)
             .filter { it.timelineEndUs <= clip.timelineStartUs }
             .forEach { add(it.timelineEndUs) }
     }.maxOrNull() ?: 0L
@@ -151,8 +167,8 @@ fun EditorViewModelV4.resizeVideoClipStartV13(clipId: String, requestedStartUs: 
 }
 
 /**
- * Trim/extend the right edge of a VIDEO clip. For a split clip this can reveal source frames that
- * were trimmed away by the split, up to the original media duration. Linked source audio follows.
+ * Extend/trim the right edge. Image clips can be pulled to any later duration, constrained only by
+ * the next item on the same V lane, and cannot be shorter than five seconds.
  */
 fun EditorViewModelV4.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long) {
     val activeVm = ActiveEditorVmRegistryV14.current()
@@ -164,14 +180,21 @@ fun EditorViewModelV4.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long
     val snapshot = state.value
     val clip = snapshot.project.clip(clipId) ?: return
     val track = snapshot.project.trackContaining(clipId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return
-    val linkedIds = snapshot.project.linkedClipIds(clipId)
+    if (clip.isImageV21) {
+        resizeImageClipEndV21(snapshot.project, track.id, clip, requestedEndUs)
+        return
+    }
 
+    val linkedIds = snapshot.project.linkedClipIds(clipId)
     val sourceDurationUs = sourceDurationUsV13(clip)
     val maxByVideoSourceUs = clip.timelineStartUs + (sourceDurationUs - clip.sourceInUs).coerceAtLeast(1L)
     val nextVideoItemStartUs = buildList<Long> {
         track.clips.filter { it.id !in linkedIds && it.timelineStartUs >= clip.timelineEndUs }
             .forEach { add(it.timelineStartUs) }
         snapshot.project.textOverlaysForVideoTrackV3(track.id)
+            .filter { it.timelineStartUs >= clip.timelineEndUs }
+            .forEach { add(it.timelineStartUs) }
+        snapshot.project.visualOverlaysForVideoTrackV19(track.id)
             .filter { it.timelineStartUs >= clip.timelineEndUs }
             .forEach { add(it.timelineStartUs) }
     }.minOrNull()
@@ -218,6 +241,55 @@ fun EditorViewModelV4.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long
     commitTrimProjectV13(snapshot.project.copy(tracks = tracks), selectedClipId = clipId, selectedTrackId = track.id)
 }
 
+private fun EditorViewModelV4.resizeImageClipStartV21(
+    project: TimelineProject,
+    trackId: String,
+    clip: TimelineClip,
+    requestedStartUs: Long,
+) {
+    val track = project.track(trackId) ?: return
+    val previousEndUs = buildList<Long> {
+        track.clips.filter { it.id != clip.id && it.timelineEndUs <= clip.timelineStartUs }.forEach { add(it.timelineEndUs) }
+        project.textOverlaysForVideoTrackV3(trackId).filter { it.timelineEndUs <= clip.timelineStartUs }.forEach { add(it.timelineEndUs) }
+        project.visualOverlaysForVideoTrackV19(trackId).filter { it.timelineEndUs <= clip.timelineStartUs }.forEach { add(it.timelineEndUs) }
+    }.maxOrNull() ?: 0L
+    val latestStartUs = clip.timelineEndUs - MIN_IMAGE_DURATION_US_V21
+    if (previousEndUs > latestStartUs) return
+    val newStartUs = requestedStartUs.coerceIn(previousEndUs, latestStartUs)
+    if (newStartUs == clip.timelineStartUs) return
+    val newDurationUs = clip.timelineEndUs - newStartUs
+    val updated = clip.copy(timelineStartUs = newStartUs, sourceInUs = 0L, sourceOutUs = newDurationUs)
+    val tracks = project.tracks.map { candidate ->
+        if (candidate.id == trackId) candidate.copy(clips = candidate.clips.map { if (it.id == clip.id) updated else it }) else candidate
+    }
+    commitTrimProjectV13(project.copy(tracks = tracks), selectedClipId = clip.id, selectedTrackId = trackId)
+}
+
+private fun EditorViewModelV4.resizeImageClipEndV21(
+    project: TimelineProject,
+    trackId: String,
+    clip: TimelineClip,
+    requestedEndUs: Long,
+) {
+    val track = project.track(trackId) ?: return
+    val nextStartUs = buildList<Long> {
+        track.clips.filter { it.id != clip.id && it.timelineStartUs >= clip.timelineEndUs }.forEach { add(it.timelineStartUs) }
+        project.textOverlaysForVideoTrackV3(trackId).filter { it.timelineStartUs >= clip.timelineEndUs }.forEach { add(it.timelineStartUs) }
+        project.visualOverlaysForVideoTrackV19(trackId).filter { it.timelineStartUs >= clip.timelineEndUs }.forEach { add(it.timelineStartUs) }
+    }.minOrNull()
+    val minEndUs = clip.timelineStartUs + MIN_IMAGE_DURATION_US_V21
+    val maxEndUs = nextStartUs ?: Long.MAX_VALUE / 4
+    if (maxEndUs < minEndUs) return
+    val newEndUs = requestedEndUs.coerceIn(minEndUs, maxEndUs)
+    if (newEndUs == clip.timelineEndUs) return
+    val newDurationUs = newEndUs - clip.timelineStartUs
+    val updated = clip.copy(sourceInUs = 0L, sourceOutUs = newDurationUs)
+    val tracks = project.tracks.map { candidate ->
+        if (candidate.id == trackId) candidate.copy(clips = candidate.clips.map { if (it.id == clip.id) updated else it }) else candidate
+    }
+    commitTrimProjectV13(project.copy(tracks = tracks), selectedClipId = clip.id, selectedTrackId = trackId)
+}
+
 private fun EditorViewModelV4.sourceDurationUsV13(clip: TimelineClip): Long =
     sourceDurationCacheV13.getOrPut(clip.uri) {
         val retriever = MediaMetadataRetriever()
@@ -248,6 +320,7 @@ private fun EditorViewModelV4.commitTrimProjectV13(
         }
         selectedClipId != null -> {
             TimelineTextSelectionBusV10.clear()
+            VisualOverlaySelectionBusV19.clear()
             selectClip(selectedClipId)
         }
     }
