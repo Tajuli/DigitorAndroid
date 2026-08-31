@@ -120,6 +120,7 @@ class StableGpuExportCompositionBuilderTest {
         assertTrue(canUseDirectSingleInputExport(project))
         assertTrue(textOverlaysAreCoveredByRealVideoV14(project))
         assertTrue(shouldUseStableSingleInputExportV17(project))
+        assertFalse(needsPureTextVideoSourceV18(project))
     }
 
     @Test
@@ -151,6 +152,42 @@ class StableGpuExportCompositionBuilderTest {
         assertTrue(canUseDirectSingleInputExport(project))
         assertTrue(textOverlaysAreCoveredByRealVideoV14(project))
         assertTrue(shouldUseStableSingleInputExportV17(project))
+        assertFalse(needsPureTextVideoSourceV18(project))
+    }
+
+    @Test
+    fun pureTextTimelineRequiresSyntheticVideoSource() {
+        val project = TimelineProject(
+            width = 1080,
+            height = 1920,
+            tracks = listOf(
+                TimelineTrack(id = "v1", name = "V1", kind = TrackKind.VIDEO),
+            ),
+            textOverlays = listOf(
+                TextOverlayClip(
+                    id = "pure-title",
+                    text = "Text",
+                    timelineStartUs = 0L,
+                    timelineEndUs = 5_000_000L,
+                    videoTrackIdV3 = "v1",
+                ),
+            ),
+        )
+
+        assertTrue(needsPureTextVideoSourceV18(project))
+        assertFalse(canUseDirectSingleInputExport(project))
+        assertEquals(5_000_000L, project.durationUs)
+    }
+
+    @Test
+    fun emptyTimelineWithoutTextDoesNotNeedSyntheticVideoSource() {
+        val project = TimelineProject(
+            tracks = listOf(
+                TimelineTrack(id = "v1", name = "V1", kind = TrackKind.VIDEO),
+            ),
+        )
+
+        assertFalse(needsPureTextVideoSourceV18(project))
     }
 
     @Test
@@ -180,6 +217,7 @@ class StableGpuExportCompositionBuilderTest {
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
         assertFalse(shouldUseStableSingleInputExportV17(project))
+        assertFalse(needsPureTextVideoSourceV18(project))
         assertEquals(13_000_000L, project.durationUs)
     }
 
@@ -210,6 +248,7 @@ class StableGpuExportCompositionBuilderTest {
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
         assertFalse(shouldUseStableSingleInputExportV17(project))
+        assertFalse(needsPureTextVideoSourceV18(project))
     }
 
     @Test
@@ -240,6 +279,7 @@ class StableGpuExportCompositionBuilderTest {
         assertTrue(canUseDirectSingleInputExport(project))
         assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
         assertFalse(shouldUseStableSingleInputExportV17(project))
+        assertFalse(needsPureTextVideoSourceV18(project))
         assertEquals(13_000_000L, project.durationUs)
     }
 }
