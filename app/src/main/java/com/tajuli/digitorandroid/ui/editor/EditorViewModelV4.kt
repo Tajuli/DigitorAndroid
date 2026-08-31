@@ -134,6 +134,37 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
         publish(selectionSafeState(_state.value.copy(project = saved, status = "Project loaded")))
     }
 
+    /** V19 bridge: visual overlays use the same undo/redo/autosave project state as all other edits. */
+    fun commitProjectV19(
+        label: String,
+        project: TimelineProject,
+        status: String = "Overlay updated",
+        coalesce: Boolean = false,
+    ) {
+        val state = _state.value
+        if (state.busyOperation != null || project == state.project) return
+        checkpoint(label, coalesce)
+        publish(state.copy(project = project, status = status))
+    }
+
+    /** Clears media/text selection while keeping the owning V track focused for overlay editing. */
+    fun focusVisualOverlayV19(trackId: String?) {
+        val state = _state.value
+        val resolvedTrack = trackId?.takeIf { state.project.track(it)?.kind == TrackKind.VIDEO }
+            ?: state.project.tracks.firstOrNull { it.kind == TrackKind.VIDEO }?.id
+        _state.value = state.copy(
+            selectedTrackId = resolvedTrack ?: state.selectedTrackId,
+            selectedClipId = null,
+            selectedClipIds = emptySet(),
+            selectedTextId = null,
+            qualifierPickerActive = false,
+        )
+    }
+
+    fun setEditorStatusV19(message: String) {
+        _state.value = _state.value.copy(status = message)
+    }
+
     private fun selectionSafeState(state: UiState): UiState {
         val selectedClip = state.selectedClipId?.takeIf { state.project.clip(it) != null }
         val selectedIds = state.selectedClipIds.filterTo(linkedSetOf()) { state.project.clip(it) != null }
@@ -181,6 +212,7 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
         val state = _state.value
         val ids = state.project.linkedClipIds(id).ifEmpty { setOf(id) }
         val primary = ids.firstOrNull { state.project.trackContaining(it)?.kind == TrackKind.VIDEO } ?: id
+        VisualOverlaySelectionBusV19.clear()
         _state.value = state.copy(
             selectedTrackId = state.project.trackContaining(id)?.id ?: state.selectedTrackId,
             selectedClipId = primary,
@@ -192,6 +224,7 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
 
     fun selectTextOverlay(id: String) {
         if (_state.value.project.textOverlays.none { it.id == id }) return
+        VisualOverlaySelectionBusV19.clear()
         _state.value = _state.value.copy(selectedTextId = id, selectedClipIds = emptySet(), selectedClipId = null)
     }
 
@@ -544,7 +577,10 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
         val overlays = project.textOverlays.map { overlay ->
             if (overlay.timelineStartUs >= oldEnd) overlay.copy(timelineStartUs = overlay.timelineStartUs + delta, timelineEndUs = overlay.timelineEndUs + delta) else overlay
         }
-        val next = project.copy(tracks = tracks, textOverlays = overlays)
+        val visualOverlays = project.visualOverlaysV19.orEmpty().map { overlay ->
+            if (overlay.timelineStartUs >= oldEnd) overlay.copy(timelineStartUs = overlay.timelineStartUs + delta, timelineEndUs = overlay.timelineEndUs + delta) else overlay
+        }
+        val next = project.copy(tracks = tracks, textOverlays = overlays, visualOverlaysV19 = visualOverlays)
         publish(state.copy(project = next, busyOperation = null, status = "Speed ${speed}x baked"))
     }
 
@@ -648,7 +684,14 @@ class EditorViewModelV4(application: Application) : AndroidViewModel(application
                 else -> overlay
             }
         }
-        val nextProject = project.copy(tracks = tracks, textOverlays = overlays)
+        val visualOverlays = project.visualOverlaysV19.orEmpty().map { overlay ->
+            when {
+                overlay.timelineStartUs >= timelineUs -> overlay.copy(timelineStartUs = overlay.timelineStartUs + freezeDuration, timelineEndUs = overlay.timelineEndUs + freezeDuration)
+                overlay.timelineEndUs > timelineUs -> overlay.copy(timelineEndUs = overlay.timelineEndUs + freezeDuration)
+                else -> overlay
+            }
+        }
+        val nextProject = project.copy(tracks = tracks, textOverlays = overlays, visualOverlaysV19 = visualOverlays)
         val freezeClip = nextProject.tracks.firstOrNull { it.id == track.id }?.clips?.firstOrNull { it.timelineStartUs == timelineUs && it.label.endsWith("· Freeze") }
         publish(state.copy(project = nextProject, selectedClipId = freezeClip?.id, selectedClipIds = freezeClip?.id?.let(::setOf).orEmpty(), busyOperation = null, status = "Freeze frame inserted"))
     }

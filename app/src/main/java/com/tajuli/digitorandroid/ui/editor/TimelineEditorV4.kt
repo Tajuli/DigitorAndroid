@@ -62,7 +62,9 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
+import com.tajuli.digitorandroid.editor.model.resolvedVisualOverlaysV19
 import com.tajuli.digitorandroid.editor.model.textOverlaysForVideoTrackV3
+import com.tajuli.digitorandroid.editor.model.visualOverlaysForVideoTrackV19
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.max
@@ -109,13 +111,12 @@ fun TimelineEditorV4(
     onDeleteText: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    // Same Activity ViewModel instance as DigitorEditorScreenV7. Keeping trim actions here lets the
-    // existing public TimelineEditorV4/EditWorkspace signatures stay stable.
     val vm: EditorViewModelV4 = viewModel()
     val scroll = rememberScrollState()
     val verticalScroll = rememberScrollState()
     val density = LocalDensity.current
     val selectedTextId by TimelineTextSelectionBusV10.selectedTextId.collectAsState()
+    val selectedVisualId by VisualOverlaySelectionBusV19.selectedId.collectAsState()
     var zoom by remember { mutableFloatStateOf(.18f) }
 
     BoxWithConstraints(modifier.background(T4Panel)) {
@@ -142,12 +143,19 @@ fun TimelineEditorV4(
             TimelineToolbarV4(
                 selectedClipCount = selectedClipIds.size,
                 textSelected = selectedTextId != null,
+                visualSelected = selectedVisualId != null,
                 zoom = zoom,
                 onZoom = { zoom = it.coerceIn(0f, 1f) },
                 onAddVideoTrack = onAddVideoTrack,
                 onAddAudioTrack = onAddAudioTrack,
                 onSplit = onSplit,
-                onDelete = { if (selectedTextId != null) onDeleteText() else onDelete() },
+                onDelete = {
+                    when {
+                        selectedVisualId != null -> vm.deleteSelectedVisualV19()
+                        selectedTextId != null -> onDeleteText()
+                        else -> onDelete()
+                    }
+                },
                 onUnlink = onUnlink,
                 onImport = onImport,
             )
@@ -197,6 +205,7 @@ fun TimelineEditorV4(
                                     onMoveClip = onMoveClip,
                                     onMoveClipToTrack = onMoveClipToTrack,
                                     onSelectText = { overlay ->
+                                        VisualOverlaySelectionBusV19.clear()
                                         TimelineTextSelectionBusV10.select(overlay.id)
                                         onSelectText(overlay.id)
                                         onSelectTrack(track.id)
@@ -238,6 +247,7 @@ fun TimelineEditorV4(
 private fun TimelineToolbarV4(
     selectedClipCount: Int,
     textSelected: Boolean,
+    visualSelected: Boolean,
     zoom: Float,
     onZoom: (Float) -> Unit,
     onAddVideoTrack: () -> Unit,
@@ -252,7 +262,7 @@ private fun TimelineToolbarV4(
             TinyActionV4("+V", onAddVideoTrack)
             TinyActionV4("+A", onAddAudioTrack)
             TinyActionV4("Split", onSplit, selectedClipCount > 0, Icons.Rounded.ContentCut)
-            TinyActionV4("Delete", onDelete, selectedClipCount > 0 || textSelected, Icons.Rounded.Delete)
+            TinyActionV4("Delete", onDelete, selectedClipCount > 0 || textSelected || visualSelected, Icons.Rounded.Delete)
             TinyActionV4("Unlink", onUnlink, selectedClipCount > 1, Icons.Rounded.LinkOff)
             Spacer(Modifier.weight(1f))
             TinyActionV4("Import", onImport, icon = Icons.Rounded.AddPhotoAlternate)
@@ -401,6 +411,15 @@ private fun TimelineLaneV4(
                     onSelect = { onSelectText(overlay) },
                     onMoveText = onMoveText,
                     onMoveTextToTrack = onMoveTextToTrack,
+                )
+            }
+            project.visualOverlaysForVideoTrackV19(track.id).forEach { overlay ->
+                VisualOverlayTimelineItemV19(
+                    project = project,
+                    track = track,
+                    overlay = overlay,
+                    pps = pps,
+                    vm = vm,
                 )
             }
         }
@@ -589,13 +608,14 @@ private fun ClipV4(
             )
             .clickable {
                 TimelineTextSelectionBusV10.clear()
+                VisualOverlaySelectionBusV19.clear()
                 onSelectClip(clip.id)
             }
             .pointerInput(clip.id, track.id, pps, project, cursorUs) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = {
                         rawDragX = 0f; dragY = 0f; displayDeltaUs = 0L; magnetActive = false
-                        TimelineTextSelectionBusV10.clear(); onSelectClip(clip.id)
+                        TimelineTextSelectionBusV10.clear(); VisualOverlaySelectionBusV19.clear(); onSelectClip(clip.id)
                     },
                     onDragEnd = {
                         val delta = displayDeltaUs
@@ -719,6 +739,7 @@ private fun resolveTextMagneticDelta(
     val laneItems = buildList<Pair<Long, Long>> {
         track.clips.forEach { add(it.timelineStartUs to it.timelineEndUs) }
         project.textOverlaysForVideoTrackV3(trackId).filterNot { it.id == textId }.forEach { add(it.timelineStartUs to it.timelineEndUs) }
+        project.visualOverlaysForVideoTrackV19(trackId).forEach { add(it.timelineStartUs to it.timelineEndUs) }
     }
     val previous = laneItems.filter { it.second <= target.timelineStartUs }.maxByOrNull { it.second }
     val next = laneItems.filter { it.first >= target.timelineEndUs }.minByOrNull { it.first }
@@ -733,6 +754,7 @@ private fun resolveTextMagneticDelta(
     anchors += cursorUs.coerceAtLeast(0L)
     project.tracks.flatMap { it.clips }.forEach { anchors += it.timelineStartUs; anchors += it.timelineEndUs }
     project.textOverlays.filterNot { it.id == textId }.forEach { anchors += it.timelineStartUs; anchors += it.timelineEndUs }
+    project.resolvedVisualOverlaysV19().forEach { anchors += it.timelineStartUs; anchors += it.timelineEndUs }
 
     var best = frameDelta
     var bestDistance = Long.MAX_VALUE
@@ -767,13 +789,14 @@ private fun resolveMagneticDelta(
         val owner = project.trackContaining(moving.id) ?: continue
         val mediaItems = owner.clips.filter { it.id !in movingIds }.map { it.timelineStartUs to it.timelineEndUs }
         val titleItems = if (owner.kind == TrackKind.VIDEO) {
-            project.textOverlaysForVideoTrackV3(owner.id).map { it.timelineStartUs to it.timelineEndUs }
+            project.textOverlaysForVideoTrackV3(owner.id).map { it.timelineStartUs to it.timelineEndUs } +
+                project.visualOverlaysForVideoTrackV19(owner.id).map { it.timelineStartUs to it.timelineEndUs }
         } else emptyList()
         val others = mediaItems + titleItems
         val previous = others.filter { it.second <= moving.timelineStartUs }.maxByOrNull { it.second }
         val next = others.filter { it.first >= moving.timelineEndUs }.minByOrNull { it.first }
         lower = max(lower, max(-moving.timelineStartUs, previous?.let { it.second - moving.timelineStartUs } ?: Long.MIN_VALUE / 4))
-        upper = min(upper, next?.let { it.first - moving.timelineEndUs } ?: Long.MAX_VALUE / 4)
+        upper = min(upper, next?.let { it.timelineStartUs - moving.timelineEndUs } ?: Long.MAX_VALUE / 4)
     }
     if (lower > upper) return T4SnapResult(0L, false)
 
@@ -784,6 +807,7 @@ private fun resolveMagneticDelta(
     anchors += cursorUs.coerceAtLeast(0L)
     project.tracks.flatMap { it.clips }.filter { it.id !in movingIds }.forEach { anchors += it.timelineStartUs; anchors += it.timelineEndUs }
     project.textOverlays.forEach { anchors += it.timelineStartUs; anchors += it.timelineEndUs }
+    project.resolvedVisualOverlaysV19().forEach { anchors += it.timelineStartUs; anchors += it.timelineEndUs }
 
     var best = frameDelta
     var bestDistance = Long.MAX_VALUE

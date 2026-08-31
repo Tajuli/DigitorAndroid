@@ -14,6 +14,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.resolvedVisualOverlaysV19
 
 /**
  * Stable export composition builder.
@@ -23,15 +24,10 @@ import com.tajuli.digitorandroid.editor.model.TrackKind
  * GL compositor and sentinel video inputs while still running Digitor's per-clip transform, color,
  * qualifier and node effects.
  *
- * Text is a composition-level overlay. Its V-track assignment controls editor/timeline semantics,
- * but when there is only one real decoded video stream and every title frame is covered by that
- * stream, no second video input is required. In that case V2/V3 titles can still be rendered after
- * the one video frame through the stable single-input graph. The compositor is only required for
- * real multi-video layering or for title regions where no real video frame exists.
- *
- * Imported camera clips normally have a linked A-track mirror of the same source file. The direct
- * path folds that linked embedded audio back into the same AV EditedMediaItem so Media3 opens one
- * source asset-loader instead of independently loading the same camera URI as video and audio.
+ * Composition overlays (text/images/stickers/shapes) render after the decoded video. Their V-track
+ * assignment controls editor semantics without creating another decoder. If every overlay frame is
+ * covered by the single real video stream, export stays on the stable single-input path. Otherwise
+ * the shared compositor path supplies continuous blank frames through overlay-only timeline gaps.
  */
 @UnstableApi
 internal class StableGpuExportCompositionBuilder(
@@ -41,9 +37,6 @@ internal class StableGpuExportCompositionBuilder(
         if (shouldUseStableSingleInputExportV17(project)) {
             buildDirectSingleInput(project)
         } else {
-            // A composition-level title that reaches a video-free timeline interval needs actual
-            // blank video frames for that interval. Real multi-video edits also need the Resolve
-            // compositor for track layering. Route only those cases through the shared graph.
             sharedBuilder.build(project)
         }
 
@@ -71,17 +64,10 @@ internal class StableGpuExportCompositionBuilder(
             .forEach { track -> sequences += buildAudioSequence(project, track) }
 
         val builder = Composition.Builder(sequences)
-
-        // Digitor owns Log/HDR -> working-space conversion. If a camera file carries HDR-style
-        // metadata, keep decoder output as editable SDR code values instead of asking Media3 to
-        // preserve an HDR pipeline that ultimately targets H.264 SDR output.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             builder.setHdrMode(Composition.HDR_MODE_EXPERIMENTAL_FORCE_INTERPRET_HDR_AS_SDR)
         }
 
-        // The old compositor path always fixed output to the project canvas. Direct single-input
-        // export must do the same; otherwise a 4K source silently becomes a 4K H.264 export even
-        // when the project is 1080p, which substantially increases codec memory pressure.
         val compositionVideoEffects = buildList<Effect> {
             add(
                 Presentation.createForWidthAndHeight(
@@ -176,7 +162,6 @@ internal class StableGpuExportCompositionBuilder(
         val mediaItem = clippedMediaItem(clip)
         return EditedMediaItem.Builder(mediaItem)
             .setDurationUs(clip.durationUs)
-            // Direct single-input path owns geometry in the clip effect instead of the compositor.
             .setEffects(Effects(emptyList(), SharedVideoPipeline.effectsFor(clip)))
             .build()
     }
@@ -203,15 +188,10 @@ internal class StableGpuExportCompositionBuilder(
     }
 }
 
-/** Final export router decision kept separate so V-track text regressions are unit-testable. */
+/** Final export router decision kept separate so overlay regressions are unit-testable. */
 internal fun shouldUseStableSingleInputExportV17(project: TimelineProject): Boolean =
     canUseDirectSingleInputExport(project) && textOverlaysAreCoveredByRealVideoV14(project)
 
-/**
- * Returns the normal imported A-track mirror when every video clip has exactly one linked audio clip
- * from the same source with identical timeline/source boundaries. Edited or independent audio stays
- * on its own sequence so separate-track behavior is preserved.
- */
 internal fun findLinkedEmbeddedAudioMirror(
     project: TimelineProject,
     videoTrack: TimelineTrack,
@@ -235,27 +215,22 @@ internal fun findLinkedEmbeddedAudioMirror(
 }
 
 /**
- * Direct SingleInputVideoGraph export is safe only while every title frame sits on top of a real
- * decoded video frame. The title may be assigned to V2/V3 in the editor; that track assignment does
- * not itself create another decoded video input. If a title crosses a video-free interval, especially
- * after the final media clip, use the compositor path so Media3 produces blank video frames first.
+ * Historical name retained for existing tests. Direct SingleInputVideoGraph export is safe only
+ * while every composition overlay frame sits on top of a real decoded video frame.
  */
 internal fun textOverlaysAreCoveredByRealVideoV14(project: TimelineProject): Boolean {
-    if (project.textOverlays.isEmpty()) return true
+    val ranges = buildList {
+        project.textOverlays.forEach { add(it.timelineStartUs to it.timelineEndUs) }
+        project.resolvedVisualOverlaysV19().forEach { add(it.timelineStartUs to it.timelineEndUs) }
+    }
+    if (ranges.isEmpty()) return true
     val clips = resolveCompositionVideoTracks(project).flatMap { it.clips }
     if (clips.isEmpty()) return false
-    return project.textOverlays.all { overlay ->
-        clips.any { clip ->
-            overlay.timelineStartUs >= clip.timelineStartUs &&
-                overlay.timelineEndUs <= clip.timelineEndUs
-        }
+    return ranges.all { (startUs, endUs) ->
+        clips.any { clip -> startUs >= clip.timelineStartUs && endUs <= clip.timelineEndUs }
     }
 }
 
-/**
- * SingleInputVideoGraph is safe when compositor-only alpha/fades are not needed. Clip transforms,
- * node effects, HSL qualifier, RGB curves and Input Color remain per-item effects and are supported.
- */
 internal fun canUseDirectSingleInputExport(project: TimelineProject): Boolean {
     val videoTracks = resolveCompositionVideoTracks(project)
     if (videoTracks.size != 1) return false

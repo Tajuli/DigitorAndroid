@@ -4,14 +4,16 @@ import android.content.Context
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.transformer.ExportException
 import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.editor.render.VisualOverlayRenderEnvironmentV19
 import java.io.File
 import kotlinx.coroutines.CancellationException
 
 @UnstableApi
 class ProcessingRouter(context: Context) {
-    private val capabilities = DeviceCapabilityProbe(context)
-    private val gpu = GpuExportBackend(context)
-    private val cpu = CpuExportBackend(context)
+    private val appContext = context.applicationContext.also(VisualOverlayRenderEnvironmentV19::install)
+    private val capabilities = DeviceCapabilityProbe(appContext)
+    private val gpu = GpuExportBackend(appContext)
+    private val cpu = CpuExportBackend(appContext)
 
     suspend fun export(
         project: TimelineProject,
