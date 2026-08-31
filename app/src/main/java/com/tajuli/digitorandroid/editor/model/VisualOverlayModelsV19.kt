@@ -29,15 +29,19 @@ data class VisualOverlayClipV19(
     val durationUs: Long get() = (timelineEndUs - timelineStartUs).coerceAtLeast(1L)
     fun activeAt(timeUs: Long): Boolean = timeUs in timelineStartUs until timelineEndUs
 
-    fun normalized(): VisualOverlayClipV19 = copy(
-        timelineStartUs = timelineStartUs.coerceAtLeast(0L),
-        timelineEndUs = timelineEndUs.coerceAtLeast(timelineStartUs + 100_000L),
-        positionX = positionX.coerceIn(-1f, 1f),
-        positionY = positionY.coerceIn(-1f, 1f),
-        scale = scale.coerceIn(.03f, 1.5f),
-        rotationDegrees = ((rotationDegrees % 360f) + 360f) % 360f,
-        opacity = opacity.coerceIn(0f, 1f),
-    )
+    fun normalized(): VisualOverlayClipV19 {
+        val safeStartUs = timelineStartUs.coerceAtLeast(0L)
+        val safeEndUs = timelineEndUs.coerceAtLeast(safeStartUs + 100_000L)
+        return copy(
+            timelineStartUs = safeStartUs,
+            timelineEndUs = safeEndUs,
+            positionX = positionX.coerceIn(-1f, 1f),
+            positionY = positionY.coerceIn(-1f, 1f),
+            scale = scale.coerceIn(.03f, 1.5f),
+            rotationDegrees = ((rotationDegrees % 360f) + 360f) % 360f,
+            opacity = opacity.coerceIn(0f, 1f),
+        )
+    }
 }
 
 fun TimelineProject.resolvedVisualOverlaysV19(): List<VisualOverlayClipV19> = visualOverlaysV19.orEmpty()
