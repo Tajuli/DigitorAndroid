@@ -59,7 +59,8 @@ class CreatorTransitionTest {
         val pair = track.transitionPairsV22().single()
         assertEquals(first.id, pair.outgoing.id)
         assertEquals(second.id, pair.incoming.id)
-        assertEquals(1_000_000L, pair.durationUs)
+        // V22 caps a cut transition to half the incoming clip so the clip always retains a stable body.
+        assertEquals(500_000L, pair.durationUs)
         assertFalse(second.transition.isIdentity)
 
         val gapped = track.copy(clips = listOf(first, second.copy(timelineStartUs = 2_100_000L)))
