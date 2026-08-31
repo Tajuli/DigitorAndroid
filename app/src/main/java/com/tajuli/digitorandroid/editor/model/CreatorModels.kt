@@ -77,8 +77,9 @@ fun TimelineProject.textOverlaysForVideoTrackV3(trackId: String): List<TextOverl
     textOverlays.filter { it.resolvedVideoTrackIdV3(this) == trackId }
 
 /**
- * Resolve-style occupancy rule: media clips and title clips share one V-track lane, so two timeline
- * items may not overlap on the same V track. A title on V2 can still freely overlap media on V1.
+ * Resolve-style occupancy rule: media, title and visual-overlay items share one V-track lane, so
+ * two timeline items may not overlap on the same V track. Upper V tracks may still overlap lower
+ * V tracks freely for normal compositing.
  */
 fun TimelineProject.videoTrackSlotAvailableV3(
     trackId: String,
@@ -93,6 +94,7 @@ fun TimelineProject.videoTrackSlotAvailableV3(
         safeStart < otherEndUs && safeEnd > otherStartUs
 
     if (track.clips.any { overlaps(it.timelineStartUs, it.timelineEndUs) }) return false
+    if (visualOverlaysForVideoTrackV19(trackId).any { overlaps(it.timelineStartUs, it.timelineEndUs) }) return false
     return textOverlaysForVideoTrackV3(trackId)
         .filterNot { it.id == ignoreTextId }
         .none { overlaps(it.timelineStartUs, it.timelineEndUs) }
