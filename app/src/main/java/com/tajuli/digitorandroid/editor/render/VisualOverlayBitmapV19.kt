@@ -10,12 +10,10 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.net.Uri
 import android.util.LruCache
-import com.tajuli.digitorandroid.editor.model.ClipNodeGraph
 import com.tajuli.digitorandroid.editor.model.ShapePresetV19
 import com.tajuli.digitorandroid.editor.model.StickerPresetV19
 import com.tajuli.digitorandroid.editor.model.VisualOverlayClipV19
 import com.tajuli.digitorandroid.editor.model.VisualOverlayKindV19
-import com.tajuli.digitorandroid.editor.processing.CpuColorProcessor
 import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.cos
@@ -30,15 +28,10 @@ internal object VisualOverlayBitmapCacheV19 {
     fun get(context: Context, spec: VisualOverlayClipV19, maxEdge: Int = 1536): Bitmap {
         val key = cacheKey(spec, maxEdge)
         memory.get(key)?.takeIf { !it.isRecycled }?.let { return it }
-        val source = when (spec.kind) {
+        val bitmap = when (spec.kind) {
             VisualOverlayKindV19.IMAGE -> decodeImage(context, spec.imageUri, maxEdge)
             VisualOverlayKindV19.STICKER -> drawSticker(spec.stickerPreset ?: StickerPresetV19.STAR, spec.colorArgb)
             VisualOverlayKindV19.SHAPE -> drawShape(spec.shapePreset ?: ShapePresetV19.RECTANGLE, spec.colorArgb)
-        }
-        val bitmap = if (spec.kind == VisualOverlayKindV19.IMAGE && spec.imageNodeGraphV20 != null) {
-            applyImageNodeGraphV20(source, spec.imageNodeGraphV20)
-        } else {
-            source
         }
         memory.put(key, bitmap)
         return bitmap
@@ -50,23 +43,7 @@ internal object VisualOverlayBitmapCacheV19 {
         append(spec.stickerPreset?.name.orEmpty()).append('|')
         append(spec.shapePreset?.name.orEmpty()).append('|')
         append(spec.colorArgb.toString(16).lowercase(Locale.US)).append('|')
-        // Image grade edits must invalidate both realtime preview and export bitmap caches.
-        append(spec.imageNodeGraphV20?.hashCode() ?: 0).append('|')
         append(maxEdge)
-    }
-
-    private fun applyImageNodeGraphV20(source: Bitmap, graph: ClipNodeGraph): Bitmap {
-        val bitmap = Bitmap.createBitmap(source.width.coerceAtLeast(1), source.height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
-        Canvas(bitmap).drawBitmap(source, 0f, 0f, null)
-        if (source !== bitmap && !source.isRecycled) source.recycle()
-
-        val pixels = IntArray(bitmap.width * bitmap.height)
-        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-        CpuColorProcessor().use { processor ->
-            processor.processNodeGraphArgb8888(pixels, bitmap.width, bitmap.height, graph)
-        }
-        bitmap.setPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-        return bitmap
     }
 
     private fun decodeImage(context: Context, uriString: String?, maxEdge: Int): Bitmap {
