@@ -89,9 +89,12 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
+import com.tajuli.digitorandroid.editor.model.VisualOverlayClipV19
 import com.tajuli.digitorandroid.editor.model.activeTextOverlaysAt
+import com.tajuli.digitorandroid.editor.model.activeVisualOverlaysAtV19
 import com.tajuli.digitorandroid.editor.model.hasPlayableMedia
 import com.tajuli.digitorandroid.editor.model.hasPlayableVideo
+import com.tajuli.digitorandroid.editor.model.resolvedVisualOverlaysV19
 import com.tajuli.digitorandroid.editor.model.topmostVideoClipAt
 import com.tajuli.digitorandroid.editor.preview.DavinciFramePreviewEngine
 import com.tajuli.digitorandroid.editor.preview.GpuPreviewSurface
@@ -121,6 +124,7 @@ private enum class WorkspaceV7(val label: String, val icon: ImageVector) {
     EFFECTS("Effects", Icons.Rounded.AutoAwesome),
     COLOR("Color", Icons.Rounded.Palette),
     TEXT("Text", Icons.Rounded.TextFields),
+    OVERLAY("Overlay", Icons.Rounded.AddPhotoAlternate),
     AUDIO("Audio", Icons.Rounded.Audiotrack),
     MEDIA("Media", Icons.Rounded.VideoLibrary),
     NODES("Nodes", Icons.Rounded.AccountTree),
@@ -169,7 +173,9 @@ fun DigitorEditorScreenV7(
     val previewClip = state.project.topmostVideoClipAt(cursorUs)
     val activeVideoClips = state.project.activeVideoClipsV7(cursorUs)
     val activeText = state.project.activeTextOverlaysAt(cursorUs)
-    val hasMedia = state.project.hasPlayableMedia()
+    val activeVisual = state.project.activeVisualOverlaysAtV19(cursorUs)
+    val hasVisual = state.project.resolvedVisualOverlaysV19().isNotEmpty()
+    val hasMedia = state.project.hasPlayableMedia() || hasVisual
     val hasVideo = state.project.hasPlayableVideo()
     val hasAudio = state.project.tracks.any { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
     val audioPreviewKey = state.project.tracks.filter { it.kind == TrackKind.AUDIO }.hashCode()
@@ -257,7 +263,11 @@ fun DigitorEditorScreenV7(
         }
         val activeVideo = state.project.topmostVideoClipAt(target)
         val textSelectedNow = vm.state.value.selectedTextId != null || TimelineTextSelectionBusV10.selectedTextId.value != null
-        if (activeVideo != null && selectedClip == null && !textSelectedNow && workspace != WorkspaceV7.TEXT) vm.selectClip(activeVideo.id)
+        val visualSelectedNow = VisualOverlaySelectionBusV19.selectedId.value != null
+        if (
+            activeVideo != null && selectedClip == null && !textSelectedNow && !visualSelectedNow &&
+            workspace != WorkspaceV7.TEXT && workspace != WorkspaceV7.OVERLAY
+        ) vm.selectClip(activeVideo.id)
     }
 
     fun stopForEdit() {
@@ -321,7 +331,6 @@ fun DigitorEditorScreenV7(
                             resumePlayback = false,
                         )
                     } catch (_: CancellationException) {
-                        // Screen is leaving; no preview rebuild is needed.
                     } catch (error: Throwable) {
                         previewStatus = "Audio preview: ${error.message ?: "unavailable"}"
                     }
@@ -342,10 +351,7 @@ fun DigitorEditorScreenV7(
                     Text("Quality", fontSize = 10.sp, color = E7Muted)
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         ExportQuality.entries.forEach { quality ->
-                            AssistChip(
-                                onClick = { exportQuality = quality },
-                                label = { Text(if (exportQuality == quality) "✓ ${quality.label}" else quality.label, fontSize = 9.sp) },
-                            )
+                            AssistChip(onClick = { exportQuality = quality }, label = { Text(if (exportQuality == quality) "✓ ${quality.label}" else quality.label, fontSize = 9.sp) })
                         }
                     }
                     val targetMbps = exportQuality.videoBitrate(state.project.width, state.project.height, state.project.frameRate) / 1_000_000f
@@ -367,11 +373,16 @@ fun DigitorEditorScreenV7(
 
     val currentExportFraction = exportFraction
     val exportingNow = currentExportFraction != null && currentExportFraction < 1f
+    val selectedVisual = state.project.resolvedVisualOverlaysV19().firstOrNull { it.id == VisualOverlaySelectionBusV19.selectedId.value }
 
     Surface(Modifier.fillMaxSize(), color = E7Shell) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
             TopBarV7(
-                title = selectedClip?.label ?: state.project.textOverlays.firstOrNull { it.id == state.selectedTextId }?.text ?: previewClip?.label ?: "New project",
+                title = selectedClip?.label
+                    ?: selectedVisual?.label
+                    ?: state.project.textOverlays.firstOrNull { it.id == state.selectedTextId }?.text
+                    ?: previewClip?.label
+                    ?: "New project",
                 status = exportStatus ?: state.busyOperation ?: previewStatus ?: state.status,
                 exportFraction = currentExportFraction,
                 canUndo = state.canUndo,
@@ -402,11 +413,13 @@ fun DigitorEditorScreenV7(
             }
 
             FramePreviewV7(
+                project = state.project,
                 previewEngine = previewEngine,
                 frame = previewFrame,
                 hasVideo = hasVideo,
                 activeVideoClip = previewClip,
                 activeLayerCount = activeVideoClips.size,
+                visualOverlays = activeVisual,
                 textOverlays = activeText,
                 timelineUs = cursorUs,
                 onImport = ::launchImport,
@@ -443,6 +456,13 @@ fun DigitorEditorScreenV7(
                         onSeek = ::seekTimeline,
                         modifier = Modifier.fillMaxSize(),
                     )
+                    WorkspaceV7.OVERLAY -> VisualOverlayWorkspaceV19(
+                        project = state.project,
+                        cursorUs = cursorUs,
+                        vm = vm,
+                        onSeek = ::seekTimeline,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                     WorkspaceV7.AUDIO -> CreatorAudioWorkspaceV8(state.project, state.selectedClipId, state.selectedClipIds, vm, Modifier.fillMaxSize())
                     WorkspaceV7.MEDIA -> CreatorMediaWorkspaceV8(state.project, selectedClip, state.selectedTextId, cursorUs, state.busyOperation, vm, Modifier.fillMaxSize())
                     WorkspaceV7.NODES -> NodeGraphV4(selectedClip, vm, Modifier.fillMaxSize())
@@ -452,18 +472,28 @@ fun DigitorEditorScreenV7(
                 selected = workspace,
                 onSelected = { next ->
                     workspace = next
-                    if (next == WorkspaceV7.TEXT) {
-                        val textTarget = state.project.activeTextOverlaysAt(cursorUs).lastOrNull()
-                            ?: state.project.textOverlays.lastOrNull()
-                        if (textTarget != null) vm.selectTextOverlay(textTarget.id)
-                    } else {
-                        val clipWorkspace = next == WorkspaceV7.EDIT || next == WorkspaceV7.CORRECTION ||
-                            next == WorkspaceV7.EFFECTS || next == WorkspaceV7.COLOR || next == WorkspaceV7.NODES ||
-                            next == WorkspaceV7.MEDIA
-                        val selectedIsActiveVideo = selectedClip?.let { clip ->
-                            state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs
-                        } == true
-                        if (clipWorkspace && !selectedIsActiveVideo && previewClip != null) vm.selectClip(previewClip.id)
+                    when (next) {
+                        WorkspaceV7.TEXT -> {
+                            VisualOverlaySelectionBusV19.clear()
+                            val textTarget = state.project.activeTextOverlaysAt(cursorUs).lastOrNull()
+                                ?: state.project.textOverlays.lastOrNull()
+                            if (textTarget != null) vm.selectTextOverlay(textTarget.id)
+                        }
+                        WorkspaceV7.OVERLAY -> {
+                            TimelineTextSelectionBusV10.clear()
+                            val overlayTarget = state.project.activeVisualOverlaysAtV19(cursorUs).lastOrNull()
+                                ?: state.project.resolvedVisualOverlaysV19().lastOrNull()
+                            if (overlayTarget != null) vm.selectVisualOverlayV19(overlayTarget.id)
+                        }
+                        else -> {
+                            val clipWorkspace = next == WorkspaceV7.EDIT || next == WorkspaceV7.CORRECTION ||
+                                next == WorkspaceV7.EFFECTS || next == WorkspaceV7.COLOR || next == WorkspaceV7.NODES ||
+                                next == WorkspaceV7.MEDIA
+                            val selectedIsActiveVideo = selectedClip?.let { clip ->
+                                state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs
+                            } == true
+                            if (clipWorkspace && !selectedIsActiveVideo && previewClip != null) vm.selectClip(previewClip.id)
+                        }
                     }
                     if (next != WorkspaceV7.COLOR && state.qualifierPickerActive) vm.setQualifierPickerActive(false)
                 },
@@ -492,13 +522,7 @@ private fun TopBarV7(
 ) {
     val exporting = exportFraction != null && exportFraction < 1f
     Row(Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Button(
-            onClick = onHome,
-            enabled = !exporting,
-            modifier = Modifier.height(32.dp),
-            shape = RoundedCornerShape(7.dp),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-        ) {
+        Button(onClick = onHome, enabled = !exporting, modifier = Modifier.height(32.dp), shape = RoundedCornerShape(7.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
             Icon(Icons.Rounded.Home, null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(4.dp)); Text("Home", fontSize = 10.sp)
         }
         IconButton(onClick = onImport, modifier = Modifier.size(34.dp)) { Icon(Icons.Rounded.Add, "Import", modifier = Modifier.size(18.dp)) }
@@ -536,36 +560,16 @@ private fun ProjectActionsBarV7(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        TextButton(
-            onClick = onUndo,
-            enabled = canUndo && !exporting,
-            modifier = Modifier.height(30.dp),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-        ) {
+        TextButton(onClick = onUndo, enabled = canUndo && !exporting, modifier = Modifier.height(30.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
             Icon(Icons.Rounded.Undo, null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(4.dp)); Text("Undo", fontSize = 9.sp)
         }
-        TextButton(
-            onClick = onRedo,
-            enabled = canRedo && !exporting,
-            modifier = Modifier.height(30.dp),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-        ) {
+        TextButton(onClick = onRedo, enabled = canRedo && !exporting, modifier = Modifier.height(30.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
             Icon(Icons.Rounded.Redo, null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(4.dp)); Text("Redo", fontSize = 9.sp)
         }
-        TextButton(
-            onClick = onSaveProject,
-            enabled = !exporting,
-            modifier = Modifier.height(30.dp),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-        ) {
+        TextButton(onClick = onSaveProject, enabled = !exporting, modifier = Modifier.height(30.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
             Icon(Icons.Rounded.Save, null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(4.dp)); Text("Save Project", fontSize = 9.sp)
         }
-        TextButton(
-            onClick = onLoadProject,
-            enabled = !exporting,
-            modifier = Modifier.height(30.dp),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-        ) {
+        TextButton(onClick = onLoadProject, enabled = !exporting, modifier = Modifier.height(30.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
             Icon(Icons.Rounded.FolderOpen, null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(4.dp)); Text("Load Project", fontSize = 9.sp)
         }
     }
@@ -573,11 +577,13 @@ private fun ProjectActionsBarV7(
 
 @Composable
 private fun FramePreviewV7(
+    project: TimelineProject,
     previewEngine: DavinciFramePreviewEngine,
     frame: DavinciFramePreviewEngine.Frame?,
     hasVideo: Boolean,
     activeVideoClip: TimelineClip?,
     activeLayerCount: Int,
+    visualOverlays: List<VisualOverlayClipV19>,
     textOverlays: List<TextOverlayClip>,
     timelineUs: Long,
     onImport: () -> Unit,
@@ -601,21 +607,20 @@ private fun FramePreviewV7(
                 Text("Preparing GPU preview…", color = Color.White.copy(alpha = .55f), fontSize = 11.sp)
             }
             if (activeVideoClip == null) {
-                Text("No video at cursor · audio can continue", color = Color.White.copy(alpha = .55f), fontSize = 11.sp, modifier = Modifier.background(Color.Black.copy(alpha = .62f), RoundedCornerShape(5.dp)).padding(horizontal = 9.dp, vertical = 6.dp))
+                Text("No video at cursor · overlays/audio can continue", color = Color.White.copy(alpha = .55f), fontSize = 11.sp, modifier = Modifier.background(Color.Black.copy(alpha = .62f), RoundedCornerShape(5.dp)).padding(horizontal = 9.dp, vertical = 6.dp))
             }
-        } else {
+        } else if (visualOverlays.isEmpty() && textOverlays.isEmpty()) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(Icons.Rounded.AddPhotoAlternate, null, tint = Color.White.copy(alpha = .35f), modifier = Modifier.size(40.dp)); Spacer(Modifier.height(8.dp))
                 Text("No video media", color = Color.White.copy(alpha = .55f), fontSize = 12.sp); TextButton(onClick = onImport) { Text("Import media") }
             }
         }
 
+        visualOverlays.forEach { overlay ->
+            VisualOverlayPreviewV19(project = project, overlay = overlay, previewSize = previewSize)
+        }
         textOverlays.forEach { overlay ->
-            TextOverlayPreviewV2(
-                overlay = overlay,
-                timelineUs = timelineUs,
-                previewSize = previewSize,
-            )
+            TextOverlayPreviewV2(overlay = overlay, timelineUs = timelineUs, previewSize = previewSize)
         }
 
         Text("GPU Preview · $activeLayerCount ${if (activeLayerCount == 1) "layer" else "layers"}", modifier = Modifier.align(Alignment.TopStart).padding(10.dp).background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 4.dp), fontSize = 9.sp, color = Color.White.copy(alpha = .72f))
