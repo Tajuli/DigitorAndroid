@@ -19,7 +19,10 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.TransitionPairV22
+import com.tajuli.digitorandroid.editor.model.transitionPairsV22
 import com.tajuli.digitorandroid.editor.render.DigitorRenderCore
+import com.tajuli.digitorandroid.editor.render.transitionGhostIdV22
 import java.io.Closeable
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
@@ -866,17 +869,9 @@ class DavinciFramePreviewEngine(
     }
 }
 
+/** Visible preview layers, including the virtual outgoing tail while a V22 video transition is active. */
 internal fun activeVideoLayersAt(project: TimelineProject, timeUs: Long): List<TimelineClip> =
-    project.tracks
-        .withIndex()
-        .filter { (_, track) -> track.kind == TrackKind.VIDEO && !track.muted }
-        .flatMap { (trackIndex, track) ->
-            track.clips
-                .filter { clip -> timeUs in clip.timelineStartUs until clip.timelineEndUs }
-                .map { clip -> trackIndex to clip }
-        }
-        .sortedByDescending { (trackIndex, _) -> trackIndex }
-        .map { (_, clip) -> clip }
+    activeLayerSpecsAt(project, timeUs).map { it.clip }
 
 private fun activeLayerSpecsAt(
     project: TimelineProject,
@@ -884,11 +879,43 @@ private fun activeLayerSpecsAt(
 ): List<DavinciFramePreviewEngine.ActiveLayer> =
     project.tracks
         .filter { track -> track.kind == TrackKind.VIDEO && !track.muted }
-        .mapNotNull { track ->
-            track.clips
+        .flatMap { track ->
+            val activeClip = track.clips
                 .firstOrNull { clip -> timeUs in clip.timelineStartUs until clip.timelineEndUs }
-                ?.let { clip -> DavinciFramePreviewEngine.ActiveLayer(track, clip) }
+            val activeTransition = track.transitionPairsV22().firstOrNull { pair ->
+                timeUs in pair.startUs until pair.endUs &&
+                    !pair.outgoing.isImageV21 &&
+                    !pair.incoming.isImageV21
+            }
+            buildList {
+                if (activeTransition != null) {
+                    add(
+                        DavinciFramePreviewEngine.ActiveLayer(
+                            track = track,
+                            clip = previewTransitionGhostClipV22(activeTransition),
+                        ),
+                    )
+                }
+                if (activeClip != null) {
+                    add(DavinciFramePreviewEngine.ActiveLayer(track, activeClip))
+                }
+            }
         }
+
+private fun previewTransitionGhostClipV22(pair: TransitionPairV22): TimelineClip {
+    val outgoing = pair.outgoing
+    val sourceOutUs = outgoing.sourceOutUs
+    val sourceInUs = (sourceOutUs - pair.durationUs).coerceAtLeast(outgoing.sourceInUs)
+    return outgoing.copy(
+        id = transitionGhostIdV22(pair),
+        label = "${outgoing.label} · transition tail",
+        timelineStartUs = pair.startUs,
+        sourceInUs = sourceInUs,
+        sourceOutUs = sourceOutUs,
+        linkGroupId = null,
+        transition = pair.incoming.transition.copy(durationUsV22 = pair.durationUs),
+    )
+}
 
 private fun sessionKey(
     project: TimelineProject,
@@ -912,6 +939,7 @@ private fun sessionKey(
 
 private fun staticSpatialHash(clip: TimelineClip): Int {
     var result = clip.nodeGraph.edges.hashCode()
+    result = 31 * result + clip.transition.hashCode()
     clip.nodeGraph.nodes.forEach { node ->
         result = 31 * result + node.id.hashCode()
         result = 31 * result + node.kind.hashCode()
