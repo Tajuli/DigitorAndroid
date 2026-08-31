@@ -1,6 +1,5 @@
 package com.tajuli.digitorandroid.editor.processing
 
-import com.tajuli.digitorandroid.editor.model.ClipNodeGraph
 import com.tajuli.digitorandroid.editor.model.ColorGrade
 import com.tajuli.digitorandroid.editor.model.ColorGraphEvaluator
 import com.tajuli.digitorandroid.editor.model.ColorNode
@@ -27,22 +26,7 @@ class CpuColorProcessor(
     ) {
         if (width <= 0 || height <= 0) return
         val evaluatedGraph = clip.nodeAnimations.evaluateGraph(clip.nodeGraph, sourceTimeUs)
-        processNodeGraphArgb8888(pixels, width, height, evaluatedGraph)
-    }
-
-    /**
-     * Applies the exact shared node color graph to an ARGB image buffer. Static image overlays use
-     * this path so their Correction/Color controls share the same evaluator as video CPU fallback,
-     * while preserving the original alpha channel for compositing.
-     */
-    fun processNodeGraphArgb8888(
-        pixels: IntArray,
-        width: Int,
-        height: Int,
-        nodeGraph: ClipNodeGraph,
-    ) {
-        if (width <= 0 || height <= 0) return
-        val graphPlan = ColorGraphEvaluator.compile(nodeGraph)
+        val graphPlan = ColorGraphEvaluator.compile(evaluatedGraph)
         val nodeTransform: (ColorNode, Float, Float, Float) -> FloatArray = { node, r, g, b ->
             QualifiedColorMath.applyNode(node, r, g, b)
         }
@@ -93,18 +77,18 @@ class CpuColorProcessor(
         var y = 0
         while (y < height) {
             val startY = y
-            val end = min(height, y + stripe)
+            val endY = min(height, y + stripe)
             jobs += Callable {
-                for (row in startY until end) {
+                for (row in startY until endY) {
                     var index = row * width
-                    val rowEnd = index + width
-                    while (index < rowEnd) {
+                    val end = index + width
+                    while (index < end) {
                         operation(index)
                         index++
                     }
                 }
             }
-            y = end
+            y = endY
         }
         workers.invokeAll(jobs).forEach { it.get() }
     }
