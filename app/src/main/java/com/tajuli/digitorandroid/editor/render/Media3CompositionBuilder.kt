@@ -2,8 +2,10 @@ package com.tajuli.digitorandroid.editor.render
 
 import android.os.Build
 import androidx.media3.common.C
+import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.Presentation
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
@@ -66,6 +68,15 @@ private fun Int.evenAtLeastTwo(): Int {
     val safe = coerceAtLeast(2)
     return if (safe % 2 == 0) safe else (safe - 1).coerceAtLeast(2)
 }
+
+/**
+ * A TextOverlay is an effect, not a source stream. If a project contains titles but no playable
+ * video clips, Transformer still needs a real video source to produce frames/timestamps for those
+ * titles. This helper is intentionally model-only so the pure-text routing can be regression tested
+ * on the JVM without constructing Android MediaItems.
+ */
+internal fun needsPureTextVideoSourceV18(project: TimelineProject): Boolean =
+    project.textOverlays.isNotEmpty() && resolveCompositionVideoTracks(project).isEmpty()
 
 @UnstableApi
 class Media3CompositionBuilder(
@@ -150,6 +161,7 @@ class Media3CompositionBuilder(
 
         val sequences = mutableListOf<EditedMediaItemSequence>()
         val videoTracks = resolveCompositionVideoTracks(project)
+        val pureTextVideo = needsPureTextVideoSourceV18(project)
         val needsBlankFrameSentinel = videoTracks.isNotEmpty() &&
             (videoTracks.size == 1 || !textOverlaysAreCoveredByRealVideoV14(project))
         val compositorTracks = if (needsBlankFrameSentinel) {
@@ -174,7 +186,7 @@ class Media3CompositionBuilder(
         // supplies this as a real app-cache PNG file on device; the data URI default remains only for
         // non-export/internal callers. This creates encoder timestamps/frames without holding the
         // previous video's last frame or opening a second hardware video decoder.
-        if (needsBlankFrameSentinel) {
+        if (needsBlankFrameSentinel || pureTextVideo) {
             sequences += buildVideoBlankFrameSentinelSequence(project)
         }
 
@@ -182,20 +194,40 @@ class Media3CompositionBuilder(
 
         require(sequences.isNotEmpty()) { "Timeline is empty" }
         val builder = Composition.Builder(sequences)
-        if (videoTracks.isNotEmpty()) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                builder.setHdrMode(Composition.HDR_MODE_EXPERIMENTAL_FORCE_INTERPRET_HDR_AS_SDR)
+        when {
+            videoTracks.isNotEmpty() -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    builder.setHdrMode(Composition.HDR_MODE_EXPERIMENTAL_FORCE_INTERPRET_HDR_AS_SDR)
+                }
+                builder.setVideoCompositorSettings(
+                    ResolveVideoCompositorSettings(
+                        outputWidth = project.width,
+                        outputHeight = project.height,
+                        videoTracks = compositorTracks,
+                    ),
+                )
+                val textEffects = projectTextEffects(project)
+                if (textEffects.isNotEmpty()) {
+                    builder.setEffects(Effects(emptyList(), textEffects))
+                }
             }
-            builder.setVideoCompositorSettings(
-                ResolveVideoCompositorSettings(
-                    outputWidth = project.width,
-                    outputHeight = project.height,
-                    videoTracks = compositorTracks,
-                ),
-            )
-            val textEffects = projectTextEffects(project)
-            if (textEffects.isNotEmpty()) {
-                builder.setEffects(Effects(emptyList(), textEffects))
+
+            pureTextVideo -> {
+                // No real V clip exists, so the static black image is the actual video stream rather
+                // than a zero-alpha compositor sentinel. Scale that 2x2 source to the project canvas
+                // first, then draw all timed text overlays on top. This supports title-card projects
+                // and Text + Audio timelines without requiring a multi-input video compositor.
+                val videoEffects = buildList<Effect> {
+                    add(
+                        Presentation.createForWidthAndHeight(
+                            project.width.coerceAtLeast(2),
+                            project.height.coerceAtLeast(2),
+                            Presentation.LAYOUT_SCALE_TO_FIT,
+                        ),
+                    )
+                    addAll(projectTextEffects(project))
+                }
+                builder.setEffects(Effects(emptyList(), videoEffects))
             }
         }
         return builder.build()
