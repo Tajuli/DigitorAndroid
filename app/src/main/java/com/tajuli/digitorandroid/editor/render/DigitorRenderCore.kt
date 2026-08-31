@@ -14,6 +14,7 @@ import androidx.media3.effect.MultipleInputVideoGraph
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
+import com.tajuli.digitorandroid.editor.model.transitionPairsV22
 import java.io.Closeable
 import java.util.concurrent.Executor
 
@@ -106,6 +107,17 @@ internal class DigitorRenderCore(
     init {
         graph.initialize()
 
+        val transitionPairsByGhostId = project.transitionPairsV22()
+            .associateBy(::transitionGhostIdV22)
+        val compositorInputs = layers.map { layer ->
+            val pair = transitionPairsByGhostId[layer.clip.id]
+            if (pair != null) {
+                ResolveCompositorInputV22.TransitionGhostInput(pair, layer.clip)
+            } else {
+                ResolveCompositorInputV22.TrackInput(layer.track)
+            }
+        }
+
         // Keep compositor geometry on the exact project canvas. The SurfaceInfo below owns the
         // realtime 720p presentation size, so a scale=1 clip no longer gets cropped/zoomed.
         graph.setCompositorSettings(
@@ -114,6 +126,7 @@ internal class DigitorRenderCore(
                 outputHeight = project.height,
                 videoTracks = layers.map { it.track },
                 livePreview = true,
+                inputsV22 = compositorInputs,
             ),
         )
 
