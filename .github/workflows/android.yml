@@ -49,7 +49,7 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Run render parity and pure-text export tests
+      - name: Run render parity, overlay, and native-image export tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
@@ -57,4 +57,4 @@ jobs:
           profile: pixel_2
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
-          script: gradle :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.tajuli.digitorandroid.editor.render.PreviewExportPixelParityInstrumentedTest,com.tajuli.digitorandroid.editor.render.PureTextExportInstrumentedTest
+          script: gradle :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.tajuli.digitorandroid.editor.render.PreviewExportPixelParityInstrumentedTest,com.tajuli.digitorandroid.editor.render.PureTextExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.NativeImageExportInstrumentedTest
