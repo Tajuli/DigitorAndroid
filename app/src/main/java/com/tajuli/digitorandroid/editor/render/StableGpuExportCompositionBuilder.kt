@@ -24,6 +24,11 @@ import com.tajuli.digitorandroid.editor.model.resolvedVisualOverlaysV19
  * GL compositor and sentinel video inputs while still running Digitor's per-clip transform, color,
  * qualifier and node effects.
  *
+ * Native still images are TimelineClip items too, but they are not encoded video sources. They must
+ * use Media3's image contract (MediaItem.imageDurationMs + EditedMediaItem.frameRate) instead of a
+ * video ClippingConfiguration. This keeps single-V-track image projects on the stable path without
+ * creating zero-byte exports.
+ *
  * Composition overlays (text/images/stickers/shapes) render after the decoded video. Their V-track
  * assignment controls editor semantics without creating another decoder. If every overlay frame is
  * covered by the single real video stream, export stays on the stable single-input path. Otherwise
@@ -96,6 +101,7 @@ internal class StableGpuExportCompositionBuilder(
             if (videoClip.timelineStartUs > cursorUs) {
                 builder.addGap(videoClip.timelineStartUs - cursorUs)
             }
+            require(!videoClip.isImageV21) { "Still images cannot carry embedded source audio" }
             val audioClip = videoClip.linkGroupId?.let(audioByGroup::get)
                 ?: error("Linked embedded audio mirror disappeared during export build")
             builder.addItem(avItem(videoClip, audioClip))
@@ -117,7 +123,7 @@ internal class StableGpuExportCompositionBuilder(
             if (clip.timelineStartUs > cursorUs) {
                 builder.addGap(clip.timelineStartUs - cursorUs)
             }
-            builder.addItem(videoItem(clip))
+            builder.addItem(videoItem(project, clip))
             cursorUs = clip.timelineEndUs
         }
         if (project.durationUs > cursorUs) {
@@ -158,10 +164,15 @@ internal class StableGpuExportCompositionBuilder(
             .build()
     }
 
-    private fun videoItem(clip: TimelineClip): EditedMediaItem {
-        val mediaItem = clippedMediaItem(clip)
-        return EditedMediaItem.Builder(mediaItem)
-            .setDurationUs(clip.durationUs)
+    private fun videoItem(project: TimelineProject, clip: TimelineClip): EditedMediaItem {
+        val mediaItem = if (clip.isImageV21) imageMediaItem(clip) else clippedMediaItem(clip)
+        val builder = EditedMediaItem.Builder(mediaItem)
+        if (clip.isImageV21) {
+            builder.setFrameRate(project.frameRate.coerceAtLeast(1))
+        } else {
+            builder.setDurationUs(clip.durationUs)
+        }
+        return builder
             .setEffects(Effects(emptyList(), SharedVideoPipeline.effectsFor(clip)))
             .build()
     }
@@ -174,6 +185,19 @@ internal class StableGpuExportCompositionBuilder(
             builder.setEffects(Effects(processors, emptyList()))
         }
         return builder.build()
+    }
+
+    private fun imageMediaItem(clip: TimelineClip): MediaItem {
+        val durationMs = ((clip.durationUs + 999L) / 1000L).coerceAtLeast(1L)
+        return MediaItem.Builder()
+            .setUri(clip.uri)
+            .apply {
+                clip.sourceMimeTypeV21
+                    ?.takeIf { it.startsWith("image/") }
+                    ?.let(::setMimeType)
+            }
+            .setImageDurationMs(durationMs)
+            .build()
     }
 
     private fun clippedMediaItem(clip: TimelineClip): MediaItem {
@@ -196,7 +220,7 @@ internal fun findLinkedEmbeddedAudioMirror(
     project: TimelineProject,
     videoTrack: TimelineTrack,
 ): TimelineTrack? {
-    if (videoTrack.clips.isEmpty() || videoTrack.clips.any { it.linkGroupId == null }) return null
+    if (videoTrack.clips.isEmpty() || videoTrack.clips.any { it.linkGroupId == null || it.isImageV21 }) return null
     return project.tracks
         .asSequence()
         .filter { it.kind == TrackKind.AUDIO && !it.muted && it.clips.size == videoTrack.clips.size }
