@@ -156,6 +156,10 @@ fun DigitorEditorScreenV7(
         onDispose { previewEngine.close(); audioPreview.close() }
     }
 
+    LaunchedEffect(Unit) {
+        vm.migrateLegacyImageOverlaysV21()
+    }
+
     val selectedClip = state.project.clip(state.selectedClipId)
     var workspace by remember { mutableStateOf(WorkspaceV7.EDIT) }
     var isPlaying by remember { mutableStateOf(false) }
@@ -187,7 +191,7 @@ fun DigitorEditorScreenV7(
             vm.importUrisAppendAwareV12(uris)
         }
     }
-    fun launchImport() = mediaPicker.launch(vm.selectedImportMimeTypes())
+    fun launchImport() = mediaPicker.launch(vm.selectedImportMimeTypesV21())
 
     LaunchedEffect(state.project, cursorUs, hasVideo) {
         if (hasVideo) previewEngine.submit(state.project, cursorUs)
@@ -481,8 +485,12 @@ fun DigitorEditorScreenV7(
                         }
                         WorkspaceV7.OVERLAY -> {
                             TimelineTextSelectionBusV10.clear()
-                            val overlayTarget = state.project.activeVisualOverlaysAtV19(cursorUs).lastOrNull()
-                                ?: state.project.resolvedVisualOverlaysV19().lastOrNull()
+                            val overlayTarget = state.project.activeVisualOverlaysAtV19(cursorUs)
+                                .filter { it.kind != com.tajuli.digitorandroid.editor.model.VisualOverlayKindV19.IMAGE }
+                                .lastOrNull()
+                                ?: state.project.resolvedVisualOverlaysV19()
+                                    .filter { it.kind != com.tajuli.digitorandroid.editor.model.VisualOverlayKindV19.IMAGE }
+                                    .lastOrNull()
                             if (overlayTarget != null) vm.selectVisualOverlayV19(overlayTarget.id)
                         }
                         else -> {
