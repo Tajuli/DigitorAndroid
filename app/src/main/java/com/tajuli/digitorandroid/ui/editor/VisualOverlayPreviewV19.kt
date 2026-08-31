@@ -36,7 +36,7 @@ internal fun BoxScope.VisualOverlayPreviewV19(
     val bitmap by produceState<android.graphics.Bitmap?>(
         initialValue = null,
         key1 = overlay.kind,
-        key2 = "${overlay.imageUri}|${overlay.stickerPreset}|${overlay.shapePreset}|${overlay.colorArgb}|${overlay.imageNodeGraphV20?.hashCode() ?: 0}",
+        key2 = "${overlay.imageUri}|${overlay.stickerPreset}|${overlay.shapePreset}|${overlay.colorArgb}",
     ) {
         value = withContext(Dispatchers.IO) {
             runCatching { VisualOverlayBitmapCacheV19.get(context, overlay, 1024) }.getOrNull()
