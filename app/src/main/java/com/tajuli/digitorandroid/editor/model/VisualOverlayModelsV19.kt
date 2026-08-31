@@ -25,12 +25,6 @@ data class VisualOverlayClipV19(
     val opacity: Float = 1f,
     /** Resolve-style V-track binding. Nullable keeps old projects migration-safe. */
     val videoTrackIdV19: String? = null,
-    /**
-     * Image-only grading graph. Nullable and appended last so legacy Gson projects stay safe.
-     * A null graph means an untouched/identity image; the first grade edit materializes a default
-     * Import -> Serial -> Output graph exactly like a video clip.
-     */
-    val imageNodeGraphV20: ClipNodeGraph? = null,
 ) {
     val durationUs: Long get() = (timelineEndUs - timelineStartUs).coerceAtLeast(1L)
     fun activeAt(timeUs: Long): Boolean = timeUs in timelineStartUs until timelineEndUs
@@ -51,9 +45,6 @@ data class VisualOverlayClipV19(
 }
 
 fun TimelineProject.resolvedVisualOverlaysV19(): List<VisualOverlayClipV19> = visualOverlaysV19.orEmpty()
-
-fun VisualOverlayClipV19.resolvedImageNodeGraphV20(): ClipNodeGraph? =
-    if (kind == VisualOverlayKindV19.IMAGE) imageNodeGraphV20 ?: ClipNodeGraph.default() else null
 
 fun VisualOverlayClipV19.resolvedVideoTrackIdV19(project: TimelineProject): String? =
     videoTrackIdV19?.takeIf { id -> project.track(id)?.kind == TrackKind.VIDEO }
