@@ -14,7 +14,6 @@ import androidx.media3.common.OverlaySettings
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.GainProcessor
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.effect.TextOverlay
 import com.tajuli.digitorandroid.editor.model.AudioMix
@@ -30,11 +29,10 @@ import com.tajuli.digitorandroid.editor.model.textManualFrameV2
 import kotlin.math.ceil
 import kotlin.math.min
 
+/** Historical name retained so existing export builders/tests keep source compatibility. */
 @UnstableApi
-internal fun projectTextEffects(project: TimelineProject): List<Effect> {
-    if (project.textOverlays.isEmpty()) return emptyList()
-    return listOf(OverlayEffect(project.textOverlays.map(::TimedDigitorTextOverlay)))
-}
+internal fun projectTextEffects(project: TimelineProject): List<Effect> =
+    buildProjectOverlayEffectsV19(VisualOverlayRenderEnvironmentV19.contextOrNull(), project)
 
 @UnstableApi
 internal fun audioProcessorsFor(clip: TimelineClip): List<AudioProcessor> {
