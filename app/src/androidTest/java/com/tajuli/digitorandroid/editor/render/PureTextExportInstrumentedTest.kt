@@ -30,7 +30,8 @@ class PureTextExportInstrumentedTest {
 
     @Test
     fun pureTextTimelineExportsNonEmptyMp4() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
         val supportDir = File(context.cacheDir, "pure_text_export_test").apply { mkdirs() }
         val blank = File(supportDir, "black.png")
         val output = File(supportDir, "pure_text.mp4")
@@ -68,31 +69,40 @@ class PureTextExportInstrumentedTest {
         val composition = Media3CompositionBuilder(Uri.fromFile(blank).toString()).build(project)
         val done = CountDownLatch(1)
         val failure = AtomicReference<Throwable?>(null)
-        val transformer = Transformer.Builder(context)
-            .setVideoMimeType(MimeTypes.VIDEO_H264)
-            .addListener(object : Transformer.Listener {
-                override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                    done.countDown()
-                }
-
-                override fun onError(
-                    composition: Composition,
-                    exportResult: ExportResult,
-                    exportException: ExportException,
-                ) {
-                    failure.set(exportException)
-                    done.countDown()
-                }
-            })
-            .build()
+        val transformerRef = AtomicReference<Transformer?>(null)
 
         try {
-            transformer.start(composition, output.absolutePath)
+            // Transformer binds itself to the application looper. Instrumentation tests execute on a
+            // worker thread, so construct/start/cancel it on main exactly like app code does.
+            instrumentation.runOnMainSync {
+                val transformer = Transformer.Builder(context)
+                    .setVideoMimeType(MimeTypes.VIDEO_H264)
+                    .addListener(object : Transformer.Listener {
+                        override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                            done.countDown()
+                        }
+
+                        override fun onError(
+                            composition: Composition,
+                            exportResult: ExportResult,
+                            exportException: ExportException,
+                        ) {
+                            failure.set(exportException)
+                            done.countDown()
+                        }
+                    })
+                    .build()
+                transformerRef.set(transformer)
+                transformer.start(composition, output.absolutePath)
+            }
+
             assertTrue("Timed out waiting for pure-text export", done.await(30, TimeUnit.SECONDS))
             failure.get()?.let { throw AssertionError("Pure-text export failed", it) }
             assertTrue("Pure-text export produced no bytes", output.exists() && output.length() > 0L)
         } finally {
-            runCatching { transformer.cancel() }
+            instrumentation.runOnMainSync {
+                transformerRef.get()?.let { transformer -> runCatching { transformer.cancel() } }
+            }
             output.delete()
             blank.delete()
         }
