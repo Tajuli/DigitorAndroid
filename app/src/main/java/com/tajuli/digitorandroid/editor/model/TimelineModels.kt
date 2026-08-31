@@ -150,11 +150,14 @@ data class TimelineProject(
         TimelineTrack(name = "A1", kind = TrackKind.AUDIO),
     ),
     val textOverlays: List<TextOverlayClip> = emptyList(),
+    /** Nullable because Gson leaves newly added reference fields null when opening legacy projects. */
+    val visualOverlaysV19: List<VisualOverlayClipV19>? = null,
 ) {
     val durationUs: Long
         get() = maxOf(
             tracks.flatMap { it.clips }.maxOfOrNull { it.timelineEndUs } ?: 0L,
             textOverlays.maxOfOrNull { it.timelineEndUs } ?: 0L,
+            visualOverlaysV19.orEmpty().maxOfOrNull { it.timelineEndUs } ?: 0L,
         )
 
     fun track(id: String?): TimelineTrack? = tracks.firstOrNull { it.id == id }
