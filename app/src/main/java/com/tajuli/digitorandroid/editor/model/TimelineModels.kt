@@ -6,6 +6,8 @@ const val US_PER_SECOND = 1_000_000L
 
 enum class TrackKind { VIDEO, AUDIO }
 enum class NodeKind { IMPORT, SERIAL, PARALLEL, MIX, OUTPUT }
+/** V-track media is either moving video or a still image. Null on legacy clips means VIDEO. */
+enum class TimelineVisualMediaV21 { VIDEO, IMAGE }
 
 data class ColorGrade(
     val redScale: Float = 1f,
@@ -125,9 +127,14 @@ data class TimelineClip(
     val audioMix: AudioMix = AudioMix(),
     /** Nullable and appended last so legacy Gson projects and positional constructor calls remain safe. */
     val inputColorProfileV1: InputColorProfile? = null,
+    /** Nullable for saved-project compatibility. Null is interpreted as VIDEO on V tracks. */
+    val visualMediaV21: TimelineVisualMediaV21? = null,
+    /** Persisted source MIME lets Media3 build still-image items without guessing the file extension. */
+    val sourceMimeTypeV21: String? = null,
 ) {
     val durationUs: Long get() = (sourceOutUs - sourceInUs).coerceAtLeast(1L)
     val timelineEndUs: Long get() = timelineStartUs + durationUs
+    val isImageV21: Boolean get() = visualMediaV21 == TimelineVisualMediaV21.IMAGE
 }
 
 data class TimelineTrack(
