@@ -32,6 +32,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -66,6 +69,12 @@ private val VisualPaletteV19 = listOf(
     0xFFFF8BCBL,
 )
 
+private enum class ImageInspectorPageV20(val title: String) {
+    TRANSFORM("Transform"),
+    CORRECTION("Correction"),
+    COLOR("Color"),
+}
+
 @Composable
 fun VisualOverlayWorkspaceV19(
     project: TimelineProject,
@@ -79,6 +88,7 @@ fun VisualOverlayWorkspaceV19(
     val overlays = project.resolvedVisualOverlaysV19()
     val selected = overlays.firstOrNull { it.id == selectedId }
     val targetTrack = vm.selectedVideoTrackForVisualV19()
+    var imagePage by remember(selectedId) { mutableStateOf(ImageInspectorPageV20.TRANSFORM) }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
             runCatching {
@@ -180,16 +190,44 @@ fun VisualOverlayWorkspaceV19(
                 }
             }
 
-            OverlaySliderV19("X", selected.positionX, -1f..1f) { vm.updateSelectedVisualV19(positionX = it) }
-            OverlaySliderV19("Y", selected.positionY, -1f..1f) { vm.updateSelectedVisualV19(positionY = it) }
-            OverlaySliderV19("Scale", selected.scale, .03f..1.5f) { vm.updateSelectedVisualV19(scale = it) }
-            OverlaySliderV19("Rotation", selected.rotationDegrees, 0f..360f) { vm.updateSelectedVisualV19(rotationDegrees = it) }
-            OverlaySliderV19("Opacity", selected.opacity, 0f..1f) { vm.updateSelectedVisualV19(opacity = it) }
-            OverlaySliderV19("Duration", selected.durationUs / 1_000_000f, .1f..60f) {
-                vm.setSelectedVisualDurationV19((it * 1_000_000L).toLong())
-            }
+            if (selected.kind == VisualOverlayKindV19.IMAGE) {
+                Text(
+                    "Timeline: drag either edge to change duration · press & hold, then drag to move or change V track",
+                    fontSize = 7.sp,
+                    color = VO19Accent,
+                )
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    ImageInspectorPageV20.entries.forEach { page ->
+                        SmallOverlayActionV19(page.title, true, imagePage == page) { imagePage = page }
+                    }
+                }
+                OverlaySliderV19("Duration", selected.durationUs / 1_000_000f, .1f..60f) {
+                    vm.setSelectedVisualDurationV19((it * 1_000_000L).toLong())
+                }
+                when (imagePage) {
+                    ImageInspectorPageV20.TRANSFORM -> {
+                        OverlaySliderV19("X", selected.positionX, -1f..1f) { vm.updateSelectedVisualV19(positionX = it) }
+                        OverlaySliderV19("Y", selected.positionY, -1f..1f) { vm.updateSelectedVisualV19(positionY = it) }
+                        OverlaySliderV19("Scale", selected.scale, .03f..1.5f) { vm.updateSelectedVisualV19(scale = it) }
+                        OverlaySliderV19("Rotation", selected.rotationDegrees, 0f..360f) { vm.updateSelectedVisualV19(rotationDegrees = it) }
+                        OverlaySliderV19("Opacity", selected.opacity, 0f..1f) { vm.updateSelectedVisualV19(opacity = it) }
+                    }
+                    ImageInspectorPageV20.CORRECTION -> ImageCorrectionWorkspaceV20(selected, vm)
+                    ImageInspectorPageV20.COLOR -> ImageColorWorkspaceV20(selected, vm)
+                }
+            } else {
+                OverlaySliderV19("X", selected.positionX, -1f..1f) { vm.updateSelectedVisualV19(positionX = it) }
+                OverlaySliderV19("Y", selected.positionY, -1f..1f) { vm.updateSelectedVisualV19(positionY = it) }
+                OverlaySliderV19("Scale", selected.scale, .03f..1.5f) { vm.updateSelectedVisualV19(scale = it) }
+                OverlaySliderV19("Rotation", selected.rotationDegrees, 0f..360f) { vm.updateSelectedVisualV19(rotationDegrees = it) }
+                OverlaySliderV19("Opacity", selected.opacity, 0f..1f) { vm.updateSelectedVisualV19(opacity = it) }
+                OverlaySliderV19("Duration", selected.durationUs / 1_000_000f, .1f..60f) {
+                    vm.setSelectedVisualDurationV19((it * 1_000_000L).toLong())
+                }
 
-            if (selected.kind != VisualOverlayKindV19.IMAGE) {
                 Text("Color", fontSize = 8.sp, color = VO19Muted)
                 Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                     VisualPaletteV19.forEach { color ->
