@@ -1,10 +1,14 @@
 package com.tajuli.digitorandroid.editor.render
 
+import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class StableGpuExportCompositionBuilderTest {
@@ -87,5 +91,195 @@ class StableGpuExportCompositionBuilderTest {
         )
 
         assertEquals(null, compositor.resolveOverlayState(1, 500_000L))
+    }
+
+    @Test
+    fun titleFullyInsideSameVideoTrackCanKeepDirectSingleInputExport() {
+        val video = TimelineClip(
+            id = "video",
+            uri = "content://test/video",
+            label = "video",
+            timelineStartUs = 0L,
+            sourceOutUs = 10_000_000L,
+        )
+        val project = TimelineProject(
+            tracks = listOf(
+                TimelineTrack(id = "v1", name = "V1", kind = TrackKind.VIDEO, clips = listOf(video)),
+            ),
+            textOverlays = listOf(
+                TextOverlayClip(
+                    id = "title",
+                    text = "Title",
+                    timelineStartUs = 2_000_000L,
+                    timelineEndUs = 6_000_000L,
+                    videoTrackIdV3 = "v1",
+                ),
+            ),
+        )
+
+        assertTrue(canUseDirectSingleInputExport(project))
+        assertTrue(textOverlaysAreCoveredByRealVideoV14(project))
+        assertTrue(shouldUseStableSingleInputExportV17(project))
+        assertFalse(needsPureTextVideoSourceV18(project))
+    }
+
+    @Test
+    fun titleOnUpperTrackOverLowerVideoUsesStableSingleInputExport() {
+        val video = TimelineClip(
+            id = "video",
+            uri = "content://test/video",
+            label = "video",
+            timelineStartUs = 0L,
+            sourceOutUs = 10_000_000L,
+        )
+        val project = TimelineProject(
+            tracks = listOf(
+                TimelineTrack(id = "v1", name = "V1", kind = TrackKind.VIDEO, clips = listOf(video)),
+                TimelineTrack(id = "v2", name = "V2", kind = TrackKind.VIDEO),
+            ),
+            textOverlays = listOf(
+                TextOverlayClip(
+                    id = "upper-title",
+                    text = "Upper title",
+                    timelineStartUs = 2_000_000L,
+                    timelineEndUs = 6_000_000L,
+                    videoTrackIdV3 = "v2",
+                ),
+            ),
+        )
+
+        // Exact device regression: V2 is timeline semantics, not a second decoded video input.
+        assertTrue(canUseDirectSingleInputExport(project))
+        assertTrue(textOverlaysAreCoveredByRealVideoV14(project))
+        assertTrue(shouldUseStableSingleInputExportV17(project))
+        assertFalse(needsPureTextVideoSourceV18(project))
+    }
+
+    @Test
+    fun pureTextTimelineRequiresSyntheticVideoSource() {
+        val project = TimelineProject(
+            width = 1080,
+            height = 1920,
+            tracks = listOf(
+                TimelineTrack(id = "v1", name = "V1", kind = TrackKind.VIDEO),
+            ),
+            textOverlays = listOf(
+                TextOverlayClip(
+                    id = "pure-title",
+                    text = "Text",
+                    timelineStartUs = 0L,
+                    timelineEndUs = 5_000_000L,
+                    videoTrackIdV3 = "v1",
+                ),
+            ),
+        )
+
+        assertTrue(needsPureTextVideoSourceV18(project))
+        assertFalse(canUseDirectSingleInputExport(project))
+        assertEquals(5_000_000L, project.durationUs)
+    }
+
+    @Test
+    fun emptyTimelineWithoutTextDoesNotNeedSyntheticVideoSource() {
+        val project = TimelineProject(
+            tracks = listOf(
+                TimelineTrack(id = "v1", name = "V1", kind = TrackKind.VIDEO),
+            ),
+        )
+
+        assertFalse(needsPureTextVideoSourceV18(project))
+    }
+
+    @Test
+    fun titleAfterLastVideoForcesCompositorExport() {
+        val video = TimelineClip(
+            id = "video",
+            uri = "content://test/video",
+            label = "video",
+            timelineStartUs = 0L,
+            sourceOutUs = 10_000_000L,
+        )
+        val project = TimelineProject(
+            tracks = listOf(
+                TimelineTrack(id = "v1", name = "V1", kind = TrackKind.VIDEO, clips = listOf(video)),
+            ),
+            textOverlays = listOf(
+                TextOverlayClip(
+                    id = "tail-title",
+                    text = "Title after video",
+                    timelineStartUs = 10_000_000L,
+                    timelineEndUs = 13_000_000L,
+                    videoTrackIdV3 = "v1",
+                ),
+            ),
+        )
+
+        assertTrue(canUseDirectSingleInputExport(project))
+        assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
+        assertFalse(shouldUseStableSingleInputExportV17(project))
+        assertFalse(needsPureTextVideoSourceV18(project))
+        assertEquals(13_000_000L, project.durationUs)
+    }
+
+    @Test
+    fun titleCrossingVideoEndForcesCompositorExport() {
+        val video = TimelineClip(
+            id = "video",
+            uri = "content://test/video",
+            label = "video",
+            timelineStartUs = 0L,
+            sourceOutUs = 10_000_000L,
+        )
+        val project = TimelineProject(
+            tracks = listOf(
+                TimelineTrack(id = "v1", name = "V1", kind = TrackKind.VIDEO, clips = listOf(video)),
+            ),
+            textOverlays = listOf(
+                TextOverlayClip(
+                    id = "crossing-title",
+                    text = "Crossing title",
+                    timelineStartUs = 9_000_000L,
+                    timelineEndUs = 12_000_000L,
+                    videoTrackIdV3 = "v1",
+                ),
+            ),
+        )
+
+        assertTrue(canUseDirectSingleInputExport(project))
+        assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
+        assertFalse(shouldUseStableSingleInputExportV17(project))
+        assertFalse(needsPureTextVideoSourceV18(project))
+    }
+
+    @Test
+    fun titleTailStillRequiresCompositorWhenAssignedToUpperEmptyTrack() {
+        val video = TimelineClip(
+            id = "video",
+            uri = "content://test/video",
+            label = "video",
+            timelineStartUs = 0L,
+            sourceOutUs = 10_000_000L,
+        )
+        val project = TimelineProject(
+            tracks = listOf(
+                TimelineTrack(id = "v1", name = "V1", kind = TrackKind.VIDEO, clips = listOf(video)),
+                TimelineTrack(id = "v2", name = "V2", kind = TrackKind.VIDEO),
+            ),
+            textOverlays = listOf(
+                TextOverlayClip(
+                    id = "upper-tail",
+                    text = "Upper title",
+                    timelineStartUs = 10_000_000L,
+                    timelineEndUs = 13_000_000L,
+                    videoTrackIdV3 = "v2",
+                ),
+            ),
+        )
+
+        assertTrue(canUseDirectSingleInputExport(project))
+        assertFalse(textOverlaysAreCoveredByRealVideoV14(project))
+        assertFalse(shouldUseStableSingleInputExportV17(project))
+        assertFalse(needsPureTextVideoSourceV18(project))
+        assertEquals(13_000_000L, project.durationUs)
     }
 }

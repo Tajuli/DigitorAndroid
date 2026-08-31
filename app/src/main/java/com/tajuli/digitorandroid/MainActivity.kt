@@ -28,6 +28,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.tajuli.digitorandroid.editor.model.ProjectSaveCoordinator
 import com.tajuli.digitorandroid.editor.model.ProjectStore
 import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.ui.editor.ActiveEditorVmRegistryV14
 import com.tajuli.digitorandroid.ui.editor.DigitorEditorScreenV7
 import com.tajuli.digitorandroid.ui.editor.EditorViewModelV4
 import com.tajuli.digitorandroid.ui.home.DigitorHomeScreen
@@ -114,7 +115,7 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                BackHandler(enabled = destination == DESTINATION_EDITOR) {
+                fun returnToHome() {
                     latestEditorProject?.let { project ->
                         runCatching { projectStore.autoSave(project) }
                     }
@@ -123,9 +124,14 @@ class MainActivity : ComponentActivity() {
                     recentRefresh++
                 }
 
+                BackHandler(enabled = destination == DESTINATION_EDITOR) {
+                    returnToHome()
+                }
+
                 when (destination) {
                     DESTINATION_EDITOR -> {
                         val editorVm: EditorViewModelV4 = viewModel(key = "editor-session-$editorSession")
+                        ActiveEditorVmRegistryV14.bind(editorVm)
                         val editorState by editorVm.state.collectAsState()
                         latestEditorProject = editorState.project
 
@@ -138,10 +144,14 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        DigitorEditorScreenV7(vm = editorVm)
+                        DigitorEditorScreenV7(
+                            vm = editorVm,
+                            onHome = ::returnToHome,
+                        )
                     }
 
                     else -> {
+                        ActiveEditorVmRegistryV14.clear()
                         latestEditorProject = null
                         val recents = remember(recentRefresh) { projectStore.recentProjects() }
                         DigitorHomeScreen(

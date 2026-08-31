@@ -36,6 +36,7 @@ import androidx.compose.material.icons.rounded.Colorize
 import androidx.compose.material.icons.rounded.ContentCut
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Forward10
+import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -131,7 +132,10 @@ private fun TimelineProject.activeVideoClipsV7(timelineUs: Long): List<TimelineC
 
 @UnstableApi
 @Composable
-fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
+fun DigitorEditorScreenV7(
+    vm: EditorViewModelV4 = viewModel(),
+    onHome: () -> Unit = {},
+) {
     val state by vm.state.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
     val appContext = context.applicationContext
@@ -174,7 +178,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
         if (uris.isNotEmpty()) {
             isPlaying = false
             runCatching { audioPreview.pause() }
-            vm.importUris(uris)
+            vm.importUrisAppendAwareV12(uris)
         }
     }
     fun launchImport() = mediaPicker.launch(vm.selectedImportMimeTypes())
@@ -252,7 +256,8 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
             playAnchorCursorUs = target; playAnchorRealtimeMs = SystemClock.elapsedRealtime()
         }
         val activeVideo = state.project.topmostVideoClipAt(target)
-        if (activeVideo != null && selectedClip == null && workspace != WorkspaceV7.TEXT) vm.selectClip(activeVideo.id)
+        val textSelectedNow = vm.state.value.selectedTextId != null || TimelineTextSelectionBusV10.selectedTextId.value != null
+        if (activeVideo != null && selectedClip == null && !textSelectedNow && workspace != WorkspaceV7.TEXT) vm.selectClip(activeVideo.id)
     }
 
     fun stopForEdit() {
@@ -280,8 +285,6 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
         val exportHasAudio = exportProject.tracks.any { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
         scope.launch {
             stopForEdit()
-            // Pausing is not enough on low-memory devices: CompositionPlayer keeps its decoder and
-            // audio graph alive. Release those preview resources before Transformer opens export AV.
             runCatching { audioPreview.suspendForExternalWork() }
             exportFraction = 0f
             exportStatus = "Preparing ${exportQualitySnapshot.label} export"
@@ -346,7 +349,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                         }
                     }
                     val targetMbps = exportQuality.videoBitrate(state.project.width, state.project.height, state.project.frameRate) / 1_000_000f
-                    Text("${exportQuality.label} · %.1f Mbps H.264 target".format(targetMbps), fontSize = 9.sp, color = E7Muted)
+                    Text("${exportQualitySnapshotLabel(exportQuality)} · %.1f Mbps H.264 target".format(targetMbps), fontSize = 9.sp, color = E7Muted)
                     Text("File type", fontSize = 10.sp, color = E7Muted)
                     AssistChip(onClick = {}, label = { Text("MP4 · H.264 / AAC") })
                     Text("Quality changes encoder bitrate; canvas resolution and frame rate stay unchanged.", fontSize = 9.sp, color = E7Muted)
@@ -377,6 +380,7 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
                 onRedo = { stopForEdit(); vm.redo() },
                 onSaveProject = vm::saveProject,
                 onLoadProject = { stopForEdit(); vm.loadProject() },
+                onHome = { stopForEdit(); onHome() },
                 onImport = ::launchImport,
                 onExport = { showExportDialog = true },
             )
@@ -469,6 +473,8 @@ fun DigitorEditorScreenV7(vm: EditorViewModelV4 = viewModel()) {
     }
 }
 
+private fun exportQualitySnapshotLabel(quality: ExportQuality): String = quality.label
+
 @Composable
 private fun TopBarV7(
     title: String,
@@ -480,11 +486,21 @@ private fun TopBarV7(
     onRedo: () -> Unit,
     onSaveProject: () -> Unit,
     onLoadProject: () -> Unit,
+    onHome: () -> Unit,
     onImport: () -> Unit,
     onExport: () -> Unit,
 ) {
     val exporting = exportFraction != null && exportFraction < 1f
     Row(Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Button(
+            onClick = onHome,
+            enabled = !exporting,
+            modifier = Modifier.height(32.dp),
+            shape = RoundedCornerShape(7.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        ) {
+            Icon(Icons.Rounded.Home, null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(4.dp)); Text("Home", fontSize = 10.sp)
+        }
         IconButton(onClick = onImport, modifier = Modifier.size(34.dp)) { Icon(Icons.Rounded.Add, "Import", modifier = Modifier.size(18.dp)) }
         IconButton(onClick = onUndo, enabled = canUndo && !exporting, modifier = Modifier.size(30.dp)) { Icon(Icons.Rounded.Undo, "Undo", modifier = Modifier.size(16.dp)) }
         IconButton(onClick = onRedo, enabled = canRedo && !exporting, modifier = Modifier.size(30.dp)) { Icon(Icons.Rounded.Redo, "Redo", modifier = Modifier.size(16.dp)) }

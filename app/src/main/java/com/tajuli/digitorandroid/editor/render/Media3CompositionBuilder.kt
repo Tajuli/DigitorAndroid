@@ -2,8 +2,10 @@ package com.tajuli.digitorandroid.editor.render
 
 import android.os.Build
 import androidx.media3.common.C
+import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.Presentation
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
@@ -16,6 +18,8 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 private const val SINGLE_LAYER_GAP_SENTINEL_ID = "__digitor_gap_sentinel"
+private const val BLANK_PNG_DATA_URI =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEElEQVR4nGNgYGD4D8UQBgAd9AP9yOH2qAAAAABJRU5ErkJggg=="
 
 internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip> {
     if (clips.size < 2) return clips
@@ -65,8 +69,19 @@ private fun Int.evenAtLeastTwo(): Int {
     return if (safe % 2 == 0) safe else (safe - 1).coerceAtLeast(2)
 }
 
+/**
+ * A TextOverlay is an effect, not a source stream. If a project contains titles but no playable
+ * video clips, Transformer still needs a real video source to produce frames/timestamps for those
+ * titles. This helper is intentionally model-only so the pure-text routing can be regression tested
+ * on the JVM without constructing Android MediaItems.
+ */
+internal fun needsPureTextVideoSourceV18(project: TimelineProject): Boolean =
+    project.textOverlays.isNotEmpty() && resolveCompositionVideoTracks(project).isEmpty()
+
 @UnstableApi
-class Media3CompositionBuilder {
+class Media3CompositionBuilder(
+    private val blankFrameUri: String = BLANK_PNG_DATA_URI,
+) {
     fun build(project: TimelineProject): Composition = buildExport(project)
 
     fun buildPreview(project: TimelineProject): Composition = buildPreviewInternal(project)
@@ -146,10 +161,13 @@ class Media3CompositionBuilder {
 
         val sequences = mutableListOf<EditedMediaItemSequence>()
         val videoTracks = resolveCompositionVideoTracks(project)
-        val compositorTracks = if (videoTracks.size == 1) {
+        val pureTextVideo = needsPureTextVideoSourceV18(project)
+        val needsBlankFrameSentinel = videoTracks.isNotEmpty() &&
+            (videoTracks.size == 1 || !textOverlaysAreCoveredByRealVideoV14(project))
+        val compositorTracks = if (needsBlankFrameSentinel) {
             videoTracks + TimelineTrack(
                 id = SINGLE_LAYER_GAP_SENTINEL_ID,
-                name = "Compositor gap sentinel",
+                name = "Compositor blank-frame sentinel",
                 kind = TrackKind.VIDEO,
                 clips = emptyList(),
             )
@@ -161,48 +179,74 @@ class Media3CompositionBuilder {
             sequences += buildCompositedVideoSequence(project, track, forPreview = false)
         }
 
-        // Media3 Transformer chooses SingleInputVideoGraph for one video sequence and rejects our
-        // custom ResolveVideoCompositorSettings in that mode. Previously Digitor duplicated the real
-        // source track at opacity=0 to force MultipleInputVideoGraph. Camera Log footage is commonly
-        // HEVC, and opening a second decoder for the same HEVC source can exhaust vendor codec slots
-        // once the export encoder is also active. A full-duration gap sequence is a compositor input
-        // but opens no source decoder, preserving the exact compositor path with one decoder only.
-        if (videoTracks.size == 1) {
-            sequences += buildVideoGapSentinelSequence(project.durationUs)
+        // A pure Media3 video gap contains no source frames. Composition-level text effects need a
+        // continuous frame stream even when the timeline is in a video-free region (for example,
+        // video 0-60s followed by a title at 60-63s). Feed a tiny static black image for the whole
+        // project and keep its compositor alpha at zero via the empty sentinel track. GpuExportBackend
+        // supplies this as a real app-cache PNG file on device; the data URI default remains only for
+        // non-export/internal callers. This creates encoder timestamps/frames without holding the
+        // previous video's last frame or opening a second hardware video decoder.
+        if (needsBlankFrameSentinel || pureTextVideo) {
+            sequences += buildVideoBlankFrameSentinelSequence(project)
         }
 
         addAudioSequences(project, sequences, forPreview = false)
 
         require(sequences.isNotEmpty()) { "Timeline is empty" }
         val builder = Composition.Builder(sequences)
-        if (videoTracks.isNotEmpty()) {
-            // Digitor's camera-log workflow intentionally treats decoder output as editable code
-            // values. Media3 defaults HDR-tagged input to KEEP_HDR, which can switch camera files
-            // onto a device HDR decoder/encoder path even though Digitor outputs SDR H.264 and owns
-            // the Log/HDR -> working-space conversion itself. On Android 10+ interpret such metadata
-            // as SDR so None/Bypass stays flat and selected Input Color profiles receive raw values.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                builder.setHdrMode(Composition.HDR_MODE_EXPERIMENTAL_FORCE_INTERPRET_HDR_AS_SDR)
+        when {
+            videoTracks.isNotEmpty() -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    builder.setHdrMode(Composition.HDR_MODE_EXPERIMENTAL_FORCE_INTERPRET_HDR_AS_SDR)
+                }
+                builder.setVideoCompositorSettings(
+                    ResolveVideoCompositorSettings(
+                        outputWidth = project.width,
+                        outputHeight = project.height,
+                        videoTracks = compositorTracks,
+                    ),
+                )
+                val textEffects = projectTextEffects(project)
+                if (textEffects.isNotEmpty()) {
+                    builder.setEffects(Effects(emptyList(), textEffects))
+                }
             }
-            builder.setVideoCompositorSettings(
-                ResolveVideoCompositorSettings(
-                    outputWidth = project.width,
-                    outputHeight = project.height,
-                    videoTracks = compositorTracks,
-                ),
-            )
-            val textEffects = projectTextEffects(project)
-            if (textEffects.isNotEmpty()) {
-                builder.setEffects(Effects(emptyList(), textEffects))
+
+            pureTextVideo -> {
+                // No real V clip exists, so the static black image is the actual video stream rather
+                // than a zero-alpha compositor sentinel. Scale that 2x2 source to the project canvas
+                // first, then draw all timed text overlays on top. This supports title-card projects
+                // and Text + Audio timelines without requiring a multi-input video compositor.
+                val videoEffects = buildList<Effect> {
+                    add(
+                        Presentation.createForWidthAndHeight(
+                            project.width.coerceAtLeast(2),
+                            project.height.coerceAtLeast(2),
+                            Presentation.LAYOUT_SCALE_TO_FIT,
+                        ),
+                    )
+                    addAll(projectTextEffects(project))
+                }
+                builder.setEffects(Effects(emptyList(), videoEffects))
             }
         }
         return builder.build()
     }
 
-    private fun buildVideoGapSentinelSequence(durationUs: Long): EditedMediaItemSequence {
-        val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
-        builder.addGap(durationUs.coerceAtLeast(1L))
-        return builder.build()
+    private fun buildVideoBlankFrameSentinelSequence(project: TimelineProject): EditedMediaItemSequence {
+        val durationUs = project.durationUs.coerceAtLeast(1L)
+        val durationMs = ((durationUs + 999L) / 1000L).coerceAtLeast(1L)
+        val imageMediaItem = MediaItem.Builder()
+            .setUri(blankFrameUri)
+            .setMimeType("image/png")
+            .setImageDurationMs(durationMs)
+            .build()
+        val imageItem = EditedMediaItem.Builder(imageMediaItem)
+            .setFrameRate(project.frameRate.coerceAtLeast(1))
+            .build()
+        return EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
+            .addItem(imageItem)
+            .build()
     }
 
     private fun buildCompositedVideoSequence(

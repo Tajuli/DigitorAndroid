@@ -78,11 +78,16 @@ private class ClipGainProvider(
 }
 
 @UnstableApi
-private class TimedDigitorTextOverlay(
+internal class TimedDigitorTextOverlay(
     private val spec: TextOverlayClip,
 ) : TextOverlay() {
     private val staticVisibleText: SpannableString = styled(spec, spec.sizeScale)
-    private val hiddenText = SpannableString("")
+
+    // Media3 TextOverlay rasterizes getText() into a Bitmap. Returning an empty SpannableString
+    // makes its measured width zero and can reach Bitmap.createBitmap(0, ...), which aborts
+    // Transformer before the first encoded frame. Keep a positive-width placeholder while hidden;
+    // getOverlaySettings() makes it fully transparent outside the clip's active interval.
+    private val hiddenText = SpannableString(" ")
 
     override fun getText(presentationTimeUs: Long): SpannableString {
         if (!spec.activeAt(presentationTimeUs)) return hiddenText
@@ -109,6 +114,7 @@ private class TimedDigitorTextOverlay(
                 (manual.positionX + preset.offsetX).coerceIn(-1f, 1f),
                 -(manual.positionY + preset.offsetY).coerceIn(-1f, 1f),
             )
+            .setRotationDegrees(manual.rotationDegrees)
             .build()
     }
 

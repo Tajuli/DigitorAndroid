@@ -64,6 +64,8 @@ data class TextTransformKeyframeV2(
     val positionY: Float,
     val sizeScale: Float,
     val alpha: Float,
+    /** Clockwise degrees around the title center. Appended for saved-project compatibility. */
+    val rotationDegrees: Float = 0f,
 ) {
     fun normalizedFor(durationUs: Long): TextTransformKeyframeV2 = copy(
         localUs = localUs.coerceIn(0L, durationUs.coerceAtLeast(1L)),
@@ -71,6 +73,7 @@ data class TextTransformKeyframeV2(
         positionY = positionY.coerceIn(-1f, 1f),
         sizeScale = sizeScale.coerceIn(.35f, 4f),
         alpha = alpha.coerceIn(0f, 1f),
+        rotationDegrees = rotationDegrees.coerceIn(-360f, 360f),
     )
 }
 
@@ -110,6 +113,7 @@ data class TextManualFrameV2(
     val positionY: Float,
     val sizeScale: Float,
     val alpha: Float,
+    val rotationDegrees: Float = 0f,
 )
 
 data class TextAnimationFrameV2(
@@ -144,6 +148,7 @@ fun TextOverlayClip.textManualFrameV2(timeUs: Long): TextManualFrameV2 {
         positionY = positionY.coerceIn(-1f, 1f),
         sizeScale = sizeScale.coerceIn(.35f, 4f),
         alpha = 1f,
+        rotationDegrees = 0f,
     )
     if (!activeAt(timeUs)) return fallback.copy(alpha = 0f)
 
@@ -163,6 +168,7 @@ fun TextOverlayClip.textManualFrameV2(timeUs: Long): TextManualFrameV2 {
         positionY = lerp(left.positionY, right.positionY, t),
         sizeScale = lerp(left.sizeScale, right.sizeScale, t),
         alpha = lerp(left.alpha, right.alpha, t),
+        rotationDegrees = lerp(left.rotationDegrees, right.rotationDegrees, t),
     )
 }
 
@@ -197,6 +203,7 @@ private fun TextTransformKeyframeV2.asManualFrame() = TextManualFrameV2(
     positionY = positionY,
     sizeScale = sizeScale,
     alpha = alpha,
+    rotationDegrees = rotationDegrees,
 )
 
 private fun lerp(a: Float, b: Float, t: Float): Float = a + (b - a) * t.coerceIn(0f, 1f)

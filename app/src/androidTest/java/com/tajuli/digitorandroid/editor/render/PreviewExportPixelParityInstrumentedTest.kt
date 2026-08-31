@@ -27,6 +27,7 @@ import com.tajuli.digitorandroid.editor.model.ClipTransform
 import com.tajuli.digitorandroid.editor.model.NodeCorrections
 import com.tajuli.digitorandroid.editor.model.NodeEffect
 import com.tajuli.digitorandroid.editor.model.NodeKind
+import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
@@ -56,6 +57,32 @@ import org.junit.runner.RunWith
 @UnstableApi
 @RunWith(AndroidJUnit4::class)
 class PreviewExportPixelParityInstrumentedTest {
+
+    @Test
+    fun inactiveTimedTextOverlay_keepsPositiveBitmapSize() {
+        val overlay = TimedDigitorTextOverlay(
+            TextOverlayClip(
+                id = "inactive-title",
+                text = "Title",
+                timelineStartUs = 2_000_000L,
+                timelineEndUs = 4_000_000L,
+            ),
+        )
+        try {
+            // Export starts at t=0 while this title starts later. Media3 TextOverlay rasterizes the
+            // returned Spannable into a Bitmap; the hidden representation must therefore retain a
+            // positive texture size instead of returning an empty string / zero-width bitmap.
+            val hiddenBitmap = overlay.getBitmap(0L)
+            assertTrue("Inactive title bitmap width must stay positive", hiddenBitmap.width > 0)
+            assertTrue("Inactive title bitmap height must stay positive", hiddenBitmap.height > 0)
+
+            val visibleBitmap = overlay.getBitmap(2_500_000L)
+            assertTrue("Visible title bitmap width must stay positive", visibleBitmap.width > 0)
+            assertTrue("Visible title bitmap height must stay positive", visibleBitmap.height > 0)
+        } finally {
+            overlay.release()
+        }
+    }
 
     @Test
     fun previewAndExportRenderStage_areByteIdentical() {

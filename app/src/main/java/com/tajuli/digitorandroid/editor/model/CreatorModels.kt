@@ -55,11 +55,47 @@ data class TextOverlayClip(
     val styleV2: TextStyleV2? = null,
     val entryAnimationV2: TextAnimationSpecV2? = null,
     val exitAnimationV2: TextAnimationSpecV2? = null,
-    /** DaVinci-style playhead keyframes for position, size and opacity. */
+    /** DaVinci-style playhead keyframes for position, size, opacity and rotation. */
     val manualAnimationV2: TextManualAnimationV2? = null,
+    /**
+     * V3 Resolve-style lane binding. A title is a free timeline item on a real VIDEO track
+     * (V1/V2/V3...) and occupies that track's time slot just like a normal video clip.
+     * Nullable preserves old saved projects; legacy text resolves to V1 when it exists.
+     */
+    val videoTrackIdV3: String? = null,
 ) {
     val durationUs: Long get() = (timelineEndUs - timelineStartUs).coerceAtLeast(1L)
     fun activeAt(timeUs: Long): Boolean = timeUs in timelineStartUs until timelineEndUs
+}
+
+fun TextOverlayClip.resolvedVideoTrackIdV3(project: TimelineProject): String? =
+    videoTrackIdV3?.takeIf { id -> project.track(id)?.kind == TrackKind.VIDEO }
+        ?: project.tracks.firstOrNull { it.kind == TrackKind.VIDEO && it.name == "V1" }?.id
+        ?: project.tracks.lastOrNull { it.kind == TrackKind.VIDEO }?.id
+
+fun TimelineProject.textOverlaysForVideoTrackV3(trackId: String): List<TextOverlayClip> =
+    textOverlays.filter { it.resolvedVideoTrackIdV3(this) == trackId }
+
+/**
+ * Resolve-style occupancy rule: media clips and title clips share one V-track lane, so two timeline
+ * items may not overlap on the same V track. A title on V2 can still freely overlap media on V1.
+ */
+fun TimelineProject.videoTrackSlotAvailableV3(
+    trackId: String,
+    startUs: Long,
+    endUs: Long,
+    ignoreTextId: String? = null,
+): Boolean {
+    val track = track(trackId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return false
+    val safeStart = startUs.coerceAtLeast(0L)
+    val safeEnd = endUs.coerceAtLeast(safeStart + 1L)
+    fun overlaps(otherStartUs: Long, otherEndUs: Long): Boolean =
+        safeStart < otherEndUs && safeEnd > otherStartUs
+
+    if (track.clips.any { overlaps(it.timelineStartUs, it.timelineEndUs) }) return false
+    return textOverlaysForVideoTrackV3(trackId)
+        .filterNot { it.id == ignoreTextId }
+        .none { overlaps(it.timelineStartUs, it.timelineEndUs) }
 }
 
 fun TimelineProject.activeTextOverlaysAt(timeUs: Long): List<TextOverlayClip> =

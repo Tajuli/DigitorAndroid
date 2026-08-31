@@ -1,15 +1,18 @@
 package com.tajuli.digitorandroid.editor.processing
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.net.Uri
 import android.os.Handler
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.Clock
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.transformer.Composition
+import androidx.media3.transformer.DefaultAssetLoaderFactory
 import androidx.media3.transformer.DefaultDecoderFactory
 import androidx.media3.transformer.DefaultEncoderFactory
-import androidx.media3.transformer.ExoPlayerAssetLoader
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult as Media3ExportResult
 import androidx.media3.transformer.ProgressHolder
@@ -18,6 +21,7 @@ import androidx.media3.transformer.VideoEncoderSettings
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
+import com.tajuli.digitorandroid.editor.render.Media3CompositionBuilder
 import com.tajuli.digitorandroid.editor.render.StableGpuExportCompositionBuilder
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -29,7 +33,6 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 class GpuExportBackend(
     private val context: Context,
 ) : ExportBackend {
-    private val compositionBuilder = StableGpuExportCompositionBuilder()
 
     override suspend fun export(
         project: TimelineProject,
@@ -61,6 +64,18 @@ class GpuExportBackend(
         }
         onProgress(ExportProgress.Stage("$compositionStage · ${quality.label}", 0.02f))
 
+        // Text-only timeline regions need an actual video frame stream. Use a real cache PNG rather
+        // than a data: URI: vendor Media3/DataSource stacks are not equally reliable with data-image
+        // URIs. The file is tiny, app-private, and can be reused across exports.
+        val blankFrameUri = runCatching { ensureBlankFramePngUri() }
+            .getOrElse { error ->
+                previewLease.close()
+                if (continuation.isActive) continuation.resumeWithException(error)
+                return@suspendCancellableCoroutine
+            }
+        val compositionBuilder = StableGpuExportCompositionBuilder(
+            Media3CompositionBuilder(blankFrameUri = blankFrameUri),
+        )
         val composition = runCatching { compositionBuilder.build(project) }
             .getOrElse { error ->
                 previewLease.close()
@@ -86,6 +101,12 @@ class GpuExportBackend(
             previewLease.close()
         }
 
+        fun cleanupFailedOutput() {
+            runCatching {
+                if (output.exists()) output.delete()
+            }
+        }
+
         val transformer = runCatching {
             val encoderFactory = DefaultEncoderFactory.Builder(context)
                 .setRequestedVideoEncoderSettings(
@@ -101,11 +122,10 @@ class GpuExportBackend(
                 .setEncoderFactory(encoderFactory)
 
             // Some Unisoc AVC hardware decoders accept camera H.264 during configuration but then
-            // repeatedly return invalid-data errors while draining the stream. In that situation
-            // Transformer can terminate in vendor Codec2/VSP code before it can report a normal
-            // ExportException. Keep hardware decoding everywhere else, but on devices whose
-            // preferred AVC decoder is a Unisoc implementation, prefer Android's software AVC
-            // decoder for export. Other MIME types keep the platform's normal decoder priority.
+            // repeatedly return invalid-data errors while draining the stream. Prefer the software
+            // AVC decoder there, but preserve Media3's DefaultAssetLoaderFactory. A bare
+            // ExoPlayerAssetLoader.Factory cannot load still-image MediaItems, while the default
+            // factory dispatches images to ImageAssetLoader and normal A/V to ExoPlayerAssetLoader.
             if (preferredAvcDecoderIsUnisoc()) {
                 val selector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
                     val delegate = if (mimeType == MimeTypes.VIDEO_H264) {
@@ -124,7 +144,12 @@ class GpuExportBackend(
                     .setEnableDecoderFallback(true)
                     .build()
                 transformerBuilder.setAssetLoaderFactory(
-                    ExoPlayerAssetLoader.Factory(context, decoderFactory, Clock.DEFAULT),
+                    DefaultAssetLoaderFactory(
+                        context,
+                        decoderFactory,
+                        Clock.DEFAULT,
+                        null,
+                    ),
                 )
             }
 
@@ -152,12 +177,14 @@ class GpuExportBackend(
                     ) {
                         stopCallbacks()
                         restorePreview()
+                        cleanupFailedOutput()
                         if (continuation.isActive) continuation.resumeWithException(exportException)
                     }
                 })
                 .build()
         }.getOrElse { error ->
             restorePreview()
+            cleanupFailedOutput()
             if (continuation.isActive) continuation.resumeWithException(error)
             return@suspendCancellableCoroutine
         }
@@ -194,6 +221,7 @@ class GpuExportBackend(
         val starter = Runnable {
             if (!continuation.isActive) {
                 restorePreview()
+                cleanupFailedOutput()
                 return@Runnable
             }
             onProgress(ExportProgress.Stage("GPU: MediaCodec + OpenGL export · ${quality.label}", 0.05f))
@@ -204,6 +232,7 @@ class GpuExportBackend(
             }.onFailure { error ->
                 stopCallbacks()
                 restorePreview()
+                cleanupFailedOutput()
                 if (continuation.isActive) continuation.resumeWithException(error)
             }
         }
@@ -212,7 +241,14 @@ class GpuExportBackend(
         continuation.invokeOnCancellation {
             stopCallbacks()
             restorePreview()
-            if (transformerStarted.get()) handler.post { runCatching { transformer.cancel() } }
+            if (transformerStarted.get()) {
+                handler.post {
+                    runCatching { transformer.cancel() }
+                    cleanupFailedOutput()
+                }
+            } else {
+                cleanupFailedOutput()
+            }
         }
 
         // Some Android codec stacks release native decoder/GL resources asynchronously even after
@@ -220,6 +256,25 @@ class GpuExportBackend(
         // opening the export decoder + encoder pair.
         onProgress(ExportProgress.Stage("GPU: waiting for codec release · ${quality.label}", 0.03f))
         handler.postDelayed(starter, EXPORT_START_GRACE_MS)
+    }
+
+    private fun ensureBlankFramePngUri(): String {
+        val supportDir = File(context.cacheDir, "digitor_export_support").apply { mkdirs() }
+        val blankFile = File(supportDir, BLANK_FRAME_FILE_NAME)
+        if (!blankFile.exists() || blankFile.length() < 16L) {
+            val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+            try {
+                bitmap.eraseColor(Color.BLACK)
+                blankFile.outputStream().use { output ->
+                    check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                        "Could not create export blank frame"
+                    }
+                }
+            } finally {
+                bitmap.recycle()
+            }
+        }
+        return Uri.fromFile(blankFile).toString()
     }
 
     private fun preferredAvcDecoderIsUnisoc(): Boolean = runCatching {
@@ -232,5 +287,6 @@ class GpuExportBackend(
 
     private companion object {
         const val EXPORT_START_GRACE_MS = 350L
+        const val BLANK_FRAME_FILE_NAME = "blank_frame_v15.png"
     }
 }
