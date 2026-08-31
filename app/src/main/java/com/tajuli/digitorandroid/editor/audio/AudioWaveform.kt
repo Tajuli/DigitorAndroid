@@ -86,7 +86,7 @@ class AudioWaveformRepository private constructor(private val appContext: Contex
         }
     }
 
-    private fun decode(uri: Uri): AudioWaveform {
+    private suspend fun decode(uri: Uri): AudioWaveform {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         try {
@@ -279,7 +279,7 @@ class AudioWaveformRepository private constructor(private val appContext: Contex
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray())
-        .joinToString("") { "%02x".format(it) }
+        .joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') }
 
     private fun MediaFormat.intOrNull(key: String): Int? = runCatching { getInteger(key) }.getOrNull()
     private fun MediaFormat.longOrNull(key: String): Long? = runCatching { getLong(key) }.getOrNull()
