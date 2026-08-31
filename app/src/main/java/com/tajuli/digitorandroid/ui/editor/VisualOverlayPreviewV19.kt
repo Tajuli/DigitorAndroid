@@ -15,8 +15,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.zIndex
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.VisualOverlayClipV19
+import com.tajuli.digitorandroid.editor.model.resolvedVideoTrackIdV19
 import com.tajuli.digitorandroid.editor.render.VisualOverlayBitmapCacheV19
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -29,6 +31,7 @@ internal fun BoxScope.VisualOverlayPreviewV19(
     previewSize: IntSize,
 ) {
     if (previewSize.width <= 0 || previewSize.height <= 0) return
+    PreviewOverlayLayerOrderV19.install(project)
     val context = LocalContext.current.applicationContext
     val bitmap by produceState<android.graphics.Bitmap?>(
         initialValue = null,
@@ -58,6 +61,7 @@ internal fun BoxScope.VisualOverlayPreviewV19(
         contentScale = ContentScale.Fit,
         modifier = Modifier
             .align(Alignment.Center)
+            .zIndex(PreviewOverlayLayerOrderV19.zFor(overlay.resolvedVideoTrackIdV19(project)))
             .width(widthDp)
             .height(heightDp)
             .graphicsLayer {
