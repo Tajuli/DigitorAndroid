@@ -39,6 +39,12 @@ data class NodeEffect(
     val name: String,
     val amount: Float = 1f,
     val enabled: Boolean = true,
+    /**
+     * V26 timed-effect bounds in absolute source time. Nullable keeps all V25 and older saved
+     * projects compatible: null resolves to the currently visible clip edge.
+     */
+    val sourceStartUsV26: Long? = null,
+    val sourceEndUsV26: Long? = null,
 )
 
 data class NodePosition(val x: Float, val y: Float)
