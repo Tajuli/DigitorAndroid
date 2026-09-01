@@ -33,12 +33,14 @@ enum class TransitionStyleV22(val label: String) {
  * fadeIn/fadeOut are retained for saved-project compatibility with the original compositor-native
  * edge fades. V22 stores a cut transition on the incoming clip. Nullable style keeps old Gson
  * projects safe: a missing field resolves to NONE instead of relying on Gson to synthesize an enum.
+ * presetIdV24 is also nullable so legacy projects continue to resolve through the stable V22 style.
  */
 data class ClipTransition(
     val fadeInUs: Long = 0L,
     val fadeOutUs: Long = 0L,
     val styleV22: TransitionStyleV22? = null,
     val durationUsV22: Long = 0L,
+    val presetIdV24: String? = null,
 ) {
     val resolvedStyleV22: TransitionStyleV22
         get() = styleV22 ?: TransitionStyleV22.NONE
@@ -63,6 +65,7 @@ data class ClipTransition(
             } else {
                 durationUsV22.coerceIn(0L, maxEdge)
             },
+            presetIdV24 = if (resolvedStyleV22 == TransitionStyleV22.NONE) null else presetIdV24,
         )
     }
 }
