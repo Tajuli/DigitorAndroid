@@ -116,6 +116,34 @@ class ResolveVideoCompositorSettingsTest {
         assertTrue(settings.resolveOverlayState(0, 2_900_000L)!!.backgroundX < -1.8f)
     }
 
+    @Test
+    fun cameraMotionRemapsToLegalMedia3AnchorsWithoutLosingFullTravel() {
+        val fullRight = ResolveOverlayState(
+            alphaScale = 1f,
+            backgroundX = 2f,
+            backgroundY = 0f,
+            scaleX = 1f,
+            scaleY = 1f,
+            rotationDegrees = 0f,
+        )
+        val fullLeft = fullRight.copy(backgroundX = -2f)
+        val fullUp = fullRight.copy(backgroundX = 0f, backgroundY = -2f)
+        val fullDown = fullRight.copy(backgroundX = 0f, backgroundY = 2f)
+
+        listOf(fullRight, fullLeft, fullUp, fullDown).forEach { state ->
+            val anchors = media3AnchorPlacementV22(state)
+            assertTrue(anchors.backgroundX in -1f..1f)
+            assertTrue(anchors.backgroundY in -1f..1f)
+            assertTrue(anchors.overlayX in -1f..1f)
+            assertTrue(anchors.overlayY in -1f..1f)
+
+            val effectiveX = anchors.backgroundX - anchors.overlayX * state.scaleX
+            val effectiveY = anchors.backgroundY - anchors.overlayY * state.scaleY
+            assertEquals(state.backgroundX, effectiveX, .0001f)
+            assertEquals(state.backgroundY, effectiveY, .0001f)
+        }
+    }
+
     private fun clip(label: String, startUs: Long, endUs: Long): TimelineClip = TimelineClip(
         uri = "content://test/$label",
         label = label,
