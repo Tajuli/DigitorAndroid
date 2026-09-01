@@ -13,6 +13,7 @@ import com.tajuli.digitorandroid.editor.model.TransitionPairV22
 import com.tajuli.digitorandroid.editor.model.TransitionStyleV22
 import com.tajuli.digitorandroid.editor.model.transitionPairForIncomingV22
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
+import kotlin.math.abs
 import kotlin.math.min
 
 internal fun resolveCompositionVideoTracks(project: TimelineProject): List<TimelineTrack> =
@@ -31,6 +32,39 @@ internal data class ResolveOverlayState(
     val scaleY: Float,
     val rotationDegrees: Float,
 )
+
+/**
+ * Media3 constrains both overlay and background anchors to [-1, 1]. A full-frame push needs roughly
+ * two normalized units of center travel, so using backgroundAnchor alone is invalid. Split the
+ * requested center position between the two legal anchors instead: effectiveCenter = background -
+ * overlay * scale. This preserves the full push/slide travel without passing illegal values to
+ * StaticOverlaySettings during Transformer export.
+ */
+internal data class Media3AnchorPlacementV22(
+    val backgroundX: Float,
+    val backgroundY: Float,
+    val overlayX: Float,
+    val overlayY: Float,
+)
+
+internal fun media3AnchorPlacementV22(state: ResolveOverlayState): Media3AnchorPlacementV22 {
+    val x = media3AxisAnchorsV22(state.backgroundX, state.scaleX)
+    val y = media3AxisAnchorsV22(state.backgroundY, state.scaleY)
+    return Media3AnchorPlacementV22(
+        backgroundX = x.first,
+        backgroundY = y.first,
+        overlayX = x.second,
+        overlayY = y.second,
+    )
+}
+
+private fun media3AxisAnchorsV22(position: Float, scale: Float): Pair<Float, Float> {
+    if (position in -1f..1f) return position to 0f
+    val background = if (position > 1f) 1f else -1f
+    val safeScale = abs(scale).coerceAtLeast(0.001f)
+    val overlay = ((background - position) / safeScale).coerceIn(-1f, 1f)
+    return background to overlay
+}
 
 internal sealed class ResolveCompositorInputV22 {
     data class TrackInput(val snapshotTrack: TimelineTrack) : ResolveCompositorInputV22()
@@ -138,11 +172,12 @@ internal class ResolveVideoCompositorSettings(
     override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
         val state = resolveOverlayState(inputId, presentationTimeUs)
             ?: return StaticOverlaySettings.Builder().setAlphaScale(0f).build()
+        val anchors = media3AnchorPlacementV22(state)
 
         return StaticOverlaySettings.Builder()
             .setAlphaScale(state.alphaScale)
-            .setOverlayFrameAnchor(0f, 0f)
-            .setBackgroundFrameAnchor(state.backgroundX, state.backgroundY)
+            .setOverlayFrameAnchor(anchors.overlayX, anchors.overlayY)
+            .setBackgroundFrameAnchor(anchors.backgroundX, anchors.backgroundY)
             .setScale(state.scaleX, state.scaleY)
             .setRotationDegrees(state.rotationDegrees)
             .build()
@@ -199,7 +234,7 @@ internal class ResolveVideoCompositorSettings(
                 scaleY = base.scaleY * (1.22f - 0.22f * p),
             )
             TransitionStyleV22.WHIP -> base.copy(
-                backgroundX = base.backgroundX + 2.35f * (1f - p),
+                backgroundX = base.backgroundX + 2f * (1f - p),
                 rotationDegrees = base.rotationDegrees + 3.5f * (1f - p),
             )
             TransitionStyleV22.SPIN -> base.copy(
@@ -247,7 +282,7 @@ internal class ResolveVideoCompositorSettings(
             )
             TransitionStyleV22.BLUR -> base.copy(alphaScale = base.alphaScale * fade)
             TransitionStyleV22.WHIP -> base.copy(
-                backgroundX = base.backgroundX - 2.35f * p,
+                backgroundX = base.backgroundX - 2f * p,
                 rotationDegrees = base.rotationDegrees - 3.5f * p,
             )
             TransitionStyleV22.SPIN -> base.copy(
