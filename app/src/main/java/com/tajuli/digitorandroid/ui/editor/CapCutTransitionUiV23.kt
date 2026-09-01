@@ -24,6 +24,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,20 +70,20 @@ private fun TransitionCutTargetV23.maxDurationUsV23(): Long = minOf(
     3_000_000L,
 ).coerceAtLeast(100_000L)
 
-fun EditorViewModelV4.setTransitionForCutV23(
+/** Pure cut mutation used by the UI and tests so a transition tap always changes project metadata. */
+internal fun TimelineProject.withTransitionForCutV23(
     incomingClipId: String,
     style: TransitionStyleV22,
     durationUs: Long,
-) {
-    val snapshot = state.value
-    val incoming = snapshot.project.clip(incomingClipId) ?: return
-    val track = snapshot.project.trackContaining(incomingClipId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return
+): TimelineProject? {
+    val incoming = clip(incomingClipId) ?: return null
+    val track = trackContaining(incomingClipId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return null
     val ordered = track.sortedClips()
     val index = ordered.indexOfFirst { it.id == incomingClipId }
+    if (index < 0) return null
     val outgoing = ordered.getOrNull(index - 1)
     if (style != TransitionStyleV22.NONE && (outgoing == null || outgoing.timelineEndUs != incoming.timelineStartUs)) {
-        setEditorStatusV19("Transition needs two clips touching at the cut")
-        return
+        return null
     }
 
     val safeDuration = if (style == TransitionStyleV22.NONE) {
@@ -99,18 +100,39 @@ fun EditorViewModelV4.setTransitionForCutV23(
         styleV22 = style.takeUnless { it == TransitionStyleV22.NONE },
         durationUsV22 = safeDuration,
     )
-    if (nextTransition == incoming.transition) return
+    if (nextTransition == incoming.transition) return this
 
-    val nextProject = snapshot.project.copy(
-        tracks = snapshot.project.tracks.map { candidate ->
+    return copy(
+        tracks = tracks.map { candidate ->
             if (candidate.id != track.id) candidate
             else candidate.copy(
-                clips = candidate.clips.map { clip ->
-                    if (clip.id == incoming.id) clip.copy(transition = nextTransition) else clip
+                clips = candidate.clips.map { item ->
+                    if (item.id == incoming.id) item.copy(transition = nextTransition) else item
                 },
             )
         },
     )
+}
+
+fun EditorViewModelV4.setTransitionForCutV23(
+    incomingClipId: String,
+    style: TransitionStyleV22,
+    durationUs: Long,
+) {
+    val snapshot = state.value
+    val nextProject = snapshot.project.withTransitionForCutV23(incomingClipId, style, durationUs)
+    if (nextProject == null) {
+        setEditorStatusV19("Transition needs two clips touching at the cut")
+        return
+    }
+    val updatedClip = nextProject.clip(incomingClipId) ?: return
+    val safeDuration = updatedClip.transition.resolvedDurationUsV22
+    if (nextProject == snapshot.project) {
+        setEditorStatusV19(
+            if (style == TransitionStyleV22.NONE) "Transition removed" else "${style.label} · ${safeDuration / 1000L} ms",
+        )
+        return
+    }
     commitProjectV19(
         label = "transition-v23-cut",
         project = nextProject,
@@ -214,17 +236,34 @@ internal fun CapCutTransitionSheetV23(
     }
     val target = TransitionCutTargetV23(track.id, outgoing, incoming)
     val maxDurationUs = target.maxDurationUsV23()
-    val style = incoming.transition.resolvedStyleV22
-    val durationUs = incoming.transition.resolvedDurationUsV22
+    val projectStyle = incoming.transition.resolvedStyleV22
+    val projectDurationUs = incoming.transition.resolvedDurationUsV22
         .takeIf { it > 0L }
         ?.coerceAtMost(maxDurationUs)
         ?: minOf(CCT23_DEFAULT_DURATION_US, maxDurationUs)
     var category by remember(targetClipId) { mutableStateOf(CapCutTransitionCategoryV23.BASIC) }
+    var selectedStyle by remember(targetClipId) { mutableStateOf(projectStyle) }
+    var selectedDurationUs by remember(targetClipId) { mutableStateOf(projectDurationUs) }
+    var appliedNotice by remember(targetClipId) { mutableStateOf(projectStyle != TransitionStyleV22.NONE) }
+
+    LaunchedEffect(projectStyle, projectDurationUs, targetClipId) {
+        selectedStyle = projectStyle
+        selectedDurationUs = projectDurationUs
+        appliedNotice = projectStyle != TransitionStyleV22.NONE
+    }
 
     fun previewAt(duration: Long) {
         val midpoint = (target.cutUs + duration.coerceAtLeast(100_000L) / 2L)
             .coerceAtMost(project.durationUs.coerceAtLeast(0L))
         onSeek(midpoint)
+    }
+
+    fun applyStyle(style: TransitionStyleV22, duration: Long) {
+        selectedStyle = style
+        selectedDurationUs = duration.coerceIn(100_000L, maxDurationUs)
+        appliedNotice = style != TransitionStyleV22.NONE
+        vm.setTransitionForCutV23(incoming.id, style, selectedDurationUs)
+        if (style == TransitionStyleV22.NONE) onSeek(target.cutUs) else previewAt(selectedDurationUs)
     }
 
     ModalBottomSheet(
@@ -243,6 +282,14 @@ internal fun CapCutTransitionSheetV23(
                         "${outgoing.label}  ◇  ${incoming.label}",
                         color = CCT23Muted,
                         fontSize = 9.sp,
+                    )
+                }
+                if (appliedNotice) {
+                    Text(
+                        "✓ Applied",
+                        color = CCT23Accent,
+                        fontSize = 9.sp,
+                        modifier = Modifier.padding(end = 4.dp),
                     )
                 }
                 TextButton(onClick = onDismiss) { Text("Done", color = CCT23Accent) }
@@ -275,35 +322,33 @@ internal fun CapCutTransitionSheetV23(
             ) {
                 stylesForCategoryV23(category).forEach { item ->
                     FilledTonalButton(
-                        onClick = {
-                            vm.setTransitionForCutV23(incoming.id, item, durationUs)
-                            previewAt(durationUs)
-                        },
-                        modifier = Modifier.height(42.dp),
+                        onClick = { applyStyle(item, selectedDurationUs) },
+                        modifier = Modifier.height(48.dp),
                         shape = RoundedCornerShape(7.dp),
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(if (style == item) "◆" else "◇", fontSize = 11.sp, color = if (style == item) CCT23Accent else Color.White)
+                            Text(if (selectedStyle == item) "✓" else "◇", fontSize = 11.sp, color = if (selectedStyle == item) CCT23Accent else Color.White)
                             Text(item.label, fontSize = 7.sp, color = Color.White.copy(alpha = .78f))
                         }
                     }
                 }
             }
 
-            if (style != TransitionStyleV22.NONE) {
+            if (selectedStyle != TransitionStyleV22.NONE) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Duration", color = CCT23Muted, fontSize = 9.sp, modifier = Modifier.width(62.dp))
                     Slider(
-                        value = (durationUs.toFloat() / maxDurationUs.toFloat()).coerceIn(0f, 1f),
+                        value = (selectedDurationUs.toFloat() / maxDurationUs.toFloat()).coerceIn(0f, 1f),
                         onValueChange = { amount ->
                             val value = (amount * maxDurationUs).toLong().coerceAtLeast(100_000L)
-                            vm.setTransitionForCutV23(incoming.id, style, value)
+                            selectedDurationUs = value
+                            vm.setTransitionForCutV23(incoming.id, selectedStyle, value)
                             previewAt(value)
                         },
                         modifier = Modifier.weight(1f),
                     )
                     Text(
-                        String.format("%.1fs", durationUs / US_PER_SECOND.toFloat()),
+                        String.format("%.1fs", selectedDurationUs / US_PER_SECOND.toFloat()),
                         color = Color.White.copy(alpha = .75f),
                         fontSize = 9.sp,
                         modifier = Modifier.width(42.dp),
@@ -316,17 +361,14 @@ internal fun CapCutTransitionSheetV23(
                         fontSize = 8.sp,
                         modifier = Modifier.weight(1f),
                     )
-                    TextButton(onClick = {
-                        vm.setTransitionForCutV23(incoming.id, TransitionStyleV22.NONE, 0L)
-                        onSeek(target.cutUs)
-                    }) {
+                    TextButton(onClick = { applyStyle(TransitionStyleV22.NONE, selectedDurationUs) }) {
                         Text("Remove", color = Color(0xFFFF7474))
                     }
                 }
             } else {
                 Spacer(Modifier.height(3.dp))
                 Text(
-                    "Choose a transition. The playhead jumps to its preview point automatically.",
+                    "Tap a transition to apply it instantly.",
                     color = CCT23Muted,
                     fontSize = 8.sp,
                 )
