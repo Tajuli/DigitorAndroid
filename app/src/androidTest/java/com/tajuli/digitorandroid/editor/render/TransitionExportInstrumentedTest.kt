@@ -28,38 +28,65 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Runtime regression for a real two-source transition going through Media3 compositor export. */
+/** Runtime regression for real two-source transitions going through Media3 compositor export. */
 @UnstableApi
 @RunWith(AndroidJUnit4::class)
 class TransitionExportInstrumentedTest {
 
     @Test
     fun crossDissolveBetweenNativeImagesExportsVisibleBlend() {
+        runTwoImageTransitionExport(
+            style = TransitionStyleV22.CROSS_DISSOLVE,
+            outputName = "cross_dissolve.mp4",
+        ) { output, project ->
+            assertMidpointIsVisibleBlend(output)
+            assertVideoCoversWholeProject(output, project.durationUs)
+            assertTailReturnsToIncomingClip(output)
+        }
+    }
+
+    @Test
+    fun whipCameraTransitionExportsWithoutIllegalAnchorFailure() {
+        runTwoImageTransitionExport(
+            style = TransitionStyleV22.WHIP,
+            outputName = "whip.mp4",
+        ) { output, project ->
+            assertVideoCoversWholeProject(output, project.durationUs)
+            assertFrameExists(output, 1_250_000L, "camera transition midpoint")
+            assertFrameExists(output, 1_800_000L, "camera transition tail")
+        }
+    }
+
+    private fun runTwoImageTransitionExport(
+        style: TransitionStyleV22,
+        outputName: String,
+        verify: (File, TimelineProject) -> Unit,
+    ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val supportDir = File(context.cacheDir, "transition_export_test").apply { mkdirs() }
-        val firstSource = File(supportDir, "first.png")
-        val secondSource = File(supportDir, "second.png")
-        val output = File(supportDir, "cross_dissolve.mp4")
+        val firstSource = File(supportDir, "first_${style.name}.png")
+        val secondSource = File(supportDir, "second_${style.name}.png")
+        val output = File(supportDir, outputName)
         if (output.exists()) output.delete()
 
         writeSolidPng(firstSource, Color.rgb(220, 45, 50))
         writeSolidPng(secondSource, Color.rgb(35, 95, 225))
 
         val first = imageClip(
-            id = "first",
+            id = "first_${style.name}",
             file = firstSource,
             startUs = 0L,
             durationUs = 1_000_000L,
         )
         val second = imageClip(
-            id = "second",
+            id = "second_${style.name}",
             file = secondSource,
             startUs = 1_000_000L,
             durationUs = 1_000_000L,
         ).copy(
             transition = ClipTransition(
-                styleV22 = TransitionStyleV22.CROSS_DISSOLVE,
+                styleV22 = style,
                 durationUsV22 = 500_000L,
             ),
         )
@@ -106,12 +133,10 @@ class TransitionExportInstrumentedTest {
                 transformer.start(composition, output.absolutePath)
             }
 
-            assertTrue("Timed out waiting for transition export", done.await(30, TimeUnit.SECONDS))
-            failure.get()?.let { throw AssertionError("Transition export failed", it) }
-            assertTrue("Transition export produced no bytes", output.exists() && output.length() > 0L)
-            assertMidpointIsVisibleBlend(output)
-            assertVideoCoversWholeProject(output, project.durationUs)
-            assertTailReturnsToIncomingClip(output)
+            assertTrue("Timed out waiting for $style transition export", done.await(30, TimeUnit.SECONDS))
+            failure.get()?.let { throw AssertionError("$style transition export failed", it) }
+            assertTrue("$style transition export produced no bytes", output.exists() && output.length() > 0L)
+            verify(output, project)
         } finally {
             instrumentation.runOnMainSync {
                 transformerRef.get()?.let { transformer -> runCatching { transformer.cancel() } }
@@ -184,6 +209,18 @@ class TransitionExportInstrumentedTest {
             } finally {
                 frame.recycle()
             }
+        } finally {
+            retriever.release()
+        }
+    }
+
+    private fun assertFrameExists(output: File, timeUs: Long, label: String) {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(output.absolutePath)
+            val frame = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                ?: throw AssertionError("Could not decode $label at ${timeUs}us")
+            frame.recycle()
         } finally {
             retriever.release()
         }
