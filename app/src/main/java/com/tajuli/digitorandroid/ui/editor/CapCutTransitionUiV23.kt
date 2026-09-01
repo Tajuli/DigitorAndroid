@@ -190,41 +190,6 @@ internal fun CapCutTransitionCutButtonV23(
     }
 }
 
-private enum class CapCutTransitionCategoryV23(val label: String) {
-    BASIC("Basic"),
-    CAMERA("Camera"),
-    EFFECT("Effect"),
-}
-
-private fun stylesForCategoryV23(category: CapCutTransitionCategoryV23): List<TransitionStyleV22> = when (category) {
-    CapCutTransitionCategoryV23.BASIC -> listOf(
-        TransitionStyleV22.CROSS_DISSOLVE,
-        TransitionStyleV22.FADE,
-        TransitionStyleV22.SMOOTH_CUT,
-        TransitionStyleV22.DIP_TO_BLACK,
-        TransitionStyleV22.DIP_TO_WHITE,
-    )
-    CapCutTransitionCategoryV23.CAMERA -> listOf(
-        TransitionStyleV22.PUSH_LEFT,
-        TransitionStyleV22.PUSH_RIGHT,
-        TransitionStyleV22.PUSH_UP,
-        TransitionStyleV22.PUSH_DOWN,
-        TransitionStyleV22.SLIDE,
-        TransitionStyleV22.ZOOM_IN,
-        TransitionStyleV22.ZOOM_OUT,
-        TransitionStyleV22.WHIP,
-        TransitionStyleV22.SPIN,
-    )
-    CapCutTransitionCategoryV23.EFFECT -> listOf(
-        TransitionStyleV22.BLUR,
-        TransitionStyleV22.FLASH,
-        TransitionStyleV22.LIGHT_LEAK,
-        TransitionStyleV22.MASK_WIPE,
-        TransitionStyleV22.CIRCLE_WIPE,
-        TransitionStyleV22.SPLIT,
-    )
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun CapCutTransitionSheetV23(
@@ -250,13 +215,17 @@ internal fun CapCutTransitionSheetV23(
         .takeIf { it > 0L }
         ?.coerceAtMost(maxDurationUs)
         ?: minOf(CCT23_DEFAULT_DURATION_US, maxDurationUs)
-    var category by remember(targetClipId) { mutableStateOf(CapCutTransitionCategoryV23.BASIC) }
+    var category by remember(targetClipId) { mutableStateOf(CapCutTransitionCategoryV24.BASIC) }
     var selectedStyle by remember(targetClipId) { mutableStateOf(projectStyle) }
+    var selectedPresetId by remember(targetClipId) {
+        mutableStateOf(defaultPresetForStyleV24(projectStyle)?.id)
+    }
     var selectedDurationUs by remember(targetClipId) { mutableStateOf(projectDurationUs) }
     var appliedNotice by remember(targetClipId) { mutableStateOf(projectStyle != TransitionStyleV22.NONE) }
 
-    LaunchedEffect(projectStyle, projectDurationUs, targetClipId) {
+    LaunchedEffect(targetClipId) {
         selectedStyle = projectStyle
+        selectedPresetId = defaultPresetForStyleV24(projectStyle)?.id
         selectedDurationUs = projectDurationUs
         appliedNotice = projectStyle != TransitionStyleV22.NONE
     }
@@ -267,12 +236,22 @@ internal fun CapCutTransitionSheetV23(
         onSeek(midpoint)
     }
 
-    fun applyStyle(style: TransitionStyleV22, duration: Long) {
+    fun applyPreset(preset: CapCutTransitionPresetV24, duration: Long) {
         val safeDuration = duration.coerceIn(100_000L, maxDurationUs)
-        selectedStyle = style
+        selectedStyle = preset.engineStyle
+        selectedPresetId = preset.id
         selectedDurationUs = safeDuration
-        vm.setTransitionForCutV23(incoming.id, style, safeDuration)
-        if (style == TransitionStyleV22.NONE) onSeek(target.cutUs) else previewAt(safeDuration)
+        appliedNotice = true
+        vm.setTransitionForCutV23(incoming.id, preset.engineStyle, safeDuration)
+        previewAt(safeDuration)
+    }
+
+    fun removeTransition() {
+        selectedStyle = TransitionStyleV22.NONE
+        selectedPresetId = null
+        appliedNotice = false
+        vm.setTransitionForCutV23(incoming.id, TransitionStyleV22.NONE, selectedDurationUs)
+        onSeek(target.cutUs)
     }
 
     ModalBottomSheet(
@@ -308,7 +287,7 @@ internal fun CapCutTransitionSheetV23(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                CapCutTransitionCategoryV23.entries.forEach { item ->
+                CapCutTransitionCategoryV24.entries.forEach { item ->
                     val active = category == item
                     Text(
                         item.label,
@@ -329,8 +308,8 @@ internal fun CapCutTransitionSheetV23(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                stylesForCategoryV23(category).forEach { item ->
-                    val active = selectedStyle == item
+                presetsForCategoryV24(category).forEach { item ->
+                    val active = selectedPresetId == item.id
                     Column(
                         Modifier
                             .width(112.dp)
@@ -344,7 +323,7 @@ internal fun CapCutTransitionSheetV23(
                                 if (active) CCT23Accent else Color.White.copy(alpha = .10f),
                                 RoundedCornerShape(10.dp),
                             )
-                            .clickable { applyStyle(item, selectedDurationUs) }
+                            .clickable { applyPreset(item, selectedDurationUs) }
                             .padding(horizontal = 8.dp, vertical = 8.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center,
@@ -390,12 +369,12 @@ internal fun CapCutTransitionSheetV23(
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "Applied instantly · tap another transition to replace",
+                        "50 presets · applied instantly · tap another to replace",
                         color = CCT23Muted,
                         fontSize = 8.sp,
                         modifier = Modifier.weight(1f),
                     )
-                    TextButton(onClick = { applyStyle(TransitionStyleV22.NONE, selectedDurationUs) }) {
+                    TextButton(onClick = ::removeTransition) {
                         Text("Remove", color = Color(0xFFFF7474))
                     }
                 }
