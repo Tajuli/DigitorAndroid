@@ -54,6 +54,7 @@ class MultitrackAudioPreviewEngine(
     private val players = mutableListOf<TrackPlayer>()
     private val mutableState = MutableStateFlow(State())
     private var lastKnownPositionMs = 0L
+    private var pendingSeekPositionMs: Long? = null
     private var lastFollowerSyncMs = 0L
     private var closed = false
 
@@ -91,6 +92,7 @@ class MultitrackAudioPreviewEngine(
         if (closed) return
         releasePlayers()
         lastKnownPositionMs = startPositionMs.coerceAtLeast(0L)
+        pendingSeekPositionMs = lastKnownPositionMs
         mutableState.value = State(ready = false, activeTrackCount = prepared.size)
 
         try {
@@ -118,11 +120,16 @@ class MultitrackAudioPreviewEngine(
         }
     }
 
+    /** Start every A-track from the last requested editor playhead, never from a stale player clock. */
     fun play() {
         ensureMainThread()
         if (closed || players.isEmpty()) return
-        val targetMs = currentPositionMs()
-        alignFollowers(targetMs, force = true)
+        val targetMs = (pendingSeekPositionMs ?: lastKnownPositionMs).coerceAtLeast(0L)
+        lastKnownPositionMs = targetMs
+        players.forEach { trackPlayer ->
+            runCatching { trackPlayer.player.seekTo(targetMs) }
+        }
+        lastFollowerSyncMs = SystemClock.elapsedRealtime()
         players.forEach { trackPlayer ->
             runCatching { trackPlayer.player.play() }
         }
@@ -142,6 +149,7 @@ class MultitrackAudioPreviewEngine(
         if (closed) return
         val targetMs = positionMs.coerceAtLeast(0L)
         lastKnownPositionMs = targetMs
+        pendingSeekPositionMs = targetMs
         players.forEach { trackPlayer ->
             runCatching { trackPlayer.player.seekTo(targetMs) }
         }
@@ -153,7 +161,15 @@ class MultitrackAudioPreviewEngine(
         ensureMainThread()
         val master = players.firstOrNull()?.player
         val position = runCatching { master?.currentPosition }.getOrNull()
-        if (position != null && position >= 0L) {
+        val pending = pendingSeekPositionMs
+        if (pending != null) {
+            if (position != null && position >= 0L && abs(position - pending) <= SEEK_SETTLE_TOLERANCE_MS) {
+                pendingSeekPositionMs = null
+                lastKnownPositionMs = position
+            } else {
+                return pending
+            }
+        } else if (position != null && position >= 0L) {
             lastKnownPositionMs = position
         }
         return lastKnownPositionMs.coerceAtLeast(0L)
@@ -177,6 +193,7 @@ class MultitrackAudioPreviewEngine(
         ensureMainThread()
         if (closed) return
         lastKnownPositionMs = currentPositionMs()
+        pendingSeekPositionMs = lastKnownPositionMs
         releasePlayers()
         mutableState.value = State()
     }
@@ -186,6 +203,7 @@ class MultitrackAudioPreviewEngine(
         ensureMainThread()
         if (closed) return
         releasePlayers()
+        pendingSeekPositionMs = null
         mutableState.value = State()
     }
 
@@ -218,11 +236,13 @@ class MultitrackAudioPreviewEngine(
         if (closed) return
         closed = true
         releasePlayers()
+        pendingSeekPositionMs = null
         mutableState.value = State()
     }
 
     private companion object {
         const val SYNC_INTERVAL_MS = 250L
         const val DRIFT_TOLERANCE_MS = 80L
+        const val SEEK_SETTLE_TOLERANCE_MS = 250L
     }
 }
