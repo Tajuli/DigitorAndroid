@@ -110,6 +110,8 @@ class TransitionExportInstrumentedTest {
             failure.get()?.let { throw AssertionError("Transition export failed", it) }
             assertTrue("Transition export produced no bytes", output.exists() && output.length() > 0L)
             assertMidpointIsVisibleBlend(output)
+            assertVideoCoversWholeProject(output, project.durationUs)
+            assertTailReturnsToIncomingClip(output)
         } finally {
             instrumentation.runOnMainSync {
                 transformerRef.get()?.let { transformer -> runCatching { transformer.cancel() } }
@@ -140,6 +142,45 @@ class TransitionExportInstrumentedTest {
                 assertTrue("Midpoint is not blended: r=$red g=$green b=$blue", blue in 85..200)
                 assertTrue("Midpoint stayed too close to first source", blue > 85)
                 assertTrue("Midpoint stayed too close to second source", red > 75)
+            } finally {
+                frame.recycle()
+            }
+        } finally {
+            retriever.release()
+        }
+    }
+
+    private fun assertVideoCoversWholeProject(output: File, projectDurationUs: Long) {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(output.absolutePath)
+            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()
+                ?: throw AssertionError("Exported video has no duration metadata")
+            val expectedMs = projectDurationUs / 1000L
+            assertTrue(
+                "Transition compositor truncated video: duration=${durationMs}ms expected≈${expectedMs}ms",
+                durationMs >= expectedMs - 100L,
+            )
+        } finally {
+            retriever.release()
+        }
+    }
+
+    private fun assertTailReturnsToIncomingClip(output: File) {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(output.absolutePath)
+            val frame = retriever.getFrameAtTime(
+                1_800_000L,
+                MediaMetadataRetriever.OPTION_CLOSEST,
+            ) ?: throw AssertionError("Could not decode frame after transition")
+            try {
+                val pixel = frame.getPixel(frame.width / 2, frame.height / 2)
+                val red = Color.red(pixel)
+                val blue = Color.blue(pixel)
+                assertTrue("Tail did not return to incoming clip: r=$red b=$blue", blue > 150)
+                assertTrue("Outgoing frame leaked after transition: r=$red b=$blue", red < 100)
             } finally {
                 frame.recycle()
             }
