@@ -193,8 +193,8 @@ fun DigitorEditorScreenV7(
     }
     fun launchImport() = mediaPicker.launch(vm.selectedImportMimeTypesV21())
 
-    LaunchedEffect(state.project, cursorUs, hasVideo) {
-        if (hasVideo) previewEngine.submit(state.project, cursorUs)
+    LaunchedEffect(state.project, cursorUs, hasVideo, isPlaying) {
+        if (hasVideo) previewEngine.submit(state.project, cursorUs, isPlaying)
     }
 
     LaunchedEffect(previewFrame?.timelineUs, previewFrame?.renderTimeMs) {
