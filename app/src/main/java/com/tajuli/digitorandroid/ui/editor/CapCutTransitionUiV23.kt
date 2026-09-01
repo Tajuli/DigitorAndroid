@@ -75,6 +75,7 @@ internal fun TimelineProject.withTransitionForCutV23(
     incomingClipId: String,
     style: TransitionStyleV22,
     durationUs: Long,
+    presetIdV24: String? = null,
 ): TimelineProject? {
     val incoming = clip(incomingClipId) ?: return null
     val track = trackContaining(incomingClipId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return null
@@ -99,6 +100,7 @@ internal fun TimelineProject.withTransitionForCutV23(
     val nextTransition = incoming.transition.copy(
         styleV22 = style.takeUnless { it == TransitionStyleV22.NONE },
         durationUsV22 = safeDuration,
+        presetIdV24 = presetIdV24.takeUnless { style == TransitionStyleV22.NONE },
     )
     if (nextTransition == incoming.transition) return this
 
@@ -118,37 +120,37 @@ fun EditorViewModelV4.setTransitionForCutV23(
     incomingClipId: String,
     style: TransitionStyleV22,
     durationUs: Long,
+    presetIdV24: String? = null,
+    displayLabelV24: String? = null,
 ) {
-    // MainActivity deliberately owns a keyed editor-session ViewModel. TimelineEditorV4 still has
-    // legacy code that can resolve an un-keyed instance from Compose. Never commit a transition to
-    // that detached state: preview/export/autosave all consume the active keyed editor VM.
     val activeVm = ActiveEditorVmRegistryV14.current()
     if (activeVm != null && activeVm !== this) {
-        activeVm.setTransitionForCutV23(incomingClipId, style, durationUs)
+        activeVm.setTransitionForCutV23(incomingClipId, style, durationUs, presetIdV24, displayLabelV24)
         return
     }
 
     val snapshot = state.value
-    val nextProject = snapshot.project.withTransitionForCutV23(incomingClipId, style, durationUs)
+    val nextProject = snapshot.project.withTransitionForCutV23(incomingClipId, style, durationUs, presetIdV24)
     if (nextProject == null) {
         setEditorStatusV19("Transition needs two clips touching at the cut")
         return
     }
     val updatedClip = nextProject.clip(incomingClipId) ?: return
     val safeDuration = updatedClip.transition.resolvedDurationUsV22
+    val label = displayLabelV24 ?: style.label
     if (nextProject == snapshot.project) {
         setEditorStatusV19(
-            if (style == TransitionStyleV22.NONE) "Transition removed" else "${style.label} · ${safeDuration / 1000L} ms",
+            if (style == TransitionStyleV22.NONE) "Transition removed" else "$label · ${safeDuration / 1000L} ms",
         )
         return
     }
     commitProjectV19(
-        label = "transition-v23-cut",
+        label = "transition-v24-cut",
         project = nextProject,
         status = if (style == TransitionStyleV22.NONE) {
             "Transition removed"
         } else {
-            "${style.label} · ${safeDuration / 1000L} ms"
+            "$label · ${safeDuration / 1000L} ms"
         },
         coalesce = true,
     )
@@ -211,6 +213,7 @@ internal fun CapCutTransitionSheetV23(
     val target = TransitionCutTargetV23(track.id, outgoing, incoming)
     val maxDurationUs = target.maxDurationUsV23()
     val projectStyle = incoming.transition.resolvedStyleV22
+    val persistedPresetId = incoming.transition.presetIdV24
     val projectDurationUs = incoming.transition.resolvedDurationUsV22
         .takeIf { it > 0L }
         ?.coerceAtMost(maxDurationUs)
@@ -218,14 +221,14 @@ internal fun CapCutTransitionSheetV23(
     var category by remember(targetClipId) { mutableStateOf(CapCutTransitionCategoryV24.BASIC) }
     var selectedStyle by remember(targetClipId) { mutableStateOf(projectStyle) }
     var selectedPresetId by remember(targetClipId) {
-        mutableStateOf(defaultPresetForStyleV24(projectStyle)?.id)
+        mutableStateOf(persistedPresetId ?: defaultPresetForStyleV24(projectStyle)?.id)
     }
     var selectedDurationUs by remember(targetClipId) { mutableStateOf(projectDurationUs) }
     var appliedNotice by remember(targetClipId) { mutableStateOf(projectStyle != TransitionStyleV22.NONE) }
 
-    LaunchedEffect(targetClipId) {
+    LaunchedEffect(projectStyle, persistedPresetId, projectDurationUs, targetClipId) {
         selectedStyle = projectStyle
-        selectedPresetId = defaultPresetForStyleV24(projectStyle)?.id
+        selectedPresetId = persistedPresetId ?: defaultPresetForStyleV24(projectStyle)?.id
         selectedDurationUs = projectDurationUs
         appliedNotice = projectStyle != TransitionStyleV22.NONE
     }
@@ -242,7 +245,13 @@ internal fun CapCutTransitionSheetV23(
         selectedPresetId = preset.id
         selectedDurationUs = safeDuration
         appliedNotice = true
-        vm.setTransitionForCutV23(incoming.id, preset.engineStyle, safeDuration)
+        vm.setTransitionForCutV23(
+            incomingClipId = incoming.id,
+            style = preset.engineStyle,
+            durationUs = safeDuration,
+            presetIdV24 = preset.id,
+            displayLabelV24 = preset.label,
+        )
         previewAt(safeDuration)
     }
 
@@ -355,7 +364,14 @@ internal fun CapCutTransitionSheetV23(
                         onValueChange = { amount ->
                             val value = (amount * maxDurationUs).toLong().coerceAtLeast(100_000L)
                             selectedDurationUs = value
-                            vm.setTransitionForCutV23(incoming.id, selectedStyle, value)
+                            val preset = presetForIdV24(selectedPresetId)
+                            vm.setTransitionForCutV23(
+                                incomingClipId = incoming.id,
+                                style = selectedStyle,
+                                durationUs = value,
+                                presetIdV24 = selectedPresetId,
+                                displayLabelV24 = preset?.label,
+                            )
                             previewAt(value)
                         },
                         modifier = Modifier.weight(1f),
@@ -369,7 +385,7 @@ internal fun CapCutTransitionSheetV23(
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "50 presets · applied instantly · tap another to replace",
+                        "50 presets · V24 motion + shader rendering",
                         color = CCT23Muted,
                         fontSize = 8.sp,
                         modifier = Modifier.weight(1f),
