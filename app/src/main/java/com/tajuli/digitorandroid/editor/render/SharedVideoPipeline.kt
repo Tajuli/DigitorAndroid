@@ -16,7 +16,7 @@ object SharedVideoPipeline {
     fun effectsFor(clip: TimelineClip): List<Effect> = buildList {
         ClipTransformEffect.forExport(clip)?.let(::add)
         addAll(SharedColorPipeline.effectsFor(clip))
-        SpatialNodeGraphEffect.forClip(clip, preview = false)?.let(::add)
+        CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
     }
 
@@ -42,7 +42,7 @@ object SharedVideoPipeline {
                 SharedColorPipeline.effectsFor(clip)
             },
         )
-        SpatialNodeGraphEffect.forClip(clip, preview = preview)?.let(::add)
+        CreatorEffectGraphV25.forClip(clip, preview = preview)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = preview)?.let(::add)
     }
 
@@ -52,14 +52,14 @@ object SharedVideoPipeline {
      */
     fun compositedPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         addAll(SharedColorPipeline.previewEffectsFor(clip))
-        SpatialNodeGraphEffect.forClip(clip, preview = true)?.let(::add)
+        CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
     }
 
     fun previewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         ClipTransformEffect.forPreview(clip)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
-        SpatialNodeGraphEffect.forClip(clip, preview = true)?.let(::add)
+        CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
     }
 }

@@ -36,6 +36,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -56,14 +57,20 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.tajuli.digitorandroid.editor.model.EFFECT_MIN_DURATION_US_V26
+import com.tajuli.digitorandroid.editor.model.NodeEffect
+import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
+import com.tajuli.digitorandroid.editor.model.resolvedSourceEndUsV26
+import com.tajuli.digitorandroid.editor.model.resolvedSourceStartUsV26
 import com.tajuli.digitorandroid.editor.model.resolvedVisualOverlaysV19
 import com.tajuli.digitorandroid.editor.model.textOverlaysForVideoTrackV3
+import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.model.visualOverlaysForVideoTrackV19
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -82,6 +89,7 @@ private val T4Magnet = Color(0xFFFFC857)
 private val T4Video = Color(0xFF385B78)
 private val T4Audio = Color(0xFF315F57)
 private val T4Text = Color(0xFF675089)
+private val T4Effect = Color(0xFF7657A8)
 private const val T4_TRACK_HEIGHT = 38f
 private const val T4_DELETE_TRACK_ACTION = "__digitor_delete_track__:"
 private const val T4_MIN_TRIM_US = 100_000L
@@ -117,8 +125,19 @@ fun TimelineEditorV4(
     val density = LocalDensity.current
     val selectedTextId by TimelineTextSelectionBusV10.selectedTextId.collectAsState()
     val selectedVisualId by VisualOverlaySelectionBusV19.selectedId.collectAsState()
+    val selectedEffect by EffectTimelineSelectionBusV26.selection.collectAsState()
+    val effectSelected = project.effectSelectionExistsV26(selectedEffect)
     var zoom by remember { mutableFloatStateOf(.18f) }
     var transitionTargetClipId by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(selectedTextId, selectedVisualId) {
+        if (selectedTextId != null || selectedVisualId != null) EffectTimelineSelectionBusV26.clear()
+    }
+    LaunchedEffect(project, selectedEffect) {
+        if (selectedEffect != null && !project.effectSelectionExistsV26(selectedEffect)) {
+            EffectTimelineSelectionBusV26.clear()
+        }
+    }
 
     BoxWithConstraints(modifier.background(T4Panel)) {
         val viewportDp = (maxWidth - 56.dp).coerceAtLeast(120.dp)
@@ -155,6 +174,7 @@ fun TimelineEditorV4(
                 selectedClipCount = selectedClipIds.size,
                 textSelected = selectedTextId != null,
                 visualSelected = selectedVisualId != null,
+                effectSelected = effectSelected,
                 zoom = zoom,
                 onZoom = { zoom = it.coerceIn(0f, 1f) },
                 onAddVideoTrack = onAddVideoTrack,
@@ -164,6 +184,7 @@ fun TimelineEditorV4(
                     when {
                         selectedVisualId != null -> vm.deleteSelectedVisualV19()
                         selectedTextId != null -> onDeleteText()
+                        effectSelected && selectedEffect != null -> vm.deleteEffectTimelineV26(selectedEffect!!)
                         else -> onDelete()
                     }
                 },
@@ -216,6 +237,7 @@ fun TimelineEditorV4(
                                     onMoveClip = onMoveClip,
                                     onMoveClipToTrack = onMoveClipToTrack,
                                     onSelectText = { overlay ->
+                                        EffectTimelineSelectionBusV26.clear()
                                         VisualOverlaySelectionBusV19.clear()
                                         TimelineTextSelectionBusV10.select(overlay.id)
                                         onSelectText(overlay.id)
@@ -225,6 +247,7 @@ fun TimelineEditorV4(
                                     onMoveText = onMoveText,
                                     onMoveTextToTrack = onMoveTextToTrack,
                                     onTransitionCut = { target ->
+                                        EffectTimelineSelectionBusV26.clear()
                                         TimelineTextSelectionBusV10.clear()
                                         VisualOverlaySelectionBusV19.clear()
                                         onSelectTrack(target.trackId)
@@ -267,6 +290,7 @@ private fun TimelineToolbarV4(
     selectedClipCount: Int,
     textSelected: Boolean,
     visualSelected: Boolean,
+    effectSelected: Boolean,
     zoom: Float,
     onZoom: (Float) -> Unit,
     onAddVideoTrack: () -> Unit,
@@ -280,9 +304,9 @@ private fun TimelineToolbarV4(
         Row(Modifier.fillMaxWidth().height(34.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             TinyActionV4("+V", onAddVideoTrack)
             TinyActionV4("+A", onAddAudioTrack)
-            TinyActionV4("Split", onSplit, selectedClipCount > 0, Icons.Rounded.ContentCut)
-            TinyActionV4("Delete", onDelete, selectedClipCount > 0 || textSelected || visualSelected, Icons.Rounded.Delete)
-            TinyActionV4("Unlink", onUnlink, selectedClipCount > 1, Icons.Rounded.LinkOff)
+            TinyActionV4("Split", onSplit, selectedClipCount > 0 && !effectSelected, Icons.Rounded.ContentCut)
+            TinyActionV4("Delete", onDelete, selectedClipCount > 0 || textSelected || visualSelected || effectSelected, Icons.Rounded.Delete)
+            TinyActionV4("Unlink", onUnlink, selectedClipCount > 1 && !effectSelected, Icons.Rounded.LinkOff)
             Spacer(Modifier.weight(1f))
             TinyActionV4("Import", onImport, icon = Icons.Rounded.AddPhotoAlternate)
         }
@@ -604,6 +628,15 @@ private fun ClipV4(
     val compatible = project.tracks.filter { it.kind == track.kind }
     val sourceIndex = compatible.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
     val trackPx = with(density) { T4_TRACK_HEIGHT.dp.toPx() }
+    val selectedEffect by EffectTimelineSelectionBusV26.selection.collectAsState()
+    val effectItems = if (track.kind == TrackKind.VIDEO) {
+        clip.nodeGraph.nodes
+            .filter { it.kind == NodeKind.SERIAL || it.kind == NodeKind.PARALLEL }
+            .flatMap { node -> node.visibleEffects().map { effect -> node.id to effect } }
+    } else {
+        emptyList()
+    }
+    val effectSelectedOnClip = selectedEffect?.clipId == clip.id
     var rawDragX by remember(clip.id) { mutableFloatStateOf(0f) }
     var dragY by remember(clip.id) { mutableFloatStateOf(0f) }
     var displayDeltaUs by remember(clip.id) { mutableStateOf(0L) }
@@ -634,6 +667,7 @@ private fun ClipV4(
                 RoundedCornerShape(4.dp),
             )
             .clickable {
+                EffectTimelineSelectionBusV26.clear()
                 TimelineTextSelectionBusV10.clear()
                 VisualOverlaySelectionBusV19.clear()
                 onSelectClip(clip.id)
@@ -642,6 +676,7 @@ private fun ClipV4(
                 detectDragGesturesAfterLongPress(
                     onDragStart = {
                         rawDragX = 0f; dragY = 0f; displayDeltaUs = 0L; magnetActive = false
+                        EffectTimelineSelectionBusV26.clear()
                         TimelineTextSelectionBusV10.clear(); VisualOverlaySelectionBusV19.clear(); onSelectClip(clip.id)
                     },
                     onDragEnd = {
@@ -665,7 +700,7 @@ private fun ClipV4(
                     magnetActive = result.magnet
                 }
             }
-            .padding(horizontal = if (selected && track.kind == TrackKind.VIDEO) 9.dp else 3.dp),
+            .padding(horizontal = if (selected && track.kind == TrackKind.VIDEO && !effectSelectedOnClip) 9.dp else 3.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
         if (track.kind == TrackKind.AUDIO) {
@@ -673,14 +708,31 @@ private fun ClipV4(
         }
 
         if (width > 24.dp) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.padding(top = if (effectItems.isNotEmpty()) 11.dp else 0.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(clip.label, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 8.sp, color = Color.White.copy(alpha = .9f), modifier = Modifier.weight(1f))
                 if (magnetActive) Text("SNAP", fontSize = 6.sp, color = T4Magnet)
                 else if (clip.linkGroupId != null) Text("link", fontSize = 6.sp, color = Color.White.copy(alpha = .45f))
             }
         }
 
-        if (selected && track.kind == TrackKind.VIDEO) {
+        effectItems.forEachIndexed { index, (nodeId, effect) ->
+            EffectBarV26(
+                clip = clip,
+                nodeId = nodeId,
+                effect = effect,
+                selected = selectedEffect?.clipId == clip.id && selectedEffect?.nodeId == nodeId && selectedEffect?.effectId == effect.id,
+                row = index % 2,
+                pps = pps,
+                frameUs = frameUs,
+                vm = vm,
+                onSelectClip = onSelectClip,
+            )
+        }
+
+        if (selected && track.kind == TrackKind.VIDEO && !effectSelectedOnClip) {
             EdgeHandleV14(
                 left = true,
                 onPreviewDeltaPx = { deltaPx ->
@@ -715,6 +767,171 @@ private fun ClipV4(
             )
         }
     }
+}
+
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.EffectBarV26(
+    clip: TimelineClip,
+    nodeId: String,
+    effect: NodeEffect,
+    selected: Boolean,
+    row: Int,
+    pps: Float,
+    frameUs: Long,
+    vm: EditorViewModelV4,
+    onSelectClip: (String) -> Unit,
+) {
+    val density = LocalDensity.current
+    val ppsDp = with(density) { pps.toDp().value }
+    val selection = EffectTimelineSelectionV26(clip.id, nodeId, effect.id)
+    val baseStart = effect.resolvedSourceStartUsV26(clip)
+    val baseEnd = effect.resolvedSourceEndUsV26(clip)
+    var previewStart by remember(effect.id) { mutableStateOf<Long?>(null) }
+    var previewEnd by remember(effect.id) { mutableStateOf<Long?>(null) }
+    var rawMoveX by remember(effect.id) { mutableFloatStateOf(0f) }
+    var moveDeltaUs by remember(effect.id) { mutableStateOf(0L) }
+    val shownStart = previewStart ?: baseStart
+    val shownEnd = previewEnd ?: baseEnd
+    val localStart = (shownStart - clip.sourceInUs).coerceAtLeast(0L)
+    val localEnd = (shownEnd - clip.sourceInUs).coerceAtLeast(localStart + 1L)
+    val x = (localStart / US_PER_SECOND.toFloat() * ppsDp).dp
+    val barWidth = ((localEnd - localStart) / US_PER_SECOND.toFloat() * ppsDp).coerceAtLeast(5f).dp
+
+    fun select() {
+        TimelineTextSelectionBusV10.clear()
+        VisualOverlaySelectionBusV19.clear()
+        onSelectClip(clip.id)
+        vm.selectNode(nodeId)
+        EffectTimelineSelectionBusV26.select(clip.id, nodeId, effect.id)
+    }
+
+    Box(
+        Modifier.offset(x = x, y = (1 + row * 6).dp)
+            .width(barWidth)
+            .height(7.dp)
+            .graphicsLayer { translationX = moveDeltaUs / US_PER_SECOND.toFloat() * pps }
+            .clip(RoundedCornerShape(2.dp))
+            .background(if (selected) T4Accent.copy(alpha = .92f) else T4Effect.copy(alpha = .90f))
+            .border(
+                if (selected) 1.dp else .5.dp,
+                if (selected) Color.White else Color.White.copy(alpha = .24f),
+                RoundedCornerShape(2.dp),
+            )
+            .clickable { select() }
+            .pointerInput(effect.id, clip.id, pps, frameUs) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = {
+                        rawMoveX = 0f
+                        moveDeltaUs = 0L
+                        select()
+                    },
+                    onDragEnd = {
+                        if (moveDeltaUs != 0L) vm.moveEffectTimelineV26(selection, moveDeltaUs)
+                        rawMoveX = 0f
+                        moveDeltaUs = 0L
+                    },
+                    onDragCancel = {
+                        rawMoveX = 0f
+                        moveDeltaUs = 0L
+                    },
+                ) { change, drag ->
+                    change.consume()
+                    rawMoveX += drag.x
+                    val rawUs = rawMoveX / pps.coerceAtLeast(.001f) * US_PER_SECOND
+                    val snapped = (rawUs / frameUs).roundToLong() * frameUs
+                    val minDelta = clip.sourceInUs - baseStart
+                    val maxDelta = clip.sourceOutUs - baseEnd
+                    moveDeltaUs = snapped.coerceIn(minDelta, maxDelta)
+                }
+            },
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        if (barWidth > 34.dp) {
+            Text(
+                effect.name,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                fontSize = 5.sp,
+                color = if (selected) Color(0xFF061612) else Color.White.copy(alpha = .90f),
+                modifier = Modifier.padding(horizontal = if (selected) 6.dp else 3.dp),
+            )
+        }
+        if (selected) {
+            EffectEdgeHandleV26(
+                left = true,
+                onPreview = { deltaPx ->
+                    val deltaUs = deltaPx / pps.coerceAtLeast(.001f) * US_PER_SECOND
+                    val snapped = (deltaUs / frameUs).roundToLong() * frameUs
+                    val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.durationUs).coerceAtLeast(1L)
+                    previewStart = (baseStart + snapped)
+                        .coerceIn(clip.sourceInUs, (baseEnd - minDuration).coerceAtLeast(clip.sourceInUs))
+                },
+                onCommit = { deltaPx ->
+                    val deltaUs = deltaPx / pps.coerceAtLeast(.001f) * US_PER_SECOND
+                    val snapped = (deltaUs / frameUs).roundToLong() * frameUs
+                    val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.durationUs).coerceAtLeast(1L)
+                    val target = (baseStart + snapped)
+                        .coerceIn(clip.sourceInUs, (baseEnd - minDuration).coerceAtLeast(clip.sourceInUs))
+                    vm.resizeEffectStartV26(selection, target)
+                    previewStart = null
+                },
+                onCancel = { previewStart = null },
+            )
+            EffectEdgeHandleV26(
+                left = false,
+                onPreview = { deltaPx ->
+                    val deltaUs = deltaPx / pps.coerceAtLeast(.001f) * US_PER_SECOND
+                    val snapped = (deltaUs / frameUs).roundToLong() * frameUs
+                    val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.durationUs).coerceAtLeast(1L)
+                    previewEnd = (baseEnd + snapped)
+                        .coerceIn((baseStart + minDuration).coerceAtMost(clip.sourceOutUs), clip.sourceOutUs)
+                },
+                onCommit = { deltaPx ->
+                    val deltaUs = deltaPx / pps.coerceAtLeast(.001f) * US_PER_SECOND
+                    val snapped = (deltaUs / frameUs).roundToLong() * frameUs
+                    val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.durationUs).coerceAtLeast(1L)
+                    val target = (baseEnd + snapped)
+                        .coerceIn((baseStart + minDuration).coerceAtMost(clip.sourceOutUs), clip.sourceOutUs)
+                    vm.resizeEffectEndV26(selection, target)
+                    previewEnd = null
+                },
+                onCancel = { previewEnd = null },
+            )
+        }
+    }
+}
+
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.EffectEdgeHandleV26(
+    left: Boolean,
+    onPreview: (Float) -> Unit,
+    onCommit: (Float) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var totalPx by remember { mutableFloatStateOf(0f) }
+    Box(
+        Modifier.align(if (left) Alignment.CenterStart else Alignment.CenterEnd)
+            .width(6.dp)
+            .fillMaxHeight()
+            .background(Color.White.copy(alpha = .62f))
+            .pointerInput(left) {
+                detectDragGestures(
+                    onDragStart = { totalPx = 0f },
+                    onDragEnd = {
+                        onCommit(totalPx)
+                        totalPx = 0f
+                    },
+                    onDragCancel = {
+                        onCancel()
+                        totalPx = 0f
+                    },
+                ) { change, drag ->
+                    change.consume()
+                    totalPx += drag.x
+                    onPreview(totalPx)
+                }
+            },
+    )
 }
 
 @Composable
