@@ -33,13 +33,6 @@ internal data class ResolveOverlayState(
     val rotationDegrees: Float,
 )
 
-/**
- * Media3 constrains both overlay and background anchors to [-1, 1]. A full-frame push needs roughly
- * two normalized units of center travel, so using backgroundAnchor alone is invalid. Split the
- * requested center position between the two legal anchors instead: effectiveCenter = background -
- * overlay * scale. This preserves the full push/slide travel without passing illegal values to
- * StaticOverlaySettings during Transformer export.
- */
 internal data class Media3AnchorPlacementV22(
     val backgroundX: Float,
     val backgroundY: Float,
@@ -75,15 +68,6 @@ internal sealed class ResolveCompositorInputV22 {
     object BlankInput : ResolveCompositorInputV22()
 }
 
-/**
- * Resolve-style multilayer compositor shared by export and preview.
- *
- * Export is fully snapshot-based. GPU preview can resolve the latest immutable editor snapshot by
- * stable track/clip id, allowing transform, opacity and transition geometry to update without
- * rebuilding the MediaCodec/GL graph. V22 transition ghost inputs keep the outgoing frame alive
- * over the beginning of the incoming clip so same-track cuts can perform true two-source motion,
- * dissolve and wipe transitions even though normal timeline clips never overlap in one V lane.
- */
 @UnstableApi
 internal class ResolveVideoCompositorSettings(
     private val outputWidth: Int,
@@ -134,7 +118,11 @@ internal class ResolveVideoCompositorSettings(
             val progress = ((presentationTimeUs - pair.startUs).toDouble() / pair.durationUs.toDouble())
                 .toFloat()
                 .coerceIn(0f, 1f)
-            state = applyIncomingTransition(state, pair.style, progress)
+            state = TransitionPresetMotionV24.incoming(
+                base = state,
+                presetId = pair.incoming.transition.presetIdV24,
+                progress = progress,
+            ) ?: applyIncomingTransition(state, pair.style, progress)
         }
         return state
     }
@@ -166,7 +154,11 @@ internal class ResolveVideoCompositorSettings(
             scaleY = transform.scaleY,
             rotationDegrees = transform.rotationDegrees,
         )
-        return applyOutgoingTransition(base, pair.style, progress)
+        return TransitionPresetMotionV24.outgoing(
+            base = base,
+            presetId = pair.incoming.transition.presetIdV24,
+            progress = progress,
+        ) ?: applyOutgoingTransition(base, pair.style, progress)
     }
 
     override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
