@@ -2,6 +2,7 @@ package com.tajuli.digitorandroid.editor.render
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
@@ -33,7 +34,7 @@ import org.junit.runner.RunWith
 class TransitionExportInstrumentedTest {
 
     @Test
-    fun crossDissolveBetweenNativeImagesExportsNonEmptyMp4() {
+    fun crossDissolveBetweenNativeImagesExportsVisibleBlend() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val supportDir = File(context.cacheDir, "transition_export_test").apply { mkdirs() }
@@ -108,6 +109,7 @@ class TransitionExportInstrumentedTest {
             assertTrue("Timed out waiting for transition export", done.await(30, TimeUnit.SECONDS))
             failure.get()?.let { throw AssertionError("Transition export failed", it) }
             assertTrue("Transition export produced no bytes", output.exists() && output.length() > 0L)
+            assertMidpointIsVisibleBlend(output)
         } finally {
             instrumentation.runOnMainSync {
                 transformerRef.get()?.let { transformer -> runCatching { transformer.cancel() } }
@@ -115,6 +117,34 @@ class TransitionExportInstrumentedTest {
             output.delete()
             firstSource.delete()
             secondSource.delete()
+        }
+    }
+
+    private fun assertMidpointIsVisibleBlend(output: File) {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(output.absolutePath)
+            val frame = retriever.getFrameAtTime(
+                1_250_000L,
+                MediaMetadataRetriever.OPTION_CLOSEST,
+            ) ?: throw AssertionError("Could not decode exported transition midpoint")
+            try {
+                val pixel = frame.getPixel(frame.width / 2, frame.height / 2)
+                val red = Color.red(pixel)
+                val green = Color.green(pixel)
+                val blue = Color.blue(pixel)
+
+                // Pure first source is roughly (220,45,50), pure second roughly (35,95,225).
+                // A half cross-dissolve must contain substantial red and blue at the same pixel.
+                assertTrue("Midpoint is not blended: r=$red g=$green b=$blue", red in 75..190)
+                assertTrue("Midpoint is not blended: r=$red g=$green b=$blue", blue in 85..200)
+                assertTrue("Midpoint stayed too close to first source", blue > 85)
+                assertTrue("Midpoint stayed too close to second source", red > 75)
+            } finally {
+                frame.recycle()
+            }
+        } finally {
+            retriever.release()
         }
     }
 
