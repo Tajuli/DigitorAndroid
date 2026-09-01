@@ -293,6 +293,13 @@ class Media3CompositionBuilder(
                 projectFrameRate = project.frameRate,
             ),
         )
+        // Every compositor input must cover the same composition duration. If this virtual outgoing
+        // tail ends at pair.endUs, Media3 can end the composed video stream there even though the
+        // real V track (and audio) continues. Players then hold that last encoded frame for the rest
+        // of the file, which looks like a one-frame freeze immediately after the transition.
+        if (project.durationUs > pair.endUs) {
+            builder.addGap(project.durationUs - pair.endUs)
+        }
         return builder.build()
     }
 
