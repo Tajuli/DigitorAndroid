@@ -1,6 +1,7 @@
 package com.tajuli.digitorandroid.ui.editor
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -19,7 +20,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,8 +62,18 @@ fun CreatorEffectsWorkspaceV25(
         return
     }
 
+    val timelineSelection by EffectTimelineSelectionBusV26.selection.collectAsState()
+    val selectedEffectId = timelineSelection
+        ?.takeIf { it.clipId == clip.id && it.nodeId == node.id }
+        ?.effectId
     var category by remember { mutableStateOf("Basic") }
     val categoryPresets = remember(category) { CreatorEffectCatalogV25.inCategory(category) }
+
+    fun selectEffect(effectId: String) {
+        TimelineTextSelectionBusV10.clear()
+        VisualOverlaySelectionBusV19.clear()
+        EffectTimelineSelectionBusV26.select(clip.id, node.id, effectId)
+    }
 
     Column(modifier.background(Fx25Panel)) {
         Row(
@@ -69,7 +82,7 @@ fun CreatorEffectsWorkspaceV25(
         ) {
             Text("Effects · ${node.label}", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
-            Text("50 presets · GPU preview + export", fontSize = 7.sp, color = Fx25Muted)
+            Text("50 presets · timed timeline bars", fontSize = 7.sp, color = Fx25Muted)
         }
         HorizontalDivider(color = Fx25Divider)
 
@@ -100,7 +113,12 @@ fun CreatorEffectsWorkspaceV25(
                         .width(82.dp)
                         .height(52.dp)
                         .background(Fx25Raised, RoundedCornerShape(8.dp))
-                        .clickable { vm.addEffectToSelectedNode(preset.name) }
+                        .clickable {
+                            vm.addEffectToSelectedNode(preset.name)
+                            val updatedNode = vm.state.value.project.clip(clip.id)
+                                ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
+                            updatedNode?.effects?.lastOrNull { it.name == preset.name }?.let { selectEffect(it.id) }
+                        }
                         .padding(horizontal = 7.dp, vertical = 6.dp),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -125,23 +143,43 @@ fun CreatorEffectsWorkspaceV25(
                 Text("Choose an effect above to add it to this node", fontSize = 9.sp, color = Fx25Muted)
             } else {
                 Text(
-                    "Effect amount can be keyframed from the Effects keyframe lane.",
+                    "Select an effect here or on its timeline bar. Drag the bar edges for duration; hold-drag the bar to move it.",
                     fontSize = 7.sp,
                     color = Fx25Muted,
                 )
             }
 
             effects.forEach { effect ->
+                val selected = effect.id == selectedEffectId
                 Column(
-                    Modifier.fillMaxWidth().background(Fx25Raised, RoundedCornerShape(7.dp)).padding(horizontal = 8.dp, vertical = 6.dp),
+                    Modifier.fillMaxWidth()
+                        .background(Fx25Raised, RoundedCornerShape(7.dp))
+                        .border(
+                            if (selected) 1.5.dp else .5.dp,
+                            if (selected) Fx25Accent else Color.White.copy(alpha = .08f),
+                            RoundedCornerShape(7.dp),
+                        )
+                        .clickable { selectEffect(effect.id) }
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
                 ) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text(effect.name, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                         Text("${(effect.amount.coerceIn(0f, 1f) * 100).toInt()}%", fontSize = 8.sp, color = Fx25Accent)
+                        if (selected) {
+                            TextButton(
+                                onClick = {
+                                    vm.deleteEffectTimelineV26(EffectTimelineSelectionV26(clip.id, node.id, effect.id))
+                                },
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 5.dp, vertical = 0.dp),
+                            ) {
+                                Text("Delete", fontSize = 7.sp, color = Color(0xFFFF7777))
+                            }
+                        }
                     }
                     Slider(
                         value = effect.amount.coerceIn(0f, 1f),
                         onValueChange = { amount ->
+                            selectEffect(effect.id)
                             val safe = amount.coerceIn(0f, 1f)
                             if (animationSourceTimeUs != null &&
                                 clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
