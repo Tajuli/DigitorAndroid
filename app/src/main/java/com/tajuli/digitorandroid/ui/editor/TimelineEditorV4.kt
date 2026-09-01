@@ -118,6 +118,7 @@ fun TimelineEditorV4(
     val selectedTextId by TimelineTextSelectionBusV10.selectedTextId.collectAsState()
     val selectedVisualId by VisualOverlaySelectionBusV19.selectedId.collectAsState()
     var zoom by remember { mutableFloatStateOf(.18f) }
+    var transitionTargetClipId by remember { mutableStateOf<String?>(null) }
 
     BoxWithConstraints(modifier.background(T4Panel)) {
         val viewportDp = (maxWidth - 56.dp).coerceAtLeast(120.dp)
@@ -137,6 +138,16 @@ fun TimelineEditorV4(
             val raw = xPx / pps * US_PER_SECOND
             val snapped = (raw / frameUs).roundToLong() * frameUs
             return snapped.coerceAtLeast(0L)
+        }
+
+        transitionTargetClipId?.let { targetClipId ->
+            CapCutTransitionSheetV23(
+                project = project,
+                targetClipId = targetClipId,
+                vm = vm,
+                onSeek = onSeek,
+                onDismiss = { transitionTargetClipId = null },
+            )
         }
 
         Column(Modifier.fillMaxSize()) {
@@ -213,6 +224,14 @@ fun TimelineEditorV4(
                                     },
                                     onMoveText = onMoveText,
                                     onMoveTextToTrack = onMoveTextToTrack,
+                                    onTransitionCut = { target ->
+                                        TimelineTextSelectionBusV10.clear()
+                                        VisualOverlaySelectionBusV19.clear()
+                                        onSelectTrack(target.trackId)
+                                        onSelectClip(target.incoming.id)
+                                        onSeek(target.cutUs)
+                                        transitionTargetClipId = target.incoming.id
+                                    },
                                 )
                             }
                         }
@@ -377,6 +396,7 @@ private fun TimelineLaneV4(
     onSelectText: (TextOverlayClip) -> Unit,
     onMoveText: (String, Long) -> Unit,
     onMoveTextToTrack: (String, String) -> Unit,
+    onTransitionCut: (TransitionCutTargetV23) -> Unit,
 ) {
     val isVideo = track.kind == TrackKind.VIDEO
     Box(
@@ -420,6 +440,13 @@ private fun TimelineLaneV4(
                     overlay = overlay,
                     pps = pps,
                     vm = vm,
+                )
+            }
+            track.capCutTransitionCutsV23().forEach { target ->
+                CapCutTransitionCutButtonV23(
+                    target = target,
+                    pps = pps,
+                    onClick = { onTransitionCut(target) },
                 )
             }
         }
@@ -796,7 +823,7 @@ private fun resolveMagneticDelta(
         val previous = others.filter { it.second <= moving.timelineStartUs }.maxByOrNull { it.second }
         val next = others.filter { it.first >= moving.timelineEndUs }.minByOrNull { it.first }
         lower = max(lower, max(-moving.timelineStartUs, previous?.let { it.second - moving.timelineStartUs } ?: Long.MIN_VALUE / 4))
-        upper = min(upper, next?.let { it.timelineStartUs - moving.timelineEndUs } ?: Long.MAX_VALUE / 4)
+        upper = min(upper, next?.let { it.first - moving.timelineEndUs } ?: Long.MAX_VALUE / 4)
     }
     if (lower > upper) return T4SnapResult(0L, false)
 
