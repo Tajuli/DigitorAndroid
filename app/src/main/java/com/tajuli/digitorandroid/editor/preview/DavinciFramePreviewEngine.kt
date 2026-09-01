@@ -878,8 +878,10 @@ private fun activeLayerSpecsAt(
     timeUs: Long,
 ): List<DavinciFramePreviewEngine.ActiveLayer> =
     project.tracks
-        .filter { track -> track.kind == TrackKind.VIDEO && !track.muted }
-        .flatMap { track ->
+        .withIndex()
+        .filter { (_, track) -> track.kind == TrackKind.VIDEO && !track.muted }
+        .sortedByDescending { (trackIndex, _) -> trackIndex }
+        .flatMap { (_, track) ->
             val activeClip = track.clips
                 .firstOrNull { clip -> timeUs in clip.timelineStartUs until clip.timelineEndUs }
             val activeTransition = track.transitionPairsV22().firstOrNull { pair ->
