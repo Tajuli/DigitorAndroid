@@ -2,12 +2,55 @@ package com.tajuli.digitorandroid.editor.model
 
 import java.util.UUID
 
-/** Extendable transition metadata. V1 intentionally implements compositor-native fades only. */
+/** Creator-facing transition catalog. Stored on the incoming clip for the cut immediately before it. */
+enum class TransitionStyleV22(val label: String) {
+    NONE("None"),
+    CROSS_DISSOLVE("Cross Dissolve"),
+    SMOOTH_CUT("Smooth Cut"),
+    DIP_TO_BLACK("Dip to Black"),
+    DIP_TO_WHITE("Dip to White"),
+    FADE("Fade"),
+    PUSH_LEFT("Push Left"),
+    PUSH_RIGHT("Push Right"),
+    PUSH_UP("Push Up"),
+    PUSH_DOWN("Push Down"),
+    SLIDE("Slide"),
+    ZOOM_IN("Zoom In"),
+    ZOOM_OUT("Zoom Out"),
+    BLUR("Blur"),
+    WHIP("Whip"),
+    SPIN("Spin"),
+    FLASH("Flash"),
+    MASK_WIPE("Mask Wipe"),
+    CIRCLE_WIPE("Circle Wipe"),
+    SPLIT("Split"),
+    LIGHT_LEAK("Light Leak"),
+}
+
+/**
+ * Transition metadata.
+ *
+ * fadeIn/fadeOut are retained for saved-project compatibility with the original compositor-native
+ * edge fades. V22 stores a cut transition on the incoming clip. Nullable style keeps old Gson
+ * projects safe: a missing field resolves to NONE instead of relying on Gson to synthesize an enum.
+ */
 data class ClipTransition(
     val fadeInUs: Long = 0L,
     val fadeOutUs: Long = 0L,
+    val styleV22: TransitionStyleV22? = null,
+    val durationUsV22: Long = 0L,
 ) {
-    val isIdentity: Boolean get() = fadeInUs <= 0L && fadeOutUs <= 0L
+    val resolvedStyleV22: TransitionStyleV22
+        get() = styleV22 ?: TransitionStyleV22.NONE
+
+    val resolvedDurationUsV22: Long
+        get() = if (resolvedStyleV22 == TransitionStyleV22.NONE) 0L else durationUsV22.coerceAtLeast(0L)
+
+    val hasCutTransitionV22: Boolean
+        get() = resolvedStyleV22 != TransitionStyleV22.NONE && resolvedDurationUsV22 > 0L
+
+    val isIdentity: Boolean
+        get() = fadeInUs <= 0L && fadeOutUs <= 0L && !hasCutTransitionV22
 
     fun normalizedFor(durationUs: Long): ClipTransition {
         val safeDuration = durationUs.coerceAtLeast(1L)
@@ -15,6 +58,11 @@ data class ClipTransition(
         return copy(
             fadeInUs = fadeInUs.coerceIn(0L, maxEdge),
             fadeOutUs = fadeOutUs.coerceIn(0L, maxEdge),
+            durationUsV22 = if (resolvedStyleV22 == TransitionStyleV22.NONE) {
+                0L
+            } else {
+                durationUsV22.coerceIn(0L, maxEdge)
+            },
         )
     }
 }

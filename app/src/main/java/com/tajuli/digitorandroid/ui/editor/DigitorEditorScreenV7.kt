@@ -193,8 +193,8 @@ fun DigitorEditorScreenV7(
     }
     fun launchImport() = mediaPicker.launch(vm.selectedImportMimeTypesV21())
 
-    LaunchedEffect(state.project, cursorUs, hasVideo) {
-        if (hasVideo) previewEngine.submit(state.project, cursorUs)
+    LaunchedEffect(state.project, cursorUs, hasVideo, isPlaying) {
+        if (hasVideo) previewEngine.submit(state.project, cursorUs, isPlaying)
     }
 
     LaunchedEffect(previewFrame?.timelineUs, previewFrame?.renderTimeMs) {
@@ -657,7 +657,7 @@ private fun TransportV7(enabled: Boolean, isPlaying: Boolean, cursorUs: Long, du
 @Composable
 private fun WorkspaceBarV7(selected: WorkspaceV7, onSelected: (WorkspaceV7) -> Unit, modifier: Modifier) {
     Row(modifier.background(Color(0xFF0A0A0D)).horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-        WorkspaceV7.entries.forEach { item ->
+        WorkspaceV7.entries.filterNot { it == WorkspaceV7.MEDIA }.forEach { item ->
             val active = item == selected
             Column(Modifier.width(68.dp).fillMaxHeight().clickable { onSelected(item) }.background(if (active) E7Accent.copy(alpha = .10f) else Color.Transparent), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                 Icon(item.icon, item.label, modifier = Modifier.size(18.dp), tint = if (active) E7Accent else Color.White.copy(alpha = .55f)); Spacer(Modifier.height(3.dp))

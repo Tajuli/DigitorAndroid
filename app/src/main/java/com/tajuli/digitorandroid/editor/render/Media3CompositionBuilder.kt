@@ -14,7 +14,9 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.TransitionPairV22
 import com.tajuli.digitorandroid.editor.model.hasCompositionOverlaysV19
+import com.tajuli.digitorandroid.editor.model.transitionPairsV22
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -102,13 +104,16 @@ class Media3CompositionBuilder(
 
         val videoTracks = resolveCompositionVideoTracks(project)
         require(videoTracks.isNotEmpty()) { "Timeline has no playable video" }
-        val sequences = videoTracks.map { track ->
-            buildCompositedVideoSequence(
-                project = project,
-                track = track,
-                forPreview = true,
-            )
-        }
+        val sequences = mutableListOf<EditedMediaItemSequence>()
+        val compositorInputs = mutableListOf<ResolveCompositorInputV22>()
+        addCompositedVideoInputsV22(
+            project = project,
+            videoTracks = videoTracks,
+            sequences = sequences,
+            compositorInputs = compositorInputs,
+            forPreview = true,
+        )
+
         val (outputWidth, outputHeight) = resolvePreviewOutputSize(project, maxLongEdge)
         return Composition.Builder(sequences)
             .setVideoCompositorSettings(
@@ -117,6 +122,7 @@ class Media3CompositionBuilder(
                     outputHeight = outputHeight,
                     videoTracks = videoTracks,
                     livePreview = true,
+                    inputsV22 = compositorInputs,
                 ),
             )
             .build()
@@ -177,13 +183,19 @@ class Media3CompositionBuilder(
         } else {
             videoTracks
         }
+        val compositorInputs = mutableListOf<ResolveCompositorInputV22>()
 
-        videoTracks.forEach { track ->
-            sequences += buildCompositedVideoSequence(project, track, forPreview = false)
-        }
+        addCompositedVideoInputsV22(
+            project = project,
+            videoTracks = videoTracks,
+            sequences = sequences,
+            compositorInputs = compositorInputs,
+            forPreview = false,
+        )
 
         if (needsBlankFrameSentinel || pureTextVideo) {
             sequences += buildVideoBlankFrameSentinelSequence(project)
+            if (videoTracks.isNotEmpty()) compositorInputs += ResolveCompositorInputV22.BlankInput
         }
 
         addAudioSequences(project, sequences, forPreview = false)
@@ -200,6 +212,7 @@ class Media3CompositionBuilder(
                         outputWidth = project.width,
                         outputHeight = project.height,
                         videoTracks = compositorTracks,
+                        inputsV22 = compositorInputs,
                     ),
                 )
                 val textEffects = projectTextEffects(project)
@@ -221,6 +234,71 @@ class Media3CompositionBuilder(
                 }
                 builder.setEffects(Effects(emptyList(), videoEffects))
             }
+        }
+        return builder.build()
+    }
+
+    /**
+     * Builds real V-track sequences plus short virtual outgoing-tail inputs for every V22 cut.
+     * Ghost inputs are inserted before their owning track because Digitor's V-track order is
+     * foreground-first; the blank sentinel remains last/background-most.
+     */
+    private fun addCompositedVideoInputsV22(
+        project: TimelineProject,
+        videoTracks: List<TimelineTrack>,
+        sequences: MutableList<EditedMediaItemSequence>,
+        compositorInputs: MutableList<ResolveCompositorInputV22>,
+        forPreview: Boolean,
+    ) {
+        videoTracks.forEach { track ->
+            track.transitionPairsV22().forEach { pair ->
+                val ghost = transitionGhostClipV22(pair)
+                sequences += buildTransitionGhostSequenceV22(project, pair, ghost, forPreview)
+                compositorInputs += ResolveCompositorInputV22.TransitionGhostInput(pair, ghost)
+            }
+            sequences += buildCompositedVideoSequence(project, track, forPreview)
+            compositorInputs += ResolveCompositorInputV22.TrackInput(track)
+        }
+    }
+
+    private fun transitionGhostClipV22(pair: TransitionPairV22): TimelineClip {
+        val outgoing = pair.outgoing
+        val sourceOutUs = outgoing.sourceOutUs
+        val sourceInUs = (sourceOutUs - pair.durationUs).coerceAtLeast(outgoing.sourceInUs)
+        return outgoing.copy(
+            id = transitionGhostIdV22(pair),
+            label = "${outgoing.label} · transition tail",
+            timelineStartUs = pair.startUs,
+            sourceInUs = sourceInUs,
+            sourceOutUs = sourceOutUs,
+            linkGroupId = null,
+            transition = pair.incoming.transition.copy(durationUsV22 = pair.durationUs),
+        )
+    }
+
+    private fun buildTransitionGhostSequenceV22(
+        project: TimelineProject,
+        pair: TransitionPairV22,
+        ghost: TimelineClip,
+        forPreview: Boolean,
+    ): EditedMediaItemSequence {
+        val builder = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
+        if (pair.startUs > 0L) builder.addGap(pair.startUs)
+        builder.addItem(
+            toEditedMediaItem(
+                clip = ghost,
+                kind = TrackKind.VIDEO,
+                forPreview = forPreview,
+                compositorOwnsGeometry = true,
+                projectFrameRate = project.frameRate,
+            ),
+        )
+        // Every compositor input must cover the same composition duration. If this virtual outgoing
+        // tail ends at pair.endUs, Media3 can end the composed video stream there even though the
+        // real V track (and audio) continues. Players then hold that last encoded frame for the rest
+        // of the file, which looks like a one-frame freeze immediately after the transition.
+        if (project.durationUs > pair.endUs) {
+            builder.addGap(project.durationUs - pair.endUs)
         }
         return builder.build()
     }
