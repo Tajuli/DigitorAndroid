@@ -4,6 +4,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -47,12 +48,9 @@ private val X5Muted = Color(0xFF909098)
 private val X5Accent = Color(0xFF30E0C3)
 private val X5Danger = Color(0xFFFF7474)
 
-private enum class EditPageV5 { TIMELINE, TRANSFORM }
+private enum class EditPageV5 { TIMELINE, TRANSFORM, RETIME }
 
-/**
- * Edit keeps timeline and geometry under one subsystem. Transform is deliberately not a top-level
- * workspace: users select a clip in Timeline, then open Transform without leaving Edit.
- */
+/** Timeline, transform and retime live under Edit; cut transitions are edited directly on the timeline. */
 @Composable
 fun EditWorkspaceV5(
     project: TimelineProject,
@@ -75,10 +73,10 @@ fun EditWorkspaceV5(
     modifier: Modifier = Modifier,
 ) {
     var page by remember { mutableStateOf(EditPageV5.TIMELINE) }
-    val canTransform = selectedClip != null && project.trackContaining(selectedClip.id)?.kind == TrackKind.VIDEO
+    val canEditVideo = selectedClip != null && project.trackContaining(selectedClip.id)?.kind == TrackKind.VIDEO
 
-    LaunchedEffect(canTransform) {
-        if (!canTransform && page == EditPageV5.TRANSFORM) page = EditPageV5.TIMELINE
+    LaunchedEffect(canEditVideo) {
+        if (!canEditVideo && page != EditPageV5.TIMELINE) page = EditPageV5.TIMELINE
     }
 
     Column(modifier.background(X5Panel)) {
@@ -90,8 +88,11 @@ fun EditWorkspaceV5(
             TextButton(onClick = { page = EditPageV5.TIMELINE }) {
                 Text("Timeline", fontSize = 8.sp, color = if (page == EditPageV5.TIMELINE) X5Accent else X5Muted)
             }
-            TextButton(onClick = { page = EditPageV5.TRANSFORM }, enabled = canTransform) {
+            TextButton(onClick = { page = EditPageV5.TRANSFORM }, enabled = canEditVideo) {
                 Text("Transform", fontSize = 8.sp, color = if (page == EditPageV5.TRANSFORM) X5Accent else X5Muted)
+            }
+            TextButton(onClick = { page = EditPageV5.RETIME }, enabled = canEditVideo) {
+                Text("Retime", fontSize = 8.sp, color = if (page == EditPageV5.RETIME) X5Accent else X5Muted)
             }
             Spacer(Modifier.weight(1f))
             if (page == EditPageV5.TRANSFORM) {
@@ -125,11 +126,70 @@ fun EditWorkspaceV5(
             )
 
             EditPageV5.TRANSFORM -> {
-                if (selectedClip != null && canTransform) {
+                if (selectedClip != null && canEditVideo) {
                     TransformWorkspaceV5(selectedClip, cursorUs, project.frameRate, vm, onSeek, Modifier.fillMaxSize())
                 }
             }
+
+            EditPageV5.RETIME -> {
+                if (selectedClip != null && canEditVideo) {
+                    RetimeWorkspaceV5(selectedClip, cursorUs, vm, Modifier.fillMaxSize())
+                }
+            }
         }
+    }
+}
+
+@Composable
+private fun RetimeWorkspaceV5(
+    clip: TimelineClip,
+    cursorUs: Long,
+    vm: EditorViewModelV4,
+    modifier: Modifier,
+) {
+    Column(
+        modifier.verticalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text("Retime · ${clip.label}", fontSize = 10.sp, color = Color.White)
+        Text("Speed", fontSize = 8.sp, color = X5Muted)
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            listOf(.5f, .75f, 1.25f, 1.5f, 2f, 3f).forEach { speed ->
+                Text(
+                    "${speed}x",
+                    fontSize = 9.sp,
+                    color = Color.White,
+                    modifier = Modifier
+                        .background(X5Raised, RoundedCornerShape(6.dp))
+                        .clickable { vm.bakeSelectedSpeed(speed) }
+                        .padding(horizontal = 13.dp, vertical = 8.dp),
+                )
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Reverse",
+                fontSize = 9.sp,
+                color = Color.White,
+                modifier = Modifier
+                    .background(X5Raised, RoundedCornerShape(6.dp))
+                    .clickable { vm.reverseSelectedVideo() }
+                    .padding(horizontal = 15.dp, vertical = 9.dp),
+            )
+            Text(
+                "Freeze 2s",
+                fontSize = 9.sp,
+                color = Color.White,
+                modifier = Modifier
+                    .background(X5Raised, RoundedCornerShape(6.dp))
+                    .clickable { vm.freezeSelectedAt(cursorUs, 2_000_000L) }
+                    .padding(horizontal = 15.dp, vertical = 9.dp),
+            )
+        }
+        Text("Transitions are applied from the ◇ icon between clips.", fontSize = 8.sp, color = X5Muted)
     }
 }
 
