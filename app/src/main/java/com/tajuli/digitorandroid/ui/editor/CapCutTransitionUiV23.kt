@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -34,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -259,11 +259,12 @@ internal fun CapCutTransitionSheetV23(
     }
 
     fun applyStyle(style: TransitionStyleV22, duration: Long) {
+        val safeDuration = duration.coerceIn(100_000L, maxDurationUs)
         selectedStyle = style
-        selectedDurationUs = duration.coerceIn(100_000L, maxDurationUs)
+        selectedDurationUs = safeDuration
         appliedNotice = style != TransitionStyleV22.NONE
-        vm.setTransitionForCutV23(incoming.id, style, selectedDurationUs)
-        if (style == TransitionStyleV22.NONE) onSeek(target.cutUs) else previewAt(selectedDurationUs)
+        vm.setTransitionForCutV23(incoming.id, style, safeDuration)
+        if (style == TransitionStyleV22.NONE) onSeek(target.cutUs) else previewAt(safeDuration)
     }
 
     ModalBottomSheet(
@@ -273,7 +274,7 @@ internal fun CapCutTransitionSheetV23(
     ) {
         Column(
             Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(9.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -318,18 +319,43 @@ internal fun CapCutTransitionSheetV23(
 
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 stylesForCategoryV23(category).forEach { item ->
-                    FilledTonalButton(
-                        onClick = { applyStyle(item, selectedDurationUs) },
-                        modifier = Modifier.height(48.dp),
-                        shape = RoundedCornerShape(7.dp),
+                    val active = selectedStyle == item
+                    Column(
+                        Modifier
+                            .width(112.dp)
+                            .height(72.dp)
+                            .background(
+                                if (active) CCT23Accent.copy(alpha = .20f) else Color.White.copy(alpha = .07f),
+                                RoundedCornerShape(10.dp),
+                            )
+                            .border(
+                                1.dp,
+                                if (active) CCT23Accent else Color.White.copy(alpha = .10f),
+                                RoundedCornerShape(10.dp),
+                            )
+                            .clickable { applyStyle(item, selectedDurationUs) }
+                            .padding(horizontal = 8.dp, vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(if (selectedStyle == item) "✓" else "◇", fontSize = 11.sp, color = if (selectedStyle == item) CCT23Accent else Color.White)
-                            Text(item.label, fontSize = 7.sp, color = Color.White.copy(alpha = .78f))
-                        }
+                        Text(
+                            if (active) "✓" else "◇",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (active) CCT23Accent else Color.White.copy(alpha = .78f),
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            item.label,
+                            fontSize = 9.sp,
+                            lineHeight = 11.sp,
+                            maxLines = 2,
+                            textAlign = TextAlign.Center,
+                            color = Color.White,
+                        )
                     }
                 }
             }
@@ -356,7 +382,7 @@ internal fun CapCutTransitionSheetV23(
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "Tap another transition to replace it",
+                        "Applied instantly · tap another transition to replace",
                         color = CCT23Muted,
                         fontSize = 8.sp,
                         modifier = Modifier.weight(1f),
@@ -368,7 +394,7 @@ internal fun CapCutTransitionSheetV23(
             } else {
                 Spacer(Modifier.height(3.dp))
                 Text(
-                    "Tap a transition to apply it instantly.",
+                    "Tap any transition card to apply it instantly.",
                     color = CCT23Muted,
                     fontSize = 8.sp,
                 )
