@@ -43,8 +43,6 @@ internal class CreatorEffectGraphV25 private constructor(
                 node.kind == NodeKind.SERIAL || node.kind == NodeKind.PARALLEL
             }
             if (preview) {
-                // Keep an identity-capable program alive so adding/changing an effect redraws the
-                // held realtime frame without rebuilding the whole preview graph.
                 return if (editableNodes.isNotEmpty()) CreatorEffectGraphV25(clip, true) else null
             }
             val hasFx = editableNodes.any { node ->
@@ -142,11 +140,14 @@ internal class CreatorEffectGraphV25 private constructor(
                                 operation.node
                             }
                             val evaluated = currentClip.nodeAnimations.evaluateNode(currentNode, sourceUs)
-                            // Timing is clip-edit metadata, not an animated value. Effect keyframe
-                            // snapshots may predate V26, so always merge the live base timing back by id.
-                            val effectsWithTiming = evaluated.visibleEffects().map { animated ->
-                                val base = currentNode.effects.firstOrNull { it.id == animated.id }
-                                if (base == null) animated else animated.copy(
+                            val animatedById = evaluated.visibleEffects().associateBy { it.id }
+                            // Base membership is authoritative: deleting an effect must not let an old
+                            // effect-keyframe snapshot resurrect it. Keyframes only animate amount/enabled;
+                            // timing always comes from the current effect instance.
+                            val effectsWithTiming = currentNode.visibleEffects().map { base ->
+                                val animated = animatedById[base.id] ?: base
+                                animated.copy(
+                                    name = base.name,
                                     sourceStartUsV26 = base.sourceStartUsV26,
                                     sourceEndUsV26 = base.sourceEndUsV26,
                                 )
