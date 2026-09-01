@@ -5,6 +5,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.TransitionStyleV22
+import com.tajuli.digitorandroid.editor.model.transitionPairsV22
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -52,7 +53,7 @@ class CapCutTransitionUiV23Test {
     }
 
     @Test
-    fun tappingTransitionMutatesIncomingClipMetadata() {
+    fun tappingTransitionMutatesIncomingClipAndFeedsEnginePair() {
         val first = clip("a", 0L, 2_000_000L)
         val second = clip("b", 2_000_000L, 4_000_000L)
         val project = TimelineProject(
@@ -71,6 +72,11 @@ class CapCutTransitionUiV23Test {
         val transition = updated!!.clip("b")!!.transition
         assertEquals(TransitionStyleV22.CROSS_DISSOLVE, transition.resolvedStyleV22)
         assertEquals(700_000L, transition.resolvedDurationUsV22)
+        val pair = updated.transitionPairsV22().single()
+        assertEquals("a", pair.outgoing.id)
+        assertEquals("b", pair.incoming.id)
+        assertEquals(TransitionStyleV22.CROSS_DISSOLVE, pair.style)
+        assertEquals(700_000L, pair.durationUs)
     }
 
     @Test
