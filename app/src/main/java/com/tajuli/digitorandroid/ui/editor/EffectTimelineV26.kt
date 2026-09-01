@@ -31,14 +31,25 @@ object EffectTimelineSelectionBusV26 {
     }
 }
 
+/**
+ * TimelineEditorV4 historically resolves an un-keyed EditorViewModelV4 while MainActivity owns a
+ * keyed editor-session ViewModel. Always route effect-bar commits to that active keyed instance,
+ * exactly like the V14 trim/resize fix. Otherwise drag preview works locally but releasing the
+ * pointer mutates an invisible ViewModel and the bar snaps back on the next recomposition.
+ */
+private fun EditorViewModelV4.activeEffectEditorV26(): EditorViewModelV4 =
+    ActiveEditorVmRegistryV14.current() ?: this
+
 fun EditorViewModelV4.deleteEffectTimelineV26(selection: EffectTimelineSelectionV26) {
-    updateEffectTimelineV26(selection, "delete-effect", "Effect deleted") { _, _ -> null }
+    val target = activeEffectEditorV26()
+    target.updateEffectTimelineV26(selection, "delete-effect", "Effect deleted") { _, _ -> null }
     if (EffectTimelineSelectionBusV26.selection.value == selection) EffectTimelineSelectionBusV26.clear()
 }
 
 fun EditorViewModelV4.moveEffectTimelineV26(selection: EffectTimelineSelectionV26, deltaUs: Long) {
     if (deltaUs == 0L) return
-    updateEffectTimelineV26(selection, "move-effect", "Effect moved", coalesce = true) { clip, effect ->
+    val target = activeEffectEditorV26()
+    target.updateEffectTimelineV26(selection, "move-effect", "Effect moved", coalesce = true) { clip, effect ->
         val normalized = effect.normalizedForClipV26(clip)
         val start = normalized.resolvedSourceStartUsV26(clip)
         val end = normalized.resolvedSourceEndUsV26(clip)
@@ -50,7 +61,8 @@ fun EditorViewModelV4.moveEffectTimelineV26(selection: EffectTimelineSelectionV2
 }
 
 fun EditorViewModelV4.resizeEffectStartV26(selection: EffectTimelineSelectionV26, targetSourceUs: Long) {
-    updateEffectTimelineV26(selection, "resize-effect-start", "Effect duration updated", coalesce = true) { clip, effect ->
+    val target = activeEffectEditorV26()
+    target.updateEffectTimelineV26(selection, "resize-effect-start", "Effect duration updated", coalesce = true) { clip, effect ->
         val normalized = effect.normalizedForClipV26(clip)
         val end = normalized.resolvedSourceEndUsV26(clip)
         val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.durationUs).coerceAtLeast(1L)
@@ -60,7 +72,8 @@ fun EditorViewModelV4.resizeEffectStartV26(selection: EffectTimelineSelectionV26
 }
 
 fun EditorViewModelV4.resizeEffectEndV26(selection: EffectTimelineSelectionV26, targetSourceUs: Long) {
-    updateEffectTimelineV26(selection, "resize-effect-end", "Effect duration updated", coalesce = true) { clip, effect ->
+    val target = activeEffectEditorV26()
+    target.updateEffectTimelineV26(selection, "resize-effect-end", "Effect duration updated", coalesce = true) { clip, effect ->
         val normalized = effect.normalizedForClipV26(clip)
         val start = normalized.resolvedSourceStartUsV26(clip)
         val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.durationUs).coerceAtLeast(1L)
