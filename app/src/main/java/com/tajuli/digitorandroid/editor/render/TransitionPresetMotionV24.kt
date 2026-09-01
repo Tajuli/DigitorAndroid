@@ -8,7 +8,7 @@ import kotlin.math.sin
 internal object TransitionPresetMotionV24 {
     fun incoming(base: ResolveOverlayState, presetId: String?, progress: Float): ResolveOverlayState? {
         val p = smooth(progress)
-        val pulse = sin((PI * p).toFloat()).coerceAtLeast(0f)
+        val pulse = sin(PI * p.toDouble()).toFloat().coerceAtLeast(0f)
         return when (presetId) {
             TransitionPresetV24.PULL_IN -> base.copy(scaleX = base.scaleX * (.62f + .38f * p), scaleY = base.scaleY * (.62f + .38f * p))
             TransitionPresetV24.PULL_OUT -> base.copy(scaleX = base.scaleX * (1.45f - .45f * p), scaleY = base.scaleY * (1.45f - .45f * p))
@@ -36,7 +36,7 @@ internal object TransitionPresetMotionV24 {
     fun outgoing(base: ResolveOverlayState, presetId: String?, progress: Float): ResolveOverlayState? {
         val p = smooth(progress)
         val fade = (1f - p).coerceIn(0f, 1f)
-        val pulse = sin((PI * p).toFloat()).coerceAtLeast(0f)
+        val pulse = sin(PI * p.toDouble()).toFloat().coerceAtLeast(0f)
         return when (presetId) {
             TransitionPresetV24.PULL_IN -> base.copy(alphaScale = base.alphaScale * fade, scaleX = base.scaleX * (1f + .34f * p), scaleY = base.scaleY * (1f + .34f * p))
             TransitionPresetV24.PULL_OUT -> base.copy(alphaScale = base.alphaScale * fade, scaleX = base.scaleX * (1f - .34f * p), scaleY = base.scaleY * (1f - .34f * p))
@@ -66,6 +66,8 @@ internal object TransitionPresetMotionV24 {
         return t * t * (3f - 2f * t)
     }
 
-    private fun shake(value: Float, frequency: Float): Float =
-        sin((value.coerceIn(0f, 1f) * frequency * PI * 2.0).toFloat()) * (1f - value.coerceIn(0f, 1f))
+    private fun shake(value: Float, frequency: Float): Float {
+        val t = value.coerceIn(0f, 1f)
+        return sin(t.toDouble() * frequency.toDouble() * PI * 2.0).toFloat() * (1f - t)
+    }
 }
