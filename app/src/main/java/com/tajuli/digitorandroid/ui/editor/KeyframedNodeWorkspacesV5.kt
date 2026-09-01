@@ -251,7 +251,7 @@ fun KeyframedEffectsWorkspaceV5(
             NodeDomainKeyframeBarV5(clip, baseNode, NodeAnimationDomain.EFFECTS, frameRate)
         }
         Box(Modifier.weight(1f).fillMaxSize()) {
-            EffectsWorkspaceV4(
+            CreatorEffectsWorkspaceV25(
                 clip = evaluated.clip,
                 vm = vm,
                 modifier = Modifier.fillMaxSize(),
