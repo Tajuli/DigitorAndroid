@@ -16,11 +16,12 @@ import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.SpatialNodeGraphPlan
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolveCreatorEffectsV25
+import com.tajuli.digitorandroid.editor.model.resolveTimedCreatorEffectsV26
 import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 
 /**
- * V25 creator-effects renderer.
+ * V25 creator-effects renderer with V26 timed effect spans.
  *
  * Keeps Digitor's Resolve-style serial/parallel node topology while expanding the old four-effect
  * shader into a compact creator library: blur/sharpen/glow/grain plus lens, RGB split, VHS lines,
@@ -141,7 +142,16 @@ internal class CreatorEffectGraphV25 private constructor(
                                 operation.node
                             }
                             val evaluated = currentClip.nodeAnimations.evaluateNode(currentNode, sourceUs)
-                            val vector = resolveCreatorEffectsV25(evaluated.visibleEffects())
+                            // Timing is clip-edit metadata, not an animated value. Effect keyframe
+                            // snapshots may predate V26, so always merge the live base timing back by id.
+                            val effectsWithTiming = evaluated.visibleEffects().map { animated ->
+                                val base = currentNode.effects.firstOrNull { it.id == animated.id }
+                                if (base == null) animated else animated.copy(
+                                    sourceStartUsV26 = base.sourceStartUsV26,
+                                    sourceEndUsV26 = base.sourceEndUsV26,
+                                )
+                            }
+                            val vector = resolveTimedCreatorEffectsV26(effectsWithTiming, currentClip, sourceUs)
                             if (vector.isIdentity) {
                                 slotTextures[operation.slot] = input
                             } else {
