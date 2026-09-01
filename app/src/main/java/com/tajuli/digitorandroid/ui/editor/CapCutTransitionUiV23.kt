@@ -119,6 +119,15 @@ fun EditorViewModelV4.setTransitionForCutV23(
     style: TransitionStyleV22,
     durationUs: Long,
 ) {
+    // MainActivity deliberately owns a keyed editor-session ViewModel. TimelineEditorV4 still has
+    // legacy code that can resolve an un-keyed instance from Compose. Never commit a transition to
+    // that detached state: preview/export/autosave all consume the active keyed editor VM.
+    val activeVm = ActiveEditorVmRegistryV14.current()
+    if (activeVm != null && activeVm !== this) {
+        activeVm.setTransitionForCutV23(incomingClipId, style, durationUs)
+        return
+    }
+
     val snapshot = state.value
     val nextProject = snapshot.project.withTransitionForCutV23(incomingClipId, style, durationUs)
     if (nextProject == null) {
@@ -262,7 +271,6 @@ internal fun CapCutTransitionSheetV23(
         val safeDuration = duration.coerceIn(100_000L, maxDurationUs)
         selectedStyle = style
         selectedDurationUs = safeDuration
-        appliedNotice = style != TransitionStyleV22.NONE
         vm.setTransitionForCutV23(incoming.id, style, safeDuration)
         if (style == TransitionStyleV22.NONE) onSeek(target.cutUs) else previewAt(safeDuration)
     }
