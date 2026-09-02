@@ -2,6 +2,7 @@ package com.tajuli.digitorandroid.editor.render
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
@@ -31,16 +32,18 @@ import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.abs
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Compiles and executes the real stacked beauty GPU stage inside a Media3 export. */
+/** Executes the real stacked beauty GPU stage and verifies it is visually non-identity. */
 @UnstableApi
 @RunWith(AndroidJUnit4::class)
 class BeautyFilterExportInstrumentedTest {
     @Test
-    fun stackedBeautyLayersExportNonEmptyMp4() {
+    fun stackedBeautyLayersExportAndChangeFacePixels() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val dir = File(context.cacheDir, "beauty_filter_export_test").apply { mkdirs() }
@@ -48,9 +51,12 @@ class BeautyFilterExportInstrumentedTest {
         val output = File(dir, "beauty.mp4")
         output.delete()
 
+        val sourceRed = 92
+        val sourceGreen = 64
+        val sourceBlue = 54
         val bitmap = Bitmap.createBitmap(320, 320, Bitmap.Config.ARGB_8888)
         try {
-            bitmap.eraseColor(Color.rgb(92, 64, 54))
+            bitmap.eraseColor(Color.rgb(sourceRed, sourceGreen, sourceBlue))
             source.outputStream().use { stream -> check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) }
         } finally {
             bitmap.recycle()
@@ -139,6 +145,25 @@ class BeautyFilterExportInstrumentedTest {
             assertTrue("Timed out waiting for beauty export", done.await(30, TimeUnit.SECONDS))
             failure.get()?.let { throw AssertionError("Beauty export failed", it) }
             assertTrue("Beauty export produced no bytes", output.exists() && output.length() > 0L)
+
+            val retriever = MediaMetadataRetriever()
+            val exportedFrame = try {
+                retriever.setDataSource(output.absolutePath)
+                retriever.getFrameAtTime(500_000L, MediaMetadataRetriever.OPTION_CLOSEST)
+            } finally {
+                runCatching { retriever.release() }
+            }
+            assertNotNull("Could not decode exported beauty frame", exportedFrame)
+            exportedFrame!!.use { frame ->
+                val center = frame.getPixel(frame.width / 2, frame.height / 2)
+                val delta = abs(Color.red(center) - sourceRed) +
+                    abs(Color.green(center) - sourceGreen) +
+                    abs(Color.blue(center) - sourceBlue)
+                assertTrue(
+                    "Beauty GPU stage was visually identity at face center; RGB=${Color.red(center)},${Color.green(center)},${Color.blue(center)}",
+                    delta >= 18,
+                )
+            }
         } finally {
             instrumentation.runOnMainSync {
                 transformerRef.get()?.let { transformer -> runCatching { transformer.cancel() } }
