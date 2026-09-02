@@ -13,10 +13,10 @@ import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 /**
  * Timestamp-aware 3D LUT used for Correction and Color.
  *
- * In preview mode the long-lived GL effect resolves the latest clip snapshot on every frame. This
- * makes correction/color controls and camera input-profile changes visible immediately without
- * stop/setComposition/prepare. Export stays deterministic and snapshot-based. Both modes use the
- * exact same composition-time to source-time mapping from [ParityRenderContract].
+ * Preview keeps one GL LUT texture alive and updates it only when color-relevant data changes.
+ * V36 intentionally excludes NodeEffect metadata from the visual revision token: creator filter and
+ * beauty markers are evaluated by their own persistent high-precision stages and must not trigger a
+ * 33^3 cube rebuild on every tap/slider tick. This is a major part of CapCut-class filter response.
  */
 @UnstableApi
 internal class AnimatedNodeColorLut(
@@ -68,10 +68,14 @@ internal class AnimatedNodeColorLut(
         if (preview) PreviewProjectRegistry.clip(clip.id) ?: clip else clip
 
     private fun visualRevision(current: TimelineClip): Long {
-        // Immutable data classes make hashCode a cheap stable change token for static grades. Keep
-        // animation revision separate so keyed updates also invalidate the LUT. Input profile is
-        // part of the visual transform and therefore must invalidate the cached cube as well.
-        var result = current.nodeGraph.hashCode().toLong()
+        var result = current.nodeGraph.edges.hashCode().toLong()
+        current.nodeGraph.nodes.forEach { node ->
+            // Node effects deliberately do not participate. LUT generation does not read them.
+            result = result * 31L + node.id.hashCode().toLong()
+            result = result * 31L + node.kind.hashCode().toLong()
+            result = result * 31L + node.corrections.hashCode().toLong()
+            result = result * 31L + node.advancedColor.hashCode().toLong()
+        }
         result = result * 31L + current.colorGrade.hashCode().toLong()
         result = result * 31L + (current.inputColorProfileV1?.hashCode()?.toLong() ?: 0L)
         result = result * 31L + current.nodeAnimations.revision
