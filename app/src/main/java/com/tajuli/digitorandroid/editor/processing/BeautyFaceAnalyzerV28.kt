@@ -56,14 +56,16 @@ object BeautyFaceTrackStoreV28 {
         val digest = MessageDigest.getInstance("SHA-256").digest(uri.toByteArray())
             .joinToString("") { byte -> "%02x".format(byte) }
             .take(32)
-        return File(File(context.filesDir, "beauty_face_tracks_v30"), "$digest.json")
+        return File(File(context.filesDir, "beauty_face_tracks_v32_fast"), "$digest.json")
     }
 }
 
 /**
- * On-device beauty analysis. ML Kit provides dense, interpolatable face/feature geometry. Dedicated
- * MediaPipe models provide semantic face-skin and hair masks. The semantic masks are sampled less
- * frequently and motion-warped by the GPU against the denser face track for stable video rendering.
+ * Low-latency beauty analysis.
+ *
+ * The editor never needs to decode hundreds of random frames before showing or exporting a filter.
+ * A five-anchor face seed upgrades the instant GPU fallback quickly; a bounded background refinement
+ * then uses <=48 low-resolution sync frames and <=12 semantic mask frames for the whole clip.
  */
 class BeautyFaceAnalyzerV28(private val context: Context) {
     private val options = FaceDetectorOptions.Builder()
@@ -75,13 +77,38 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         .enableTracking()
         .build()
 
-    suspend fun analyzeAndStore(
+    /** Very small seed used by preview. No semantic model is run here. */
+    suspend fun primeAndStore(clip: TimelineClip): BeautyFaceTrackV28 {
+        val existing = BeautyFaceTrackStoreV28.load(context, clip)
+        if (existing != null && existing.samples.count { it.geometry != null } >= PRIME_FACE_ANCHORS) return existing
+
+        val fresh = if (clip.isImageV21) {
+            analyzeImage(clip, requireHairMask = false, requireSkinMask = false)
+        } else {
+            analyzeVideoAnchors(
+                clip = clip,
+                faceAnchorCount = PRIME_FACE_ANCHORS,
+                requireHairMask = false,
+                requireSkinMask = false,
+                semanticAnchorLimit = 0,
+                frameOption = MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+            )
+        }
+        val merged = existing?.mergedWith(fresh) ?: fresh
+        BeautyFaceTrackStoreV28.save(context, merged)
+        return merged
+    }
+
+    /** Bounded background quality refinement. Never performs the old hundreds-of-seeks scan. */
+    suspend fun refineFastAndStore(
         clip: TimelineClip,
         requireHairMask: Boolean = true,
         requireSkinMask: Boolean = true,
     ): BeautyFaceTrackV28 {
         val existing = BeautyFaceTrackStoreV28.load(context, clip)
-        val faceReady = existing?.covers(clip.sourceInUs, clip.sourceOutUs) == true
+        val targetFaceAnchors = targetFaceAnchorCount(clip)
+        val faceReady = existing?.covers(clip.sourceInUs, clip.sourceOutUs) == true &&
+            existing.samples.count { it.geometry != null } >= minOf(targetFaceAnchors, 12)
         val hairReady = !requireHairMask || BeautyHairMaskStoreV29.hasCoverage(context, clip)
         val skinReady = !requireSkinMask || BeautyFaceSkinMaskStoreV31.hasCoverage(context, clip)
         if (faceReady && hairReady && skinReady) return existing!!
@@ -89,12 +116,26 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         val fresh = if (clip.isImageV21) {
             analyzeImage(clip, requireHairMask, requireSkinMask)
         } else {
-            analyzeVideo(clip, requireHairMask, requireSkinMask)
+            analyzeVideoAnchors(
+                clip = clip,
+                faceAnchorCount = targetFaceAnchors,
+                requireHairMask = requireHairMask,
+                requireSkinMask = requireSkinMask,
+                semanticAnchorLimit = SEMANTIC_ANCHOR_LIMIT,
+                frameOption = MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+            )
         }
         val merged = existing?.mergedWith(fresh) ?: fresh
         BeautyFaceTrackStoreV28.save(context, merged)
         return merged
     }
+
+    /** Kept as the public compatibility entry point; now delegates to the bounded fast path. */
+    suspend fun analyzeAndStore(
+        clip: TimelineClip,
+        requireHairMask: Boolean = true,
+        requireSkinMask: Boolean = true,
+    ): BeautyFaceTrackV28 = refineFastAndStore(clip, requireHairMask, requireSkinMask)
 
     private suspend fun analyzeImage(
         clip: TimelineClip,
@@ -129,10 +170,13 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         }
     }
 
-    private suspend fun analyzeVideo(
+    private suspend fun analyzeVideoAnchors(
         clip: TimelineClip,
+        faceAnchorCount: Int,
         requireHairMask: Boolean,
         requireSkinMask: Boolean,
+        semanticAnchorLimit: Int,
+        frameOption: Int,
     ): BeautyFaceTrackV28 {
         val detector = FaceDetection.getClient(options)
         val hairSegmenter = if (requireHairMask) BeautyHairSegmenterV29(context) else null
@@ -142,50 +186,30 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
             retriever.setDataSource(context, Uri.parse(clip.uri))
             val start = clip.sourceInUs.coerceAtLeast(0L)
             val end = clip.sourceOutUs.coerceAtLeast(start + 1L)
-            val duration = (end - start).coerceAtLeast(1L)
-
-            // Geometry stays dense because it is cheap and drives motion-locking between ML masks.
-            val faceIntervalUs = max(125_000L, duration / 240L)
-            // Dedicated hair model is lighter than the multiclass model.
-            val hairIntervalUs = max(250_000L, duration / 120L)
-            // SelfieMulticlass is heavier; its face-skin mask is similarity-warped between samples.
-            val skinIntervalUs = max(500_000L, duration / 100L)
-
-            val times = mutableListOf<Long>()
-            var t = start
-            while (t < end) {
-                times += t
-                t += faceIntervalUs
-            }
-            val lastSourceUs = (end - 1L).coerceAtLeast(start)
-            if (times.isEmpty() || times.last() != lastSourceUs) times += lastSourceUs
-
+            val times = evenlySpacedTimes(start, end, faceAnchorCount)
+            val semanticStride = if (semanticAnchorLimit <= 0) Int.MAX_VALUE
+            else max(1, (times.size - 1) / max(1, semanticAnchorLimit - 1))
             val samples = ArrayList<BeautyFaceSampleV28>(times.size)
-            var nextHairUs = start
-            var nextSkinUs = start
+
             for ((index, sourceUs) in times.withIndex()) {
-                val raw = retriever.getFrameAtTime(sourceUs, MediaMetadataRetriever.OPTION_CLOSEST)
-                if (raw == null) {
+                val frame = scaledFrameAtTime(retriever, sourceUs, frameOption)
+                if (frame == null) {
                     samples += BeautyFaceSampleV28(sourceUs, null)
                     continue
                 }
-                val prepared = downscaleForDetector(raw)
                 try {
-                    val isLast = index == times.lastIndex
-                    if (hairSegmenter != null && (sourceUs >= nextHairUs || isLast)) {
-                        hairSegmenter.segmentAndStore(context, clip, prepared, sourceUs)
-                        nextHairUs = sourceUs + hairIntervalUs
+                    val semanticAnchor = semanticAnchorLimit > 0 &&
+                        (index == 0 || index == times.lastIndex || index % semanticStride == 0)
+                    if (semanticAnchor) {
+                        hairSegmenter?.segmentAndStore(context, clip, frame, sourceUs)
+                        skinSegmenter?.segmentAndStore(context, clip, frame, sourceUs)
                     }
-                    if (skinSegmenter != null && (sourceUs >= nextSkinUs || isLast)) {
-                        skinSegmenter.segmentAndStore(context, clip, prepared, sourceUs)
-                        nextSkinUs = sourceUs + skinIntervalUs
-                    }
-                    samples += BeautyFaceSampleV28(sourceUs, detectPrimaryGeometry(detector, prepared))
+                    samples += BeautyFaceSampleV28(sourceUs, detectPrimaryGeometry(detector, frame))
                 } finally {
-                    if (prepared !== raw) prepared.recycle()
-                    raw.recycle()
+                    frame.recycle()
                 }
             }
+
             return BeautyFaceTrackV28(
                 sourceUri = clip.uri,
                 analyzedStartUs = start,
@@ -198,6 +222,41 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
             hairSegmenter?.close()
             detector.close()
         }
+    }
+
+    private fun targetFaceAnchorCount(clip: TimelineClip): Int {
+        val durationUs = (clip.sourceOutUs - clip.sourceInUs).coerceAtLeast(1L)
+        val roughlyOnePerSecond = (durationUs / 1_000_000L).toInt() + 2
+        return roughlyOnePerSecond.coerceIn(MIN_FAST_FACE_ANCHORS, MAX_FAST_FACE_ANCHORS)
+    }
+
+    private fun evenlySpacedTimes(start: Long, end: Long, count: Int): List<Long> {
+        val last = (end - 1L).coerceAtLeast(start)
+        val safeCount = count.coerceAtLeast(2)
+        if (last <= start) return listOf(start, end)
+        return (0 until safeCount).map { index ->
+            if (index == safeCount - 1) last
+            else start + ((last - start) * index.toLong()) / (safeCount - 1).toLong()
+        }.distinct()
+    }
+
+    private fun scaledFrameAtTime(retriever: MediaMetadataRetriever, sourceUs: Long, option: Int): Bitmap? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            if (width > 0 && height > 0) {
+                val longEdge = max(width, height)
+                val scale = if (longEdge <= ANALYSIS_LONG_EDGE) 1f else ANALYSIS_LONG_EDGE / longEdge.toFloat()
+                val targetWidth = (width * scale).toInt().coerceAtLeast(1)
+                val targetHeight = (height * scale).toInt().coerceAtLeast(1)
+                retriever.getScaledFrameAtTime(sourceUs, option, targetWidth, targetHeight)?.let { return it }
+            }
+        }
+        val raw = retriever.getFrameAtTime(sourceUs, option) ?: return null
+        val scaled = downscaleForDetector(raw)
+        if (scaled === raw) return raw
+        raw.recycle()
+        return scaled
     }
 
     private suspend fun detectPrimaryGeometry(detector: FaceDetector, bitmap: Bitmap): BeautyFaceGeometryV28? {
@@ -324,8 +383,8 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
 
     private fun downscaleForDetector(bitmap: Bitmap): Bitmap {
         val longEdge = max(bitmap.width, bitmap.height)
-        if (longEdge <= 720) return bitmap
-        val scale = 720f / longEdge.toFloat()
+        if (longEdge <= ANALYSIS_LONG_EDGE) return bitmap
+        val scale = ANALYSIS_LONG_EDGE / longEdge.toFloat()
         return Bitmap.createScaledBitmap(
             bitmap,
             (bitmap.width * scale).toInt().coerceAtLeast(1),
@@ -352,4 +411,12 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
             context.contentResolver.openInputStream(uri)?.use { stream -> BitmapFactory.decodeStream(stream) }
         }
     }.getOrNull()
+
+    companion object {
+        private const val PRIME_FACE_ANCHORS = 5
+        private const val MIN_FAST_FACE_ANCHORS = 10
+        private const val MAX_FAST_FACE_ANCHORS = 48
+        private const val SEMANTIC_ANCHOR_LIMIT = 12
+        private const val ANALYSIS_LONG_EDGE = 480
+    }
 }
