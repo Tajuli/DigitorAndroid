@@ -60,13 +60,15 @@ object BeautyFaceTrackStoreV28 {
         val digest = MessageDigest.getInstance("SHA-256").digest(uri.toByteArray())
             .joinToString("") { byte -> "%02x".format(byte) }
             .take(32)
-        return File(File(context.filesDir, "beauty_face_tracks_v32_fast"), "$digest.json")
+        return File(File(context.filesDir, "beauty_face_tracks_v33_quality"), "$digest.json")
     }
 }
 
 /**
- * Low-latency beauty analysis. A five-anchor face seed returns quickly; bounded semantic refinement
- * continues independently and is consumed live by the GPU shader when each cache becomes available.
+ * Fast seed + higher-quality background refinement. Preview can start from five sync-frame anchors,
+ * then the cache is replaced by denser exact-frame geometry while semantic skin/hair masks are
+ * sampled at a bounded cadence. This avoids the one-second/keyframe stepping that makes beauty
+ * appear to float behind a moving face.
  */
 class BeautyFaceAnalyzerV28(private val context: Context) {
     private val options = FaceDetectorOptions.Builder()
@@ -107,7 +109,7 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         val existing = BeautyFaceTrackStoreV28.load(context, clip)
         val targetFaceAnchors = targetFaceAnchorCount(clip)
         val faceReady = existing?.covers(clip.sourceInUs, clip.sourceOutUs) == true &&
-            existing.samples.count { it.geometry != null } >= minOf(targetFaceAnchors, 12)
+            existing.samples.count { it.geometry != null } >= minOf(targetFaceAnchors, 24)
         val hairReady = !requireHairMask || BeautyHairMaskStoreV29.hasCoverage(context, clip)
         val skinReady = !requireSkinMask || BeautyFaceSkinMaskStoreV31.hasCoverage(context, clip)
         if (faceReady && hairReady && skinReady) return existing!!
@@ -121,7 +123,8 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
                 requireHairMask = requireHairMask,
                 requireSkinMask = requireSkinMask,
                 semanticAnchorLimit = SEMANTIC_ANCHOR_LIMIT,
-                frameOption = MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                // Refinement must inspect requested frames, not only nearby keyframes.
+                frameOption = MediaMetadataRetriever.OPTION_CLOSEST,
             )
         }
         val merged = existing?.mergedWith(fresh) ?: fresh
@@ -129,11 +132,6 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         return merged
     }
 
-    /**
-     * Editor compatibility entry point. Return as soon as the quick face seed exists, then refine
-     * semantic skin/hair and denser anchors in a deduplicated process background job. The caller is
-     * never held for the whole-video refinement pass.
-     */
     suspend fun analyzeAndStore(
         clip: TimelineClip,
         requireHairMask: Boolean = true,
@@ -252,8 +250,8 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
 
     private fun targetFaceAnchorCount(clip: TimelineClip): Int {
         val durationUs = (clip.sourceOutUs - clip.sourceInUs).coerceAtLeast(1L)
-        val roughlyOnePerSecond = (durationUs / 1_000_000L).toInt() + 2
-        return roughlyOnePerSecond.coerceIn(MIN_FAST_FACE_ANCHORS, MAX_FAST_FACE_ANCHORS)
+        val roughlyThreePerSecond = ((durationUs * 3L) / 1_000_000L).toInt() + 2
+        return roughlyThreePerSecond.coerceIn(MIN_FAST_FACE_ANCHORS, MAX_FAST_FACE_ANCHORS)
     }
 
     private fun evenlySpacedTimes(start: Long, end: Long, count: Int): List<Long> {
@@ -325,17 +323,17 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
                 FaceContour.LOWER_LIP_BOTTOM,
             ),
             lipsFallback,
-            .10f,
+            .04f,
         )
-        val leftEye = contourBounds(face, width, height, intArrayOf(FaceContour.LEFT_EYE), leftEyeFallback, .18f)
-        val rightEye = contourBounds(face, width, height, intArrayOf(FaceContour.RIGHT_EYE), rightEyeFallback, .18f)
+        val leftEye = contourBounds(face, width, height, intArrayOf(FaceContour.LEFT_EYE), leftEyeFallback, .14f)
+        val rightEye = contourBounds(face, width, height, intArrayOf(FaceContour.RIGHT_EYE), rightEyeFallback, .14f)
         val leftBrow = contourBounds(
             face,
             width,
             height,
             intArrayOf(FaceContour.LEFT_EYEBROW_TOP, FaceContour.LEFT_EYEBROW_BOTTOM),
             leftBrowFallback,
-            .18f,
+            .14f,
         )
         val rightBrow = contourBounds(
             face,
@@ -343,7 +341,7 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
             height,
             intArrayOf(FaceContour.RIGHT_EYEBROW_TOP, FaceContour.RIGHT_EYEBROW_BOTTOM),
             rightBrowFallback,
-            .18f,
+            .14f,
         )
 
         val faceWidth = (faceRect.right - faceRect.left).coerceAtLeast(.01f)
@@ -440,9 +438,9 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
 
     companion object {
         private const val PRIME_FACE_ANCHORS = 5
-        private const val MIN_FAST_FACE_ANCHORS = 10
-        private const val MAX_FAST_FACE_ANCHORS = 48
-        private const val SEMANTIC_ANCHOR_LIMIT = 12
+        private const val MIN_FAST_FACE_ANCHORS = 18
+        private const val MAX_FAST_FACE_ANCHORS = 210
+        private const val SEMANTIC_ANCHOR_LIMIT = 30
         private const val ANALYSIS_LONG_EDGE = 480
 
         private val refinementScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
