@@ -7,17 +7,26 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 /**
  * Shared video processing stages used by both preview and export.
  *
- * V36 keeps creator filters responsive by attaching persistent preview stages before a filter is
- * selected. Filter taps only mutate lightweight effect markers on an existing node, so neither the
- * decoder nor the GL graph needs to be recreated.
+ * V36 keeps creator filters responsive by attaching persistent realtime-preview stages before a
+ * filter is selected. Filter taps only mutate lightweight effect markers on an existing node, so
+ * neither the decoder nor the GL graph needs to be recreated.
+ *
+ * Two preview contracts intentionally exist:
+ *  - [compositedPreviewEffectsFor] is the production realtime graph. It keeps the BASE/look/FINISH
+ *    stages resident so a new filter becomes visible on the next submitted frame.
+ *  - [compositedExactPreviewEffectsFor] is the deterministic export-parity snapshot used by the
+ *    byte-parity harness. It uses the same static stage topology as export. A resident neutral GPU
+ *    pass can differ by one 8-bit rounding step even when it is visually a no-op, so comparing that
+ *    latency-optimised graph byte-for-byte with an export that correctly omits inactive stages would
+ *    test framebuffer quantisation rather than render math.
  *
  * Order:
  *  1. Transform.
- *  2. Persistent BASE skin retouch (instant color-skin fallback -> semantic refinement).
+ *  2. BASE skin retouch (instant color-skin fallback -> semantic refinement).
  *  3. Camera input transform + normal Correction/Color LUT.
- *  4. Persistent high-precision creator-look stack.
+ *  4. High-precision creator-look stack.
  *  5. Timed creator effects.
- *  6. Persistent FINISH lips/eyes/hair beauty.
+ *  6. FINISH lips/eyes/hair beauty.
  *  7. Transition.
  */
 @UnstableApi
@@ -33,26 +42,25 @@ object SharedVideoPipeline {
     }
 
     fun compositedExportEffectsFor(clip: TimelineClip): List<Effect> =
-        compositedParityEffectsFor(clip, preview = false)
+        compositedStaticEffectsFor(clip)
 
+    /**
+     * Static snapshot used only when proving render-stage parity against export. Production realtime
+     * preview uses [compositedPreviewEffectsFor] so filter stages stay resident and immediately live.
+     */
     fun compositedExactPreviewEffectsFor(clip: TimelineClip): List<Effect> =
-        compositedParityEffectsFor(clip, preview = true)
+        compositedStaticEffectsFor(clip)
 
-    private fun compositedParityEffectsFor(
-        clip: TimelineClip,
-        preview: Boolean,
-    ): List<Effect> = buildList {
-        BeautyFaceEffectV36.baseForClip(clip, preview = preview)?.let(::add)
-        addAll(
-            if (preview) SharedColorPipeline.exactPreviewEffectsFor(clip)
-            else SharedColorPipeline.effectsFor(clip),
-        )
-        CreatorLookStackEffectV36.forClip(clip, preview = preview)?.let(::add)
-        CreatorEffectGraphV25.forClip(clip, preview = preview)?.let(::add)
-        BeautyFaceEffectV36.finishForClip(clip, preview = preview)?.let(::add)
-        TransitionVisualEffectV22.forClip(clip, preview = preview)?.let(::add)
+    private fun compositedStaticEffectsFor(clip: TimelineClip): List<Effect> = buildList {
+        BeautyFaceEffectV36.baseForClip(clip, preview = false)?.let(::add)
+        addAll(SharedColorPipeline.effectsFor(clip))
+        CreatorLookStackEffectV36.forClip(clip, preview = false)?.let(::add)
+        CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
+        BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
+        TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
     }
 
+    /** Production zero-latency composited preview chain. */
     fun compositedPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         BeautyFaceEffectV36.baseForClip(clip, preview = true)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
