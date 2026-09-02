@@ -69,14 +69,6 @@ jobs:
             adb install -r app/build/outputs/apk/phone/app-phone.apk
             adb shell am force-stop com.tajuli.digitorandroid
             adb logcat -c
-            adb shell am start -W -n com.tajuli.digitorandroid/.MainActivity || true
+            adb shell am start -W -n com.tajuli.digitorandroid/.MainActivity
             sleep 5
-            PID="$(adb shell pidof com.tajuli.digitorandroid | tr -d '\r')"
-            if [ -z "$PID" ]; then
-              echo '=== Digitor phone startup failed; recent logcat ==='
-              adb logcat -d -v threadtime | grep -E -A 80 -B 20 'FATAL EXCEPTION|AndroidRuntime|com.tajuli.digitorandroid' | tail -400 || true
-              echo '=== Activity state ==='
-              adb shell dumpsys activity activities | tail -250 || true
-              exit 1
-            fi
-            echo "Digitor phone smoke test alive with PID=$PID"
+            PID="$(adb shell pidof com.tajuli.digitorandroid | tr -d '\r')"; if [ -z "$PID" ]; then echo '=== Digitor phone startup failed; recent logcat ==='; adb logcat -d -v threadtime | grep -E -A 80 -B 20 'FATAL EXCEPTION|AndroidRuntime|com.tajuli.digitorandroid' | tail -400 || true; echo '=== Activity state ==='; adb shell dumpsys activity activities | tail -250 || true; exit 1; fi; echo "Digitor phone smoke test alive with PID=$PID"
