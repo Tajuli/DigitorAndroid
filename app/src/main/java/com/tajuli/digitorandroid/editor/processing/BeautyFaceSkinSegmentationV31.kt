@@ -19,7 +19,7 @@ import kotlin.math.roundToInt
 
 private const val FACE_SKIN_MODEL_ASSET_V31 = "selfie_multiclass_256x256.tflite"
 private const val FACE_SKIN_CLASS_V31 = 3
-private const val FACE_SKIN_MASK_LONG_EDGE_V31 = 192
+private const val FACE_SKIN_MASK_LONG_EDGE_V31 = 256
 
 /** One cached semantic face-skin confidence mask from MediaPipe SelfieMulticlass. */
 data class BeautyFaceSkinMaskFrameV31(
@@ -56,9 +56,9 @@ data class BeautyFaceSkinMaskTrackV31(
 }
 
 /**
- * Semantic face-skin confidence cache. Unlike a hard winning-category mask, confidence alpha keeps
- * uncertain boundary pixels partially transparent. That makes brightening/smoothing dissolve into
- * the original face instead of looking like a colored sticker over skin, hair or a hijab edge.
+ * Semantic face-skin confidence cache. V34 keeps the full 256-pixel model output instead of
+ * shrinking it to 192, improving cheeks, jaw, nose and head-cover boundaries without inventing
+ * resolution that the model does not provide.
  */
 object BeautyFaceSkinMaskStoreV31 {
     private val indexCache = ConcurrentHashMap<String, BeautyFaceSkinMaskTrackV31>()
@@ -102,7 +102,7 @@ object BeautyFaceSkinMaskStoreV31 {
     }
 
     private fun sourceDir(context: Context, sourceUri: String): File =
-        File(File(context.filesDir, "beauty_face_skin_masks_v33_confidence"), cacheKey(sourceUri))
+        File(File(context.filesDir, "beauty_face_skin_masks_v34_confidence_256"), cacheKey(sourceUri))
 
     private fun cacheKey(sourceUri: String): String = MessageDigest.getInstance("SHA-256")
         .digest(sourceUri.toByteArray())
@@ -141,14 +141,11 @@ class BeautyFaceSkinSegmenterV31(context: Context) : AutoCloseable {
         val alpha = IntArray(width * height)
         for (index in alpha.indices) {
             val confidence = confidences.get().coerceIn(0f, 1f)
-            // Keep uncertain edges translucent instead of thresholding them into a hard on/off mask.
-            val x = ((confidence - .06f) / .82f).coerceIn(0f, 1f)
+            val x = ((confidence - .05f) / .84f).coerceIn(0f, 1f)
             val smooth = x * x * (3f - 2f * x)
             alpha[index] = (smooth * 255f).roundToInt().coerceIn(0, 255)
         }
 
-        // One tiny spatial pass suppresses isolated confidence noise while preserving the model's
-        // naturally soft boundary. The old binary path needed more blur and looked mask-like.
         val softened = blurMask(alpha, width, height)
         val pixels = IntArray(width * height) { index ->
             val value = softened[index].coerceIn(0, 255)
