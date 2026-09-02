@@ -38,10 +38,9 @@ object BeautyFaceTrackStoreV28 {
             ?.takeIf { it.sourceUri == clip.uri && it.version == 1 }
     }
 
-    /** Beauty readiness now includes the dedicated semantic-hair cache for upgrade safety. */
+    /** Face readiness is independent from the heavier semantic-hair cache. */
     fun hasCoverage(context: Context, clip: TimelineClip): Boolean =
-        load(context, clip)?.covers(clip.sourceInUs, clip.sourceOutUs) == true &&
-            BeautyHairMaskStoreV29.hasCoverage(context, clip)
+        load(context, clip)?.covers(clip.sourceInUs, clip.sourceOutUs) == true
 
     fun save(context: Context, track: BeautyFaceTrackV28) {
         val file = fileFor(context, track.sourceUri)
@@ -58,16 +57,17 @@ object BeautyFaceTrackStoreV28 {
         val digest = MessageDigest.getInstance("SHA-256").digest(uri.toByteArray())
             .joinToString("") { byte -> "%02x".format(byte) }
             .take(32)
-        return File(File(context.filesDir, "beauty_face_tracks_v28"), "$digest.json")
+        // V30 invalidates the older sparse (~80 sample) tracks that could visibly trail motion.
+        return File(File(context.filesDir, "beauty_face_tracks_v30"), "$digest.json")
     }
 }
 
 /**
  * On-device face/contour analysis used by stackable beauty filters.
  *
- * ML Kit supplies face/eye/lip/brow geometry. The same sampled frame is also sent through the
- * dedicated MediaPipe HairSegmenter and a semantic hair mask is cached by source time for the GPU
- * beauty stage. This replaces the earlier upper-head rectangle/pixel-color hair heuristic.
+ * ML Kit supplies face/eye/lip/brow geometry. Video tracking deliberately samples face geometry
+ * more densely than the semantic hair model; the GPU warps the nearest hair mask onto the current
+ * interpolated face transform so expensive segmentation does not need to run on every face sample.
  */
 class BeautyFaceAnalyzerV28(private val context: Context) {
     private val options = FaceDetectorOptions.Builder()
@@ -130,18 +130,26 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
             val start = clip.sourceInUs.coerceAtLeast(0L)
             val end = clip.sourceOutUs.coerceAtLeast(start + 1L)
             val duration = (end - start).coerceAtLeast(1L)
-            // Roughly 4 fps on short clips, tapering to <=80 detector/segmenter calls on long clips.
-            val intervalUs = max(250_000L, duration / 80L).coerceAtMost(1_000_000L)
+
+            // Motion quality first: up to ~8 fps for short clips and roughly <=240 face samples for
+            // longer clips. A ~63 s clip now gets ~3.8 fps instead of the previous ~1.3 fps.
+            val faceIntervalUs = max(125_000L, duration / 240L)
+            // Hair segmentation is heavier. Sample it about half as often, then GPU-warp each mask
+            // using the denser interpolated face track to keep it attached to head motion.
+            val hairIntervalUs = max(250_000L, duration / 120L)
+
             val times = mutableListOf<Long>()
             var t = start
             while (t < end) {
                 times += t
-                t += intervalUs
+                t += faceIntervalUs
             }
-            if (times.isEmpty() || times.last() != end - 1L) times += (end - 1L).coerceAtLeast(start)
+            val lastSourceUs = (end - 1L).coerceAtLeast(start)
+            if (times.isEmpty() || times.last() != lastSourceUs) times += lastSourceUs
 
             val samples = ArrayList<BeautyFaceSampleV28>(times.size)
-            for (sourceUs in times) {
+            var nextHairUs = start
+            for ((index, sourceUs) in times.withIndex()) {
                 val raw = retriever.getFrameAtTime(sourceUs, MediaMetadataRetriever.OPTION_CLOSEST)
                 if (raw == null) {
                     samples += BeautyFaceSampleV28(sourceUs, null)
@@ -149,7 +157,11 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
                 }
                 val prepared = downscaleForDetector(raw)
                 try {
-                    hairSegmenter?.segmentAndStore(context, clip, prepared, sourceUs)
+                    val isLast = index == times.lastIndex
+                    if (hairSegmenter != null && (sourceUs >= nextHairUs || isLast)) {
+                        hairSegmenter.segmentAndStore(context, clip, prepared, sourceUs)
+                        nextHairUs = sourceUs + hairIntervalUs
+                    }
                     samples += BeautyFaceSampleV28(sourceUs, detectPrimaryGeometry(detector, prepared))
                 } finally {
                     if (prepared !== raw) prepared.recycle()
