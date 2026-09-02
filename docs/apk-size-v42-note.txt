@@ -1,3 +1,0 @@
-Compact CI phone APK: gradle :app:assembleDebug -PdigitorAbi=arm64-v8a
-Emulator tests: gradle :app:connectedDebugAndroidTest -PdigitorAbi=x86_64
-Normal local builds without -PdigitorAbi remain universal.
