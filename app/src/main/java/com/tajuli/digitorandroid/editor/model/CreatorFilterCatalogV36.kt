@@ -13,6 +13,7 @@ import kotlin.math.abs
  * Old V28 filter-node projects remain readable through [appliedCreatorFiltersV36].
  */
 const val CREATOR_FILTER_MARKER_PREFIX_V36 = "__digitor_filter_v36__:"
+const val KOREAN_SKIN_BRIGHT_FILTER_ID_V40 = "korean_skin_bright"
 
 enum class CreatorFilterGroupV36 { LOOKS, BEAUTY }
 
@@ -114,7 +115,11 @@ val CREATOR_FILTERS_V36: List<CreatorFilterPresetV36> = listOf(
         beautyWeights = mapOf(BEAUTY_SKIN_BRIGHT_V28 to 1f), defaultIntensity = .80f,
     ),
     CreatorFilterPresetV36(
-        id = "skin_smooth", name = "Skin Smooth", description = "Texture-safe skin smoothing", group = CreatorFilterGroupV36.BEAUTY,
+        id = KOREAN_SKIN_BRIGHT_FILTER_ID_V40, name = "Korean Skin Bright", description = "Porcelain bright rosy K-beauty tone", group = CreatorFilterGroupV36.BEAUTY,
+        beautyWeights = mapOf(BEAUTY_SKIN_BRIGHT_V28 to 1f), defaultIntensity = .80f,
+    ),
+    CreatorFilterPresetV36(
+        id = "skin_smooth", name = "Skin Smooth", description = "Stronger wrinkle + acne smoothing", group = CreatorFilterGroupV36.BEAUTY,
         beautyWeights = mapOf(BEAUTY_SKIN_SMOOTH_V28 to 1f), defaultIntensity = .50f,
     ),
     CreatorFilterPresetV36(
