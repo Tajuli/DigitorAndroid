@@ -11,7 +11,7 @@ object SharedVideoPipeline {
         ClipTransformEffect.forExport(clip)?.let(::add)
         addAll(SharedColorPipeline.effectsFor(clip))
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
-        BeautyFaceEffectV28.forClip(clip, preview = false)?.let(::add)
+        BeautyFaceEffectV33.forClip(clip, preview = false)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
     }
 
@@ -30,14 +30,14 @@ object SharedVideoPipeline {
             else SharedColorPipeline.effectsFor(clip),
         )
         CreatorEffectGraphV25.forClip(clip, preview = preview)?.let(::add)
-        BeautyFaceEffectV28.forClip(clip, preview = preview)?.let(::add)
+        BeautyFaceEffectV33.forClip(clip, preview = preview)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = preview)?.let(::add)
     }
 
     fun compositedPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         addAll(SharedColorPipeline.previewEffectsFor(clip))
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
-        BeautyFaceEffectV28.forClip(clip, preview = true)?.let(::add)
+        BeautyFaceEffectV33.forClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
     }
 
@@ -45,7 +45,7 @@ object SharedVideoPipeline {
         ClipTransformEffect.forPreview(clip)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
-        BeautyFaceEffectV28.forClip(clip, preview = true)?.let(::add)
+        BeautyFaceEffectV33.forClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
     }
 }
