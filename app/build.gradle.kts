@@ -82,6 +82,19 @@ android {
     }
 
     buildTypes {
+        // Installable CI/phone build: keeps the normal application id and debug signing, but runs
+        // the same shrinker used by release so unused legacy screens/icons/classes do not bloat the
+        // downloadable APK. Normal `debug` remains untouched for development and instrumentation.
+        create("phone") {
+            initWith(getByName("debug"))
+            isDebuggable = true
+            isMinifyEnabled = true
+            isShrinkResources = true
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("debug")
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+
         release {
             isMinifyEnabled = true
             isShrinkResources = true
