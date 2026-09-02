@@ -12,7 +12,10 @@ class CreatorFilterCatalogV36Test {
         val markedGraph = graph.copy(
             nodes = graph.nodes.map { node ->
                 if (node.id == host.id) node.copy(
-                    effects = node.effects + NodeEffect(creatorFilterMarkerNameV36("skin_bright"), .8f),
+                    effects = node.effects + NodeEffect(
+                        name = creatorFilterMarkerNameV36("skin_bright"),
+                        amount = .8f,
+                    ),
                 ) else node
             },
         )
@@ -35,7 +38,10 @@ class CreatorFilterCatalogV36Test {
         val markedGraph = graph.copy(
             nodes = graph.nodes.map { node ->
                 if (node.id == host.id) node.copy(
-                    effects = node.effects + NodeEffect(creatorFilterMarkerNameV36("natural_portrait"), 1f),
+                    effects = node.effects + NodeEffect(
+                        name = creatorFilterMarkerNameV36("natural_portrait"),
+                        amount = 1f,
+                    ),
                 ) else node
             },
         )
