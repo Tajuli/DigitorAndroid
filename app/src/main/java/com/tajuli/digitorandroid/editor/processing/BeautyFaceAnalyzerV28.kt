@@ -38,8 +38,10 @@ object BeautyFaceTrackStoreV28 {
             ?.takeIf { it.sourceUri == clip.uri && it.version == 1 }
     }
 
+    /** Beauty readiness now includes the dedicated semantic-hair cache for upgrade safety. */
     fun hasCoverage(context: Context, clip: TimelineClip): Boolean =
-        load(context, clip)?.covers(clip.sourceInUs, clip.sourceOutUs) == true
+        load(context, clip)?.covers(clip.sourceInUs, clip.sourceOutUs) == true &&
+            BeautyHairMaskStoreV29.hasCoverage(context, clip)
 
     fun save(context: Context, track: BeautyFaceTrackV28) {
         val file = fileFor(context, track.sourceUri)
@@ -63,9 +65,9 @@ object BeautyFaceTrackStoreV28 {
 /**
  * On-device face/contour analysis used by stackable beauty filters.
  *
- * ML Kit supplies face/eye/lip/brow geometry. When a beauty preset needs hair, the same sampled
- * frame is also sent through the dedicated MediaPipe HairSegmenter and a semantic hair mask is
- * cached by source time for the GPU beauty stage.
+ * ML Kit supplies face/eye/lip/brow geometry. The same sampled frame is also sent through the
+ * dedicated MediaPipe HairSegmenter and a semantic hair mask is cached by source time for the GPU
+ * beauty stage. This replaces the earlier upper-head rectangle/pixel-color hair heuristic.
  */
 class BeautyFaceAnalyzerV28(private val context: Context) {
     private val options = FaceDetectorOptions.Builder()
@@ -77,7 +79,7 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         .enableTracking()
         .build()
 
-    suspend fun analyzeAndStore(clip: TimelineClip, requireHairMask: Boolean = false): BeautyFaceTrackV28 {
+    suspend fun analyzeAndStore(clip: TimelineClip, requireHairMask: Boolean = true): BeautyFaceTrackV28 {
         val existing = BeautyFaceTrackStoreV28.load(context, clip)
         val faceReady = existing?.covers(clip.sourceInUs, clip.sourceOutUs) == true
         val hairReady = !requireHairMask || BeautyHairMaskStoreV29.hasCoverage(context, clip)
