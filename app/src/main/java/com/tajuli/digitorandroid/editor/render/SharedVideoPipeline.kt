@@ -7,26 +7,28 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 /**
  * Shared video processing stages used by both preview and export.
  *
- * V35 orders portrait/color/look work deliberately:
+ * V36 keeps creator filters responsive by attaching persistent preview stages before a filter is
+ * selected. Filter taps only mutate lightweight effect markers on an existing node, so neither the
+ * decoder nor the GL graph needs to be recreated.
  *
- *  1. BASE semantic skin retouch.
- *  2. Camera input transform + ordinary Correction/Color graph.
- *  3. High-precision creator looks, one final serial look node per GPU pass.
- *  4. Timed creator effects.
- *  5. FINISH lips/eyes/hair cosmetics.
- *
- * This keeps skin smoothing before stylisation, keeps creator looks out of the 8-bit grading LUT,
- * and guarantees realtime preview/export use the same V35 look shader.
+ * Order:
+ *  1. Transform.
+ *  2. Persistent BASE skin retouch (instant color-skin fallback -> semantic refinement).
+ *  3. Camera input transform + normal Correction/Color LUT.
+ *  4. Persistent high-precision creator-look stack.
+ *  5. Timed creator effects.
+ *  6. Persistent FINISH lips/eyes/hair beauty.
+ *  7. Transition.
  */
 @UnstableApi
 object SharedVideoPipeline {
     fun effectsFor(clip: TimelineClip): List<Effect> = buildList {
         ClipTransformEffect.forExport(clip)?.let(::add)
-        BeautyFaceEffectV34.baseForClip(clip, preview = false)?.let(::add)
+        BeautyFaceEffectV36.baseForClip(clip, preview = false)?.let(::add)
         addAll(SharedColorPipeline.effectsFor(clip))
-        addAll(CreatorLookEffectV35.effectsForClip(clip, preview = false))
+        CreatorLookStackEffectV36.forClip(clip, preview = false)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
-        BeautyFaceEffectV34.finishForClip(clip, preview = false)?.let(::add)
+        BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
     }
 
@@ -40,33 +42,33 @@ object SharedVideoPipeline {
         clip: TimelineClip,
         preview: Boolean,
     ): List<Effect> = buildList {
-        BeautyFaceEffectV34.baseForClip(clip, preview = preview)?.let(::add)
+        BeautyFaceEffectV36.baseForClip(clip, preview = preview)?.let(::add)
         addAll(
             if (preview) SharedColorPipeline.exactPreviewEffectsFor(clip)
             else SharedColorPipeline.effectsFor(clip),
         )
-        addAll(CreatorLookEffectV35.effectsForClip(clip, preview = preview))
+        CreatorLookStackEffectV36.forClip(clip, preview = preview)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = preview)?.let(::add)
-        BeautyFaceEffectV34.finishForClip(clip, preview = preview)?.let(::add)
+        BeautyFaceEffectV36.finishForClip(clip, preview = preview)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = preview)?.let(::add)
     }
 
     fun compositedPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
-        BeautyFaceEffectV34.baseForClip(clip, preview = true)?.let(::add)
+        BeautyFaceEffectV36.baseForClip(clip, preview = true)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
-        addAll(CreatorLookEffectV35.effectsForClip(clip, preview = true))
+        CreatorLookStackEffectV36.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
-        BeautyFaceEffectV34.finishForClip(clip, preview = true)?.let(::add)
+        BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
     }
 
     fun previewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         ClipTransformEffect.forPreview(clip)?.let(::add)
-        BeautyFaceEffectV34.baseForClip(clip, preview = true)?.let(::add)
+        BeautyFaceEffectV36.baseForClip(clip, preview = true)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
-        addAll(CreatorLookEffectV35.effectsForClip(clip, preview = true))
+        CreatorLookStackEffectV36.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
-        BeautyFaceEffectV34.finishForClip(clip, preview = true)?.let(::add)
+        BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
     }
 }
