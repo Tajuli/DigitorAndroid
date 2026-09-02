@@ -53,7 +53,9 @@ import com.tajuli.digitorandroid.editor.model.NodePosition
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceAnalyzerV28
+import com.tajuli.digitorandroid.editor.processing.BeautyFaceSkinMaskStoreV31
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceTrackStoreV28
+import com.tajuli.digitorandroid.editor.processing.BeautyHairMaskStoreV29
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -72,11 +74,6 @@ private enum class FilterGroupV28(val label: String) {
     BEAUTY("Beauty"),
 }
 
-/**
- * Digitor-authored creator looks. Beauty entries are region-aware GPU layers; normal looks are
- * color-grade recipes. Every applied preset owns its own final serial node, so multiple presets can
- * be combined without overwriting Correction/Color work.
- */
 private data class CreatorFilterPresetV28(
     val id: String,
     val name: String,
@@ -88,6 +85,7 @@ private data class CreatorFilterPresetV28(
     val highlights: ColorWheelValue = ColorWheelValue(),
     val global: ColorWheelValue = ColorWheelValue(),
     val beautyEffects: Map<String, Float> = emptyMap(),
+    val defaultIntensity: Float = 1f,
     val swatchA: Color,
     val swatchB: Color,
 )
@@ -166,28 +164,28 @@ private val CREATOR_FILTERS_V28 = listOf(
     ),
 
     CreatorFilterPresetV28(
-        id = "skin_bright", name = "Skin Bright", description = "Face-aware bright skin", group = FilterGroupV28.BEAUTY,
-        beautyEffects = mapOf(BEAUTY_SKIN_BRIGHT_V28 to 1f),
+        id = "skin_bright", name = "Skin Bright", description = "Semantic neutral bright skin", group = FilterGroupV28.BEAUTY,
+        beautyEffects = mapOf(BEAUTY_SKIN_BRIGHT_V28 to 1f), defaultIntensity = .60f,
         swatchA = Color(0xFFD6A98F), swatchB = Color(0xFFFFE3CE),
     ),
     CreatorFilterPresetV28(
-        id = "skin_smooth", name = "Skin Smooth", description = "Texture-safe smoothing", group = FilterGroupV28.BEAUTY,
-        beautyEffects = mapOf(BEAUTY_SKIN_SMOOTH_V28 to 1f),
+        id = "skin_smooth", name = "Skin Smooth", description = "Edge-aware texture smoothing", group = FilterGroupV28.BEAUTY,
+        beautyEffects = mapOf(BEAUTY_SKIN_SMOOTH_V28 to 1f), defaultIntensity = .50f,
         swatchA = Color(0xFFC89582), swatchB = Color(0xFFF1C6B7),
     ),
     CreatorFilterPresetV28(
-        id = "pink_lips", name = "Pink Lips", description = "Soft natural pink lips", group = FilterGroupV28.BEAUTY,
-        beautyEffects = mapOf(BEAUTY_PINK_LIP_V28 to 1f),
+        id = "pink_lips", name = "Pink Lips", description = "Luma-safe natural rose lips", group = FilterGroupV28.BEAUTY,
+        beautyEffects = mapOf(BEAUTY_PINK_LIP_V28 to 1f), defaultIntensity = .55f,
         swatchA = Color(0xFF9B4E61), swatchB = Color(0xFFF08FA8),
     ),
     CreatorFilterPresetV28(
         id = "hair_brows", name = "Hair & Brows", description = "Semantic hair + dark brows", group = FilterGroupV28.BEAUTY,
-        beautyEffects = mapOf(BEAUTY_HAIR_BROW_DARK_V28 to 1f),
+        beautyEffects = mapOf(BEAUTY_HAIR_BROW_DARK_V28 to 1f), defaultIntensity = .45f,
         swatchA = Color(0xFF111115), swatchB = Color(0xFF4E4240),
     ),
     CreatorFilterPresetV28(
-        id = "eye_pop", name = "Eye Pop", description = "Clearer prominent eyes", group = FilterGroupV28.BEAUTY,
-        beautyEffects = mapOf(BEAUTY_EYE_POP_V28 to 1f),
+        id = "eye_pop", name = "Eye Pop", description = "Natural eye clarity", group = FilterGroupV28.BEAUTY,
+        beautyEffects = mapOf(BEAUTY_EYE_POP_V28 to 1f), defaultIntensity = .45f,
         swatchA = Color(0xFF394D65), swatchB = Color(0xFFD9E7F2),
     ),
     CreatorFilterPresetV28(
@@ -199,6 +197,7 @@ private val CREATOR_FILTERS_V28 = listOf(
             BEAUTY_HAIR_BROW_DARK_V28 to .34f,
             BEAUTY_EYE_POP_V28 to .38f,
         ),
+        defaultIntensity = .70f,
         swatchA = Color(0xFFB66F72), swatchB = Color(0xFFF3C7A9),
     ),
 )
@@ -231,26 +230,34 @@ fun CreatorFiltersWorkspaceV27(
     fun applyPreset(preset: CreatorFilterPresetV28) {
         selectedPresetId = preset.id
         val alreadyApplied = preset.id in appliedIds
-
-        // UX rule: selecting a filter must make its control active immediately. Beauty analysis can
-        // take seconds on a long video, so never gate the node/slider behind ML preprocessing.
         if (!alreadyApplied) {
-            applyFilterV28(vm, clip.id, preset, 1f, coalesce = false)
+            applyFilterV28(vm, clip.id, preset, preset.defaultIntensity, coalesce = false)
         }
         if (preset.group != FilterGroupV28.BEAUTY) return
 
         val needsHairMask = preset.beautyEffects.containsKey(BEAUTY_HAIR_BROW_DARK_V28)
+        val needsSkinMask = preset.beautyEffects.containsKey(BEAUTY_SKIN_BRIGHT_V28) ||
+            preset.beautyEffects.containsKey(BEAUTY_SKIN_SMOOTH_V28)
         val faceReady = BeautyFaceTrackStoreV28.hasCoverage(context, clip)
-        if (faceReady && !needsHairMask) return
+        val hairReady = !needsHairMask || BeautyHairMaskStoreV29.hasCoverage(context, clip)
+        val skinReady = !needsSkinMask || BeautyFaceSkinMaskStoreV31.hasCoverage(context, clip)
+        if (faceReady && hairReady && skinReady) return
 
-        vm.setEditorStatusV19(
-            if (needsHairMask) "Filter active · analyzing face + semantic hair in background…"
-            else "Filter active · analyzing face in background…",
-        )
+        val analysisLabel = when {
+            needsHairMask && needsSkinMask -> "face + semantic skin + hair"
+            needsSkinMask -> "face + semantic skin"
+            needsHairMask -> "face + semantic hair"
+            else -> "face"
+        }
+        vm.setEditorStatusV19("Filter active · analyzing $analysisLabel in background…")
         scope.launch {
             val track = runCatching {
                 withContext(Dispatchers.Default) {
-                    BeautyFaceAnalyzerV28(context).analyzeAndStore(clip, requireHairMask = needsHairMask)
+                    BeautyFaceAnalyzerV28(context).analyzeAndStore(
+                        clip,
+                        requireHairMask = needsHairMask,
+                        requireSkinMask = needsSkinMask,
+                    )
                 }
             }.getOrElse { error ->
                 vm.setEditorStatusV19(error.message ?: "Beauty analysis failed")
@@ -261,17 +268,11 @@ fun CreatorFiltersWorkspaceV27(
                 return@launch
             }
 
-            // The GPU beauty program may have been created before cached geometry/masks existed.
-            // Re-commit the live node at its CURRENT intensity so resources are picked up without
-            // resetting a slider that the user moved while background analysis was running.
             val liveClip = vm.state.value.project.clip(clip.id) ?: return@launch
             val liveNode = liveClip.nodeGraph.filterNodeForPresetV28(preset.id) ?: return@launch
             val liveIntensity = inferIntensityV28(liveNode, preset)
             applyFilterV28(vm, clip.id, preset, liveIntensity, coalesce = true)
-            vm.setEditorStatusV19(
-                if (needsHairMask) "${preset.name} ready · face + semantic hair analyzed"
-                else "${preset.name} ready · face analyzed",
-            )
+            vm.setEditorStatusV19("${preset.name} ready · $analysisLabel analyzed")
         }
     }
 
@@ -308,7 +309,7 @@ fun CreatorFiltersWorkspaceV27(
                 }
             }
             if (group == FilterGroupV28.BEAUTY) {
-                Text("Face contours + HairSegmenter · video + image", fontSize = 7.sp, color = Filter27Muted)
+                Text("Semantic skin + face + hair · video + image", fontSize = 7.sp, color = Filter27Muted)
             }
         }
 
@@ -357,7 +358,7 @@ fun CreatorFiltersWorkspaceV27(
             )
             Text(
                 if (group == FilterGroupV28.BEAUTY) {
-                    "Combine freely: Skin Bright + Hair & Brows + Pink Lips + Eye Pop. ML Kit localizes face features; MediaPipe HairSegmenter supplies a real semantic hair mask instead of a color/rectangle guess."
+                    "Combine freely. Skin Bright/Smooth use semantic face-skin segmentation; Hair & Brows uses dedicated HairSegmenter; lips/eyes/brows follow face contours. 100% is maximum, presets start at a natural default."
                 } else {
                     "Looks are independent final serial nodes. You can stack multiple looks, and your existing Correction/Color nodes remain untouched."
                 },
@@ -476,7 +477,6 @@ private fun clearFiltersV28(vm: EditorViewModelV4, clipId: String) {
 private fun ClipNodeGraph.ensureFilterNodeV28(preset: CreatorFilterPresetV28): ClipNodeGraph {
     val existing = filterNodeForPresetV28(preset.id)
     if (existing != null) {
-        // Migrate the single-filter V27 label if this branch had already been used locally.
         if (existing.label.startsWith(LEGACY_FILTER_NODE_PREFIX_V27)) {
             return copy(
                 nodes = nodes.map { node -> if (node.id == existing.id) node.copy(label = filterLabelV28(preset)) else node },
