@@ -154,7 +154,8 @@ class BeautyFilterExportInstrumentedTest {
                 runCatching { retriever.release() }
             }
             assertNotNull("Could not decode exported beauty frame", exportedFrame)
-            exportedFrame!!.use { frame ->
+            val frame = exportedFrame!!
+            try {
                 val center = frame.getPixel(frame.width / 2, frame.height / 2)
                 val delta = abs(Color.red(center) - sourceRed) +
                     abs(Color.green(center) - sourceGreen) +
@@ -163,6 +164,8 @@ class BeautyFilterExportInstrumentedTest {
                     "Beauty GPU stage was visually identity at face center; RGB=${Color.red(center)},${Color.green(center)},${Color.blue(center)}",
                     delta >= 18,
                 )
+            } finally {
+                frame.recycle()
             }
         } finally {
             instrumentation.runOnMainSync {
