@@ -282,19 +282,26 @@ internal class BeautyFaceEffectV28 private constructor(
 
                     float skin = face * skinProbability(rgb) * (1.0 - clamp(lips + eyes * .90 + brows * .85, 0.0, 1.0));
 
+                    // South-Asian portrait tuning: these three controls intentionally deliver 3x
+                    // their original visual contribution while retaining the same 0-100% UI range.
                     if (uSkinSmooth > .001) {
+                        float amount = clamp(uSkinSmooth * 3.0, 0.0, 3.0);
                         vec3 soft = softSample(vTexCoord);
                         float textureProtect = 1.0 - smoothstep(.16, .48, abs(luma(rgb) - luma(soft)) * 4.0);
-                        rgb = mix(rgb, soft, skin * textureProtect * clamp(uSkinSmooth, 0.0, 1.5) * .34);
+                        float mixAmount = clamp(skin * textureProtect * amount * .34, 0.0, 1.0);
+                        rgb = mix(rgb, soft, mixAmount);
                     }
 
                     if (uSkinBright > .001) {
+                        float amount = clamp(uSkinBright * 3.0, 0.0, 3.0);
                         vec3 lifted = pow(clamp(rgb, 0.0, 1.0), vec3(.90));
-                        lifted += vec3(.040, .037, .031) * clamp(uSkinBright, 0.0, 1.5);
-                        rgb = mix(rgb, clamp(lifted, 0.0, 1.0), skin * clamp(uSkinBright, 0.0, 1.5) * .58);
+                        lifted += vec3(.040, .037, .031) * amount;
+                        float mixAmount = clamp(skin * amount * .58, 0.0, 1.0);
+                        rgb = mix(rgb, clamp(lifted, 0.0, 1.0), mixAmount);
                     }
 
                     if (uPinkLip > .001) {
+                        float amount = clamp(uPinkLip * 3.0, 0.0, 3.0);
                         float lipLum = luma(rgb);
                         float teethReject = 1.0 - smoothstep(.68, .88, lipLum);
                         float lipMask = lips * teethReject;
@@ -302,7 +309,8 @@ internal class BeautyFaceEffectV28 private constructor(
                         pink.r = max(pink.r * 1.08 + .045, lipLum * 1.02 + .055);
                         pink.g = pink.g * .94 + .008;
                         pink.b = pink.b * 1.06 + .025;
-                        rgb = mix(rgb, clamp(pink, 0.0, 1.0), lipMask * clamp(uPinkLip, 0.0, 1.5) * .62);
+                        float mixAmount = clamp(lipMask * amount * .62, 0.0, 1.0);
+                        rgb = mix(rgb, clamp(pink, 0.0, 1.0), mixAmount);
                     }
 
                     if (uHairBrowDark > .001) {
