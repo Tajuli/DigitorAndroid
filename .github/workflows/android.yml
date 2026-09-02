@@ -22,8 +22,12 @@ jobs:
         run: gradle :app:testDebugUnitTest
       - name: Compile instrumentation parity test
         run: gradle :app:assembleDebugAndroidTest
-      - name: Build debug APK
-        run: gradle :app:assembleDebug
+      - name: Build compact arm64 debug APK
+        run: gradle :app:assembleDebug -PdigitorAbi=arm64-v8a
+      - name: Report APK size
+        run: |
+          ls -lh app/build/outputs/apk/debug/app-debug.apk
+          du -h app/build/outputs/apk/debug/app-debug.apk
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -31,6 +35,8 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
+      - name: Verify optimized release build
+        run: gradle :app:assembleRelease -PdigitorAbi=arm64-v8a
 
   pixel-parity:
     needs: build
@@ -57,4 +63,4 @@ jobs:
           profile: pixel_2
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
-          script: gradle :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.tajuli.digitorandroid.editor.render.PreviewExportPixelParityInstrumentedTest,com.tajuli.digitorandroid.editor.render.PureTextExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.NativeImageExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.TransitionExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.BeautyFilterExportInstrumentedTest,com.tajuli.digitorandroid.editor.processing.HairSegmentationInstrumentedTest,com.tajuli.digitorandroid.editor.processing.FaceSkinSegmentationInstrumentedTest
+          script: gradle :app:connectedDebugAndroidTest -PdigitorAbi=x86_64 -Pandroid.testInstrumentationRunnerArguments.class=com.tajuli.digitorandroid.editor.render.PreviewExportPixelParityInstrumentedTest,com.tajuli.digitorandroid.editor.render.PureTextExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.NativeImageExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.TransitionExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.BeautyFilterExportInstrumentedTest,com.tajuli.digitorandroid.editor.processing.HairSegmentationInstrumentedTest,com.tajuli.digitorandroid.editor.processing.FaceSkinSegmentationInstrumentedTest
