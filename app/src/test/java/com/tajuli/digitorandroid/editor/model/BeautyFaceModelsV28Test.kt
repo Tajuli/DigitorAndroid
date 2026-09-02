@@ -30,7 +30,8 @@ class BeautyFaceModelsV28Test {
         )
 
         val strengths = clip.beautyStrengthsV28()
-        assertEquals(.70f, strengths.skinBright, .0001f)
+        assertEquals(0f, strengths.skinBright, .0001f)
+        assertEquals(.70f, clip.skinQualifierStrengthV38(), .0001f)
         assertEquals(.55f, strengths.pinkLip, .0001f)
         assertEquals(.40f, strengths.hairBrowDark, .0001f)
         assertEquals(.35f, strengths.eyePop, .0001f)
