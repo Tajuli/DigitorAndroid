@@ -1,3 +1,6 @@
+import java.io.File
+import java.net.URI
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -11,9 +14,9 @@ val downloadHairSegmenterModel by tasks.registering {
         val output = hairSegmenterModelFile.get().asFile
         if (output.isFile && output.length() > 1_000_000L) return@doLast
         output.parentFile.mkdirs()
-        val temp = java.io.File(output.parentFile, output.name + ".download")
+        val temp = File(output.parentFile, output.name + ".download")
         if (temp.exists()) temp.delete()
-        val url = java.net.URI(
+        val url = URI(
             "https://storage.googleapis.com/mediapipe-models/image_segmenter/hair_segmenter/float32/latest/hair_segmenter.tflite",
         ).toURL()
         url.openStream().use { input ->
