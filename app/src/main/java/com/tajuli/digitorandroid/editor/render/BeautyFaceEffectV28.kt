@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.opengl.GLES20
 import android.opengl.GLUtils
+import android.os.SystemClock
 import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.util.GlProgram
 import androidx.media3.common.util.GlUtil
@@ -14,6 +15,7 @@ import androidx.media3.effect.BaseGlShaderProgram
 import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
 import com.tajuli.digitorandroid.editor.model.BeautyFaceGeometryV28
+import com.tajuli.digitorandroid.editor.model.BeautyFaceTrackV28
 import com.tajuli.digitorandroid.editor.model.BeautyRectV28
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.beautyStrengthsV28
@@ -46,7 +48,8 @@ internal class BeautyFaceEffectV28 private constructor(
         /* texturePoolCapacity = */ 1,
     ) {
         private val appContext = context.applicationContext
-        private val faceTrack = BeautyFaceTrackStoreV28.load(appContext, clip)
+        private var faceTrack: BeautyFaceTrackV28? = BeautyFaceTrackStoreV28.load(appContext, clip)
+        private var lastFaceTrackRefreshMs = 0L
         private val program: GlProgram
         private var inputWidth = 1
         private var inputHeight = 1
@@ -79,13 +82,14 @@ internal class BeautyFaceEffectV28 private constructor(
                 val currentClip = if (preview) PreviewProjectRegistry.clip(clip.id) ?: clip else clip
                 val strengths = currentClip.beautyStrengthsV28()
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
-                val geometry = faceTrack?.geometryAt(sourceUs)
+                val activeFaceTrack = refreshFaceTrack(currentClip)
+                val geometry = activeFaceTrack?.geometryAt(sourceUs)
                 val hairFrame = if (strengths.hairBrowDark > .001f) {
                     BeautyHairMaskStoreV29.index(appContext, currentClip).nearest(sourceUs)
                 } else {
                     null
                 }
-                val hairReferenceGeometry = hairFrame?.let { frame -> faceTrack?.geometryAt(frame.sourceTimeUs) }
+                val hairReferenceGeometry = hairFrame?.let { frame -> activeFaceTrack?.geometryAt(frame.sourceTimeUs) }
                 val hasHairMask = bindHairMask(hairFrame)
 
                 program.use()
@@ -112,6 +116,22 @@ internal class BeautyFaceEffectV28 private constructor(
             } catch (error: GlUtil.GlException) {
                 throw VideoFrameProcessingException(error, presentationTimeUs)
             }
+        }
+
+        /**
+         * Beauty analysis runs asynchronously from the editor. A shader program can therefore be
+         * created before the face-track cache exists. Refresh the lightweight JSON cache at a low
+         * cadence so preview starts using the track as soon as analysis finishes, without requiring
+         * the whole Media3 preview graph to be recreated. Export also benefits if preprocessing
+         * completed immediately before the first encoded frame.
+         */
+        private fun refreshFaceTrack(currentClip: TimelineClip): BeautyFaceTrackV28? {
+            val now = SystemClock.elapsedRealtime()
+            if (faceTrack == null || now - lastFaceTrackRefreshMs >= FACE_TRACK_REFRESH_MS) {
+                lastFaceTrackRefreshMs = now
+                BeautyFaceTrackStoreV28.load(appContext, currentClip)?.let { latest -> faceTrack = latest }
+            }
+            return faceTrack
         }
 
         private fun setGeometry(
@@ -199,6 +219,8 @@ internal class BeautyFaceEffectV28 private constructor(
         }
 
         companion object {
+            private const val FACE_TRACK_REFRESH_MS = 350L
+
             private const val VERTEX_SHADER = """
                 attribute vec4 aFramePosition;
                 varying vec2 vTexCoord;
