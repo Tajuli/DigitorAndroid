@@ -85,6 +85,7 @@ internal class BeautyFaceEffectV28 private constructor(
                 } else {
                     null
                 }
+                val hairReferenceGeometry = hairFrame?.let { frame -> faceTrack?.geometryAt(frame.sourceTimeUs) }
                 val hasHairMask = bindHairMask(hairFrame)
 
                 program.use()
@@ -101,7 +102,7 @@ internal class BeautyFaceEffectV28 private constructor(
                 program.setFloatUniform("uPinkLip", strengths.pinkLip)
                 program.setFloatUniform("uHairBrowDark", strengths.hairBrowDark)
                 program.setFloatUniform("uEyePop", strengths.eyePop)
-                setGeometry(geometry)
+                setGeometry(geometry, hairReferenceGeometry)
                 program.bindAttributesAndUniforms()
                 GLES20.glDisable(GLES20.GL_BLEND)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -113,13 +114,17 @@ internal class BeautyFaceEffectV28 private constructor(
             }
         }
 
-        private fun setGeometry(geometry: BeautyFaceGeometryV28?) {
+        private fun setGeometry(
+            geometry: BeautyFaceGeometryV28?,
+            hairReferenceGeometry: BeautyFaceGeometryV28?,
+        ) {
             setRect("uFaceRect", geometry?.face)
             setRect("uLipRect", geometry?.lips)
             setRect("uLeftEyeRect", geometry?.leftEye)
             setRect("uRightEyeRect", geometry?.rightEye)
             setRect("uLeftBrowRect", geometry?.leftBrow)
             setRect("uRightBrowRect", geometry?.rightBrow)
+            setRect("uHairReferenceFaceRect", hairReferenceGeometry?.face ?: geometry?.face)
         }
 
         private fun setRect(name: String, rect: BeautyRectV28?) {
@@ -221,6 +226,7 @@ internal class BeautyFaceEffectV28 private constructor(
                 uniform vec4 uRightEyeRect;
                 uniform vec4 uLeftBrowRect;
                 uniform vec4 uRightBrowRect;
+                uniform vec4 uHairReferenceFaceRect;
                 varying vec2 vTexCoord;
 
                 vec2 safeUv(vec2 uv) { return clamp(uv, vec2(.001), vec2(.999)); }
@@ -233,6 +239,14 @@ internal class BeautyFaceEffectV28 private constructor(
                     vec2 q = (p - center) / halfSize;
                     float d = dot(q, q);
                     return 1.0 - smoothstep(inner, outer, d);
+                }
+
+                vec2 hairReferenceUv(vec2 p) {
+                    vec2 currentSize = max(uFaceRect.zw - uFaceRect.xy, vec2(.001));
+                    vec2 referenceSize = max(uHairReferenceFaceRect.zw - uHairReferenceFaceRect.xy, vec2(.001));
+                    vec2 currentCenter = (uFaceRect.xy + uFaceRect.zw) * .5;
+                    vec2 referenceCenter = (uHairReferenceFaceRect.xy + uHairReferenceFaceRect.zw) * .5;
+                    return referenceCenter + (p - currentCenter) * (referenceSize / currentSize);
                 }
 
                 float skinProbability(vec3 c) {
@@ -267,7 +281,6 @@ internal class BeautyFaceEffectV28 private constructor(
                     }
 
                     // Feature geometry and generated hair-mask PNGs use Android top-left coordinates.
-                    // The mask texture is uploaded without a vertical flip, so p samples it directly.
                     vec2 p = vec2(vTexCoord.x, 1.0 - vTexCoord.y);
                     vec3 rgb = source.rgb;
                     float face = uHasFace > .5 ? ellipseMask(p, uFaceRect, .72, 1.08) : 0.0;
@@ -278,14 +291,25 @@ internal class BeautyFaceEffectV28 private constructor(
                     float leftBrow = uHasFace > .5 ? ellipseMask(p, uLeftBrowRect, .58, 1.15) : 0.0;
                     float rightBrow = uHasFace > .5 ? ellipseMask(p, uRightBrowRect, .58, 1.15) : 0.0;
                     float brows = max(leftBrow, rightBrow);
-                    float semanticHair = uHasHairMask > .5 ? texture2D(uHairMask, safeUv(p)).r : 0.0;
+
+                    float semanticHair = 0.0;
+                    if (uHasHairMask > .5) {
+                        vec2 hairUv = p;
+                        if (uHasFace > .5 && uHairReferenceFaceRect.z > uHairReferenceFaceRect.x) {
+                            // Motion-lock the nearest semantic mask to the current interpolated face.
+                            // Translation and scale are corrected every rendered frame, removing the
+                            // visible delayed-shadow trail between expensive segmentation samples.
+                            hairUv = hairReferenceUv(p);
+                        }
+                        semanticHair = texture2D(uHairMask, safeUv(hairUv)).r;
+                    }
 
                     float skin = face * skinProbability(rgb) * (1.0 - clamp(lips + eyes * .90 + brows * .85, 0.0, 1.0));
 
-                    // South-Asian portrait tuning: these three controls intentionally deliver 3x
-                    // their original visual contribution while retaining the same 0-100% UI range.
+                    // Portrait tuning: these three controls deliver 2x their original visual
+                    // contribution while retaining the same user-facing 0-100% slider range.
                     if (uSkinSmooth > .001) {
-                        float amount = clamp(uSkinSmooth * 3.0, 0.0, 3.0);
+                        float amount = clamp(uSkinSmooth * 2.0, 0.0, 2.0);
                         vec3 soft = softSample(vTexCoord);
                         float textureProtect = 1.0 - smoothstep(.16, .48, abs(luma(rgb) - luma(soft)) * 4.0);
                         float mixAmount = clamp(skin * textureProtect * amount * .34, 0.0, 1.0);
@@ -293,7 +317,7 @@ internal class BeautyFaceEffectV28 private constructor(
                     }
 
                     if (uSkinBright > .001) {
-                        float amount = clamp(uSkinBright * 3.0, 0.0, 3.0);
+                        float amount = clamp(uSkinBright * 2.0, 0.0, 2.0);
                         vec3 lifted = pow(clamp(rgb, 0.0, 1.0), vec3(.90));
                         lifted += vec3(.040, .037, .031) * amount;
                         float mixAmount = clamp(skin * amount * .58, 0.0, 1.0);
@@ -301,7 +325,7 @@ internal class BeautyFaceEffectV28 private constructor(
                     }
 
                     if (uPinkLip > .001) {
-                        float amount = clamp(uPinkLip * 3.0, 0.0, 3.0);
+                        float amount = clamp(uPinkLip * 2.0, 0.0, 2.0);
                         float lipLum = luma(rgb);
                         float teethReject = 1.0 - smoothstep(.68, .88, lipLum);
                         float lipMask = lips * teethReject;
@@ -320,7 +344,6 @@ internal class BeautyFaceEffectV28 private constructor(
                         float mask = clamp(max(semanticHair, browMask), 0.0, 1.0);
                         float darken = amount * .40;
                         vec3 darker = rgb * (1.0 - darken);
-                        // A small neutralization makes brown hair/brows read deeper without a blue cast.
                         float gray = luma(darker);
                         darker = mix(darker, vec3(gray), semanticHair * .16 * amount);
                         rgb = mix(rgb, clamp(darker, 0.0, 1.0), mask);
