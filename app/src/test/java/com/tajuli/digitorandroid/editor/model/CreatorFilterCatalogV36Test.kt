@@ -28,7 +28,8 @@ class CreatorFilterCatalogV36Test {
         )
 
         assertEquals(.8f, clip.appliedCreatorFiltersV36()["skin_bright"] ?: 0f, .0001f)
-        assertEquals(.8f, clip.beautyStrengthsV28().skinBright, .0001f)
+        assertEquals(.8f, clip.skinQualifierStrengthV38(), .0001f)
+        assertEquals(0f, clip.beautyStrengthsV28().skinBright, .0001f)
     }
 
     @Test
