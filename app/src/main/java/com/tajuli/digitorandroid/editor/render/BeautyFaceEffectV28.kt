@@ -157,6 +157,7 @@ internal class BeautyFaceEffectV28 private constructor(
             setRect("uRightEyeRect", geometry?.rightEye)
             setRect("uLeftBrowRect", geometry?.leftBrow)
             setRect("uRightBrowRect", geometry?.rightBrow)
+            setRect("uHairRect", geometry?.hair)
         }
 
         private fun setRect(name: String, rect: BeautyRectV28?) {
@@ -329,7 +330,7 @@ internal class BeautyFaceEffectV28 private constructor(
         }
 
         companion object {
-            private const val FACE_TRACK_REFRESH_MS = 300L
+            private const val FACE_TRACK_REFRESH_MS = 200L
 
             private const val VERTEX_SHADER = """
                 attribute vec4 aFramePosition;
@@ -360,6 +361,7 @@ internal class BeautyFaceEffectV28 private constructor(
                 uniform vec4 uRightEyeRect;
                 uniform vec4 uLeftBrowRect;
                 uniform vec4 uRightBrowRect;
+                uniform vec4 uHairRect;
                 uniform vec4 uHairWarpM;
                 uniform vec2 uHairWarpT;
                 uniform vec4 uSkinWarpM;
@@ -380,6 +382,11 @@ internal class BeautyFaceEffectV28 private constructor(
                     vec2 q = (p - center) / halfSize;
                     float d = dot(q, q);
                     return 1.0 - smoothstep(inner, outer, d);
+                }
+
+                float instantPortraitMask(vec2 p) {
+                    vec2 q = (p - vec2(.5, .40)) / vec2(.30, .34);
+                    return 1.0 - smoothstep(.72, 1.18, dot(q, q));
                 }
 
                 float skinProbability(vec3 c) {
@@ -417,15 +424,11 @@ internal class BeautyFaceEffectV28 private constructor(
 
                 void main() {
                     vec4 source = texture2D(uTexSampler, safeUv(vTexCoord));
-                    if (uHasFace < .5 && uHasHairMask < .5 && uHasFaceSkinMask < .5) {
-                        gl_FragColor = source;
-                        return;
-                    }
-
                     vec2 p = vec2(vTexCoord.x, 1.0 - vTexCoord.y);
                     vec3 rgb = source.rgb;
+
                     float face = uHasFace > .5 ? ellipseMask(p, uFaceRect, .72, 1.08) : 0.0;
-                    float faceWide = uHasFace > .5 ? ellipseMask(p, uFaceRect, .92, 1.48) : 1.0;
+                    float faceWide = uHasFace > .5 ? ellipseMask(p, uFaceRect, .92, 1.48) : instantPortraitMask(p);
                     float lips = uHasFace > .5 ? ellipseMask(p, uLipRect, .68, 1.18) : 0.0;
                     float leftEye = uHasFace > .5 ? ellipseMask(p, uLeftEyeRect, .62, 1.20) : 0.0;
                     float rightEye = uHasFace > .5 ? ellipseMask(p, uRightEyeRect, .62, 1.20) : 0.0;
@@ -437,19 +440,24 @@ internal class BeautyFaceEffectV28 private constructor(
                     float semanticHair = 0.0;
                     if (uHasHairMask > .5) {
                         semanticHair = texture2D(uHairMask, safeUv(applyWarp(p, uHairWarpM, uHairWarpT))).r;
+                    } else if (uHasFace > .5) {
+                        float hairRegion = ellipseMask(p, uHairRect, .70, 1.22);
+                        float darkGate = 1.0 - smoothstep(.38, .68, luma(rgb));
+                        semanticHair = hairRegion * darkGate;
                     }
 
                     float semanticSkin = 0.0;
                     if (uHasFaceSkinMask > .5) {
                         semanticSkin = texture2D(uFaceSkinMask, safeUv(applyWarp(p, uSkinWarpM, uSkinWarpT))).r * faceWide;
                     }
-                    float fallbackSkin = face * skinProbability(rgb);
+                    // Instant path: before ML caches exist, use a conservative portrait/skin gate.
+                    // As soon as face/semantic data arrives the same shader upgrades itself in-place.
+                    float fallbackRegion = uHasFace > .5 ? face : instantPortraitMask(p);
+                    float fallbackSkin = fallbackRegion * skinProbability(rgb);
                     float skinBase = uHasFaceSkinMask > .5 ? semanticSkin : fallbackSkin;
                     float featureProtect = clamp(lips + eyes * .96 + brows * .88, 0.0, 1.0);
                     float skin = clamp(skinBase * (1.0 - featureProtect), 0.0, 1.0);
 
-                    // 2x maximum range, but with CapCut-style quality safeguards: semantic skin,
-                    // edge-aware detail preservation, hue-neutral luminance lift and highlight rolloff.
                     if (uSkinSmooth > .001) {
                         float amount = clamp(uSkinSmooth * 2.0, 0.0, 2.0);
                         vec3 soft = edgeAwareSoftSample(vTexCoord);
@@ -473,7 +481,7 @@ internal class BeautyFaceEffectV28 private constructor(
                         rgb = mix(rgb, lifted, mixAmount);
                     }
 
-                    if (uPinkLip > .001) {
+                    if (uPinkLip > .001 && uHasFace > .5) {
                         float amount = clamp(uPinkLip * 2.0, 0.0, 2.0);
                         float lipLum = luma(rgb);
                         float teethReject = 1.0 - smoothstep(.66, .86, lipLum);
@@ -496,7 +504,7 @@ internal class BeautyFaceEffectV28 private constructor(
                         rgb = mix(rgb, clamp(darker, 0.0, 1.0), mask);
                     }
 
-                    if (uEyePop > .001) {
+                    if (uEyePop > .001 && uHasFace > .5) {
                         float amount = clamp(uEyePop, 0.0, 1.5);
                         float y = luma(rgb);
                         float c = chroma(rgb);
