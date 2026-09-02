@@ -18,23 +18,25 @@ import com.tajuli.digitorandroid.editor.model.NodeCorrections
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.activeCreatorLookV37
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
  * V37 full-frame creator-look renderer.
  *
- * The supplied Normal / Digitor / CapCut comparison exposed a fundamental V36 mistake: a LOOK was
- * being tuned with skin-specific logic. That can make the grade look like a bright patch attached to
- * a face while the rest of the image stays almost unchanged. V37 removes spatial semantics from the
- * LOOK stage completely. A look is now a deterministic RGB -> RGB transform for every pixel.
+ * The Normal / Digitor / CapCut comparison exposed a fundamental V36 mistake: a LOOK was being
+ * tuned with skin-specific logic. That made the grade resemble a bright patch attached to a face
+ * while the rest of the image stayed close to Normal. V37 removes all spatial semantics from LOOKS.
+ * A look is now a deterministic RGB -> RGB transform for every pixel.
  *
- * Realtime preview still keeps one resident shader, so changing a marker/intensity is a uniform/data
- * update and becomes visible on the next rendered frame. Export uses this exact shader.
+ * Realtime preview keeps this one shader resident, so changing a marker/intensity is only a data
+ * update and becomes visible on the next submitted frame. Export uses the exact same shader.
  *
- * Moody Cinema's reference kernel is independently fitted from the user-supplied Normal/CapCut
- * Cinematic Dark pair. Across seven aligned frames the reference showed strong midtone lift,
- * protected highlights, and chroma compression strongest near neutral colors. Calibration constants
- * live in the model layer so they are JVM-testable; the shader receives them as uniforms. No CapCut
- * LUT, model, code, or asset is included.
+ * For the supplied Cinematic Dark reference, V37 generates a tiny 17^3 Digitor-owned LUT from the
+ * calibrated cubic RGB model when the shader is created. The LUT is flattened into a 289x17 RGBA8
+ * atlas and sampled with two bilinear texture reads (manual blue-slice interpolation). This is much
+ * cheaper per pixel than evaluating the cubic model directly, works on GLES2, and preserves the
+ * full-frame mapping measured from the reference. No CapCut LUT, code, model or asset is bundled.
  */
 @UnstableApi
 internal class CreatorLookEffectV37 private constructor(
@@ -59,6 +61,7 @@ internal class CreatorLookEffectV37 private constructor(
         /* texturePoolCapacity = */ 1,
     ) {
         private val program: GlProgram
+        private val referenceLutTexture: Int
 
         init {
             try {
@@ -69,6 +72,7 @@ internal class CreatorLookEffectV37 private constructor(
                         GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE,
                     )
                 }
+                referenceLutTexture = createReferenceLutTexture()
             } catch (error: GlUtil.GlException) {
                 throw VideoFrameProcessingException(error)
             }
@@ -84,10 +88,11 @@ internal class CreatorLookEffectV37 private constructor(
                 val log = active?.preset?.log ?: LogWheels()
                 val intensity = active?.intensity ?: 0f
                 val kernelMode = if (active?.kernel == CreatorLookKernelV37.CINEMATIC_DARK_REFERENCE) 1f else 0f
-                val reference = CINEMATIC_DARK_REFERENCE_V37
 
                 program.use()
                 program.setSamplerTexIdUniform("uTexSampler", inputTexId, 0)
+                program.setSamplerTexIdUniform("uReferenceLut", referenceLutTexture, 1)
+                program.setFloatUniform("uReferenceLutSize", REFERENCE_LUT_SIZE.toFloat())
                 program.setFloatUniform("uKernelMode", kernelMode)
                 program.setFloatUniform("uIntensity", intensity)
                 program.setFloatUniform("uExposure", corrections.exposure)
@@ -105,19 +110,6 @@ internal class CreatorLookEffectV37 private constructor(
                 program.setFloatsUniform("uLogGlobal", log.global.uniformV37())
                 program.setFloatUniform("uShadowRange", log.shadowRange)
                 program.setFloatUniform("uHighlightRange", log.highlightRange)
-                program.setFloatsUniform(
-                    "uRefToneA",
-                    floatArrayOf(reference.toneC5, reference.toneC4, reference.toneC3, reference.toneC2),
-                )
-                program.setFloatsUniform("uRefToneB", floatArrayOf(reference.toneC1, reference.toneC0))
-                program.setFloatsUniform(
-                    "uRefChroma",
-                    floatArrayOf(reference.chromaFloor, reference.chromaLow, reference.chromaHigh, reference.chromaMaster),
-                )
-                program.setFloatsUniform("uRefMatrixR", reference.matrixR)
-                program.setFloatsUniform("uRefMatrixG", reference.matrixG)
-                program.setFloatsUniform("uRefMatrixB", reference.matrixB)
-                program.setFloatsUniform("uRefOffset", reference.offset)
                 program.bindAttributesAndUniforms()
                 GLES20.glDisable(GLES20.GL_BLEND)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -131,14 +123,67 @@ internal class CreatorLookEffectV37 private constructor(
 
         override fun release() {
             super.release()
+            GLES20.glDeleteTextures(1, intArrayOf(referenceLutTexture), 0)
             try {
                 program.delete()
+                GlUtil.checkGlError()
             } catch (error: GlUtil.GlException) {
                 throw VideoFrameProcessingException(error)
             }
         }
 
+        private fun createReferenceLutTexture(): Int {
+            val size = REFERENCE_LUT_SIZE
+            val width = size * size
+            val height = size
+            val bytes = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder())
+
+            // Atlas layout: X = blueSlice * size + red, Y = green. Texture origin and generated row
+            // order both start at green=0, so shader coordinates can use the same normalized axes.
+            for (greenIndex in 0 until size) {
+                val g = greenIndex.toFloat() / (size - 1).toFloat()
+                for (blueIndex in 0 until size) {
+                    val b = blueIndex.toFloat() / (size - 1).toFloat()
+                    for (redIndex in 0 until size) {
+                        val r = redIndex.toFloat() / (size - 1).toFloat()
+                        val mapped = CINEMATIC_DARK_REFERENCE_V37.mapRgb(r, g, b)
+                        bytes.put((mapped[0] * 255f + .5f).toInt().coerceIn(0, 255).toByte())
+                        bytes.put((mapped[1] * 255f + .5f).toInt().coerceIn(0, 255).toByte())
+                        bytes.put((mapped[2] * 255f + .5f).toInt().coerceIn(0, 255).toByte())
+                        bytes.put(0xFF.toByte())
+                    }
+                }
+            }
+            bytes.flip()
+
+            val ids = IntArray(1)
+            GLES20.glGenTextures(1, ids, 0)
+            val texture = ids[0]
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
+            GLES20.glTexImage2D(
+                GLES20.GL_TEXTURE_2D,
+                0,
+                GLES20.GL_RGBA,
+                width,
+                height,
+                0,
+                GLES20.GL_RGBA,
+                GLES20.GL_UNSIGNED_BYTE,
+                bytes,
+            )
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+            GlUtil.checkGlError()
+            return texture
+        }
+
         companion object {
+            private const val REFERENCE_LUT_SIZE = 17
+
             private const val VERTEX_SHADER = """
                 attribute vec4 aFramePosition;
                 varying vec2 vTexCoord;
@@ -151,6 +196,8 @@ internal class CreatorLookEffectV37 private constructor(
             private const val FRAGMENT_SHADER = """
                 precision highp float;
                 uniform sampler2D uTexSampler;
+                uniform sampler2D uReferenceLut;
+                uniform float uReferenceLutSize;
                 uniform float uKernelMode;
                 uniform float uIntensity;
                 uniform float uExposure;
@@ -168,13 +215,6 @@ internal class CreatorLookEffectV37 private constructor(
                 uniform vec4 uLogGlobal;
                 uniform float uShadowRange;
                 uniform float uHighlightRange;
-                uniform vec4 uRefToneA;
-                uniform vec2 uRefToneB;
-                uniform vec4 uRefChroma;
-                uniform vec3 uRefMatrixR;
-                uniform vec3 uRefMatrixG;
-                uniform vec3 uRefMatrixB;
-                uniform vec3 uRefOffset;
                 varying vec2 vTexCoord;
 
                 const float PI2 = 6.28318530718;
@@ -265,34 +305,23 @@ internal class CreatorLookEffectV37 private constructor(
                     return fitToGamutPreserveHue(rgb);
                 }
 
-                float cinematicDarkTone(float y) {
-                    float v = (((((
-                        uRefToneA.x * y + uRefToneA.y
-                    ) * y + uRefToneA.z
-                    ) * y + uRefToneA.w
-                    ) * y + uRefToneB.x
-                    ) * y + uRefToneB.y);
-                    return clamp(v, 0.0, 1.0);
-                }
-
-                vec3 cinematicDarkReference(vec3 src) {
-                    float y = luma(src);
-                    float targetY = cinematicDarkTone(y);
-                    vec3 chroma = src - vec3(y);
-                    float magnitude = length(chroma);
-
-                    float chromaScale = (
-                        uRefChroma.x + (1.0 - uRefChroma.x) *
-                        smoothstep(uRefChroma.y, uRefChroma.z, magnitude)
-                    ) * uRefChroma.w;
-                    vec3 rgb = vec3(targetY) + chroma * chromaScale;
-
-                    vec3 corrected = vec3(
-                        dot(uRefMatrixR, rgb) + uRefOffset.r,
-                        dot(uRefMatrixG, rgb) + uRefOffset.g,
-                        dot(uRefMatrixB, rgb) + uRefOffset.b
-                    );
-                    return fitToGamutPreserveHue(corrected);
+                vec3 referenceLutLook(vec3 source) {
+                    vec3 c = clamp(source, 0.0, 1.0);
+                    float size = uReferenceLutSize;
+                    float last = size - 1.0;
+                    float atlasWidth = size * size;
+                    float blue = c.b * last;
+                    float slice0 = floor(blue);
+                    float slice1 = min(slice0 + 1.0, last);
+                    float blueMix = blue - slice0;
+                    float redTexel = c.r * last;
+                    float greenTexel = c.g * last;
+                    float x0 = (slice0 * size + redTexel + .5) / atlasWidth;
+                    float x1 = (slice1 * size + redTexel + .5) / atlasWidth;
+                    float y = (greenTexel + .5) / size;
+                    vec3 a = texture2D(uReferenceLut, vec2(x0, y)).rgb;
+                    vec3 b = texture2D(uReferenceLut, vec2(x1, y)).rgb;
+                    return mix(a, b, blueMix);
                 }
 
                 void main() {
@@ -303,11 +332,11 @@ internal class CreatorLookEffectV37 private constructor(
                     }
 
                     vec3 graded = uKernelMode > .5
-                        ? cinematicDarkReference(source.rgb)
+                        ? referenceLutLook(source.rgb)
                         : genericGlobalLook(source.rgb);
 
-                    // Intensity is a final source/look blend, not a second scaling of recipe values.
-                    // This keeps slider response predictable and matches single-filter editor UX.
+                    // Intensity is a final source/look blend. The LUT and generic recipes always
+                    // represent their 100% look and slider response stays predictable.
                     gl_FragColor = vec4(mix(source.rgb, graded, clamp(uIntensity, 0.0, 1.0)), source.a);
                 }
             """
