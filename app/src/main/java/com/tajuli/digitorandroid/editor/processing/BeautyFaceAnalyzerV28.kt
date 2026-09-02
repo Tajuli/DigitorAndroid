@@ -21,12 +21,16 @@ import com.tajuli.digitorandroid.editor.model.BeautyRectV28
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.max
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 
-/** Persisted local face tracks keep beauty masks available after save/load without bloating project JSON. */
 object BeautyFaceTrackStoreV28 {
     private val gson = Gson()
 
@@ -61,11 +65,8 @@ object BeautyFaceTrackStoreV28 {
 }
 
 /**
- * Low-latency beauty analysis.
- *
- * The editor never needs to decode hundreds of random frames before showing or exporting a filter.
- * A five-anchor face seed upgrades the instant GPU fallback quickly; a bounded background refinement
- * then uses <=48 low-resolution sync frames and <=12 semantic mask frames for the whole clip.
+ * Low-latency beauty analysis. A five-anchor face seed returns quickly; bounded semantic refinement
+ * continues independently and is consumed live by the GPU shader when each cache becomes available.
  */
 class BeautyFaceAnalyzerV28(private val context: Context) {
     private val options = FaceDetectorOptions.Builder()
@@ -77,7 +78,6 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         .enableTracking()
         .build()
 
-    /** Very small seed used by preview. No semantic model is run here. */
     suspend fun primeAndStore(clip: TimelineClip): BeautyFaceTrackV28 {
         val existing = BeautyFaceTrackStoreV28.load(context, clip)
         if (existing != null && existing.samples.count { it.geometry != null } >= PRIME_FACE_ANCHORS) return existing
@@ -99,7 +99,6 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         return merged
     }
 
-    /** Bounded background quality refinement. Never performs the old hundreds-of-seeks scan. */
     suspend fun refineFastAndStore(
         clip: TimelineClip,
         requireHairMask: Boolean = true,
@@ -130,12 +129,39 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         return merged
     }
 
-    /** Kept as the public compatibility entry point; now delegates to the bounded fast path. */
+    /**
+     * Editor compatibility entry point. Return as soon as the quick face seed exists, then refine
+     * semantic skin/hair and denser anchors in a deduplicated process background job. The caller is
+     * never held for the whole-video refinement pass.
+     */
     suspend fun analyzeAndStore(
         clip: TimelineClip,
         requireHairMask: Boolean = true,
         requireSkinMask: Boolean = true,
-    ): BeautyFaceTrackV28 = refineFastAndStore(clip, requireHairMask, requireSkinMask)
+    ): BeautyFaceTrackV28 {
+        val prime = primeAndStore(clip)
+        val key = buildString {
+            append(clip.uri)
+            append('|')
+            append(clip.sourceInUs)
+            append('|')
+            append(clip.sourceOutUs)
+            append('|')
+            append(requireHairMask)
+            append('|')
+            append(requireSkinMask)
+        }
+        if (refinementKeys.add(key)) {
+            refinementScope.launch {
+                try {
+                    runCatching { refineFastAndStore(clip, requireHairMask, requireSkinMask) }
+                } finally {
+                    refinementKeys.remove(key)
+                }
+            }
+        }
+        return prime
+    }
 
     private suspend fun analyzeImage(
         clip: TimelineClip,
@@ -418,5 +444,8 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         private const val MAX_FAST_FACE_ANCHORS = 48
         private const val SEMANTIC_ANCHOR_LIMIT = 12
         private const val ANALYSIS_LONG_EDGE = 480
+
+        private val refinementScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        private val refinementKeys = ConcurrentHashMap.newKeySet<String>()
     }
 }
