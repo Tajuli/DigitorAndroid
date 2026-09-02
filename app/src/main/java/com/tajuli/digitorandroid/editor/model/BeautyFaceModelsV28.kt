@@ -22,8 +22,11 @@ data class BeautyStrengthsV28(
 }
 
 /**
- * Resolve stackable beauty strengths from all editable nodes. Multiple filter nodes therefore add
- * naturally: Skin Bright + Pink Lip + Hair/Brow Dark + Eye Pop can all be active together.
+ * Resolve stackable beauty strengths from both legacy direct beauty effects and V36 filter markers.
+ *
+ * V36 markers live on one stable existing node, so tapping Skin Bright/Smooth/Portrait Glow changes
+ * only effect metadata and does not recreate preview node/edge topology. Legacy V28 filter-node
+ * projects remain valid because their direct internal beauty effect ids are still accumulated.
  */
 fun TimelineClip.beautyStrengthsV28(): BeautyStrengthsV28 {
     var skinBright = 0f
@@ -31,19 +34,35 @@ fun TimelineClip.beautyStrengthsV28(): BeautyStrengthsV28 {
     var pinkLip = 0f
     var hairBrowDark = 0f
     var eyePop = 0f
+
+    fun add(name: String, amount: Float) {
+        when (name) {
+            BEAUTY_SKIN_BRIGHT_V28 -> skinBright += amount
+            BEAUTY_SKIN_SMOOTH_V28 -> skinSmooth += amount
+            BEAUTY_PINK_LIP_V28 -> pinkLip += amount
+            BEAUTY_HAIR_BROW_DARK_V28 -> hairBrowDark += amount
+            BEAUTY_EYE_POP_V28 -> eyePop += amount
+        }
+    }
+
     nodeGraph.nodes.asSequence()
         .filter { it.kind == NodeKind.SERIAL || it.kind == NodeKind.PARALLEL }
         .flatMap { it.effects.asSequence() }
         .filter { it.enabled && it.amount > 0f }
         .forEach { effect ->
-            when (effect.name) {
-                BEAUTY_SKIN_BRIGHT_V28 -> skinBright += effect.amount
-                BEAUTY_SKIN_SMOOTH_V28 -> skinSmooth += effect.amount
-                BEAUTY_PINK_LIP_V28 -> pinkLip += effect.amount
-                BEAUTY_HAIR_BROW_DARK_V28 -> hairBrowDark += effect.amount
-                BEAUTY_EYE_POP_V28 -> eyePop += effect.amount
+            val filterId = effect.creatorFilterPresetIdV36()
+            if (filterId != null) {
+                val preset = creatorFilterPresetV36(filterId)
+                if (preset?.group == CreatorFilterGroupV36.BEAUTY) {
+                    preset.beautyWeights.forEach { (name, weight) ->
+                        add(name, weight * effect.amount)
+                    }
+                }
+            } else {
+                add(effect.name, effect.amount)
             }
         }
+
     return BeautyStrengthsV28(
         skinBright = skinBright.coerceIn(0f, 1.5f),
         skinSmooth = skinSmooth.coerceIn(0f, 1.5f),
