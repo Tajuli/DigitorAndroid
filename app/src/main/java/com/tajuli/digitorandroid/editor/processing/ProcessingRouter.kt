@@ -4,13 +4,9 @@ import android.content.Context
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.transformer.ExportException
 import com.tajuli.digitorandroid.editor.model.TimelineProject
-import com.tajuli.digitorandroid.editor.model.TrackKind
-import com.tajuli.digitorandroid.editor.model.beautyStrengthsV28
 import com.tajuli.digitorandroid.editor.render.VisualOverlayRenderEnvironmentV19
 import java.io.File
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 @UnstableApi
 class ProcessingRouter(context: Context) {
@@ -31,8 +27,11 @@ class ProcessingRouter(context: Context) {
         quality: ExportQuality,
         onProgress: (ExportProgress) -> Unit,
     ): ExportResult {
-        prepareBeautyTracks(project, onProgress)
-
+        // CapCut-style latency rule: export must never wait for a whole-video ML beauty scan.
+        // BeautyFaceEffectV28 has an instant GPU fallback and opportunistically consumes any
+        // face/semantic masks already produced by background preview refinement. This makes
+        // tapping Export start the normal Media3 pipeline immediately instead of spending
+        // minutes in a blocking "Preparing beauty" phase.
         if (capabilities.supportsGpuEditing()) {
             val gpuName = capabilities.gpuDescription()
             onProgress(ExportProgress.Stage("GPU selected · $gpuName · ${quality.label}", 0f))
@@ -61,46 +60,5 @@ class ProcessingRouter(context: Context) {
 
         onProgress(ExportProgress.Stage("No compatible GPU · CPU fallback · ${quality.label}", 0f))
         return cpu.export(project, output, quality, onProgress)
-    }
-
-    /** Ensure all ML-driven beauty assets exist before Media3 starts encoding. */
-    private suspend fun prepareBeautyTracks(
-        project: TimelineProject,
-        onProgress: (ExportProgress) -> Unit,
-    ) {
-        val beautyClips = project.tracks.asSequence()
-            .filter { it.kind == TrackKind.VIDEO && !it.muted }
-            .flatMap { it.clips.asSequence() }
-            .map { clip -> clip to clip.beautyStrengthsV28() }
-            .filter { (_, strengths) -> !strengths.isIdentity }
-            .toList()
-        if (beautyClips.isEmpty()) return
-
-        beautyClips.forEachIndexed { index, (clip, strengths) ->
-            val requireHairMask = strengths.hairBrowDark > .001f
-            val requireSkinMask = strengths.skinBright > .001f || strengths.skinSmooth > .001f
-            val fraction = ((index.toFloat() / beautyClips.size.toFloat()) * .08f).coerceIn(0f, .08f)
-            onProgress(
-                ExportProgress.Stage(
-                    "Preparing beauty ${index + 1}/${beautyClips.size} · ${clip.label}",
-                    fraction,
-                ),
-            )
-            val track = withContext(Dispatchers.Default) {
-                BeautyFaceAnalyzerV28(appContext).analyzeAndStore(
-                    clip = clip,
-                    requireHairMask = requireHairMask,
-                    requireSkinMask = requireSkinMask,
-                )
-            }
-            if (track.samples.none { sample -> sample.geometry != null }) {
-                onProgress(
-                    ExportProgress.Stage(
-                        "Beauty: no clear face detected · ${clip.label}",
-                        fraction,
-                    ),
-                )
-            }
-        }
     }
 }
