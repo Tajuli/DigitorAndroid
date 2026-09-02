@@ -7,26 +7,25 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 /**
  * Shared video processing stages used by both preview and export.
  *
- * V36 keeps creator filters responsive by attaching persistent realtime-preview stages before a
- * filter is selected. Filter taps only mutate lightweight effect markers on an existing node, so
- * neither the decoder nor the GL graph needs to be recreated.
+ * V37 separates LOOKS from BEAUTY at the render-contract level:
+ *  - LOOKS are deterministic full-frame RGB transforms in [CreatorLookEffectV37]. They never depend
+ *    on face boxes, skin masks, ML segmentation, or pixel location.
+ *  - BEAUTY is the only semantic/spatial face/skin/hair stage in [BeautyFaceEffectV36].
  *
- * Two preview contracts intentionally exist:
- *  - [compositedPreviewEffectsFor] is the production realtime graph. It keeps the BASE/look/FINISH
- *    stages resident so a new filter becomes visible on the next submitted frame.
- *  - [compositedExactPreviewEffectsFor] is the deterministic export-parity snapshot used by the
- *    byte-parity harness. It uses the same static stage topology as export. A resident neutral GPU
- *    pass can differ by one 8-bit rounding step even when it is visually a no-op, so comparing that
- *    latency-optimised graph byte-for-byte with an export that correctly omits inactive stages would
- *    test framebuffer quantisation rather than render math.
+ * Two preview contracts intentionally remain:
+ *  - [compositedPreviewEffectsFor] is the production realtime graph. It keeps look/beauty stages
+ *    resident so a filter marker/intensity change is visible on the next submitted frame.
+ *  - [compositedExactPreviewEffectsFor] is the deterministic export-parity snapshot. It uses the
+ *    same static topology as export so an inactive resident pass cannot create a one-LSB framebuffer
+ *    rounding difference in the byte-parity harness.
  *
  * Order:
  *  1. Transform.
- *  2. BASE skin retouch (instant color-skin fallback -> semantic refinement).
+ *  2. Optional semantic BASE beauty.
  *  3. Camera input transform + normal Correction/Color LUT.
- *  4. High-precision creator-look stack.
+ *  4. Full-frame V37 creator look.
  *  5. Timed creator effects.
- *  6. FINISH lips/eyes/hair beauty.
+ *  6. Optional semantic FINISH beauty.
  *  7. Transition.
  */
 @UnstableApi
@@ -35,7 +34,7 @@ object SharedVideoPipeline {
         ClipTransformEffect.forExport(clip)?.let(::add)
         BeautyFaceEffectV36.baseForClip(clip, preview = false)?.let(::add)
         addAll(SharedColorPipeline.effectsFor(clip))
-        CreatorLookStackEffectV36.forClip(clip, preview = false)?.let(::add)
+        CreatorLookEffectV37.forClip(clip, preview = false)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
@@ -44,17 +43,13 @@ object SharedVideoPipeline {
     fun compositedExportEffectsFor(clip: TimelineClip): List<Effect> =
         compositedStaticEffectsFor(clip)
 
-    /**
-     * Static snapshot used only when proving render-stage parity against export. Production realtime
-     * preview uses [compositedPreviewEffectsFor] so filter stages stay resident and immediately live.
-     */
     fun compositedExactPreviewEffectsFor(clip: TimelineClip): List<Effect> =
         compositedStaticEffectsFor(clip)
 
     private fun compositedStaticEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         BeautyFaceEffectV36.baseForClip(clip, preview = false)?.let(::add)
         addAll(SharedColorPipeline.effectsFor(clip))
-        CreatorLookStackEffectV36.forClip(clip, preview = false)?.let(::add)
+        CreatorLookEffectV37.forClip(clip, preview = false)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
@@ -64,7 +59,7 @@ object SharedVideoPipeline {
     fun compositedPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         BeautyFaceEffectV36.baseForClip(clip, preview = true)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
-        CreatorLookStackEffectV36.forClip(clip, preview = true)?.let(::add)
+        CreatorLookEffectV37.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
@@ -74,7 +69,7 @@ object SharedVideoPipeline {
         ClipTransformEffect.forPreview(clip)?.let(::add)
         BeautyFaceEffectV36.baseForClip(clip, preview = true)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
-        CreatorLookStackEffectV36.forClip(clip, preview = true)?.let(::add)
+        CreatorLookEffectV37.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
