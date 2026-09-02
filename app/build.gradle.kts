@@ -50,6 +50,17 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
     }
 }
 
+// Optional CI/local packaging filter. Normal builds keep every ABI, while a phone APK can be built
+// with `-PdigitorAbi=arm64-v8a` so MediaPipe/ML Kit native libraries are not duplicated for x86,
+// x86_64 and armeabi-v7a. This changes packaging only; editor/beauty behavior is unchanged.
+val requestedAbi = providers.gradleProperty("digitorAbi").orNull
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+val supportedPackageAbis = setOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+require(requestedAbi == null || requestedAbi in supportedPackageAbis) {
+    "Unsupported -PdigitorAbi=$requestedAbi. Expected one of ${supportedPackageAbis.joinToString()}."
+}
+
 android {
     namespace = "com.tajuli.digitorandroid"
     compileSdk = 37
@@ -62,11 +73,18 @@ android {
         versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        requestedAbi?.let { abi ->
+            ndk {
+                abiFilters += abi
+            }
+        }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -107,7 +125,6 @@ dependencies {
     val media3 = "1.11.0"
     implementation("androidx.media3:media3-common:$media3")
     implementation("androidx.media3:media3-exoplayer:$media3")
-    implementation("androidx.media3:media3-ui:$media3")
     implementation("androidx.media3:media3-transformer:$media3")
     implementation("androidx.media3:media3-effect:$media3")
 
