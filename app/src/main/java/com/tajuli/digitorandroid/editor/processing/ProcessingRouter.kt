@@ -3,7 +3,6 @@ package com.tajuli.digitorandroid.editor.processing
 import android.content.Context
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.transformer.ExportException
-import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.beautyStrengthsV28
@@ -42,9 +41,6 @@ class ProcessingRouter(context: Context) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (gpuFailure: Throwable) {
-                // A GPU-capable device must not silently fall back to the video-only CPU path because
-                // CPU export does not yet preserve mixed audio/text parity. Surface a useful Media3
-                // error code instead, so a remaining device-specific failure is actionable from the UI.
                 val exportException = generateSequence(gpuFailure as Throwable?) { it.cause }
                     .filterIsInstance<ExportException>()
                     .firstOrNull()
@@ -67,12 +63,7 @@ class ProcessingRouter(context: Context) {
         return cpu.export(project, output, quality, onProgress)
     }
 
-    /**
-     * Face-aware beauty is driven by local ML geometry/masks rather than a full-frame LUT. Export
-     * must therefore not start until every clip with an active beauty layer has the required cache.
-     * This also fixes the common workflow where a user taps Skin Bright/Pink Lips and immediately
-     * exports before the editor's background analysis coroutine has finished.
-     */
+    /** Ensure all ML-driven beauty assets exist before Media3 starts encoding. */
     private suspend fun prepareBeautyTracks(
         project: TimelineProject,
         onProgress: (ExportProgress) -> Unit,
@@ -87,6 +78,7 @@ class ProcessingRouter(context: Context) {
 
         beautyClips.forEachIndexed { index, (clip, strengths) ->
             val requireHairMask = strengths.hairBrowDark > .001f
+            val requireSkinMask = strengths.skinBright > .001f || strengths.skinSmooth > .001f
             val fraction = ((index.toFloat() / beautyClips.size.toFloat()) * .08f).coerceIn(0f, .08f)
             onProgress(
                 ExportProgress.Stage(
@@ -98,6 +90,7 @@ class ProcessingRouter(context: Context) {
                 BeautyFaceAnalyzerV28(appContext).analyzeAndStore(
                     clip = clip,
                     requireHairMask = requireHairMask,
+                    requireSkinMask = requireSkinMask,
                 )
             }
             if (track.samples.none { sample -> sample.geometry != null }) {
