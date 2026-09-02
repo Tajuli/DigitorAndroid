@@ -49,6 +49,7 @@ import com.tajuli.digitorandroid.editor.model.appliedCreatorFiltersV36
 import com.tajuli.digitorandroid.editor.model.creatorFilterHostNodeV36
 import com.tajuli.digitorandroid.editor.model.creatorFilterMarkerNameV36
 import com.tajuli.digitorandroid.editor.model.creatorFilterPresetIdV36
+import com.tajuli.digitorandroid.editor.model.creatorFilterPresetV36
 import com.tajuli.digitorandroid.editor.model.isLegacyCreatorFilterNodeV36
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceAnalyzerV28
 import kotlinx.coroutines.Dispatchers
@@ -83,10 +84,13 @@ private fun swatchV36(id: String): FilterSwatchV36 = when (id) {
 }
 
 /**
- * Filters V36 keeps the public V27 function name so the editor screen and saved UI contract stay
- * source-compatible. Internally, filters no longer create/delete color nodes. Each selected preset
- * is a lightweight marker effect on one existing editable node, which means a tap or slider change
- * does not alter decoder/GL topology and can render on the next frame.
+ * Filters V38 keeps the public V27 function name so the editor screen and saved UI contract stay
+ * source-compatible. Filters remain lightweight marker effects on one existing editable node.
+ *
+ * LOOKS now have CapCut-style single-selection semantics: tapping a look removes other LOOK markers
+ * while leaving BEAUTY markers independent. This also fixes a V37 bug where re-tapping an already
+ * applied look did not move its marker and `activeCreatorLookV37()` could keep rendering an older
+ * look. BEAUTY remains stackable.
  */
 @Composable
 fun CreatorFiltersWorkspaceV27(
@@ -113,12 +117,15 @@ fun CreatorFiltersWorkspaceV27(
 
     fun refineBeautyInBackground(preset: CreatorFilterPresetV36) {
         val needsHairMask = preset.beautyWeights.containsKey(BEAUTY_HAIR_BROW_DARK_V28)
-        val needsSkinMask = preset.beautyWeights.containsKey(BEAUTY_SKIN_BRIGHT_V28) ||
-            preset.beautyWeights.containsKey(BEAUTY_SKIN_SMOOTH_V28)
+        // V38 Skin Bright does not need a semantic skin mask. Face geometry is only an automatic
+        // eyedropper source for the global color qualifier. Skin Smooth still benefits from masks.
+        val needsSkinMask = preset.beautyWeights.containsKey(BEAUTY_SKIN_SMOOTH_V28)
+        val needsSkinColorSample = preset.beautyWeights.containsKey(BEAUTY_SKIN_BRIGHT_V28)
         val analysisLabel = when {
             needsHairMask && needsSkinMask -> "skin + face + hair"
             needsHairMask -> "face + hair"
             needsSkinMask -> "skin + face"
+            needsSkinColorSample -> "face color sample"
             else -> "face"
         }
         vm.setEditorStatusV19("${preset.name} active instantly · refining $analysisLabel…")
@@ -133,13 +140,13 @@ fun CreatorFiltersWorkspaceV27(
                     )
                 }
             }.getOrElse { error ->
-                vm.setEditorStatusV19("${preset.name} active · semantic refinement unavailable: ${error.message ?: "analysis failed"}")
+                vm.setEditorStatusV19("${preset.name} active · refinement unavailable: ${error.message ?: "analysis failed"}")
                 return@launch
             }
             if (track.samples.any { it.geometry != null }) {
-                vm.setEditorStatusV19("${preset.name} ready · instant filter + refined $analysisLabel")
+                vm.setEditorStatusV19("${preset.name} ready · refined $analysisLabel")
             } else {
-                vm.setEditorStatusV19("${preset.name} active · no clear face found; color-skin fallback remains active")
+                vm.setEditorStatusV19("${preset.name} active · no clear face found; global color fallback remains active")
             }
         }
     }
@@ -147,7 +154,9 @@ fun CreatorFiltersWorkspaceV27(
     fun applyPreset(preset: CreatorFilterPresetV36) {
         selectedPresetId = preset.id
         val wasApplied = preset.id in applied
-        if (!wasApplied) {
+        // LOOK taps always write the marker: V38 uses the write to enforce single-look selection and
+        // make the tapped look the deterministic active look even if it already existed in the map.
+        if (!wasApplied || preset.group == CreatorFilterGroupV36.LOOKS) {
             updateFilterMarkerV36(vm, clip.id, preset.id, preset.defaultIntensity, coalesce = false)
         }
         if (!wasApplied && preset.group == CreatorFilterGroupV36.BEAUTY) {
@@ -189,7 +198,7 @@ fun CreatorFiltersWorkspaceV27(
                 }
             }
             if (group == CreatorFilterGroupV36.BEAUTY) {
-                Text("Instant first frame · semantic refinement follows", fontSize = 7.sp, color = Filter27Muted)
+                Text("Skin Bright = global color qualifier", fontSize = 7.sp, color = Filter27Muted)
             }
         }
 
@@ -237,9 +246,9 @@ fun CreatorFiltersWorkspaceV27(
             )
             Text(
                 if (group == CreatorFilterGroupV36.BEAUTY) {
-                    "Skin Bright now responds immediately without waiting for face analysis. 100% has a stronger CapCut-class midtone lift with highlight protection; MediaPipe skin/face/hair masks refine the result in the background."
+                    "V38 Skin Bright uses face geometry only to auto-pick representative skin color. The brightness qualifier is then applied everywhere that color matches, with soft chroma/luma falloff and no face ellipse or segmentation boundary."
                 } else {
-                    "Looks use one persistent high-precision GPU pass. Tapping or changing intensity does not rebuild the preview graph, and white highlights are compressed while portrait midtones stay bright and detailed."
+                    "Looks are single-select full-frame transforms. Cinematic/Moody Cinema also receives a small global color-qualifier relight after the LUT; no spatial face mask is used."
                 },
                 fontSize = 7.sp,
                 color = Filter27Muted,
@@ -286,6 +295,9 @@ private fun FilterCardV36(
 /**
  * Writes/updates one filter marker on a stable existing node. Legacy V28 filter nodes are migrated
  * lazily on first edit so projects made with PR #47 keep their visible filter stack.
+ *
+ * V38 LOOKS are exclusive. When a LOOK is selected, every other LOOK marker is removed before the
+ * selected marker is appended. BEAUTY markers remain stackable and untouched.
  */
 private fun updateFilterMarkerV36(
     vm: EditorViewModelV4,
@@ -296,8 +308,22 @@ private fun updateFilterMarkerV36(
 ) {
     val state = vm.state.value
     val liveClip = state.project.clip(clipId) ?: return
+    val preset = creatorFilterPresetV36(presetId)
     val remembered = liveClip.appliedCreatorFiltersV36().toMutableMap()
-    if (intensity > .001f) remembered[presetId] = intensity.coerceIn(0f, 1f) else remembered.remove(presetId)
+
+    if (intensity > .001f) {
+        if (preset?.group == CreatorFilterGroupV36.LOOKS) {
+            val oldLookIds = remembered.keys.filter { id ->
+                creatorFilterPresetV36(id)?.group == CreatorFilterGroupV36.LOOKS
+            }.toList()
+            oldLookIds.forEach(remembered::remove)
+        }
+        // Remove + append makes this tap deterministic even for an already-existing legacy marker.
+        remembered.remove(presetId)
+        remembered[presetId] = intensity.coerceIn(0f, 1f)
+    } else {
+        remembered.remove(presetId)
+    }
 
     var graph = liveClip.nodeGraph
     graph.nodes.filter { it.isLegacyCreatorFilterNodeV36() }.map { it.id }.forEach { id ->
@@ -321,12 +347,12 @@ private fun updateFilterMarkerV36(
         revision = graph.revision + 1L,
     )
 
-    val preset = CREATOR_FILTERS_V36.firstOrNull { it.id == presetId }
     vm.commitProjectV19(
-        label = "filter-marker-v36",
+        label = "filter-marker-v38",
         project = state.project.withUpdatedClipV36(liveClip.copy(nodeGraph = graph)),
         status = if (intensity > .001f) {
-            "${preset?.name ?: presetId} · ${(intensity * 100f).toInt()}% · instant"
+            val suffix = if (preset?.group == CreatorFilterGroupV36.LOOKS) " · single global look" else " · instant"
+            "${preset?.name ?: presetId} · ${(intensity * 100f).toInt()}%$suffix"
         } else {
             "${preset?.name ?: presetId} removed"
         },
@@ -349,7 +375,7 @@ private fun clearFilterMarkersV36(vm: EditorViewModelV4, clipId: String) {
         revision = graph.revision + 1L,
     )
     vm.commitProjectV19(
-        label = "filter-marker-v36-clear",
+        label = "filter-marker-v38-clear",
         project = state.project.withUpdatedClipV36(liveClip.copy(nodeGraph = graph)),
         status = "All filters removed",
     )
