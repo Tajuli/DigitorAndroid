@@ -28,6 +28,28 @@ val downloadHairSegmenterModel by tasks.registering {
     }
 }
 
+val generatedFaceSkinModelAssets = layout.buildDirectory.dir("generated/faceSkinSegmenterAssets")
+val faceSkinSegmenterModelFile = generatedFaceSkinModelAssets.map { it.file("selfie_multiclass_256x256.tflite") }
+val downloadFaceSkinSegmenterModel by tasks.registering {
+    outputs.file(faceSkinSegmenterModelFile)
+    doLast {
+        val output = faceSkinSegmenterModelFile.get().asFile
+        if (output.isFile && output.length() > 200_000L) return@doLast
+        output.parentFile.mkdirs()
+        val temp = File(output.parentFile, output.name + ".download")
+        if (temp.exists()) temp.delete()
+        val url = URI(
+            "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite",
+        ).toURL()
+        url.openStream().use { input ->
+            temp.outputStream().buffered().use { target -> input.copyTo(target) }
+        }
+        require(temp.length() > 200_000L) { "Downloaded SelfieMulticlass model is unexpectedly small" }
+        if (output.exists()) output.delete()
+        check(temp.renameTo(output)) { "Could not install generated selfie_multiclass_256x256.tflite asset" }
+    }
+}
+
 android {
     namespace = "com.tajuli.digitorandroid"
     compileSdk = 37
@@ -59,10 +81,12 @@ android {
     }
 
     sourceSets["main"].assets.srcDir(generatedHairModelAssets.get().asFile)
+    sourceSets["main"].assets.srcDir(generatedFaceSkinModelAssets.get().asFile)
 }
 
 tasks.named("preBuild").configure {
     dependsOn(downloadHairSegmenterModel)
+    dependsOn(downloadFaceSkinSegmenterModel)
 }
 
 dependencies {
