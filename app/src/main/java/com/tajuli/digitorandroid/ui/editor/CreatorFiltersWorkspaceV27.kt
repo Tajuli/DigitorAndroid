@@ -45,12 +45,12 @@ import com.tajuli.digitorandroid.editor.model.NodeEffect
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
-import com.tajuli.digitorandroid.editor.model.appliedCreatorFiltersV36
-import com.tajuli.digitorandroid.editor.model.creatorFilterHostNodeV36
+import com.tajuli.digitorandroid.editor.model.appliedCreatorFiltersV41
 import com.tajuli.digitorandroid.editor.model.creatorFilterMarkerNameV36
 import com.tajuli.digitorandroid.editor.model.creatorFilterPresetIdV36
 import com.tajuli.digitorandroid.editor.model.creatorFilterPresetV36
 import com.tajuli.digitorandroid.editor.model.isLegacyCreatorFilterNodeV36
+import com.tajuli.digitorandroid.editor.model.selectedCreatorFilterHostV41
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceAnalyzerV28
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -83,15 +83,6 @@ private fun swatchV36(id: String): FilterSwatchV36 = when (id) {
     else -> FilterSwatchV36(Color(0xFFB66F72), Color(0xFFF3C7A9))
 }
 
-/**
- * Filters V38 keeps the public V27 function name so the editor screen and saved UI contract stay
- * source-compatible. Filters remain lightweight marker effects on one existing editable node.
- *
- * LOOKS now have CapCut-style single-selection semantics: tapping a look removes other LOOK markers
- * while leaving BEAUTY markers independent. This also fixes a V37 bug where re-tapping an already
- * applied look did not move its marker and `activeCreatorLookV37()` could keep rendering an older
- * look. BEAUTY remains stackable.
- */
 @Composable
 fun CreatorFiltersWorkspaceV27(
     clip: TimelineClip?,
@@ -108,27 +99,25 @@ fun CreatorFiltersWorkspaceV27(
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
     var group by remember { mutableStateOf(CreatorFilterGroupV36.LOOKS) }
-    var selectedPresetId by remember(clip.id) { mutableStateOf<String?>(null) }
-
-    val applied = clip.appliedCreatorFiltersV36()
+    var selectedPresetId by remember(clip.id, clip.nodeGraph.selectedNodeId) { mutableStateOf<String?>(null) }
+    val host = clip.selectedCreatorFilterHostV41()
+    val applied = host?.appliedCreatorFiltersV41() ?: linkedMapOf()
     val selectedPreset = CREATOR_FILTERS_V36.firstOrNull { it.id == selectedPresetId }
     val selectedIntensity = selectedPresetId?.let { applied[it] } ?: 0f
     val visiblePresets = CREATOR_FILTERS_V36.filter { it.group == group }
 
     fun refineBeautyInBackground(preset: CreatorFilterPresetV36) {
         val needsHairMask = preset.beautyWeights.containsKey(BEAUTY_HAIR_BROW_DARK_V28)
-        // V38 Skin Bright does not need a semantic skin mask. Face geometry is only an automatic
-        // eyedropper source for the global color qualifier. Skin Smooth still benefits from masks.
         val needsSkinMask = preset.beautyWeights.containsKey(BEAUTY_SKIN_SMOOTH_V28)
         val needsSkinColorSample = preset.beautyWeights.containsKey(BEAUTY_SKIN_BRIGHT_V28)
-        val analysisLabel = when {
+        val label = when {
             needsHairMask && needsSkinMask -> "skin + face + hair"
             needsHairMask -> "face + hair"
             needsSkinMask -> "skin + face"
             needsSkinColorSample -> "face color sample"
             else -> "face"
         }
-        vm.setEditorStatusV19("${preset.name} active instantly · refining $analysisLabel…")
+        vm.setEditorStatusV19("${preset.name} active instantly · refining $label…")
         scope.launch {
             val analysisClip = vm.state.value.project.clip(clip.id) ?: clip
             val track = runCatching {
@@ -143,25 +132,24 @@ fun CreatorFiltersWorkspaceV27(
                 vm.setEditorStatusV19("${preset.name} active · refinement unavailable: ${error.message ?: "analysis failed"}")
                 return@launch
             }
-            if (track.samples.any { it.geometry != null }) {
-                vm.setEditorStatusV19("${preset.name} ready · refined $analysisLabel")
-            } else {
-                vm.setEditorStatusV19("${preset.name} active · no clear face found; global color fallback remains active")
-            }
+            vm.setEditorStatusV19(
+                if (track.samples.any { it.geometry != null }) "${preset.name} ready · refined $label"
+                else "${preset.name} active · no clear face found; fallback remains active",
+            )
         }
     }
 
     fun applyPreset(preset: CreatorFilterPresetV36) {
+        if (host == null) {
+            vm.setEditorStatusV19("Select a Serial or Parallel node before applying a filter")
+            return
+        }
         selectedPresetId = preset.id
         val wasApplied = preset.id in applied
-        // LOOK taps always write the marker: V38 uses the write to enforce single-look selection and
-        // make the tapped look the deterministic active look even if it already existed in the map.
         if (!wasApplied || preset.group == CreatorFilterGroupV36.LOOKS) {
             updateFilterMarkerV36(vm, clip.id, preset.id, preset.defaultIntensity, coalesce = false)
         }
-        if (!wasApplied && preset.group == CreatorFilterGroupV36.BEAUTY) {
-            refineBeautyInBackground(preset)
-        }
+        if (!wasApplied && preset.group == CreatorFilterGroupV36.BEAUTY) refineBeautyInBackground(preset)
     }
 
     Column(modifier.background(Filter27Panel)) {
@@ -171,7 +159,11 @@ fun CreatorFiltersWorkspaceV27(
         ) {
             Text("Filters · ${clip.label}", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
-            Text("${applied.size} active · instant", fontSize = 7.sp, color = Filter27Muted)
+            Text(
+                if (host == null) "Select Serial/Parallel node" else "Node ${host.label} · ${applied.size} active",
+                fontSize = 7.sp,
+                color = if (host == null) Color(0xFFFFB86B) else Filter27Muted,
+            )
             if (applied.isNotEmpty()) {
                 TextButton(onClick = {
                     clearFilterMarkersV36(vm, clip.id)
@@ -180,7 +172,6 @@ fun CreatorFiltersWorkspaceV27(
             }
         }
         HorizontalDivider(color = Filter27Divider)
-
         Row(
             Modifier.fillMaxWidth().height(34.dp).padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -188,20 +179,15 @@ fun CreatorFiltersWorkspaceV27(
         ) {
             CreatorFilterGroupV36.entries.forEach { item ->
                 val active = group == item
-                val label = if (item == CreatorFilterGroupV36.LOOKS) "Looks" else "Beauty"
                 Box(
                     Modifier.background(if (active) Filter27Accent.copy(alpha = .16f) else Filter27Raised, RoundedCornerShape(7.dp))
                         .clickable { group = item }
                         .padding(horizontal = 11.dp, vertical = 6.dp),
                 ) {
-                    Text(label, fontSize = 8.sp, color = if (active) Filter27Accent else Color.White.copy(alpha = .75f))
+                    Text(if (item == CreatorFilterGroupV36.LOOKS) "Looks" else "Beauty", fontSize = 8.sp, color = if (active) Filter27Accent else Color.White.copy(alpha = .75f))
                 }
             }
-            if (group == CreatorFilterGroupV36.BEAUTY) {
-                Text("Skin Bright = global color qualifier", fontSize = 7.sp, color = Filter27Muted)
-            }
         }
-
         Row(
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(7.dp),
@@ -219,7 +205,6 @@ fun CreatorFiltersWorkspaceV27(
                 )
             }
         }
-
         HorizontalDivider(color = Filter27Divider)
         Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -241,14 +226,14 @@ fun CreatorFiltersWorkspaceV27(
                     }
                 },
                 valueRange = 0f..1f,
-                enabled = selectedPreset != null && selectedPreset.id in applied,
+                enabled = host != null && selectedPreset != null && selectedPreset.id in applied,
                 modifier = Modifier.fillMaxWidth().height(30.dp),
             )
             Text(
-                if (group == CreatorFilterGroupV36.BEAUTY) {
-                    "V38 Skin Bright uses face geometry only to auto-pick representative skin color. The brightness qualifier is then applied everywhere that color matches, with soft chroma/luma falloff and no face ellipse or segmentation boundary."
+                if (group == CreatorFilterGroupV36.LOOKS) {
+                    "LOOKS execute inside Node ${host?.label ?: "—"}. Serial order and Parallel branches now affect the rendered result."
                 } else {
-                    "Looks are single-select full-frame transforms. Cinematic/Moody Cinema also receives a small global color-qualifier relight after the LUT; no spatial face mask is used."
+                    "Beauty is owned by Node ${host?.label ?: "—"}; spatial beauty processing remains outside the 3D color LUT."
                 },
                 fontSize = 7.sp,
                 color = Filter27Muted,
@@ -292,13 +277,6 @@ private fun FilterCardV36(
     }
 }
 
-/**
- * Writes/updates one filter marker on a stable existing node. Legacy V28 filter nodes are migrated
- * lazily on first edit so projects made with PR #47 keep their visible filter stack.
- *
- * V38 LOOKS are exclusive. When a LOOK is selected, every other LOOK marker is removed before the
- * selected marker is appended. BEAUTY markers remain stackable and untouched.
- */
 private fun updateFilterMarkerV36(
     vm: EditorViewModelV4,
     clipId: String,
@@ -309,52 +287,45 @@ private fun updateFilterMarkerV36(
     val state = vm.state.value
     val liveClip = state.project.clip(clipId) ?: return
     val preset = creatorFilterPresetV36(presetId)
-    val remembered = liveClip.appliedCreatorFiltersV36().toMutableMap()
+    var graph = liveClip.nodeGraph
+    graph.nodes.filter { it.isLegacyCreatorFilterNodeV36() }.map { it.id }.forEach { id ->
+        graph = graph.deleteEditableNodeV4(id)
+    }
+    val migratedClip = liveClip.copy(nodeGraph = graph)
+    val host = migratedClip.selectedCreatorFilterHostV41()
+    if (host == null) {
+        vm.setEditorStatusV19("Select a Serial or Parallel node before applying a filter")
+        return
+    }
 
+    val remembered = host.appliedCreatorFiltersV41().toMutableMap()
     if (intensity > .001f) {
         if (preset?.group == CreatorFilterGroupV36.LOOKS) {
-            val oldLookIds = remembered.keys.filter { id ->
-                creatorFilterPresetV36(id)?.group == CreatorFilterGroupV36.LOOKS
-            }.toList()
-            oldLookIds.forEach(remembered::remove)
+            remembered.keys.filter { creatorFilterPresetV36(it)?.group == CreatorFilterGroupV36.LOOKS }
+                .toList().forEach(remembered::remove)
         }
-        // Remove + append makes this tap deterministic even for an already-existing legacy marker.
         remembered.remove(presetId)
         remembered[presetId] = intensity.coerceIn(0f, 1f)
     } else {
         remembered.remove(presetId)
     }
 
-    var graph = liveClip.nodeGraph
-    graph.nodes.filter { it.isLegacyCreatorFilterNodeV36() }.map { it.id }.forEach { id ->
-        graph = graph.deleteEditableNodeV4(id)
-    }
-
-    val migratedClip = liveClip.copy(nodeGraph = graph)
-    val host = migratedClip.creatorFilterHostNodeV36()
-    if (host == null) {
-        vm.setEditorStatusV19("Filter unavailable · no editable color node")
-        return
-    }
-
-    val preservedEffects = host.effects.filter { effect -> effect.creatorFilterPresetIdV36() == null }
+    val preservedEffects = host.effects.filter { it.creatorFilterPresetIdV36() == null }
     val markerEffects = remembered.entries.map { (id, amount) ->
         NodeEffect(name = creatorFilterMarkerNameV36(id), amount = amount.coerceIn(0f, 1f))
     }
     val updatedHost = host.copy(effects = preservedEffects + markerEffects)
     graph = graph.copy(
-        nodes = graph.nodes.map { node -> if (node.id == host.id) updatedHost else node },
+        nodes = graph.nodes.map { if (it.id == host.id) updatedHost else it },
         revision = graph.revision + 1L,
     )
-
     vm.commitProjectV19(
-        label = "filter-marker-v38",
+        label = "filter-marker-v41",
         project = state.project.withUpdatedClipV36(liveClip.copy(nodeGraph = graph)),
         status = if (intensity > .001f) {
-            val suffix = if (preset?.group == CreatorFilterGroupV36.LOOKS) " · single global look" else " · instant"
-            "${preset?.name ?: presetId} · ${(intensity * 100f).toInt()}%$suffix"
+            "${preset?.name ?: presetId} · ${(intensity * 100f).toInt()}% · Node ${host.label}"
         } else {
-            "${preset?.name ?: presetId} removed"
+            "${preset?.name ?: presetId} removed from Node ${host.label}"
         },
         coalesce = coalesce,
     )
@@ -375,7 +346,7 @@ private fun clearFilterMarkersV36(vm: EditorViewModelV4, clipId: String) {
         revision = graph.revision + 1L,
     )
     vm.commitProjectV19(
-        label = "filter-marker-v38-clear",
+        label = "filter-marker-v41-clear",
         project = state.project.withUpdatedClipV36(liveClip.copy(nodeGraph = graph)),
         status = "All filters removed",
     )
@@ -384,6 +355,6 @@ private fun clearFilterMarkersV36(vm: EditorViewModelV4, clipId: String) {
 private fun TimelineProject.withUpdatedClipV36(updated: TimelineClip): TimelineProject = copy(
     tracks = tracks.map { track ->
         if (track.clips.none { it.id == updated.id }) track
-        else track.copy(clips = track.clips.map { clip -> if (clip.id == updated.id) updated else clip })
+        else track.copy(clips = track.clips.map { if (it.id == updated.id) updated else it })
     },
 )
