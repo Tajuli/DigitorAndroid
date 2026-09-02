@@ -82,17 +82,16 @@ android {
     }
 
     buildTypes {
-        // Installable CI/phone build: keeps the normal application id and debug signing, but runs
-        // the same shrinker used by release so unused legacy screens/icons/classes do not bloat the
-        // downloadable APK. Normal `debug` remains untouched for development and instrumentation.
+        // Installable CI/phone build. Keep it behavior-identical to debug and reduce size only by
+        // packaging a single requested ABI. Do not combine debuggable=true with R8/resource shrink;
+        // AGP explicitly treats that combination as unsupported and it caused a real New Project crash.
         create("phone") {
             initWith(getByName("debug"))
             isDebuggable = true
-            isMinifyEnabled = true
-            isShrinkResources = true
+            isMinifyEnabled = false
+            isShrinkResources = false
             signingConfig = signingConfigs.getByName("debug")
             matchingFallbacks += listOf("debug")
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
 
         release {
