@@ -35,28 +35,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.tajuli.digitorandroid.editor.model.AdvancedColorGrade
-import com.tajuli.digitorandroid.editor.model.BEAUTY_EYE_POP_V28
 import com.tajuli.digitorandroid.editor.model.BEAUTY_HAIR_BROW_DARK_V28
-import com.tajuli.digitorandroid.editor.model.BEAUTY_PINK_LIP_V28
 import com.tajuli.digitorandroid.editor.model.BEAUTY_SKIN_BRIGHT_V28
 import com.tajuli.digitorandroid.editor.model.BEAUTY_SKIN_SMOOTH_V28
-import com.tajuli.digitorandroid.editor.model.ClipNodeGraph
-import com.tajuli.digitorandroid.editor.model.ColorNode
-import com.tajuli.digitorandroid.editor.model.ColorWheelValue
-import com.tajuli.digitorandroid.editor.model.LogWheels
-import com.tajuli.digitorandroid.editor.model.NodeCorrections
-import com.tajuli.digitorandroid.editor.model.NodeEdge
+import com.tajuli.digitorandroid.editor.model.CREATOR_FILTERS_V36
+import com.tajuli.digitorandroid.editor.model.CreatorFilterGroupV36
+import com.tajuli.digitorandroid.editor.model.CreatorFilterPresetV36
 import com.tajuli.digitorandroid.editor.model.NodeEffect
 import com.tajuli.digitorandroid.editor.model.NodeKind
-import com.tajuli.digitorandroid.editor.model.NodePosition
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.editor.model.appliedCreatorFiltersV36
+import com.tajuli.digitorandroid.editor.model.creatorFilterHostNodeV36
+import com.tajuli.digitorandroid.editor.model.creatorFilterMarkerNameV36
+import com.tajuli.digitorandroid.editor.model.creatorFilterPresetIdV36
+import com.tajuli.digitorandroid.editor.model.isLegacyCreatorFilterNodeV36
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceAnalyzerV28
-import com.tajuli.digitorandroid.editor.processing.BeautyFaceSkinMaskStoreV31
-import com.tajuli.digitorandroid.editor.processing.BeautyFaceTrackStoreV28
-import com.tajuli.digitorandroid.editor.processing.BeautyHairMaskStoreV29
-import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -66,142 +60,34 @@ private val Filter27Raised = Color(0xFF17171C)
 private val Filter27Divider = Color(0xFF292930)
 private val Filter27Muted = Color(0xFF909098)
 private val Filter27Accent = Color(0xFF30E0C3)
-private const val FILTER_NODE_PREFIX_V28 = "FilterV28 · "
-private const val LEGACY_FILTER_NODE_PREFIX_V27 = "Filter · "
 
-private enum class FilterGroupV28(val label: String) {
-    LOOKS("Looks"),
-    BEAUTY("Beauty"),
+private data class FilterSwatchV36(val a: Color, val b: Color)
+
+private fun swatchV36(id: String): FilterSwatchV36 = when (id) {
+    "fresh_lime" -> FilterSwatchV36(Color(0xFF84DDA4), Color(0xFFEAF8B4))
+    "vivid_verse" -> FilterSwatchV36(Color(0xFF865DFF), Color(0xFFFF7E70))
+    "soft_light" -> FilterSwatchV36(Color(0xFFF8D9D3), Color(0xFFF5F0E8))
+    "vhs" -> FilterSwatchV36(Color(0xFF6B7AA8), Color(0xFFD88793))
+    "teal_orange" -> FilterSwatchV36(Color(0xFF238B91), Color(0xFFE79B63))
+    "warm_film" -> FilterSwatchV36(Color(0xFF8B694F), Color(0xFFE6B47E))
+    "golden_hour" -> FilterSwatchV36(Color(0xFFD78845), Color(0xFFFFD982))
+    "moody_cinema" -> FilterSwatchV36(Color(0xFF243541), Color(0xFF8A6B59))
+    "natural_portrait" -> FilterSwatchV36(Color(0xFFC68E78), Color(0xFFF0C9B4))
+    "fade_film" -> FilterSwatchV36(Color(0xFF77736B), Color(0xFFC9B99B))
+    "skin_bright" -> FilterSwatchV36(Color(0xFFD6A98F), Color(0xFFFFE3CE))
+    "skin_smooth" -> FilterSwatchV36(Color(0xFFC89582), Color(0xFFF1C6B7))
+    "pink_lips" -> FilterSwatchV36(Color(0xFF9B4E61), Color(0xFFF08FA8))
+    "hair_brows" -> FilterSwatchV36(Color(0xFF111115), Color(0xFF4E4240))
+    "eye_pop" -> FilterSwatchV36(Color(0xFF394D65), Color(0xFFD9E7F2))
+    else -> FilterSwatchV36(Color(0xFFB66F72), Color(0xFFF3C7A9))
 }
 
-private data class CreatorFilterPresetV28(
-    val id: String,
-    val name: String,
-    val description: String,
-    val group: FilterGroupV28,
-    val corrections: NodeCorrections = NodeCorrections(),
-    val shadows: ColorWheelValue = ColorWheelValue(),
-    val midtones: ColorWheelValue = ColorWheelValue(),
-    val highlights: ColorWheelValue = ColorWheelValue(),
-    val global: ColorWheelValue = ColorWheelValue(),
-    val beautyEffects: Map<String, Float> = emptyMap(),
-    val defaultIntensity: Float = 1f,
-    val swatchA: Color,
-    val swatchB: Color,
-)
-
-private val CREATOR_FILTERS_V28 = listOf(
-    CreatorFilterPresetV28(
-        id = "fresh_lime", name = "Fresh Lime", description = "Clean fresh greens", group = FilterGroupV28.LOOKS,
-        corrections = NodeCorrections(exposure = .08f, contrast = 7f, saturation = 13f, temperature = -4f, tint = -3f, highlights = -5f, shadows = 7f),
-        shadows = ColorWheelValue(red = -.015f, green = .035f, blue = .005f),
-        highlights = ColorWheelValue(red = .012f, green = .030f, blue = -.012f),
-        swatchA = Color(0xFF84DDA4), swatchB = Color(0xFFEAF8B4),
-    ),
-    CreatorFilterPresetV28(
-        id = "vivid_verse", name = "Vivid Verse", description = "Punchy social color", group = FilterGroupV28.LOOKS,
-        corrections = NodeCorrections(exposure = .04f, contrast = 16f, saturation = 23f, temperature = 3f, tint = 2f, highlights = -6f, shadows = -3f),
-        shadows = ColorWheelValue(red = -.020f, blue = .025f),
-        highlights = ColorWheelValue(red = .025f, green = .006f, blue = -.014f),
-        swatchA = Color(0xFF865DFF), swatchB = Color(0xFFFF7E70),
-    ),
-    CreatorFilterPresetV28(
-        id = "soft_light", name = "Soft Light", description = "Airy soft highlights", group = FilterGroupV28.LOOKS,
-        corrections = NodeCorrections(exposure = .16f, contrast = -12f, saturation = -4f, temperature = 5f, tint = 2f, highlights = -18f, shadows = 15f),
-        midtones = ColorWheelValue(luma = .025f),
-        highlights = ColorWheelValue(red = .018f, green = .010f, blue = .004f, luma = .020f),
-        swatchA = Color(0xFFF8D9D3), swatchB = Color(0xFFF5F0E8),
-    ),
-    CreatorFilterPresetV28(
-        id = "vhs", name = "VHS", description = "Muted retro camcorder", group = FilterGroupV28.LOOKS,
-        corrections = NodeCorrections(exposure = -.03f, contrast = -7f, saturation = -17f, temperature = 7f, tint = 7f, highlights = -12f, shadows = 11f, hue = -2f),
-        shadows = ColorWheelValue(red = -.020f, green = .002f, blue = .028f),
-        highlights = ColorWheelValue(red = .030f, green = -.005f, blue = -.020f),
-        swatchA = Color(0xFF6B7AA8), swatchB = Color(0xFFD88793),
-    ),
-    CreatorFilterPresetV28(
-        id = "teal_orange", name = "Teal & Orange", description = "Cool shadow + warm skin", group = FilterGroupV28.LOOKS,
-        corrections = NodeCorrections(exposure = .01f, contrast = 14f, saturation = 9f, temperature = 2f, highlights = -8f, shadows = -7f),
-        shadows = ColorWheelValue(red = -.075f, green = .025f, blue = .090f),
-        midtones = ColorWheelValue(red = .018f, green = .003f, blue = -.014f),
-        highlights = ColorWheelValue(red = .085f, green = .022f, blue = -.065f),
-        swatchA = Color(0xFF238B91), swatchB = Color(0xFFE79B63),
-    ),
-    CreatorFilterPresetV28(
-        id = "warm_film", name = "Warm Film", description = "Warm cinematic film", group = FilterGroupV28.LOOKS,
-        corrections = NodeCorrections(exposure = .03f, contrast = -4f, saturation = -5f, temperature = 17f, tint = 2f, highlights = -10f, shadows = 9f),
-        shadows = ColorWheelValue(red = .018f, green = .006f, blue = -.020f),
-        highlights = ColorWheelValue(red = .060f, green = .020f, blue = -.045f),
-        swatchA = Color(0xFF8B694F), swatchB = Color(0xFFE6B47E),
-    ),
-    CreatorFilterPresetV28(
-        id = "golden_hour", name = "Golden Hour", description = "Sunset warmth + glow", group = FilterGroupV28.LOOKS,
-        corrections = NodeCorrections(exposure = .10f, contrast = 6f, saturation = 14f, temperature = 29f, tint = 4f, highlights = -7f, shadows = 7f),
-        midtones = ColorWheelValue(red = .035f, green = .010f, blue = -.030f),
-        highlights = ColorWheelValue(red = .090f, green = .035f, blue = -.070f, luma = .012f),
-        swatchA = Color(0xFFD78845), swatchB = Color(0xFFFFD982),
-    ),
-    CreatorFilterPresetV28(
-        id = "moody_cinema", name = "Moody Cinema", description = "Deep cinematic contrast", group = FilterGroupV28.LOOKS,
-        corrections = NodeCorrections(exposure = -.16f, contrast = 21f, saturation = -12f, temperature = -5f, tint = 1f, highlights = -23f, shadows = -13f),
-        shadows = ColorWheelValue(red = -.035f, green = .006f, blue = .060f, luma = -.025f),
-        highlights = ColorWheelValue(red = .030f, green = .006f, blue = -.022f),
-        swatchA = Color(0xFF243541), swatchB = Color(0xFF8A6B59),
-    ),
-    CreatorFilterPresetV28(
-        id = "natural_portrait", name = "Natural Portrait", description = "Gentle natural skin", group = FilterGroupV28.LOOKS,
-        corrections = NodeCorrections(exposure = .08f, contrast = -4f, saturation = 5f, temperature = 8f, tint = 3f, highlights = -9f, shadows = 11f),
-        midtones = ColorWheelValue(red = .022f, green = .006f, blue = -.012f, luma = .010f),
-        highlights = ColorWheelValue(red = .025f, green = .009f, blue = -.014f),
-        swatchA = Color(0xFFC68E78), swatchB = Color(0xFFF0C9B4),
-    ),
-    CreatorFilterPresetV28(
-        id = "fade_film", name = "Fade Film", description = "Lifted blacks + matte", group = FilterGroupV28.LOOKS,
-        corrections = NodeCorrections(exposure = .03f, contrast = -19f, saturation = -10f, temperature = 6f, tint = 1f, highlights = -11f, shadows = 22f),
-        shadows = ColorWheelValue(red = .012f, green = .006f, luma = .080f),
-        highlights = ColorWheelValue(red = .025f, green = .008f, blue = -.016f, luma = -.010f),
-        swatchA = Color(0xFF77736B), swatchB = Color(0xFFC9B99B),
-    ),
-
-    CreatorFilterPresetV28(
-        id = "skin_bright", name = "Skin Bright", description = "Semantic neutral bright skin", group = FilterGroupV28.BEAUTY,
-        beautyEffects = mapOf(BEAUTY_SKIN_BRIGHT_V28 to 1f), defaultIntensity = .60f,
-        swatchA = Color(0xFFD6A98F), swatchB = Color(0xFFFFE3CE),
-    ),
-    CreatorFilterPresetV28(
-        id = "skin_smooth", name = "Skin Smooth", description = "Edge-aware texture smoothing", group = FilterGroupV28.BEAUTY,
-        beautyEffects = mapOf(BEAUTY_SKIN_SMOOTH_V28 to 1f), defaultIntensity = .50f,
-        swatchA = Color(0xFFC89582), swatchB = Color(0xFFF1C6B7),
-    ),
-    CreatorFilterPresetV28(
-        id = "pink_lips", name = "Pink Lips", description = "Luma-safe natural rose lips", group = FilterGroupV28.BEAUTY,
-        beautyEffects = mapOf(BEAUTY_PINK_LIP_V28 to 1f), defaultIntensity = .55f,
-        swatchA = Color(0xFF9B4E61), swatchB = Color(0xFFF08FA8),
-    ),
-    CreatorFilterPresetV28(
-        id = "hair_brows", name = "Hair & Brows", description = "Semantic hair + dark brows", group = FilterGroupV28.BEAUTY,
-        beautyEffects = mapOf(BEAUTY_HAIR_BROW_DARK_V28 to 1f), defaultIntensity = .45f,
-        swatchA = Color(0xFF111115), swatchB = Color(0xFF4E4240),
-    ),
-    CreatorFilterPresetV28(
-        id = "eye_pop", name = "Eye Pop", description = "Natural eye clarity", group = FilterGroupV28.BEAUTY,
-        beautyEffects = mapOf(BEAUTY_EYE_POP_V28 to 1f), defaultIntensity = .45f,
-        swatchA = Color(0xFF394D65), swatchB = Color(0xFFD9E7F2),
-    ),
-    CreatorFilterPresetV28(
-        id = "portrait_glow", name = "Portrait Glow", description = "Balanced beauty combo", group = FilterGroupV28.BEAUTY,
-        beautyEffects = mapOf(
-            BEAUTY_SKIN_BRIGHT_V28 to .68f,
-            BEAUTY_SKIN_SMOOTH_V28 to .34f,
-            BEAUTY_PINK_LIP_V28 to .44f,
-            BEAUTY_HAIR_BROW_DARK_V28 to .34f,
-            BEAUTY_EYE_POP_V28 to .38f,
-        ),
-        defaultIntensity = .70f,
-        swatchA = Color(0xFFB66F72), swatchB = Color(0xFFF3C7A9),
-    ),
-)
-
+/**
+ * Filters V36 keeps the public V27 function name so the editor screen and saved UI contract stay
+ * source-compatible. Internally, filters no longer create/delete color nodes. Each selected preset
+ * is a lightweight marker effect on one existing editable node, which means a tap or slider change
+ * does not alter decoder/GL topology and can render on the next frame.
+ */
 @Composable
 fun CreatorFiltersWorkspaceV27(
     clip: TimelineClip?,
@@ -217,62 +103,55 @@ fun CreatorFiltersWorkspaceV27(
 
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
-    var group by remember { mutableStateOf(FilterGroupV28.LOOKS) }
-    val appliedIds = clip.nodeGraph.filterNodesV28().mapNotNull { it.filterPresetIdV28() }.toSet()
-    var selectedPresetId by remember(clip.id) {
-        mutableStateOf(clip.nodeGraph.filterNodesV28().lastOrNull()?.filterPresetIdV28())
-    }
-    val selectedPreset = CREATOR_FILTERS_V28.firstOrNull { it.id == selectedPresetId }
-    val selectedNode = selectedPreset?.let { clip.nodeGraph.filterNodeForPresetV28(it.id) }
-    val intensity = if (selectedPreset != null && selectedNode != null) inferIntensityV28(selectedNode, selectedPreset) else 0f
-    val visiblePresets = CREATOR_FILTERS_V28.filter { it.group == group }
+    var group by remember { mutableStateOf(CreatorFilterGroupV36.LOOKS) }
+    var selectedPresetId by remember(clip.id) { mutableStateOf<String?>(null) }
 
-    fun applyPreset(preset: CreatorFilterPresetV28) {
-        selectedPresetId = preset.id
-        val alreadyApplied = preset.id in appliedIds
-        if (!alreadyApplied) {
-            applyFilterV28(vm, clip.id, preset, preset.defaultIntensity, coalesce = false)
-        }
-        if (preset.group != FilterGroupV28.BEAUTY) return
+    val applied = clip.appliedCreatorFiltersV36()
+    val selectedPreset = CREATOR_FILTERS_V36.firstOrNull { it.id == selectedPresetId }
+    val selectedIntensity = selectedPresetId?.let { applied[it] } ?: 0f
+    val visiblePresets = CREATOR_FILTERS_V36.filter { it.group == group }
 
-        val needsHairMask = preset.beautyEffects.containsKey(BEAUTY_HAIR_BROW_DARK_V28)
-        val needsSkinMask = preset.beautyEffects.containsKey(BEAUTY_SKIN_BRIGHT_V28) ||
-            preset.beautyEffects.containsKey(BEAUTY_SKIN_SMOOTH_V28)
-        val faceReady = BeautyFaceTrackStoreV28.hasCoverage(context, clip)
-        val hairReady = !needsHairMask || BeautyHairMaskStoreV29.hasCoverage(context, clip)
-        val skinReady = !needsSkinMask || BeautyFaceSkinMaskStoreV31.hasCoverage(context, clip)
-        if (faceReady && hairReady && skinReady) return
-
+    fun refineBeautyInBackground(preset: CreatorFilterPresetV36) {
+        val needsHairMask = preset.beautyWeights.containsKey(BEAUTY_HAIR_BROW_DARK_V28)
+        val needsSkinMask = preset.beautyWeights.containsKey(BEAUTY_SKIN_BRIGHT_V28) ||
+            preset.beautyWeights.containsKey(BEAUTY_SKIN_SMOOTH_V28)
         val analysisLabel = when {
-            needsHairMask && needsSkinMask -> "face + semantic skin + hair"
-            needsSkinMask -> "face + semantic skin"
-            needsHairMask -> "face + semantic hair"
+            needsHairMask && needsSkinMask -> "skin + face + hair"
+            needsHairMask -> "face + hair"
+            needsSkinMask -> "skin + face"
             else -> "face"
         }
-        vm.setEditorStatusV19("Filter active · analyzing $analysisLabel in background…")
+        vm.setEditorStatusV19("${preset.name} active instantly · refining $analysisLabel…")
         scope.launch {
+            val analysisClip = vm.state.value.project.clip(clip.id) ?: clip
             val track = runCatching {
                 withContext(Dispatchers.Default) {
                     BeautyFaceAnalyzerV28(context).analyzeAndStore(
-                        clip,
+                        analysisClip,
                         requireHairMask = needsHairMask,
                         requireSkinMask = needsSkinMask,
                     )
                 }
             }.getOrElse { error ->
-                vm.setEditorStatusV19(error.message ?: "Beauty analysis failed")
+                vm.setEditorStatusV19("${preset.name} active · semantic refinement unavailable: ${error.message ?: "analysis failed"}")
                 return@launch
             }
-            if (track.samples.none { it.geometry != null }) {
-                vm.setEditorStatusV19("Filter active · no clear face found in analyzed frames")
-                return@launch
+            if (track.samples.any { it.geometry != null }) {
+                vm.setEditorStatusV19("${preset.name} ready · instant filter + refined $analysisLabel")
+            } else {
+                vm.setEditorStatusV19("${preset.name} active · no clear face found; color-skin fallback remains active")
             }
+        }
+    }
 
-            val liveClip = vm.state.value.project.clip(clip.id) ?: return@launch
-            val liveNode = liveClip.nodeGraph.filterNodeForPresetV28(preset.id) ?: return@launch
-            val liveIntensity = inferIntensityV28(liveNode, preset)
-            applyFilterV28(vm, clip.id, preset, liveIntensity, coalesce = true)
-            vm.setEditorStatusV19("${preset.name} ready · $analysisLabel analyzed")
+    fun applyPreset(preset: CreatorFilterPresetV36) {
+        selectedPresetId = preset.id
+        val wasApplied = preset.id in applied
+        if (!wasApplied) {
+            updateFilterMarkerV36(vm, clip.id, preset.id, preset.defaultIntensity, coalesce = false)
+        }
+        if (!wasApplied && preset.group == CreatorFilterGroupV36.BEAUTY) {
+            refineBeautyInBackground(preset)
         }
     }
 
@@ -283,10 +162,10 @@ fun CreatorFiltersWorkspaceV27(
         ) {
             Text("Filters · ${clip.label}", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
-            Text("${appliedIds.size} active · stackable", fontSize = 7.sp, color = Filter27Muted)
-            if (appliedIds.isNotEmpty()) {
+            Text("${applied.size} active · instant", fontSize = 7.sp, color = Filter27Muted)
+            if (applied.isNotEmpty()) {
                 TextButton(onClick = {
-                    clearFiltersV28(vm, clip.id)
+                    clearFilterMarkersV36(vm, clip.id)
                     selectedPresetId = null
                 }) { Text("Clear all", fontSize = 7.sp) }
             }
@@ -298,18 +177,19 @@ fun CreatorFiltersWorkspaceV27(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            FilterGroupV28.entries.forEach { item ->
+            CreatorFilterGroupV36.entries.forEach { item ->
                 val active = group == item
+                val label = if (item == CreatorFilterGroupV36.LOOKS) "Looks" else "Beauty"
                 Box(
                     Modifier.background(if (active) Filter27Accent.copy(alpha = .16f) else Filter27Raised, RoundedCornerShape(7.dp))
                         .clickable { group = item }
                         .padding(horizontal = 11.dp, vertical = 6.dp),
                 ) {
-                    Text(item.label, fontSize = 8.sp, color = if (active) Filter27Accent else Color.White.copy(alpha = .75f))
+                    Text(label, fontSize = 8.sp, color = if (active) Filter27Accent else Color.White.copy(alpha = .75f))
                 }
             }
-            if (group == FilterGroupV28.BEAUTY) {
-                Text("Semantic skin + face + hair · video + image", fontSize = 7.sp, color = Filter27Muted)
+            if (group == CreatorFilterGroupV36.BEAUTY) {
+                Text("Instant first frame · semantic refinement follows", fontSize = 7.sp, color = Filter27Muted)
             }
         }
 
@@ -318,13 +198,14 @@ fun CreatorFiltersWorkspaceV27(
             horizontalArrangement = Arrangement.spacedBy(7.dp),
         ) {
             visiblePresets.forEach { preset ->
-                FilterCardV28(
+                val swatch = swatchV36(preset.id)
+                FilterCardV36(
                     name = preset.name,
                     description = preset.description,
-                    applied = preset.id in appliedIds,
+                    applied = preset.id in applied,
                     selected = preset.id == selectedPresetId,
-                    swatchA = preset.swatchA,
-                    swatchB = preset.swatchB,
+                    swatchA = swatch.a,
+                    swatchB = swatch.b,
                     onClick = { applyPreset(preset) },
                 )
             }
@@ -335,32 +216,30 @@ fun CreatorFiltersWorkspaceV27(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(selectedPreset?.name ?: "Select a filter", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
-                if (selectedNode != null) {
-                    Text("${(intensity * 100f).toInt()}%", fontSize = 9.sp, color = Filter27Accent)
+                if (selectedPreset != null && selectedPreset.id in applied) {
+                    Text("${(selectedIntensity * 100f).toInt()}%", fontSize = 9.sp, color = Filter27Accent)
                     TextButton(onClick = {
-                        removeFilterV28(vm, clip.id, selectedPreset!!.id)
-                        selectedPresetId = clip.nodeGraph.filterNodesV28()
-                            .mapNotNull { it.filterPresetIdV28() }
-                            .lastOrNull { it != selectedPreset.id }
+                        updateFilterMarkerV36(vm, clip.id, selectedPreset.id, 0f, coalesce = false)
+                        selectedPresetId = null
                     }) { Text("Remove", fontSize = 7.sp, color = Color(0xFFFF7777)) }
                 }
             }
             Slider(
-                value = if (selectedNode == null) 0f else intensity,
+                value = selectedIntensity.coerceIn(0f, 1f),
                 onValueChange = { next ->
-                    selectedPreset?.let { preset ->
-                        if (selectedNode != null) applyFilterV28(vm, clip.id, preset, next, coalesce = true)
+                    selectedPreset?.takeIf { it.id in applied }?.let { preset ->
+                        updateFilterMarkerV36(vm, clip.id, preset.id, next, coalesce = true)
                     }
                 },
                 valueRange = 0f..1f,
-                enabled = selectedNode != null,
+                enabled = selectedPreset != null && selectedPreset.id in applied,
                 modifier = Modifier.fillMaxWidth().height(30.dp),
             )
             Text(
-                if (group == FilterGroupV28.BEAUTY) {
-                    "Combine freely. Skin Bright/Smooth use semantic face-skin segmentation; Hair & Brows uses dedicated HairSegmenter; lips/eyes/brows follow face contours. 100% is maximum, presets start at a natural default."
+                if (group == CreatorFilterGroupV36.BEAUTY) {
+                    "Skin Bright now responds immediately without waiting for face analysis. 100% has a stronger CapCut-class midtone lift with highlight protection; MediaPipe skin/face/hair masks refine the result in the background."
                 } else {
-                    "Looks are independent final serial nodes. You can stack multiple looks, and your existing Correction/Color nodes remain untouched."
+                    "Looks use one persistent high-precision GPU pass. Tapping or changing intensity does not rebuild the preview graph, and white highlights are compressed while portrait midtones stay bright and detailed."
                 },
                 fontSize = 7.sp,
                 color = Filter27Muted,
@@ -370,7 +249,7 @@ fun CreatorFiltersWorkspaceV27(
 }
 
 @Composable
-private fun FilterCardV28(
+private fun FilterCardV36(
     name: String,
     description: String,
     applied: Boolean,
@@ -396,9 +275,7 @@ private fun FilterCardV28(
                 .background(Brush.linearGradient(listOf(swatchA, swatchB)), RoundedCornerShape(6.dp)),
             contentAlignment = Alignment.TopEnd,
         ) {
-            if (applied) {
-                Text("✓", fontSize = 10.sp, color = Color.White, modifier = Modifier.padding(4.dp))
-            }
+            if (applied) Text("✓", fontSize = 10.sp, color = Color.White, modifier = Modifier.padding(4.dp))
         }
         Spacer(Modifier.height(4.dp))
         Text(name, fontSize = 8.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, textAlign = TextAlign.Center)
@@ -406,170 +283,79 @@ private fun FilterCardV28(
     }
 }
 
-private fun applyFilterV28(
+/**
+ * Writes/updates one filter marker on a stable existing node. Legacy V28 filter nodes are migrated
+ * lazily on first edit so projects made with PR #47 keep their visible filter stack.
+ */
+private fun updateFilterMarkerV36(
     vm: EditorViewModelV4,
     clipId: String,
-    preset: CreatorFilterPresetV28,
+    presetId: String,
     intensity: Float,
     coalesce: Boolean,
 ) {
     val state = vm.state.value
     val liveClip = state.project.clip(clipId) ?: return
-    val safeIntensity = intensity.coerceIn(0f, 1f)
-    var graph = liveClip.nodeGraph.ensureFilterNodeV28(preset)
-    val filterNode = graph.filterNodeForPresetV28(preset.id) ?: return
-    val nextNode = filterNode.copy(
-        label = filterLabelV28(preset),
-        corrections = preset.corrections.scaledV28(safeIntensity),
-        advancedColor = AdvancedColorGrade(
-            log = LogWheels(
-                shadows = preset.shadows.scaledV28(safeIntensity),
-                midtones = preset.midtones.scaledV28(safeIntensity),
-                highlights = preset.highlights.scaledV28(safeIntensity),
-                global = preset.global.scaledV28(safeIntensity),
-            ),
-        ),
-        effects = preset.beautyEffects.map { (name, weight) ->
-            NodeEffect(name = name, amount = (weight * safeIntensity).coerceIn(0f, 1.5f))
-        },
-    )
+    val remembered = liveClip.appliedCreatorFiltersV36().toMutableMap()
+    if (intensity > .001f) remembered[presetId] = intensity.coerceIn(0f, 1f) else remembered.remove(presetId)
+
+    var graph = liveClip.nodeGraph
+    graph.nodes.filter { it.isLegacyCreatorFilterNodeV36() }.map { it.id }.forEach { id ->
+        graph = graph.deleteEditableNodeV4(id)
+    }
+
+    val migratedClip = liveClip.copy(nodeGraph = graph)
+    val host = migratedClip.creatorFilterHostNodeV36()
+    if (host == null) {
+        vm.setEditorStatusV19("Filter unavailable · no editable color node")
+        return
+    }
+
+    val preservedEffects = host.effects.filter { effect -> effect.creatorFilterPresetIdV36() == null }
+    val markerEffects = remembered.entries.map { (id, amount) ->
+        NodeEffect(name = creatorFilterMarkerNameV36(id), amount = amount.coerceIn(0f, 1f))
+    }
+    val updatedHost = host.copy(effects = preservedEffects + markerEffects)
     graph = graph.copy(
-        nodes = graph.nodes.map { node -> if (node.id == nextNode.id) nextNode else node },
+        nodes = graph.nodes.map { node -> if (node.id == host.id) updatedHost else node },
         revision = graph.revision + 1L,
     )
+
+    val preset = CREATOR_FILTERS_V36.firstOrNull { it.id == presetId }
     vm.commitProjectV19(
-        label = "filter-stack-v28",
-        project = state.project.withUpdatedClipV28(liveClip.copy(nodeGraph = graph)),
-        status = "${preset.name} · ${(safeIntensity * 100f).toInt()}% · ${graph.filterNodesV28().size} filter(s)",
+        label = "filter-marker-v36",
+        project = state.project.withUpdatedClipV36(liveClip.copy(nodeGraph = graph)),
+        status = if (intensity > .001f) {
+            "${preset?.name ?: presetId} · ${(intensity * 100f).toInt()}% · instant"
+        } else {
+            "${preset?.name ?: presetId} removed"
+        },
         coalesce = coalesce,
     )
 }
 
-private fun removeFilterV28(vm: EditorViewModelV4, clipId: String, presetId: String) {
-    val state = vm.state.value
-    val liveClip = state.project.clip(clipId) ?: return
-    val target = liveClip.nodeGraph.filterNodeForPresetV28(presetId) ?: return
-    val graph = liveClip.nodeGraph.deleteEditableNodeV4(target.id).let { deleted ->
-        deleted.copy(revision = deleted.revision + 1L)
-    }
-    vm.commitProjectV19(
-        label = "filter-stack-v28-remove",
-        project = state.project.withUpdatedClipV28(liveClip.copy(nodeGraph = graph)),
-        status = "Filter removed · ${graph.filterNodesV28().size} active",
-    )
-}
-
-private fun clearFiltersV28(vm: EditorViewModelV4, clipId: String) {
+private fun clearFilterMarkersV36(vm: EditorViewModelV4, clipId: String) {
     val state = vm.state.value
     val liveClip = state.project.clip(clipId) ?: return
     var graph = liveClip.nodeGraph
-    val ids = graph.filterNodesV28().map { it.id }
-    if (ids.isEmpty()) return
-    ids.forEach { id -> graph = graph.deleteEditableNodeV4(id) }
-    graph = graph.copy(revision = graph.revision + 1L)
+    graph.nodes.filter { it.isLegacyCreatorFilterNodeV36() }.map { it.id }.forEach { id ->
+        graph = graph.deleteEditableNodeV4(id)
+    }
+    graph = graph.copy(
+        nodes = graph.nodes.map { node ->
+            if (node.kind != NodeKind.SERIAL && node.kind != NodeKind.PARALLEL) node
+            else node.copy(effects = node.effects.filter { it.creatorFilterPresetIdV36() == null })
+        },
+        revision = graph.revision + 1L,
+    )
     vm.commitProjectV19(
-        label = "filter-stack-v28-clear",
-        project = state.project.withUpdatedClipV28(liveClip.copy(nodeGraph = graph)),
+        label = "filter-marker-v36-clear",
+        project = state.project.withUpdatedClipV36(liveClip.copy(nodeGraph = graph)),
         status = "All filters removed",
     )
 }
 
-private fun ClipNodeGraph.ensureFilterNodeV28(preset: CreatorFilterPresetV28): ClipNodeGraph {
-    val existing = filterNodeForPresetV28(preset.id)
-    if (existing != null) {
-        if (existing.label.startsWith(LEGACY_FILTER_NODE_PREFIX_V27)) {
-            return copy(
-                nodes = nodes.map { node -> if (node.id == existing.id) node.copy(label = filterLabelV28(preset)) else node },
-                revision = revision + 1L,
-            )
-        }
-        return this
-    }
-    val output = nodes.firstOrNull { it.kind == NodeKind.OUTPUT } ?: return this
-    val incoming = edges.firstOrNull { it.toId == output.id } ?: return this
-    val filter = ColorNode(
-        kind = NodeKind.SERIAL,
-        label = filterLabelV28(preset),
-        position = NodePosition(output.position.x, output.position.y),
-    )
-    val shiftedNodes = nodes.map { node ->
-        if (node.position.x >= output.position.x) node.copy(position = node.position.copy(x = node.position.x + 126f)) else node
-    }
-    val rebuiltEdges = edges.filterNot { it == incoming }.toMutableList().apply {
-        add(NodeEdge(incoming.fromId, filter.id))
-        add(NodeEdge(filter.id, output.id))
-    }
-    return copy(nodes = shiftedNodes + filter, edges = rebuiltEdges, revision = revision + 1L)
-}
-
-private fun ClipNodeGraph.filterNodesV28(): List<ColorNode> =
-    nodes.filter { node ->
-        node.kind == NodeKind.SERIAL &&
-            (node.label.startsWith(FILTER_NODE_PREFIX_V28) || node.label.startsWith(LEGACY_FILTER_NODE_PREFIX_V27)) &&
-            node.filterPresetIdV28() != null
-    }.sortedBy { it.position.x }
-
-private fun ClipNodeGraph.filterNodeForPresetV28(presetId: String): ColorNode? =
-    filterNodesV28().firstOrNull { it.filterPresetIdV28() == presetId }
-
-private fun ColorNode.filterPresetIdV28(): String? {
-    if (label.startsWith(FILTER_NODE_PREFIX_V28)) {
-        return label.removePrefix(FILTER_NODE_PREFIX_V28).substringBefore(" · ").takeIf { id ->
-            CREATOR_FILTERS_V28.any { it.id == id }
-        }
-    }
-    if (label.startsWith(LEGACY_FILTER_NODE_PREFIX_V27)) {
-        val oldName = label.removePrefix(LEGACY_FILTER_NODE_PREFIX_V27)
-        return CREATOR_FILTERS_V28.firstOrNull { it.name == oldName }?.id
-    }
-    return null
-}
-
-private fun filterLabelV28(preset: CreatorFilterPresetV28): String =
-    "$FILTER_NODE_PREFIX_V28${preset.id} · ${preset.name}"
-
-private fun inferIntensityV28(node: ColorNode, preset: CreatorFilterPresetV28): Float {
-    if (preset.beautyEffects.isNotEmpty()) {
-        val base = preset.beautyEffects.entries.firstOrNull { abs(it.value) > .0001f } ?: return 1f
-        val current = node.effects.firstOrNull { it.name == base.key }?.amount ?: 0f
-        return (current / base.value).coerceIn(0f, 1f)
-    }
-    val base = preset.corrections
-    val current = node.corrections
-    val pairs = listOf(
-        current.contrast to base.contrast,
-        current.saturation to base.saturation,
-        current.temperature to base.temperature,
-        current.exposure to base.exposure,
-        current.highlights to base.highlights,
-        current.shadows to base.shadows,
-    )
-    val pair = pairs.firstOrNull { (_, reference) -> abs(reference) > .0001f } ?: return 1f
-    return (pair.first / pair.second).coerceIn(0f, 1f)
-}
-
-private fun NodeCorrections.scaledV28(amount: Float): NodeCorrections = copy(
-    exposure = exposure * amount,
-    contrast = contrast * amount,
-    saturation = saturation * amount,
-    temperature = temperature * amount,
-    tint = tint * amount,
-    highlights = highlights * amount,
-    shadows = shadows * amount,
-    hue = hue * amount,
-    colorBoost = colorBoost * amount,
-)
-
-private fun ColorWheelValue.scaledV28(amount: Float): ColorWheelValue = copy(
-    red = red * amount,
-    green = green * amount,
-    blue = blue * amount,
-    luma = luma * amount,
-    puckX = puckX * amount,
-    puckY = puckY * amount,
-)
-
-private fun TimelineProject.withUpdatedClipV28(updated: TimelineClip): TimelineProject = copy(
+private fun TimelineProject.withUpdatedClipV36(updated: TimelineClip): TimelineProject = copy(
     tracks = tracks.map { track ->
         if (track.clips.none { it.id == updated.id }) track
         else track.copy(clips = track.clips.map { clip -> if (clip.id == updated.id) updated else clip })
