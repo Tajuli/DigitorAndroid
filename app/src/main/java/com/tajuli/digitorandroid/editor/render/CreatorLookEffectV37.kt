@@ -10,6 +10,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.BaseGlShaderProgram
 import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
+import com.tajuli.digitorandroid.editor.model.CINEMATIC_DARK_REFERENCE_V37
 import com.tajuli.digitorandroid.editor.model.ColorWheelValue
 import com.tajuli.digitorandroid.editor.model.CreatorLookKernelV37
 import com.tajuli.digitorandroid.editor.model.LogWheels
@@ -29,11 +30,11 @@ import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
  * Realtime preview still keeps one resident shader, so changing a marker/intensity is a uniform/data
  * update and becomes visible on the next rendered frame. Export uses this exact shader.
  *
- * Moody Cinema uses an independently fitted global kernel from the user-supplied CapCut Cinematic
- * Dark reference pair. Across seven aligned frames the reference showed a strong midtone lift,
- * protected/rolled highlights, and chroma compression strongest near neutral colors. The fitted
- * kernel is a smooth luminance polynomial + chroma-response curve + small global color matrix. No
- * CapCut LUT, model, code, or asset is included.
+ * Moody Cinema's reference kernel is independently fitted from the user-supplied Normal/CapCut
+ * Cinematic Dark pair. Across seven aligned frames the reference showed strong midtone lift,
+ * protected highlights, and chroma compression strongest near neutral colors. Calibration constants
+ * live in the model layer so they are JVM-testable; the shader receives them as uniforms. No CapCut
+ * LUT, model, code, or asset is included.
  */
 @UnstableApi
 internal class CreatorLookEffectV37 private constructor(
@@ -83,6 +84,7 @@ internal class CreatorLookEffectV37 private constructor(
                 val log = active?.preset?.log ?: LogWheels()
                 val intensity = active?.intensity ?: 0f
                 val kernelMode = if (active?.kernel == CreatorLookKernelV37.CINEMATIC_DARK_REFERENCE) 1f else 0f
+                val reference = CINEMATIC_DARK_REFERENCE_V37
 
                 program.use()
                 program.setSamplerTexIdUniform("uTexSampler", inputTexId, 0)
@@ -103,6 +105,19 @@ internal class CreatorLookEffectV37 private constructor(
                 program.setFloatsUniform("uLogGlobal", log.global.uniformV37())
                 program.setFloatUniform("uShadowRange", log.shadowRange)
                 program.setFloatUniform("uHighlightRange", log.highlightRange)
+                program.setFloatsUniform(
+                    "uRefToneA",
+                    floatArrayOf(reference.toneC5, reference.toneC4, reference.toneC3, reference.toneC2),
+                )
+                program.setFloatsUniform("uRefToneB", floatArrayOf(reference.toneC1, reference.toneC0))
+                program.setFloatsUniform(
+                    "uRefChroma",
+                    floatArrayOf(reference.chromaFloor, reference.chromaLow, reference.chromaHigh, reference.chromaMaster),
+                )
+                program.setFloatsUniform("uRefMatrixR", reference.matrixR)
+                program.setFloatsUniform("uRefMatrixG", reference.matrixG)
+                program.setFloatsUniform("uRefMatrixB", reference.matrixB)
+                program.setFloatsUniform("uRefOffset", reference.offset)
                 program.bindAttributesAndUniforms()
                 GLES20.glDisable(GLES20.GL_BLEND)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -153,6 +168,13 @@ internal class CreatorLookEffectV37 private constructor(
                 uniform vec4 uLogGlobal;
                 uniform float uShadowRange;
                 uniform float uHighlightRange;
+                uniform vec4 uRefToneA;
+                uniform vec2 uRefToneB;
+                uniform vec4 uRefChroma;
+                uniform vec3 uRefMatrixR;
+                uniform vec3 uRefMatrixG;
+                uniform vec3 uRefMatrixB;
+                uniform vec3 uRefOffset;
                 varying vec2 vTexCoord;
 
                 const float PI2 = 6.28318530718;
@@ -243,16 +265,13 @@ internal class CreatorLookEffectV37 private constructor(
                     return fitToGamutPreserveHue(rgb);
                 }
 
-                // Fifth-order monotonic fit to the measured full-frame tone response in the supplied
-                // Normal -> CapCut Cinematic Dark pair. Input/output are normalized BT.709 code-value
-                // luminance. It lifts mids strongly and rolls the top end instead of painting a face.
                 float cinematicDarkTone(float y) {
                     float v = (((((
-                        .11038443 * y + .20514610
-                    ) * y - 1.25236079
-                    ) * y + .97381303
-                    ) * y + .92797531
-                    ) * y + .00854670);
+                        uRefToneA.x * y + uRefToneA.y
+                    ) * y + uRefToneA.z
+                    ) * y + uRefToneA.w
+                    ) * y + uRefToneB.x
+                    ) * y + uRefToneB.y);
                     return clamp(v, 0.0, 1.0);
                 }
 
@@ -262,18 +281,16 @@ internal class CreatorLookEffectV37 private constructor(
                     vec3 chroma = src - vec3(y);
                     float magnitude = length(chroma);
 
-                    // The reference compresses near-neutral chroma much more than strong color.
-                    // This is global color behaviour: the exact same RGB receives the exact same
-                    // transform regardless of whether it belongs to skin, a wall, clothing, etc.
-                    float chromaScale = (.50 + .50 * smoothstep(.04, .18, magnitude)) * .95;
+                    float chromaScale = (
+                        uRefChroma.x + (1.0 - uRefChroma.x) *
+                        smoothstep(uRefChroma.y, uRefChroma.z, magnitude)
+                    ) * uRefChroma.w;
                     vec3 rgb = vec3(targetY) + chroma * chromaScale;
 
-                    // Small fitted global residual matrix after tone/chroma response. Explicit form
-                    // avoids GLSL column-major ambiguity and remains deterministic on GLES2/3.
                     vec3 corrected = vec3(
-                        1.00241445 * rgb.r + .14546172 * rgb.g - .15868165 * rgb.b + .01373053,
-                        -.01362015 * rgb.r + 1.09564502 * rgb.g - .08796748 * rgb.b + .00844339,
-                        -.03250342 * rgb.r + .01014680 * rgb.g + .99816702 * rgb.b + .02524541
+                        dot(uRefMatrixR, rgb) + uRefOffset.r,
+                        dot(uRefMatrixG, rgb) + uRefOffset.g,
+                        dot(uRefMatrixB, rgb) + uRefOffset.b
                     );
                     return fitToGamutPreserveHue(corrected);
                 }
