@@ -181,7 +181,7 @@ private val CREATOR_FILTERS_V28 = listOf(
         swatchA = Color(0xFF9B4E61), swatchB = Color(0xFFF08FA8),
     ),
     CreatorFilterPresetV28(
-        id = "hair_brows", name = "Hair & Brows", description = "Deeper black definition", group = FilterGroupV28.BEAUTY,
+        id = "hair_brows", name = "Hair & Brows", description = "Semantic hair + dark brows", group = FilterGroupV28.BEAUTY,
         beautyEffects = mapOf(BEAUTY_HAIR_BROW_DARK_V28 to 1f),
         swatchA = Color(0xFF111115), swatchB = Color(0xFF4E4240),
     ),
@@ -235,12 +235,12 @@ fun CreatorFiltersWorkspaceV27(
             applyFilterV28(vm, clip.id, preset, 1f, coalesce = false)
             return
         }
-        vm.setEditorStatusV19("Analyzing face, lips, eyes and brows…")
+        vm.setEditorStatusV19("Analyzing face + dedicated semantic hair mask…")
         scope.launch {
             val track = runCatching {
                 withContext(Dispatchers.Default) { BeautyFaceAnalyzerV28(context).analyzeAndStore(clip) }
             }.getOrElse { error ->
-                vm.setEditorStatusV19(error.message ?: "Face analysis failed")
+                vm.setEditorStatusV19(error.message ?: "Beauty analysis failed")
                 return@launch
             }
             if (track.samples.none { it.geometry != null }) {
@@ -284,7 +284,7 @@ fun CreatorFiltersWorkspaceV27(
                 }
             }
             if (group == FilterGroupV28.BEAUTY) {
-                Text("Face-aware · works on video + image", fontSize = 7.sp, color = Filter27Muted)
+                Text("Face contours + HairSegmenter · video + image", fontSize = 7.sp, color = Filter27Muted)
             }
         }
 
@@ -333,7 +333,7 @@ fun CreatorFiltersWorkspaceV27(
             )
             Text(
                 if (group == FilterGroupV28.BEAUTY) {
-                    "Combine freely: Skin Bright + Hair & Brows + Pink Lips + Eye Pop. ML face contours localize features; skin/hair color gates keep changes inside the intended regions."
+                    "Combine freely: Skin Bright + Hair & Brows + Pink Lips + Eye Pop. ML Kit localizes face features; MediaPipe HairSegmenter supplies a real semantic hair mask instead of a color/rectangle guess."
                 } else {
                     "Looks are independent final serial nodes. You can stack multiple looks, and your existing Correction/Color nodes remain untouched."
                 },
