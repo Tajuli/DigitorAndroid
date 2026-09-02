@@ -6,21 +6,19 @@ import com.tajuli.digitorandroid.editor.model.ColorGraphEvaluator
 import com.tajuli.digitorandroid.editor.model.ColorNode
 import com.tajuli.digitorandroid.editor.model.InputColorProfile
 import com.tajuli.digitorandroid.editor.model.InputColorTransform
-import com.tajuli.digitorandroid.editor.model.QualifiedColorMath
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolvedInputColorProfile
 
 /**
  * Single source of truth for GPU color processing.
  *
- * Optional camera log/HDR input transforms run first, then Correction/Color node snapshots. NONE is
- * a true bypass, so flat source code values can go straight into grading and export.
+ * V41 restores true node-local creator LOOK execution. A LOOK marker is evaluated inside the
+ * Serial/Parallel node that owns it, immediately after that node's manual correction, and before
+ * downstream nodes or a Parallel Mixer. This means node order and branch topology are now real
+ * processing semantics instead of UI-only metadata.
  *
- * V34 keeps preview and export on the same 33^3 cube. V35 additionally moves the preset recipe of
- * creator-look filter nodes into [CreatorLookEffectV35], a highp analytic shader stage. The LUT still
- * evaluates every ordinary grading node plus any advanced primary/curve/qualifier edits made on a
- * filter node; only that filter's preset Corrections + Log Wheels are neutralised here. This avoids
- * baking strong creator looks into ARGB_8888 while preserving the existing node graph contract.
+ * Camera input transforms still run before the graph. BEAUTY remains outside this 3D color LUT
+ * because semantic smoothing/lips/eyes/hair require spatial processing.
  */
 @UnstableApi
 object SharedColorPipeline {
@@ -42,8 +40,6 @@ object SharedColorPipeline {
     }
 
     private fun MutableList<Effect>.addSpatialQualifierEffects(clip: TimelineClip) {
-        // This pre-filter samples source RGB before the 3D LUT. NONE/Rec.709 use those RGB code
-        // values directly, so the mask is valid. Managed Log/HDR transforms stay inside the LUT.
         val profile = clip.resolvedInputColorProfile()
         if (profile != InputColorProfile.NONE && profile != InputColorProfile.REC709) return
 
@@ -64,13 +60,10 @@ object SharedColorPipeline {
     ): Array<Array<IntArray>> {
         val last = (size - 1).toFloat()
         val evaluatedGraph = clip.nodeAnimations.evaluateGraph(clip.nodeGraph, sourceTimeUs)
-        val lutGraph = evaluatedGraph.copy(
-            nodes = evaluatedGraph.nodes.map(CreatorLookNodeV35::neutralizeRecipeForLut),
-        )
-        val graphPlan = ColorGraphEvaluator.compile(lutGraph)
+        val graphPlan = ColorGraphEvaluator.compile(evaluatedGraph)
         val inputProfile = clip.resolvedInputColorProfile()
         val nodeTransform: (ColorNode, Float, Float, Float) -> FloatArray = { node, r, g, b ->
-            QualifiedColorMath.applyNode(node, r, g, b)
+            CreatorLookNodeTransformV41.apply(node, r, g, b)
         }
         return Array(size) { rIndex ->
             Array(size) { gIndex ->
