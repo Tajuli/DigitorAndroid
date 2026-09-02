@@ -16,8 +16,11 @@ import com.tajuli.digitorandroid.editor.model.resolvedInputColorProfile
  * Optional camera log/HDR input transforms run first, then Correction/Color node snapshots. NONE is
  * a true bypass, so flat source code values can go straight into grading and export.
  *
- * V34 keeps preview and export on the same 33^3 cube. The previous 17^3/25^3 preview cubes were
- * cheaper, but they visibly reduced smoothness in skin/highlight gradients while authoring looks.
+ * V34 keeps preview and export on the same 33^3 cube. V35 additionally moves the preset recipe of
+ * creator-look filter nodes into [CreatorLookEffectV35], a highp analytic shader stage. The LUT still
+ * evaluates every ordinary grading node plus any advanced primary/curve/qualifier edits made on a
+ * filter node; only that filter's preset Corrections + Log Wheels are neutralised here. This avoids
+ * baking strong creator looks into ARGB_8888 while preserving the existing node graph contract.
  */
 @UnstableApi
 object SharedColorPipeline {
@@ -61,7 +64,10 @@ object SharedColorPipeline {
     ): Array<Array<IntArray>> {
         val last = (size - 1).toFloat()
         val evaluatedGraph = clip.nodeAnimations.evaluateGraph(clip.nodeGraph, sourceTimeUs)
-        val graphPlan = ColorGraphEvaluator.compile(evaluatedGraph)
+        val lutGraph = evaluatedGraph.copy(
+            nodes = evaluatedGraph.nodes.map(CreatorLookNodeV35::neutralizeRecipeForLut),
+        )
+        val graphPlan = ColorGraphEvaluator.compile(lutGraph)
         val inputProfile = clip.resolvedInputColorProfile()
         val nodeTransform: (ColorNode, Float, Float, Float) -> FloatArray = { node, r, g, b ->
             QualifiedColorMath.applyNode(node, r, g, b)
