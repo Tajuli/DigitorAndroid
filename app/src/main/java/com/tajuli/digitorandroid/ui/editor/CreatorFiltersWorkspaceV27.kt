@@ -230,24 +230,48 @@ fun CreatorFiltersWorkspaceV27(
 
     fun applyPreset(preset: CreatorFilterPresetV28) {
         selectedPresetId = preset.id
-        if (preset.id in appliedIds) return
-        if (preset.group != FilterGroupV28.BEAUTY || BeautyFaceTrackStoreV28.hasCoverage(context, clip)) {
+        val alreadyApplied = preset.id in appliedIds
+
+        // UX rule: selecting a filter must make its control active immediately. Beauty analysis can
+        // take seconds on a long video, so never gate the node/slider behind ML preprocessing.
+        if (!alreadyApplied) {
             applyFilterV28(vm, clip.id, preset, 1f, coalesce = false)
-            return
         }
-        vm.setEditorStatusV19("Analyzing face + dedicated semantic hair mask…")
+        if (preset.group != FilterGroupV28.BEAUTY) return
+
+        val needsHairMask = preset.beautyEffects.containsKey(BEAUTY_HAIR_BROW_DARK_V28)
+        val faceReady = BeautyFaceTrackStoreV28.hasCoverage(context, clip)
+        if (faceReady && !needsHairMask) return
+
+        vm.setEditorStatusV19(
+            if (needsHairMask) "Filter active · analyzing face + semantic hair in background…"
+            else "Filter active · analyzing face in background…",
+        )
         scope.launch {
             val track = runCatching {
-                withContext(Dispatchers.Default) { BeautyFaceAnalyzerV28(context).analyzeAndStore(clip) }
+                withContext(Dispatchers.Default) {
+                    BeautyFaceAnalyzerV28(context).analyzeAndStore(clip, requireHairMask = needsHairMask)
+                }
             }.getOrElse { error ->
                 vm.setEditorStatusV19(error.message ?: "Beauty analysis failed")
                 return@launch
             }
             if (track.samples.none { it.geometry != null }) {
-                vm.setEditorStatusV19("No clear face found for beauty filter")
+                vm.setEditorStatusV19("Filter active · no clear face found in analyzed frames")
                 return@launch
             }
-            applyFilterV28(vm, clip.id, preset, 1f, coalesce = false)
+
+            // The GPU beauty program may have been created before cached geometry/masks existed.
+            // Re-commit the live node at its CURRENT intensity so resources are picked up without
+            // resetting a slider that the user moved while background analysis was running.
+            val liveClip = vm.state.value.project.clip(clip.id) ?: return@launch
+            val liveNode = liveClip.nodeGraph.filterNodeForPresetV28(preset.id) ?: return@launch
+            val liveIntensity = inferIntensityV28(liveNode, preset)
+            applyFilterV28(vm, clip.id, preset, liveIntensity, coalesce = true)
+            vm.setEditorStatusV19(
+                if (needsHairMask) "${preset.name} ready · face + semantic hair analyzed"
+                else "${preset.name} ready · face analyzed",
+            )
         }
     }
 
