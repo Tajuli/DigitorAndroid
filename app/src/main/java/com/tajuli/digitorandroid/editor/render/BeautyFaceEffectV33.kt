@@ -23,7 +23,6 @@ import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceSkinMaskFrameV31
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceSkinMaskStoreV31
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceTrackStoreV28
-import com.tajuli.digitorandroid.editor.processing.BeautyHairMaskFrameV29
 import com.tajuli.digitorandroid.editor.processing.BeautyHairMaskStoreV29
 import kotlin.math.sqrt
 
@@ -50,8 +49,8 @@ internal class BeautyFaceEffectV33 private constructor(
         private val preview: Boolean,
         useHighPrecisionColorComponents: Boolean,
     ) : BaseGlShaderProgram(
-        useHighPrecisionColorComponents = useHighPrecisionColorComponents,
-        texturePoolCapacity = 1,
+        /* useHighPrecisionColorComponents = */ useHighPrecisionColorComponents,
+        /* texturePoolCapacity = */ 1,
     ) {
         private val appContext = context.applicationContext
         private var faceTrack: BeautyFaceTrackV28? = BeautyFaceTrackStoreV28.load(appContext, clip)
@@ -479,7 +478,6 @@ internal class BeautyFaceEffectV33 private constructor(
                     float skinBase = (uHasSkinA > .5 || uHasSkinB > .5) ? semanticSkin : fallbackSkin;
                     float featureProtect = clamp(lips + eyes * .97 + brows * .90, 0.0, 1.0);
                     float skin = clamp(skinBase * (1.0 - featureProtect), 0.0, 1.0);
-                    // Confidence alpha stays genuinely translucent near boundaries.
                     float skinAlpha = skin * (.52 + .48 * skin);
 
                     if (uSkinSmooth > .001) {
@@ -500,7 +498,6 @@ internal class BeautyFaceEffectV33 private constructor(
                         float lift = .080 * amount * (1.0 - y) * shadowGate * (.45 + .55 * highlightGate);
                         float targetY = min(y + lift, .965);
                         vec3 lifted = replaceLumaPreserveChroma(rgb, targetY);
-                        // The processed color is subtle; mask alpha controls spatial blending only.
                         rgb = mix(rgb, lifted, clamp(skinAlpha * .88, 0.0, .88));
                     }
 
@@ -513,7 +510,6 @@ internal class BeautyFaceEffectV33 private constructor(
                         float lipMask = lips * teethReject * mix(.28, 1.0, naturalLipGate);
                         vec3 tintDelta = vec3(.032, -.011, .017) * amount;
                         vec3 tinted = clamp(rgb + tintDelta, 0.0, 1.0);
-                        // Put original luminance back: tint changes chroma, not brightness/flatness.
                         tinted = replaceLumaPreserveChroma(tinted, y);
                         float mixAmount = clamp(lipMask * amount * .18, 0.0, .38);
                         rgb = mix(rgb, tinted, mixAmount);
