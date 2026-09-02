@@ -869,7 +869,11 @@ class DavinciFramePreviewEngine(
     }
 }
 
-/** Visible preview layers, including the virtual outgoing tail while a V22 video transition is active. */
+/**
+ * Visible preview layers, including the virtual outgoing tail while a V22 video transition is active.
+ * Project V tracks are stored foreground-first (V2 before V1), matching the export compositor's
+ * input contract, so the GPU preview must preserve ascending project track index as well.
+ */
 internal fun activeVideoLayersAt(project: TimelineProject, timeUs: Long): List<TimelineClip> =
     activeLayerSpecsAt(project, timeUs).map { it.clip }
 
@@ -880,7 +884,7 @@ private fun activeLayerSpecsAt(
     project.tracks
         .withIndex()
         .filter { (_, track) -> track.kind == TrackKind.VIDEO && !track.muted }
-        .sortedByDescending { (trackIndex, _) -> trackIndex }
+        .sortedBy { (trackIndex, _) -> trackIndex }
         .flatMap { (_, track) ->
             val activeClip = track.clips
                 .firstOrNull { clip -> timeUs in clip.timelineStartUs until clip.timelineEndUs }
