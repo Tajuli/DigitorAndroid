@@ -19,14 +19,19 @@ fun ColorNode.appliedCreatorFiltersV41(): LinkedHashMap<String, Float> {
     return result
 }
 
-/** Selected editable node first; legacy fallback keeps older projects usable. */
+/**
+ * Returns only the actual selected editable node. Import/Output/Mixer selections are not silently
+ * redirected to another node. A null legacy selection may still fall back to the first editable
+ * node so old saved projects remain usable until the user explicitly selects a node.
+ */
 fun TimelineClip.selectedCreatorFilterHostV41(): ColorNode? {
+    val selectedId = nodeGraph.selectedNodeId
     val selected = nodeGraph.selectedNode()
-    if (selected != null &&
-        (selected.kind == NodeKind.SERIAL || selected.kind == NodeKind.PARALLEL) &&
-        !selected.isLegacyCreatorFilterNodeV36()
-    ) {
-        return selected
+    if (selectedId != null) {
+        return selected?.takeIf { node ->
+            (node.kind == NodeKind.SERIAL || node.kind == NodeKind.PARALLEL) &&
+                !node.isLegacyCreatorFilterNodeV36()
+        }
     }
     return creatorFilterHostNodeV36()
 }
