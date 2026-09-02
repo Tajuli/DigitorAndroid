@@ -30,6 +30,7 @@ class BeautyFaceModelsV28Test {
         )
 
         val strengths = clip.beautyStrengthsV28()
+        // V39 routes Skin Bright to the global color qualifier, never the spatial face shader.
         assertEquals(0f, strengths.skinBright, .0001f)
         assertEquals(.70f, clip.skinQualifierStrengthV38(), .0001f)
         assertEquals(.55f, strengths.pinkLip, .0001f)
