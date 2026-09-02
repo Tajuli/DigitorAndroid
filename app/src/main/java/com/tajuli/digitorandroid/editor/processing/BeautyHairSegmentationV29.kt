@@ -54,8 +54,9 @@ data class BeautyHairMaskTrackV29(
 }
 
 /**
- * Local semantic-hair mask cache. Masks are small PNGs keyed by source URI + sampled source time,
- * so video masks can follow head movement without inflating project JSON.
+ * Local semantic-hair mask cache. Masks are small PNGs keyed by source URI + sampled source time.
+ * V30 storage intentionally invalidates the original sparse mask cache; the renderer now motion-
+ * warps each nearest semantic mask using the denser face track between segmentation samples.
  */
 object BeautyHairMaskStoreV29 {
     private val indexCache = ConcurrentHashMap<String, BeautyHairMaskTrackV29>()
@@ -99,7 +100,7 @@ object BeautyHairMaskStoreV29 {
     }
 
     private fun sourceDir(context: Context, sourceUri: String): File =
-        File(File(context.filesDir, "beauty_hair_masks_v29"), cacheKey(sourceUri))
+        File(File(context.filesDir, "beauty_hair_masks_v30"), cacheKey(sourceUri))
 
     private fun cacheKey(sourceUri: String): String = MessageDigest.getInstance("SHA-256")
         .digest(sourceUri.toByteArray())
