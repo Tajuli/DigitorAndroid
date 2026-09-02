@@ -22,17 +22,17 @@ jobs:
         run: gradle :app:testDebugUnitTest
       - name: Compile instrumentation parity test
         run: gradle :app:assembleDebugAndroidTest
-      - name: Build compact arm64 debug APK
-        run: gradle :app:assembleDebug -PdigitorAbi=arm64-v8a
-      - name: Report APK size
+      - name: Build shrunk arm64 phone APK
+        run: gradle :app:assemblePhone -PdigitorAbi=arm64-v8a
+      - name: Report phone APK size
         run: |
-          ls -lh app/build/outputs/apk/debug/app-debug.apk
-          du -h app/build/outputs/apk/debug/app-debug.apk
-      - name: Upload debug APK
+          ls -lh app/build/outputs/apk/phone/app-phone.apk
+          du -h app/build/outputs/apk/phone/app-phone.apk
+      - name: Upload phone APK
         uses: actions/upload-artifact@v4
         with:
-          name: DigitorAndroid-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: DigitorAndroid-phone-apk
+          path: app/build/outputs/apk/phone/app-phone.apk
           if-no-files-found: error
           retention-days: 14
       - name: Verify optimized release build
