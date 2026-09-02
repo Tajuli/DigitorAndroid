@@ -22,14 +22,43 @@ data class BeautyStrengthsV28(
 }
 
 /**
- * Resolve stackable beauty strengths from both legacy direct beauty effects and V36 filter markers.
+ * Resolve the Skin Bright amount independently for V38's global color qualifier.
  *
- * V36 markers live on one stable existing node, so tapping Skin Bright/Smooth/Portrait Glow changes
- * only effect metadata and does not recreate preview node/edge topology. Legacy V28 filter-node
- * projects remain valid because their direct internal beauty effect ids are still accumulated.
+ * Skin Bright is no longer a spatial face-mask operation. The renderer may use face geometry only
+ * to AUTO-PICK representative skin chroma, then applies the qualifier anywhere the same color occurs
+ * in the frame. Keeping the amount separate prevents the legacy V36 BASE shader from painting an
+ * ellipse/semantic mask over the face while preserving old direct-effect and V36 marker projects.
+ */
+fun TimelineClip.skinQualifierStrengthV38(): Float {
+    var skinBright = 0f
+
+    nodeGraph.nodes.asSequence()
+        .filter { it.kind == NodeKind.SERIAL || it.kind == NodeKind.PARALLEL }
+        .flatMap { it.effects.asSequence() }
+        .filter { it.enabled && it.amount > 0f }
+        .forEach { effect ->
+            val filterId = effect.creatorFilterPresetIdV36()
+            if (filterId != null) {
+                val preset = creatorFilterPresetV36(filterId)
+                if (preset?.group == CreatorFilterGroupV36.BEAUTY) {
+                    skinBright += (preset.beautyWeights[BEAUTY_SKIN_BRIGHT_V28] ?: 0f) * effect.amount
+                }
+            } else if (effect.name == BEAUTY_SKIN_BRIGHT_V28) {
+                skinBright += effect.amount
+            }
+        }
+
+    return skinBright.coerceIn(0f, 1.5f)
+}
+
+/**
+ * Resolve spatial beauty strengths from both legacy direct beauty effects and V36 filter markers.
+ *
+ * V38 deliberately removes Skin Bright from this spatial contract. Skin Smooth, lips, eyes and hair
+ * may remain semantic/spatial, but brightness is handled by the global color qualifier instead. This
+ * is what removes the visible "bright face layer" boundary while keeping saved projects compatible.
  */
 fun TimelineClip.beautyStrengthsV28(): BeautyStrengthsV28 {
-    var skinBright = 0f
     var skinSmooth = 0f
     var pinkLip = 0f
     var hairBrowDark = 0f
@@ -37,7 +66,7 @@ fun TimelineClip.beautyStrengthsV28(): BeautyStrengthsV28 {
 
     fun add(name: String, amount: Float) {
         when (name) {
-            BEAUTY_SKIN_BRIGHT_V28 -> skinBright += amount
+            // BEAUTY_SKIN_BRIGHT_V28 intentionally routes to skinQualifierStrengthV38().
             BEAUTY_SKIN_SMOOTH_V28 -> skinSmooth += amount
             BEAUTY_PINK_LIP_V28 -> pinkLip += amount
             BEAUTY_HAIR_BROW_DARK_V28 -> hairBrowDark += amount
@@ -64,7 +93,7 @@ fun TimelineClip.beautyStrengthsV28(): BeautyStrengthsV28 {
         }
 
     return BeautyStrengthsV28(
-        skinBright = skinBright.coerceIn(0f, 1.5f),
+        skinBright = 0f,
         skinSmooth = skinSmooth.coerceIn(0f, 1.5f),
         pinkLip = pinkLip.coerceIn(0f, 1.5f),
         hairBrowDark = hairBrowDark.coerceIn(0f, 1.5f),
