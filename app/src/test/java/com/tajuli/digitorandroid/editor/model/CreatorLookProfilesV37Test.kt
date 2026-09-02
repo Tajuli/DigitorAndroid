@@ -58,31 +58,44 @@ class CreatorLookProfilesV37Test {
     }
 
     @Test
-    fun cinematicDarkReferenceHasMeasuredMidtoneLiftAndHighlightRolloff() {
+    fun cinematicDarkReferenceHasMeasuredGlobalMidtoneLiftAndWhiteRolloff() {
         val kernel = CINEMATIC_DARK_REFERENCE_V37
+        val gray20 = kernel.mapRgb(.20f, .20f, .20f).average().toFloat()
+        val gray50 = kernel.mapRgb(.50f, .50f, .50f).average().toFloat()
+        val gray80 = kernel.mapRgb(.80f, .80f, .80f).average().toFloat()
+        val white = kernel.mapRgb(1f, 1f, 1f)
 
-        val y20 = kernel.toneLuma(.20f)
-        val y50 = kernel.toneLuma(.50f)
-        val y80 = kernel.toneLuma(.80f)
-        val y95 = kernel.toneLuma(.95f)
-        val y100 = kernel.toneLuma(1f)
-
-        assertTrue("20% tone should not be crushed", y20 >= .20f)
-        assertTrue("50% tone should receive the strongest visible lift", y50 > .56f)
-        assertTrue("80% tone should still lift", y80 > .82f)
-        assertTrue("95% tone must remain below clipping", y95 < .99f)
-        assertTrue("white endpoint must roll off below one", y100 < .99f)
+        assertTrue("20% neutral must not be crushed", gray20 >= .20f)
+        assertTrue("50% neutral must receive the measured strong lift", gray50 > .56f)
+        assertTrue("80% neutral must still lift", gray80 > .84f)
+        assertTrue("reference white must roll off below clipping", white.maxOrNull()!! < .99f)
     }
 
     @Test
-    fun cinematicDarkReferenceToneCurveIsMonotonic() {
+    fun cinematicDarkReferenceNeutralRampIsMonotonic() {
         val kernel = CINEMATIC_DARK_REFERENCE_V37
-        var previous = kernel.toneLuma(0f)
+        var previous = kernel.mapRgb(0f, 0f, 0f).average().toFloat()
         for (step in 1..100) {
-            val y = step / 100f
-            val current = kernel.toneLuma(y)
-            assertTrue("tone curve reversed near $y: $current < $previous", current + 1e-5f >= previous)
+            val v = step / 100f
+            val current = kernel.mapRgb(v, v, v).average().toFloat()
+            assertTrue("neutral response reversed near $v: $current < $previous", current + 1e-5f >= previous)
             previous = current
+        }
+    }
+
+    @Test
+    fun cinematicDarkReferenceMapsSkinLikeAndColorPixelsGlobally() {
+        val kernel = CINEMATIC_DARK_REFERENCE_V37
+        val skinLike = kernel.mapRgb(.72f, .52f, .45f)
+        val wallLike = kernel.mapRgb(.90f, .90f, .90f)
+        val blueObject = kernel.mapRgb(.10f, .20f, .30f)
+
+        // These are RGB-only probes: the kernel has no concept of where the pixel came from.
+        assertTrue(skinLike[0] > .75f && skinLike[1] > .58f)
+        assertTrue(wallLike.average() > .90)
+        assertTrue(blueObject[2] > blueObject[1] && blueObject[1] > blueObject[0])
+        listOf(skinLike, wallLike, blueObject).flatMap { it.toList() }.forEach { channel ->
+            assertTrue(channel in 0f..1f)
         }
     }
 }
