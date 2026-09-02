@@ -115,7 +115,7 @@ val CREATOR_FILTERS_V36: List<CreatorFilterPresetV36> = listOf(
         beautyWeights = mapOf(BEAUTY_SKIN_BRIGHT_V28 to 1f), defaultIntensity = .80f,
     ),
     CreatorFilterPresetV36(
-        id = KOREAN_SKIN_BRIGHT_FILTER_ID_V40, name = "Korean Skin Bright", description = "Porcelain bright rosy K-beauty tone", group = CreatorFilterGroupV36.BEAUTY,
+        id = KOREAN_SKIN_BRIGHT_FILTER_ID_V40, name = "Korean Skin Bright", description = "Porcelain bright rosy skin", group = CreatorFilterGroupV36.BEAUTY,
         beautyWeights = mapOf(BEAUTY_SKIN_BRIGHT_V28 to 1f), defaultIntensity = .80f,
     ),
     CreatorFilterPresetV36(
