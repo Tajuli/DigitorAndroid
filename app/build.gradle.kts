@@ -12,7 +12,7 @@ val downloadHairSegmenterModel by tasks.registering {
     outputs.file(hairSegmenterModelFile)
     doLast {
         val output = hairSegmenterModelFile.get().asFile
-        if (output.isFile && output.length() > 1_000_000L) return@doLast
+        if (output.isFile && output.length() > 500_000L) return@doLast
         output.parentFile.mkdirs()
         val temp = File(output.parentFile, output.name + ".download")
         if (temp.exists()) temp.delete()
@@ -22,7 +22,7 @@ val downloadHairSegmenterModel by tasks.registering {
         url.openStream().use { input ->
             temp.outputStream().buffered().use { target -> input.copyTo(target) }
         }
-        require(temp.length() > 1_000_000L) { "Downloaded MediaPipe HairSegmenter model is unexpectedly small" }
+        require(temp.length() > 500_000L) { "Downloaded MediaPipe HairSegmenter model is unexpectedly small" }
         if (output.exists()) output.delete()
         check(temp.renameTo(output)) { "Could not install generated hair_segmenter.tflite asset" }
     }
