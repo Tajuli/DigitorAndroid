@@ -15,32 +15,27 @@ import com.tajuli.digitorandroid.editor.model.resolvedInputColorProfile
  *
  * Optional camera log/HDR input transforms run first, then Correction/Color node snapshots. NONE is
  * a true bypass, so flat source code values can go straight into grading and export.
+ *
+ * V34 keeps preview and export on the same 33^3 cube. The previous 17^3/25^3 preview cubes were
+ * cheaper, but they visibly reduced smoothness in skin/highlight gradients while authoring looks.
  */
 @UnstableApi
 object SharedColorPipeline {
-    private const val EXPORT_LUT_SIZE = 33
-    private const val PREVIEW_LUT_SIZE = 17
-    private const val QUALIFIER_PREVIEW_LUT_SIZE = 25
+    private const val LUT_SIZE = 33
 
     fun effectsFor(clip: TimelineClip): List<Effect> = buildList {
         addSpatialQualifierEffects(clip)
-        add(AnimatedNodeColorLut(clip, EXPORT_LUT_SIZE, preview = false))
+        add(AnimatedNodeColorLut(clip, LUT_SIZE, preview = false))
     }
 
     fun exactPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         addSpatialQualifierEffects(clip)
-        add(AnimatedNodeColorLut(clip, EXPORT_LUT_SIZE, preview = true))
+        add(AnimatedNodeColorLut(clip, LUT_SIZE, preview = true))
     }
 
     fun previewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
-        val hasQualifier = clip.nodeGraph.nodes.any { it.advancedColor.qualifier.enabled }
         addSpatialQualifierEffects(clip)
-        val size = if (hasQualifier || clip.nodeAnimations.hasColorAnimation) {
-            QUALIFIER_PREVIEW_LUT_SIZE
-        } else {
-            PREVIEW_LUT_SIZE
-        }
-        add(AnimatedNodeColorLut(clip, size, preview = true))
+        add(AnimatedNodeColorLut(clip, LUT_SIZE, preview = true))
     }
 
     private fun MutableList<Effect>.addSpatialQualifierEffects(clip: TimelineClip) {
@@ -57,7 +52,7 @@ object SharedColorPipeline {
     }
 
     internal fun buildCube(clip: TimelineClip): Array<Array<IntArray>> =
-        buildCubeAtSourceTime(clip, EXPORT_LUT_SIZE, clip.sourceInUs)
+        buildCubeAtSourceTime(clip, LUT_SIZE, clip.sourceInUs)
 
     internal fun buildCubeAtSourceTime(
         clip: TimelineClip,
