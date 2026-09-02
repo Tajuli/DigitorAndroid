@@ -7,24 +7,21 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 /**
  * Shared video processing stages used by both preview and export.
  *
- * V39 keeps three different responsibilities separate:
- *  - spatial BEAUTY: smoothing/lips/eyes/hair may use semantic geometry in [BeautyFaceEffectV36]
- *  - LOOK: the full-frame creator transform is [CreatorLookEffectV37]
- *  - skin tone response: [AdaptiveSkinQualifierEffectV39] auto-picks representative face color but
- *    applies luminance lift, paler chroma and fine-texture attenuation globally by COLOR only
+ * V41 moves creator LOOK execution into [SharedColorPipeline], where each marker runs inside the
+ * Serial/Parallel node that owns it. There is deliberately no second clip-level LOOK pass after the
+ * node graph, preventing the old outside-node/double-application behavior.
  *
- * The skin-tone stage never multiplies by a face ellipse or semantic skin mask, so it cannot create
- * a pasted-on bright-face boundary. Preview and export use the same stage order and render math.
+ * Spatial BEAUTY remains separate because smoothing/lips/eyes/hair need neighbouring pixels or
+ * semantic geometry. V39's adaptive skin qualifier also remains a post-color spatial refinement.
  *
  * Order:
  *  1. Transform.
  *  2. Optional spatial BASE beauty.
- *  3. Camera input transform + normal Correction/Color LUT.
- *  4. Full-frame V37 creator look.
- *  5. V39 adaptive color qualifier: brighter + paler + wrinkle-softened matching skin colors.
- *  6. Timed creator effects.
- *  7. Optional semantic FINISH beauty.
- *  8. Transition.
+ *  3. Camera input transform + node graph, including V41 node-local creator LOOKS.
+ *  4. V39 adaptive color qualifier / beauty refinement.
+ *  5. Timed creator effects.
+ *  6. Optional semantic FINISH beauty.
+ *  7. Transition.
  */
 @UnstableApi
 object SharedVideoPipeline {
@@ -32,7 +29,6 @@ object SharedVideoPipeline {
         ClipTransformEffect.forExport(clip)?.let(::add)
         BeautyFaceEffectV36.baseForClip(clip, preview = false)?.let(::add)
         addAll(SharedColorPipeline.effectsFor(clip))
-        CreatorLookEffectV37.forClip(clip, preview = false)?.let(::add)
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = false)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
@@ -48,7 +44,6 @@ object SharedVideoPipeline {
     private fun compositedStaticEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         BeautyFaceEffectV36.baseForClip(clip, preview = false)?.let(::add)
         addAll(SharedColorPipeline.effectsFor(clip))
-        CreatorLookEffectV37.forClip(clip, preview = false)?.let(::add)
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = false)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
@@ -59,7 +54,6 @@ object SharedVideoPipeline {
     fun compositedPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         BeautyFaceEffectV36.baseForClip(clip, preview = true)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
-        CreatorLookEffectV37.forClip(clip, preview = true)?.let(::add)
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
@@ -70,7 +64,6 @@ object SharedVideoPipeline {
         ClipTransformEffect.forPreview(clip)?.let(::add)
         BeautyFaceEffectV36.baseForClip(clip, preview = true)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
-        CreatorLookEffectV37.forClip(clip, preview = true)?.let(::add)
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
