@@ -1,7 +1,10 @@
 package com.tajuli.digitorandroid.editor.render
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.opengl.GLES20
+import android.opengl.GLUtils
 import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.util.GlProgram
 import androidx.media3.common.util.GlUtil
@@ -16,6 +19,8 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.beautyStrengthsV28
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceTrackStoreV28
+import com.tajuli.digitorandroid.editor.processing.BeautyHairMaskFrameV29
+import com.tajuli.digitorandroid.editor.processing.BeautyHairMaskStoreV29
 
 /** Shared GPU stage for stackable, face-aware portrait beauty layers. */
 @UnstableApi
@@ -40,10 +45,13 @@ internal class BeautyFaceEffectV28 private constructor(
         /* useHighPrecisionColorComponents = */ useHighPrecisionColorComponents,
         /* texturePoolCapacity = */ 1,
     ) {
-        private val faceTrack = BeautyFaceTrackStoreV28.load(context, clip)
+        private val appContext = context.applicationContext
+        private val faceTrack = BeautyFaceTrackStoreV28.load(appContext, clip)
         private val program: GlProgram
         private var inputWidth = 1
         private var inputHeight = 1
+        private var hairMaskTexture = 0
+        private var loadedHairMaskPath: String? = null
 
         init {
             try {
@@ -54,6 +62,7 @@ internal class BeautyFaceEffectV28 private constructor(
                         GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE,
                     )
                 }
+                ensureHairMaskTexture()
             } catch (error: GlUtil.GlException) {
                 throw VideoFrameProcessingException(error)
             }
@@ -71,14 +80,22 @@ internal class BeautyFaceEffectV28 private constructor(
                 val strengths = currentClip.beautyStrengthsV28()
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
                 val geometry = faceTrack?.geometryAt(sourceUs)
+                val hairFrame = if (strengths.hairBrowDark > .001f) {
+                    BeautyHairMaskStoreV29.index(appContext, currentClip).nearest(sourceUs)
+                } else {
+                    null
+                }
+                val hasHairMask = bindHairMask(hairFrame)
 
                 program.use()
                 program.setSamplerTexIdUniform("uTexSampler", inputTexId, 0)
+                program.setSamplerTexIdUniform("uHairMask", hairMaskTexture, 1)
                 program.setFloatsUniform(
                     "uTexelSize",
                     floatArrayOf(1f / inputWidth.toFloat(), 1f / inputHeight.toFloat()),
                 )
                 program.setFloatUniform("uHasFace", if (geometry == null) 0f else 1f)
+                program.setFloatUniform("uHasHairMask", if (hasHairMask) 1f else 0f)
                 program.setFloatUniform("uSkinBright", strengths.skinBright)
                 program.setFloatUniform("uSkinSmooth", strengths.skinSmooth)
                 program.setFloatUniform("uPinkLip", strengths.pinkLip)
@@ -103,7 +120,6 @@ internal class BeautyFaceEffectV28 private constructor(
             setRect("uRightEyeRect", geometry?.rightEye)
             setRect("uLeftBrowRect", geometry?.leftBrow)
             setRect("uRightBrowRect", geometry?.rightBrow)
-            setRect("uHairRect", geometry?.hair)
         }
 
         private fun setRect(name: String, rect: BeautyRectV28?) {
@@ -115,9 +131,62 @@ internal class BeautyFaceEffectV28 private constructor(
             )
         }
 
+        private fun ensureHairMaskTexture() {
+            if (hairMaskTexture != 0) return
+            val ids = IntArray(1)
+            GLES20.glGenTextures(1, ids, 0)
+            hairMaskTexture = ids[0]
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, hairMaskTexture)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            uploadHairMaskBitmap(null)
+        }
+
+        private fun bindHairMask(frame: BeautyHairMaskFrameV29?): Boolean {
+            ensureHairMaskTexture()
+            val path = frame?.file?.takeIf { it.isFile }?.absolutePath
+            if (path == null) {
+                if (loadedHairMaskPath != null) {
+                    uploadHairMaskBitmap(null)
+                    loadedHairMaskPath = null
+                }
+                return false
+            }
+            if (loadedHairMaskPath == path) return true
+            val bitmap = BitmapFactory.decodeFile(path) ?: return false
+            try {
+                uploadHairMaskBitmap(bitmap)
+                loadedHairMaskPath = path
+            } finally {
+                bitmap.recycle()
+            }
+            return true
+        }
+
+        private fun uploadHairMaskBitmap(bitmap: Bitmap?) {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, hairMaskTexture)
+            if (bitmap != null) {
+                GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+            } else {
+                val black = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+                try {
+                    black.eraseColor(android.graphics.Color.BLACK)
+                    GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, black, 0)
+                } finally {
+                    black.recycle()
+                }
+            }
+        }
+
         override fun release() {
             super.release()
             try {
+                if (hairMaskTexture != 0) {
+                    GLES20.glDeleteTextures(1, intArrayOf(hairMaskTexture), 0)
+                    hairMaskTexture = 0
+                }
                 program.delete()
             } catch (error: GlUtil.GlException) {
                 throw VideoFrameProcessingException(error)
@@ -137,8 +206,10 @@ internal class BeautyFaceEffectV28 private constructor(
             private const val FRAGMENT_SHADER = """
                 precision highp float;
                 uniform sampler2D uTexSampler;
+                uniform sampler2D uHairMask;
                 uniform vec2 uTexelSize;
                 uniform float uHasFace;
+                uniform float uHasHairMask;
                 uniform float uSkinBright;
                 uniform float uSkinSmooth;
                 uniform float uPinkLip;
@@ -150,7 +221,6 @@ internal class BeautyFaceEffectV28 private constructor(
                 uniform vec4 uRightEyeRect;
                 uniform vec4 uLeftBrowRect;
                 uniform vec4 uRightBrowRect;
-                uniform vec4 uHairRect;
                 varying vec2 vTexCoord;
 
                 vec2 safeUv(vec2 uv) { return clamp(uv, vec2(.001), vec2(.999)); }
@@ -191,23 +261,24 @@ internal class BeautyFaceEffectV28 private constructor(
 
                 void main() {
                     vec4 source = texture2D(uTexSampler, safeUv(vTexCoord));
-                    if (uHasFace < .5) {
+                    if (uHasFace < .5 && uHasHairMask < .5) {
                         gl_FragColor = source;
                         return;
                     }
 
-                    // Detector coordinates are Android top-left; GL texture coordinates are bottom-left.
+                    // Feature geometry and generated hair-mask PNGs use Android top-left coordinates.
+                    // The mask texture is uploaded without a vertical flip, so p samples it directly.
                     vec2 p = vec2(vTexCoord.x, 1.0 - vTexCoord.y);
                     vec3 rgb = source.rgb;
-                    float face = ellipseMask(p, uFaceRect, .72, 1.08);
-                    float lips = ellipseMask(p, uLipRect, .68, 1.18);
-                    float leftEye = ellipseMask(p, uLeftEyeRect, .62, 1.20);
-                    float rightEye = ellipseMask(p, uRightEyeRect, .62, 1.20);
+                    float face = uHasFace > .5 ? ellipseMask(p, uFaceRect, .72, 1.08) : 0.0;
+                    float lips = uHasFace > .5 ? ellipseMask(p, uLipRect, .68, 1.18) : 0.0;
+                    float leftEye = uHasFace > .5 ? ellipseMask(p, uLeftEyeRect, .62, 1.20) : 0.0;
+                    float rightEye = uHasFace > .5 ? ellipseMask(p, uRightEyeRect, .62, 1.20) : 0.0;
                     float eyes = max(leftEye, rightEye);
-                    float leftBrow = ellipseMask(p, uLeftBrowRect, .58, 1.15);
-                    float rightBrow = ellipseMask(p, uRightBrowRect, .58, 1.15);
+                    float leftBrow = uHasFace > .5 ? ellipseMask(p, uLeftBrowRect, .58, 1.15) : 0.0;
+                    float rightBrow = uHasFace > .5 ? ellipseMask(p, uRightBrowRect, .58, 1.15) : 0.0;
                     float brows = max(leftBrow, rightBrow);
-                    float hairRegion = ellipseMask(p, uHairRect, .74, 1.12);
+                    float semanticHair = uHasHairMask > .5 ? texture2D(uHairMask, safeUv(p)).r : 0.0;
 
                     float skin = face * skinProbability(rgb) * (1.0 - clamp(lips + eyes * .90 + brows * .85, 0.0, 1.0));
 
@@ -219,7 +290,6 @@ internal class BeautyFaceEffectV28 private constructor(
 
                     if (uSkinBright > .001) {
                         vec3 lifted = pow(clamp(rgb, 0.0, 1.0), vec3(.90));
-                        // Slightly warm-neutral lift avoids a chalky blue/gray complexion.
                         lifted += vec3(.040, .037, .031) * clamp(uSkinBright, 0.0, 1.5);
                         rgb = mix(rgb, clamp(lifted, 0.0, 1.0), skin * clamp(uSkinBright, 0.0, 1.5) * .58);
                     }
@@ -236,14 +306,16 @@ internal class BeautyFaceEffectV28 private constructor(
                     }
 
                     if (uHairBrowDark > .001) {
+                        float amount = clamp(uHairBrowDark, 0.0, 1.5);
                         float y = luma(rgb);
-                        float darkGate = 1.0 - smoothstep(.34, .68, y);
-                        float neutralGate = 1.0 - smoothstep(.22, .52, chroma(rgb));
-                        float hairMask = hairRegion * darkGate * neutralGate;
-                        float browMask = brows * (1.0 - smoothstep(.48, .78, y));
-                        float mask = clamp(hairMask + browMask, 0.0, 1.0);
-                        float darken = clamp(uHairBrowDark, 0.0, 1.5) * .34;
-                        rgb = mix(rgb, rgb * (1.0 - darken), mask);
+                        float browMask = brows * (1.0 - smoothstep(.54, .82, y));
+                        float mask = clamp(max(semanticHair, browMask), 0.0, 1.0);
+                        float darken = amount * .40;
+                        vec3 darker = rgb * (1.0 - darken);
+                        // A small neutralization makes brown hair/brows read deeper without a blue cast.
+                        float gray = luma(darker);
+                        darker = mix(darker, vec3(gray), semanticHair * .16 * amount);
+                        rgb = mix(rgb, clamp(darker, 0.0, 1.0), mask);
                     }
 
                     if (uEyePop > .001) {
