@@ -7,26 +7,24 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 /**
  * Shared video processing stages used by both preview and export.
  *
- * V37 separates LOOKS from BEAUTY at the render-contract level:
- *  - LOOKS are deterministic full-frame RGB transforms in [CreatorLookEffectV37]. They never depend
- *    on face boxes, skin masks, ML segmentation, or pixel location.
- *  - BEAUTY is the only semantic/spatial face/skin/hair stage in [BeautyFaceEffectV36].
+ * V38 keeps three different responsibilities separate:
+ *  - spatial BEAUTY: smoothing/lips/eyes/hair may use semantic geometry in [BeautyFaceEffectV36]
+ *  - LOOK: the full-frame creator transform is [CreatorLookEffectV37]
+ *  - Skin Bright / portrait relight: [AdaptiveSkinQualifierEffectV38] auto-picks face color but then
+ *    applies the response globally by COLOR, never by face position or a segmentation mask
  *
- * Two preview contracts intentionally remain:
- *  - [compositedPreviewEffectsFor] is the production realtime graph. It keeps look/beauty stages
- *    resident so a filter marker/intensity change is visible on the next submitted frame.
- *  - [compositedExactPreviewEffectsFor] is the deterministic export-parity snapshot. It uses the
- *    same static topology as export so an inactive resident pass cannot create a one-LSB framebuffer
- *    rounding difference in the byte-parity harness.
+ * This removes the visible bright-face-layer boundary while preserving the resident realtime graph.
+ * Preview and export use the same stage order and render math.
  *
  * Order:
  *  1. Transform.
- *  2. Optional semantic BASE beauty.
+ *  2. Optional spatial BASE beauty (Skin Smooth only after V38 routing).
  *  3. Camera input transform + normal Correction/Color LUT.
  *  4. Full-frame V37 creator look.
- *  5. Timed creator effects.
- *  6. Optional semantic FINISH beauty.
- *  7. Transition.
+ *  5. V38 adaptive color qualifier / relight.
+ *  6. Timed creator effects.
+ *  7. Optional semantic FINISH beauty.
+ *  8. Transition.
  */
 @UnstableApi
 object SharedVideoPipeline {
@@ -35,6 +33,7 @@ object SharedVideoPipeline {
         BeautyFaceEffectV36.baseForClip(clip, preview = false)?.let(::add)
         addAll(SharedColorPipeline.effectsFor(clip))
         CreatorLookEffectV37.forClip(clip, preview = false)?.let(::add)
+        AdaptiveSkinQualifierEffectV38.forClip(clip, preview = false)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
@@ -50,6 +49,7 @@ object SharedVideoPipeline {
         BeautyFaceEffectV36.baseForClip(clip, preview = false)?.let(::add)
         addAll(SharedColorPipeline.effectsFor(clip))
         CreatorLookEffectV37.forClip(clip, preview = false)?.let(::add)
+        AdaptiveSkinQualifierEffectV38.forClip(clip, preview = false)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
@@ -60,6 +60,7 @@ object SharedVideoPipeline {
         BeautyFaceEffectV36.baseForClip(clip, preview = true)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
         CreatorLookEffectV37.forClip(clip, preview = true)?.let(::add)
+        AdaptiveSkinQualifierEffectV38.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
@@ -70,6 +71,7 @@ object SharedVideoPipeline {
         BeautyFaceEffectV36.baseForClip(clip, preview = true)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
         CreatorLookEffectV37.forClip(clip, preview = true)?.let(::add)
+        AdaptiveSkinQualifierEffectV38.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
