@@ -27,6 +27,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TimelineVisualMediaV21
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.creatorFilterMarkerNameV36
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceTrackStoreV28
 import java.io.File
 import java.util.concurrent.CountDownLatch
@@ -38,12 +39,17 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Executes the real stacked beauty GPU stage and verifies it is visually non-identity. */
+/**
+ * Executes the real semantic beauty GPU stages plus the V37 full-frame reference LUT stage.
+ *
+ * Keeping the calibrated look marker in this already-CI-enumerated test means every pixel-parity run
+ * actually compiles, uploads and samples the GLES2 17^3 LUT atlas instead of merely compiling Kotlin.
+ */
 @UnstableApi
 @RunWith(AndroidJUnit4::class)
 class BeautyFilterExportInstrumentedTest {
     @Test
-    fun stackedBeautyLayersExportAndChangeFacePixels() {
+    fun stackedBeautyAndReferenceLookExportAndChangePixels() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val dir = File(context.cacheDir, "beauty_filter_export_test").apply { mkdirs() }
@@ -68,6 +74,9 @@ class BeautyFilterExportInstrumentedTest {
             nodes = baseGraph.nodes.map { node ->
                 if (node.id != selectedNodeId) node else node.copy(
                     effects = listOf(
+                        // V37 reference LOOK: full-frame LUT stage, no face/skin semantics.
+                        NodeEffect(name = creatorFilterMarkerNameV36("moody_cinema"), amount = 1f),
+                        // BEAUTY remains the only semantic/spatial portion of this stack.
                         NodeEffect(name = BEAUTY_SKIN_BRIGHT_V28, amount = .75f),
                         NodeEffect(name = BEAUTY_PINK_LIP_V28, amount = .55f),
                         NodeEffect(name = BEAUTY_HAIR_BROW_DARK_V28, amount = .50f),
@@ -142,9 +151,9 @@ class BeautyFilterExportInstrumentedTest {
                 transformer.start(composition, output.absolutePath)
             }
 
-            assertTrue("Timed out waiting for beauty export", done.await(30, TimeUnit.SECONDS))
-            failure.get()?.let { throw AssertionError("Beauty export failed", it) }
-            assertTrue("Beauty export produced no bytes", output.exists() && output.length() > 0L)
+            assertTrue("Timed out waiting for beauty/look export", done.await(30, TimeUnit.SECONDS))
+            failure.get()?.let { throw AssertionError("Beauty/look export failed", it) }
+            assertTrue("Beauty/look export produced no bytes", output.exists() && output.length() > 0L)
 
             val retriever = MediaMetadataRetriever()
             val exportedFrame = try {
@@ -153,7 +162,7 @@ class BeautyFilterExportInstrumentedTest {
             } finally {
                 runCatching { retriever.release() }
             }
-            assertNotNull("Could not decode exported beauty frame", exportedFrame)
+            assertNotNull("Could not decode exported beauty/look frame", exportedFrame)
             val frame = exportedFrame!!
             try {
                 val center = frame.getPixel(frame.width / 2, frame.height / 2)
@@ -161,7 +170,7 @@ class BeautyFilterExportInstrumentedTest {
                     abs(Color.green(center) - sourceGreen) +
                     abs(Color.blue(center) - sourceBlue)
                 assertTrue(
-                    "Beauty GPU stage was visually identity at face center; RGB=${Color.red(center)},${Color.green(center)},${Color.blue(center)}",
+                    "V37 LOOK + beauty stack was visually identity; RGB=${Color.red(center)},${Color.green(center)},${Color.blue(center)}",
                     delta >= 18,
                 )
             } finally {
