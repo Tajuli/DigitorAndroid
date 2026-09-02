@@ -6,7 +6,7 @@ V42 keeps all editor and beauty behavior while making CI's downloadable phone AP
 
 Normal local builds without `-PdigitorAbi` remain universal and keep all supported ABIs.
 
-Release builds enable R8 code shrinking and Android resource shrinking. `media3-ui` was removed because Digitor does not use Media3 UI widgets; preview/audio/export use Media3 common, ExoPlayer/CompositionPlayer, Transformer and Effect APIs directly.
+Release builds enable R8 code shrinking and Android resource shrinking. Media3 UI remains because legacy editor screens still compile against `PlayerView`; removing it is not currently a safe size optimization.
 
 Examples:
 
