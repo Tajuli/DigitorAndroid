@@ -38,7 +38,6 @@ object BeautyFaceTrackStoreV28 {
             ?.takeIf { it.sourceUri == clip.uri && it.version == 1 }
     }
 
-    /** Face readiness is independent from the heavier semantic-hair cache. */
     fun hasCoverage(context: Context, clip: TimelineClip): Boolean =
         load(context, clip)?.covers(clip.sourceInUs, clip.sourceOutUs) == true
 
@@ -57,17 +56,14 @@ object BeautyFaceTrackStoreV28 {
         val digest = MessageDigest.getInstance("SHA-256").digest(uri.toByteArray())
             .joinToString("") { byte -> "%02x".format(byte) }
             .take(32)
-        // V30 invalidates the older sparse (~80 sample) tracks that could visibly trail motion.
         return File(File(context.filesDir, "beauty_face_tracks_v30"), "$digest.json")
     }
 }
 
 /**
- * On-device face/contour analysis used by stackable beauty filters.
- *
- * ML Kit supplies face/eye/lip/brow geometry. Video tracking deliberately samples face geometry
- * more densely than the semantic hair model; the GPU warps the nearest hair mask onto the current
- * interpolated face transform so expensive segmentation does not need to run on every face sample.
+ * On-device beauty analysis. ML Kit provides dense, interpolatable face/feature geometry. Dedicated
+ * MediaPipe models provide semantic face-skin and hair masks. The semantic masks are sampled less
+ * frequently and motion-warped by the GPU against the denser face track for stable video rendering.
  */
 class BeautyFaceAnalyzerV28(private val context: Context) {
     private val options = FaceDetectorOptions.Builder()
@@ -79,29 +75,40 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         .enableTracking()
         .build()
 
-    suspend fun analyzeAndStore(clip: TimelineClip, requireHairMask: Boolean = true): BeautyFaceTrackV28 {
+    suspend fun analyzeAndStore(
+        clip: TimelineClip,
+        requireHairMask: Boolean = true,
+        requireSkinMask: Boolean = true,
+    ): BeautyFaceTrackV28 {
         val existing = BeautyFaceTrackStoreV28.load(context, clip)
         val faceReady = existing?.covers(clip.sourceInUs, clip.sourceOutUs) == true
         val hairReady = !requireHairMask || BeautyHairMaskStoreV29.hasCoverage(context, clip)
-        if (faceReady && hairReady) return existing!!
+        val skinReady = !requireSkinMask || BeautyFaceSkinMaskStoreV31.hasCoverage(context, clip)
+        if (faceReady && hairReady && skinReady) return existing!!
 
         val fresh = if (clip.isImageV21) {
-            analyzeImage(clip, requireHairMask)
+            analyzeImage(clip, requireHairMask, requireSkinMask)
         } else {
-            analyzeVideo(clip, requireHairMask)
+            analyzeVideo(clip, requireHairMask, requireSkinMask)
         }
         val merged = existing?.mergedWith(fresh) ?: fresh
         BeautyFaceTrackStoreV28.save(context, merged)
         return merged
     }
 
-    private suspend fun analyzeImage(clip: TimelineClip, requireHairMask: Boolean): BeautyFaceTrackV28 {
+    private suspend fun analyzeImage(
+        clip: TimelineClip,
+        requireHairMask: Boolean,
+        requireSkinMask: Boolean,
+    ): BeautyFaceTrackV28 {
         val detector = FaceDetection.getClient(options)
         val hairSegmenter = if (requireHairMask) BeautyHairSegmenterV29(context) else null
+        val skinSegmenter = if (requireSkinMask) BeautyFaceSkinSegmenterV31(context) else null
         val bitmap = decodeImage(Uri.parse(clip.uri))
         try {
             val geometry = bitmap?.let { image ->
                 hairSegmenter?.segmentAndStore(context, clip, image, clip.sourceInUs)
+                skinSegmenter?.segmentAndStore(context, clip, image, clip.sourceInUs)
                 detectPrimaryGeometry(detector, image)
             }
             val end = clip.sourceOutUs.coerceAtLeast(clip.sourceInUs + 1L)
@@ -116,14 +123,20 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
             )
         } finally {
             bitmap?.recycle()
+            skinSegmenter?.close()
             hairSegmenter?.close()
             detector.close()
         }
     }
 
-    private suspend fun analyzeVideo(clip: TimelineClip, requireHairMask: Boolean): BeautyFaceTrackV28 {
+    private suspend fun analyzeVideo(
+        clip: TimelineClip,
+        requireHairMask: Boolean,
+        requireSkinMask: Boolean,
+    ): BeautyFaceTrackV28 {
         val detector = FaceDetection.getClient(options)
         val hairSegmenter = if (requireHairMask) BeautyHairSegmenterV29(context) else null
+        val skinSegmenter = if (requireSkinMask) BeautyFaceSkinSegmenterV31(context) else null
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(context, Uri.parse(clip.uri))
@@ -131,12 +144,12 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
             val end = clip.sourceOutUs.coerceAtLeast(start + 1L)
             val duration = (end - start).coerceAtLeast(1L)
 
-            // Motion quality first: up to ~8 fps for short clips and roughly <=240 face samples for
-            // longer clips. A ~63 s clip now gets ~3.8 fps instead of the previous ~1.3 fps.
+            // Geometry stays dense because it is cheap and drives motion-locking between ML masks.
             val faceIntervalUs = max(125_000L, duration / 240L)
-            // Hair segmentation is heavier. Sample it about half as often, then GPU-warp each mask
-            // using the denser interpolated face track to keep it attached to head motion.
+            // Dedicated hair model is lighter than the multiclass model.
             val hairIntervalUs = max(250_000L, duration / 120L)
+            // SelfieMulticlass is heavier; its face-skin mask is similarity-warped between samples.
+            val skinIntervalUs = max(500_000L, duration / 100L)
 
             val times = mutableListOf<Long>()
             var t = start
@@ -149,6 +162,7 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
 
             val samples = ArrayList<BeautyFaceSampleV28>(times.size)
             var nextHairUs = start
+            var nextSkinUs = start
             for ((index, sourceUs) in times.withIndex()) {
                 val raw = retriever.getFrameAtTime(sourceUs, MediaMetadataRetriever.OPTION_CLOSEST)
                 if (raw == null) {
@@ -161,6 +175,10 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
                     if (hairSegmenter != null && (sourceUs >= nextHairUs || isLast)) {
                         hairSegmenter.segmentAndStore(context, clip, prepared, sourceUs)
                         nextHairUs = sourceUs + hairIntervalUs
+                    }
+                    if (skinSegmenter != null && (sourceUs >= nextSkinUs || isLast)) {
+                        skinSegmenter.segmentAndStore(context, clip, prepared, sourceUs)
+                        nextSkinUs = sourceUs + skinIntervalUs
                     }
                     samples += BeautyFaceSampleV28(sourceUs, detectPrimaryGeometry(detector, prepared))
                 } finally {
@@ -176,6 +194,7 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
             )
         } finally {
             runCatching { retriever.release() }
+            skinSegmenter?.close()
             hairSegmenter?.close()
             detector.close()
         }
@@ -242,7 +261,6 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
             .18f,
         )
 
-        // Kept for saved-track compatibility; semantic MediaPipe masks now drive actual hair pixels.
         val faceWidth = (faceRect.right - faceRect.left).coerceAtLeast(.01f)
         val faceHeight = (faceRect.bottom - faceRect.top).coerceAtLeast(.01f)
         val hair = BeautyRectV28(
