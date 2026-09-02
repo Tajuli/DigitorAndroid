@@ -27,11 +27,10 @@ class ProcessingRouter(context: Context) {
         quality: ExportQuality,
         onProgress: (ExportProgress) -> Unit,
     ): ExportResult {
-        // CapCut-style latency rule: export must never wait for a whole-video ML beauty scan.
-        // BeautyFaceEffectV28 has an instant GPU fallback and opportunistically consumes any
-        // face/semantic masks already produced by background preview refinement. This makes
-        // tapping Export start the normal Media3 pipeline immediately instead of spending
-        // minutes in a blocking "Preparing beauty" phase.
+        // Low-latency contract: Export never waits for whole-video ML preprocessing. The shared GPU
+        // beauty stage renders immediately from the same deterministic fast fallback used by preview
+        // and upgrades to cached face/semantic masks whenever they already exist. Background ML is
+        // therefore an optional quality refinement, never an export prerequisite.
         if (capabilities.supportsGpuEditing()) {
             val gpuName = capabilities.gpuDescription()
             onProgress(ExportProgress.Stage("GPU selected · $gpuName · ${quality.label}", 0f))
