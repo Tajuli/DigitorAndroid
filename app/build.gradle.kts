@@ -3,6 +3,28 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val generatedHairModelAssets = layout.buildDirectory.dir("generated/hairSegmenterAssets")
+val hairSegmenterModelFile = generatedHairModelAssets.map { it.file("hair_segmenter.tflite") }
+val downloadHairSegmenterModel by tasks.registering {
+    outputs.file(hairSegmenterModelFile)
+    doLast {
+        val output = hairSegmenterModelFile.get().asFile
+        if (output.isFile && output.length() > 1_000_000L) return@doLast
+        output.parentFile.mkdirs()
+        val temp = java.io.File(output.parentFile, output.name + ".download")
+        if (temp.exists()) temp.delete()
+        val url = java.net.URI(
+            "https://storage.googleapis.com/mediapipe-models/image_segmenter/hair_segmenter/float32/latest/hair_segmenter.tflite",
+        ).toURL()
+        url.openStream().use { input ->
+            temp.outputStream().buffered().use { target -> input.copyTo(target) }
+        }
+        require(temp.length() > 1_000_000L) { "Downloaded MediaPipe HairSegmenter model is unexpectedly small" }
+        if (output.exists()) output.delete()
+        check(temp.renameTo(output)) { "Could not install generated hair_segmenter.tflite asset" }
+    }
+}
+
 android {
     namespace = "com.tajuli.digitorandroid"
     compileSdk = 37
@@ -32,6 +54,12 @@ android {
     buildFeatures {
         compose = true
     }
+
+    sourceSets["main"].assets.srcDir(generatedHairModelAssets)
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(downloadHairSegmenterModel)
 }
 
 dependencies {
@@ -59,6 +87,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("com.google.code.gson:gson:2.13.1")
     implementation("com.google.mlkit:face-detection:16.1.7")
+    implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
