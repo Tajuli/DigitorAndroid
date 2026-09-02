@@ -55,7 +55,7 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Run render parity and semantic beauty tests
+      - name: Run render parity, semantic beauty, and shrunk-phone smoke tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
@@ -63,4 +63,12 @@ jobs:
           profile: pixel_2
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
-          script: gradle :app:connectedDebugAndroidTest -PdigitorAbi=x86_64 -Pandroid.testInstrumentationRunnerArguments.class=com.tajuli.digitorandroid.editor.render.PreviewExportPixelParityInstrumentedTest,com.tajuli.digitorandroid.editor.render.PureTextExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.NativeImageExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.TransitionExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.BeautyFilterExportInstrumentedTest,com.tajuli.digitorandroid.editor.processing.HairSegmentationInstrumentedTest,com.tajuli.digitorandroid.editor.processing.FaceSkinSegmentationInstrumentedTest
+          script: |
+            gradle :app:connectedDebugAndroidTest -PdigitorAbi=x86_64 -Pandroid.testInstrumentationRunnerArguments.class=com.tajuli.digitorandroid.editor.render.PreviewExportPixelParityInstrumentedTest,com.tajuli.digitorandroid.editor.render.PureTextExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.NativeImageExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.TransitionExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.BeautyFilterExportInstrumentedTest,com.tajuli.digitorandroid.editor.processing.HairSegmentationInstrumentedTest,com.tajuli.digitorandroid.editor.processing.FaceSkinSegmentationInstrumentedTest
+            gradle :app:assemblePhone -PdigitorAbi=x86_64
+            adb install -r app/build/outputs/apk/phone/app-phone.apk
+            adb shell am force-stop com.tajuli.digitorandroid
+            adb shell monkey -p com.tajuli.digitorandroid -c android.intent.category.LAUNCHER 1
+            sleep 5
+            PID="$(adb shell pidof com.tajuli.digitorandroid | tr -d '\r')"
+            test -n "$PID"
