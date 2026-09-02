@@ -58,7 +58,7 @@ android {
         compose = true
     }
 
-    sourceSets["main"].assets.srcDir(generatedHairModelAssets)
+    sourceSets["main"].assets.srcDir(generatedHairModelAssets.get().asFile)
 }
 
 tasks.named("preBuild").configure {
