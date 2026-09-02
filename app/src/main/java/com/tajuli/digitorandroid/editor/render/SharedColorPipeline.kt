@@ -6,46 +6,40 @@ import com.tajuli.digitorandroid.editor.model.ColorGraphEvaluator
 import com.tajuli.digitorandroid.editor.model.ColorNode
 import com.tajuli.digitorandroid.editor.model.InputColorProfile
 import com.tajuli.digitorandroid.editor.model.InputColorTransform
-import com.tajuli.digitorandroid.editor.model.QualifiedColorMath
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolvedInputColorProfile
 
 /**
  * Single source of truth for GPU color processing.
  *
- * Optional camera log/HDR input transforms run first, then Correction/Color node snapshots. NONE is
- * a true bypass, so flat source code values can go straight into grading and export.
+ * V41 restores true node-local creator LOOK execution. A LOOK marker is evaluated inside the
+ * Serial/Parallel node that owns it, immediately after that node's manual correction, and before
+ * downstream nodes or a Parallel Mixer. This means node order and branch topology are now real
+ * processing semantics instead of UI-only metadata.
+ *
+ * Camera input transforms still run before the graph. BEAUTY remains outside this 3D color LUT
+ * because semantic smoothing/lips/eyes/hair require spatial processing.
  */
 @UnstableApi
 object SharedColorPipeline {
-    private const val EXPORT_LUT_SIZE = 33
-    private const val PREVIEW_LUT_SIZE = 17
-    private const val QUALIFIER_PREVIEW_LUT_SIZE = 25
+    private const val LUT_SIZE = 33
 
     fun effectsFor(clip: TimelineClip): List<Effect> = buildList {
         addSpatialQualifierEffects(clip)
-        add(AnimatedNodeColorLut(clip, EXPORT_LUT_SIZE, preview = false))
+        add(AnimatedNodeColorLut(clip, LUT_SIZE, preview = false))
     }
 
     fun exactPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
         addSpatialQualifierEffects(clip)
-        add(AnimatedNodeColorLut(clip, EXPORT_LUT_SIZE, preview = true))
+        add(AnimatedNodeColorLut(clip, LUT_SIZE, preview = true))
     }
 
     fun previewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
-        val hasQualifier = clip.nodeGraph.nodes.any { it.advancedColor.qualifier.enabled }
         addSpatialQualifierEffects(clip)
-        val size = if (hasQualifier || clip.nodeAnimations.hasColorAnimation) {
-            QUALIFIER_PREVIEW_LUT_SIZE
-        } else {
-            PREVIEW_LUT_SIZE
-        }
-        add(AnimatedNodeColorLut(clip, size, preview = true))
+        add(AnimatedNodeColorLut(clip, LUT_SIZE, preview = true))
     }
 
     private fun MutableList<Effect>.addSpatialQualifierEffects(clip: TimelineClip) {
-        // This pre-filter samples source RGB before the 3D LUT. NONE/Rec.709 use those RGB code
-        // values directly, so the mask is valid. Managed Log/HDR transforms stay inside the LUT.
         val profile = clip.resolvedInputColorProfile()
         if (profile != InputColorProfile.NONE && profile != InputColorProfile.REC709) return
 
@@ -57,7 +51,7 @@ object SharedColorPipeline {
     }
 
     internal fun buildCube(clip: TimelineClip): Array<Array<IntArray>> =
-        buildCubeAtSourceTime(clip, EXPORT_LUT_SIZE, clip.sourceInUs)
+        buildCubeAtSourceTime(clip, LUT_SIZE, clip.sourceInUs)
 
     internal fun buildCubeAtSourceTime(
         clip: TimelineClip,
@@ -69,7 +63,7 @@ object SharedColorPipeline {
         val graphPlan = ColorGraphEvaluator.compile(evaluatedGraph)
         val inputProfile = clip.resolvedInputColorProfile()
         val nodeTransform: (ColorNode, Float, Float, Float) -> FloatArray = { node, r, g, b ->
-            QualifiedColorMath.applyNode(node, r, g, b)
+            CreatorLookNodeTransformV41.apply(node, r, g, b)
         }
         return Array(size) { rIndex ->
             Array(size) { gIndex ->

@@ -40,6 +40,10 @@ internal const val REALTIME_PREVIEW_LONG_EDGE = 720
  * than the canvas and therefore looked zoomed/cropped. Only the final viewer Surface is reduced to
  * at most 720 px on the long edge. Source decoding, color/spatial effects and compositor geometry
  * therefore stay export-compatible, and the final presentation is simply downsampled for display.
+ *
+ * V36 uses [SharedVideoPipeline.compositedPreviewEffectsFor] here rather than the static byte-parity
+ * snapshot. The realtime chain deliberately keeps creator/beauty stages resident so a filter tap or
+ * intensity change is visible on the next submitted frame without rebuilding MediaCodec/GL state.
  */
 @UnstableApi
 internal class DigitorRenderCore(
@@ -137,7 +141,7 @@ internal class DigitorRenderCore(
                 index,
                 VideoFrameProcessor.INPUT_TYPE_SURFACE,
                 renderFormats[index],
-                SharedVideoPipeline.compositedExactPreviewEffectsFor(layer.clip),
+                SharedVideoPipeline.compositedPreviewEffectsFor(layer.clip),
                 layer.clip.timelineStartUs - layer.clip.sourceInUs,
             )
         }

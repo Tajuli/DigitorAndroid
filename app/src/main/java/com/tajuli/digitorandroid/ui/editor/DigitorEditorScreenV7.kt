@@ -122,6 +122,7 @@ private enum class WorkspaceV7(val label: String, val icon: ImageVector) {
     EDIT("Edit", Icons.Rounded.ContentCut),
     CORRECTION("Correction", Icons.Rounded.Tune),
     EFFECTS("Effects", Icons.Rounded.AutoAwesome),
+    FILTERS("Filters", Icons.Rounded.Palette),
     COLOR("Color", Icons.Rounded.Palette),
     TEXT("Text", Icons.Rounded.TextFields),
     OVERLAY("Overlay", Icons.Rounded.AddPhotoAlternate),
@@ -450,6 +451,7 @@ fun DigitorEditorScreenV7(
                     )
                     WorkspaceV7.CORRECTION -> KeyframedCorrectionWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
                     WorkspaceV7.EFFECTS -> KeyframedEffectsWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
+                    WorkspaceV7.FILTERS -> CreatorFiltersWorkspaceV27(selectedClip, vm, Modifier.fillMaxSize())
                     WorkspaceV7.COLOR -> KeyframedColorWorkspaceV5(selectedClip, state.project.frameRate, vm, Modifier.fillMaxSize())
                     WorkspaceV7.TEXT -> TextWorkspaceV9(
                         project = state.project,
@@ -495,7 +497,7 @@ fun DigitorEditorScreenV7(
                         }
                         else -> {
                             val clipWorkspace = next == WorkspaceV7.EDIT || next == WorkspaceV7.CORRECTION ||
-                                next == WorkspaceV7.EFFECTS || next == WorkspaceV7.COLOR || next == WorkspaceV7.NODES ||
+                                next == WorkspaceV7.EFFECTS || next == WorkspaceV7.FILTERS || next == WorkspaceV7.COLOR || next == WorkspaceV7.NODES ||
                                 next == WorkspaceV7.MEDIA
                             val selectedIsActiveVideo = selectedClip?.let { clip ->
                                 state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs

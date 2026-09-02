@@ -13,7 +13,7 @@ import org.junit.Test
 
 class DavinciFramePreviewEngineTest {
     @Test
-    fun activeLayersRenderBottomToTop() {
+    fun activeLayersRenderForegroundFirst() {
         val top = TimelineTrack(
             name = "V2",
             kind = TrackKind.VIDEO,
@@ -27,7 +27,7 @@ class DavinciFramePreviewEngineTest {
         val project = TimelineProject(tracks = listOf(top, bottom))
 
         assertEquals(
-            listOf("bottom", "top"),
+            listOf("top", "bottom"),
             activeVideoLayersAt(project, 1_000_000L).map { it.label },
         )
     }

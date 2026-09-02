@@ -4,12 +4,13 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.topmostVideoClipAt
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class GpuPreviewActiveLayersTest {
     @Test
-    fun activeLayers_areReturnedBottomToTopForCompositing() {
+    fun activeLayers_preserveForegroundFirstProjectOrder() {
         val top = TimelineClip(
             id = "top",
             uri = "content://top",
@@ -25,6 +26,8 @@ class GpuPreviewActiveLayersTest {
             ),
         )
 
-        assertEquals(listOf("bottom", "top"), activeVideoLayersAt(project, 500_000L).map { it.id })
+        val active = activeVideoLayersAt(project, 500_000L)
+        assertEquals(listOf("top", "bottom"), active.map { it.id })
+        assertEquals(project.topmostVideoClipAt(500_000L)?.id, active.firstOrNull()?.id)
     }
 }

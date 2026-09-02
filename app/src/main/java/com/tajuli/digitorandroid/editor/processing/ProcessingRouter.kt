@@ -27,6 +27,10 @@ class ProcessingRouter(context: Context) {
         quality: ExportQuality,
         onProgress: (ExportProgress) -> Unit,
     ): ExportResult {
+        // Low-latency contract: Export never waits for whole-video ML preprocessing. The shared GPU
+        // beauty stage renders immediately from the same deterministic fast fallback used by preview
+        // and upgrades to cached face/semantic masks whenever they already exist. Background ML is
+        // therefore an optional quality refinement, never an export prerequisite.
         if (capabilities.supportsGpuEditing()) {
             val gpuName = capabilities.gpuDescription()
             onProgress(ExportProgress.Stage("GPU selected · $gpuName · ${quality.label}", 0f))
@@ -35,9 +39,6 @@ class ProcessingRouter(context: Context) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (gpuFailure: Throwable) {
-                // A GPU-capable device must not silently fall back to the video-only CPU path because
-                // CPU export does not yet preserve mixed audio/text parity. Surface a useful Media3
-                // error code instead, so a remaining device-specific failure is actionable from the UI.
                 val exportException = generateSequence(gpuFailure as Throwable?) { it.cause }
                     .filterIsInstance<ExportException>()
                     .firstOrNull()
