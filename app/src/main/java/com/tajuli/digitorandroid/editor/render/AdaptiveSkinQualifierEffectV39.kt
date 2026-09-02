@@ -13,8 +13,11 @@ import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
 import com.tajuli.digitorandroid.editor.model.BeautyFaceTrackV28
 import com.tajuli.digitorandroid.editor.model.CreatorLookKernelV37
+import com.tajuli.digitorandroid.editor.model.KOREAN_SKIN_BRIGHT_FILTER_ID_V40
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.activeCreatorLookV37
+import com.tajuli.digitorandroid.editor.model.appliedCreatorFiltersV36
+import com.tajuli.digitorandroid.editor.model.beautyStrengthsV28
 import com.tajuli.digitorandroid.editor.model.skinQualifierStrengthV38
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceTrackStoreV28
@@ -22,21 +25,15 @@ import com.tajuli.digitorandroid.editor.processing.BeautyFaceTrackStoreV28
 /**
  * V39 adaptive skin-tone qualifier.
  *
- * V38 fixed the visible face-mask boundary by making Skin Bright color-qualified instead of spatial.
- * The latest Digitor/CapCut comparison shows the remaining difference clearly: CapCut not only lifts
- * skin luminance, it also compresses warm skin chroma and attenuates fine skin texture/wrinkle
- * contrast. V39 performs all three operations through the SAME global color qualifier.
+ * Skin Bright and Cinematic Dark keep their existing V39 response. V40 extends only two requested
+ * beauty paths without changing the rest of the filter stack:
+ *  - Korean Skin Bright starts from the same global color-qualified Skin Bright process, then adds
+ *    a brighter porcelain/rosy Korean-beauty tone and a little extra soft glow.
+ *  - Skin Smooth keeps the existing semantic smoother and adds a stronger color-qualified refinement
+ *    pass for wrinkles/acne while preserving hard feature edges with similarity weighting.
  *
- * Face geometry is still only an automatic eyedropper. Three face samples estimate representative
- * skin chroma, then every pixel in the frame is treated purely by color. There is no face ellipse,
- * semantic skin mask, or position multiplier in the render response. Matching skin-like colors on
- * neck/hands or elsewhere receive the same soft response, so no pasted-on-face edge can appear.
- *
- * The response has three independent uniforms:
- *  - tone: protected luminance lift,
- *  - pale: chroma compression toward a cleaner/fairer neutral skin rendering,
- *  - smooth: edge-aware high-frequency attenuation to reduce fine wrinkles while preserving eyes,
- *    brows, lips and hard object boundaries through color/luma similarity weighting.
+ * Face geometry remains only an automatic eyedropper. Rendering is still based on matching color,
+ * not a face ellipse or pasted-on brightness mask.
  */
 @UnstableApi
 internal class AdaptiveSkinQualifierEffectV39 private constructor(
@@ -49,9 +46,10 @@ internal class AdaptiveSkinQualifierEffectV39 private constructor(
     companion object {
         fun forClip(clip: TimelineClip, preview: Boolean): AdaptiveSkinQualifierEffectV39? {
             val skinBright = clip.skinQualifierStrengthV38()
+            val skinSmooth = clip.beautyStrengthsV28().skinSmooth
             val look = clip.activeCreatorLookV37()
             val lookUsesQualifier = look?.kernel == CreatorLookKernelV37.CINEMATIC_DARK_REFERENCE
-            return if (preview || skinBright > .001f || lookUsesQualifier) {
+            return if (preview || skinBright > .001f || skinSmooth > .001f || lookUsesQualifier) {
                 AdaptiveSkinQualifierEffectV39(clip, preview)
             } else {
                 null
@@ -98,6 +96,9 @@ internal class AdaptiveSkinQualifierEffectV39 private constructor(
             try {
                 val currentClip = if (preview) PreviewProjectRegistry.clip(clip.id) ?: clip else clip
                 val beautyAmount = currentClip.skinQualifierStrengthV38().coerceIn(0f, 1.5f)
+                val koreanAmount = (currentClip.appliedCreatorFiltersV36()[KOREAN_SKIN_BRIGHT_FILTER_ID_V40] ?: 0f)
+                    .coerceIn(0f, 1f)
+                val skinSmoothRefine = currentClip.beautyStrengthsV28().skinSmooth.coerceIn(0f, 1.5f)
                 val activeLook = currentClip.activeCreatorLookV37()
                 val lookIntensity = if (activeLook?.kernel == CreatorLookKernelV37.CINEMATIC_DARK_REFERENCE) {
                     activeLook.intensity.coerceIn(0f, 1f)
@@ -105,12 +106,10 @@ internal class AdaptiveSkinQualifierEffectV39 private constructor(
                     0f
                 }
 
-                // The supplied CapCut reference is visibly paler and smoother than the V38 output.
-                // Keep explicit Skin Bright authoritative, while Cinematic Dark gets a strong but
-                // bounded automatic portrait response at 100% look intensity.
-                val toneAmount = maxOf(beautyAmount, lookIntensity * .82f)
-                val paleAmount = maxOf(beautyAmount * .92f, lookIntensity * .95f)
-                val smoothAmount = maxOf(beautyAmount * .26f, lookIntensity * .42f)
+                // Existing Skin Bright / Cinematic Dark values are unchanged when Korean = 0.
+                val toneAmount = maxOf(beautyAmount, lookIntensity * .82f, koreanAmount * 1.10f)
+                val paleAmount = maxOf(beautyAmount * .92f, lookIntensity * .95f, koreanAmount * 1.20f)
+                val smoothAmount = maxOf(beautyAmount * .26f, lookIntensity * .42f, koreanAmount * .38f)
 
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
                 val geometry = refreshFaceTrack(currentClip)?.geometryAt(sourceUs)
@@ -121,6 +120,8 @@ internal class AdaptiveSkinQualifierEffectV39 private constructor(
                 program.setFloatUniform("uToneAmount", toneAmount)
                 program.setFloatUniform("uPaleAmount", paleAmount)
                 program.setFloatUniform("uSmoothAmount", smoothAmount)
+                program.setFloatUniform("uKoreanAmount", koreanAmount)
+                program.setFloatUniform("uSkinSmoothRefine", skinSmoothRefine)
                 program.setFloatUniform("uHasFace", if (face == null) 0f else 1f)
                 program.setFloatsUniform(
                     "uFaceRect",
@@ -178,6 +179,8 @@ internal class AdaptiveSkinQualifierEffectV39 private constructor(
                 uniform float uToneAmount;
                 uniform float uPaleAmount;
                 uniform float uSmoothAmount;
+                uniform float uKoreanAmount;
+                uniform float uSkinSmoothRefine;
                 uniform float uHasFace;
                 uniform vec4 uFaceRect;
                 uniform vec2 uTexelSize;
@@ -203,8 +206,7 @@ internal class AdaptiveSkinQualifierEffectV39 private constructor(
                     return cbBand * crBand * satGate * smoothstep(.10, .25, y) * (1.0 - smoothstep(.95, .995, y));
                 }
 
-                // Android face coordinates are top-left based. These UVs are ONLY used to sample a
-                // representative skin color. Pixel position never enters qualifierWeight().
+                // Face coordinates are used only to pick representative skin color.
                 vec2 faceSampleUv(float nx, float ny) {
                     vec2 p = mix(uFaceRect.xy, uFaceRect.zw, vec2(nx, ny));
                     return safeUv(vec2(p.x, 1.0 - p.y));
@@ -231,8 +233,6 @@ internal class AdaptiveSkinQualifierEffectV39 private constructor(
                     float y = luma(c);
                     float span = chromaSpan(c);
                     vec2 cc = cbcr(c);
-                    // Slightly wider than V38 so darker under-eye/cheek skin remains continuous while
-                    // the saturation gate keeps white walls and near-neutral objects out.
                     vec2 delta = vec2((cc.x - center.x) / .080, (cc.y - center.y) / .083);
                     float distance = length(delta);
                     float colorGate = 1.0 - smoothstep(.45, 1.62, distance);
@@ -242,10 +242,29 @@ internal class AdaptiveSkinQualifierEffectV39 private constructor(
                     return clamp(colorGate * satGate * darkGate * whiteGate, 0.0, 1.0);
                 }
 
+                float refineQualifierWeight(vec3 c, vec2 center) {
+                    float y = luma(c);
+                    float span = chromaSpan(c);
+                    vec2 cc = cbcr(c);
+                    vec2 delta = vec2((cc.x - center.x) / .100, (cc.y - center.y) / .105);
+                    float distance = length(delta);
+                    float colorGate = 1.0 - smoothstep(.34, 1.88, distance);
+                    float satGate = smoothstep(.010, .065, span);
+                    float darkGate = smoothstep(.055, .21, y);
+                    float whiteGate = 1.0 - smoothstep(.94, .996, y);
+                    return clamp(colorGate * satGate * darkGate * whiteGate, 0.0, 1.0);
+                }
+
                 float similarityWeight(vec3 sampleColor, vec3 centerColor) {
                     float dy = abs(luma(sampleColor) - luma(centerColor));
                     float dc = length(sampleColor - centerColor);
                     return 1.0 / (1.0 + dy * 34.0 + dc * 8.0);
+                }
+
+                float refineSimilarityWeight(vec3 sampleColor, vec3 centerColor) {
+                    float dy = abs(luma(sampleColor) - luma(centerColor));
+                    float dc = length(sampleColor - centerColor);
+                    return 1.0 / (1.0 + dy * 13.0 + dc * 4.6);
                 }
 
                 vec3 edgeAwareSkinSoft(vec2 uv) {
@@ -266,6 +285,29 @@ internal class AdaptiveSkinQualifierEffectV39 private constructor(
                     return acc / max(weights, .001);
                 }
 
+                vec3 edgeAwareBlemishSoft(vec2 uv) {
+                    vec2 a = uTexelSize * 2.7;
+                    vec2 b = uTexelSize * 5.4;
+                    vec3 centerColor = texture2D(uTexSampler, safeUv(uv)).rgb;
+                    vec3 acc = centerColor * 3.2;
+                    float weights = 3.2;
+                    vec3 s;
+                    float w;
+                    s = texture2D(uTexSampler, safeUv(uv + vec2( a.x, 0.0))).rgb; w = refineSimilarityWeight(s, centerColor); acc += s*w; weights += w;
+                    s = texture2D(uTexSampler, safeUv(uv + vec2(-a.x, 0.0))).rgb; w = refineSimilarityWeight(s, centerColor); acc += s*w; weights += w;
+                    s = texture2D(uTexSampler, safeUv(uv + vec2(0.0,  a.y))).rgb; w = refineSimilarityWeight(s, centerColor); acc += s*w; weights += w;
+                    s = texture2D(uTexSampler, safeUv(uv + vec2(0.0, -a.y))).rgb; w = refineSimilarityWeight(s, centerColor); acc += s*w; weights += w;
+                    s = texture2D(uTexSampler, safeUv(uv + vec2( a.x,  a.y))).rgb; w = refineSimilarityWeight(s, centerColor); acc += s*w; weights += w;
+                    s = texture2D(uTexSampler, safeUv(uv + vec2(-a.x,  a.y))).rgb; w = refineSimilarityWeight(s, centerColor); acc += s*w; weights += w;
+                    s = texture2D(uTexSampler, safeUv(uv + vec2( a.x, -a.y))).rgb; w = refineSimilarityWeight(s, centerColor); acc += s*w; weights += w;
+                    s = texture2D(uTexSampler, safeUv(uv + vec2(-a.x, -a.y))).rgb; w = refineSimilarityWeight(s, centerColor); acc += s*w; weights += w;
+                    s = texture2D(uTexSampler, safeUv(uv + vec2( b.x, 0.0))).rgb; w = refineSimilarityWeight(s, centerColor); acc += s*w; weights += w;
+                    s = texture2D(uTexSampler, safeUv(uv + vec2(-b.x, 0.0))).rgb; w = refineSimilarityWeight(s, centerColor); acc += s*w; weights += w;
+                    s = texture2D(uTexSampler, safeUv(uv + vec2(0.0,  b.y))).rgb; w = refineSimilarityWeight(s, centerColor); acc += s*w; weights += w;
+                    s = texture2D(uTexSampler, safeUv(uv + vec2(0.0, -b.y))).rgb; w = refineSimilarityWeight(s, centerColor); acc += s*w; weights += w;
+                    return acc / max(weights, .001);
+                }
+
                 float chromaFitScale(vec3 chromaVector, float targetY) {
                     float fit = 1.0;
                     if (chromaVector.r > .0001) fit = min(fit, (1.0 - targetY) / chromaVector.r);
@@ -281,17 +323,33 @@ internal class AdaptiveSkinQualifierEffectV39 private constructor(
                     float y = luma(c);
                     vec3 chromaVector = c - vec3(y);
                     float paleGate = smoothstep(.18, .55, y) * (1.0 - smoothstep(.91, .992, targetY));
-                    // At a 100% Cinematic Dark reference response this drives skin chroma to about
-                    // half of V38, matching the supplied CapCut face much more closely.
                     float pale = clamp(q * uPaleAmount * paleGate, 0.0, 1.0);
                     float desiredScale = 1.0 - .53 * pale;
                     float safeScale = chromaFitScale(chromaVector, targetY);
                     return vec3(targetY) + chromaVector * min(desiredScale, safeScale);
                 }
 
+                vec3 koreanPorcelainTone(vec3 c, float q) {
+                    float korean = clamp(q * uKoreanAmount, 0.0, 1.0);
+                    if (korean <= .0001) return c;
+
+                    float y = luma(c);
+                    float gate = smoothstep(.16, .58, y) * (1.0 - smoothstep(.92, .995, y));
+                    float headroom = pow(max(1.0 - y, 0.0), .68);
+                    float highlightProtect = 1.0 - smoothstep(.78, .985, y);
+                    float targetY = min(y + .050 * korean * headroom * (.78 + .22 * highlightProtect), .985);
+                    vec3 chromaVector = c - vec3(y);
+                    float porcelainScale = 1.0 - .24 * korean * gate;
+
+                    // Near-zero-luma cool rose vector: brighter porcelain skin without a pink overlay.
+                    vec3 coolRose = vec3(.014, -.005, .008) * korean * gate;
+                    return vec3(targetY) + chromaVector * porcelainScale + coolRose;
+                }
+
                 void main() {
                     vec4 source = texture2D(uTexSampler, safeUv(vTexCoord));
-                    if (uToneAmount <= .0001 && uPaleAmount <= .0001 && uSmoothAmount <= .0001) {
+                    if (uToneAmount <= .0001 && uPaleAmount <= .0001 && uSmoothAmount <= .0001 &&
+                        uKoreanAmount <= .0001 && uSkinSmoothRefine <= .0001) {
                         gl_FragColor = source;
                         return;
                     }
@@ -299,22 +357,38 @@ internal class AdaptiveSkinQualifierEffectV39 private constructor(
                     vec3 original = source.rgb;
                     vec2 center = autoQualifierCenter();
                     float q = qualifierWeight(original, center);
+                    vec3 rgb = original;
 
-                    // First attenuate only high-frequency skin texture. Similarity weighting keeps
-                    // strong feature/object edges intact; q provides a soft color-only boundary.
-                    vec3 soft = edgeAwareSkinSoft(vTexCoord);
-                    float smoothMix = clamp(q * uSmoothAmount * .56, 0.0, .34);
-                    vec3 rgb = mix(original, soft, smoothMix);
+                    // Existing V39 smoothing path; unchanged for existing filters.
+                    if (uSmoothAmount > .0001) {
+                        vec3 soft = edgeAwareSkinSoft(vTexCoord);
+                        float smoothMix = clamp(q * uSmoothAmount * .56, 0.0, .34);
+                        rgb = mix(rgb, soft, smoothMix);
+                    }
 
-                    // Then produce the lighter/paler skin response. This is luminance-first, with a
-                    // shoulder near white so already-bright highlights do not clip into flat patches.
-                    float y = luma(rgb);
-                    float tone = clamp(uToneAmount, 0.0, 1.5);
-                    float headroom = pow(max(1.0 - y, 0.0), .72);
-                    float highlightProtect = 1.0 - smoothstep(.74, .975, y);
-                    float lift = .125 * tone * headroom * (.72 + .28 * highlightProtect);
-                    float targetY = min(y + lift * q, .976);
-                    rgb = relightAndPale(rgb, targetY, q);
+                    // Skin Smooth gets a second, wider edge-aware pass. The broader color qualifier and
+                    // lower similarity penalty let fine wrinkles and acne variation blend more strongly
+                    // while still rejecting eyes, brows, lips and hard object boundaries.
+                    if (uSkinSmoothRefine > .0001) {
+                        float refineQ = refineQualifierWeight(original, center);
+                        vec3 refined = edgeAwareBlemishSoft(vTexCoord);
+                        float refineMix = clamp(refineQ * uSkinSmoothRefine * .72, 0.0, .62);
+                        rgb = mix(rgb, refined, refineMix);
+                    }
+
+                    // Existing V39 lighter/paler response.
+                    if (uToneAmount > .0001 || uPaleAmount > .0001) {
+                        float y = luma(rgb);
+                        float tone = clamp(uToneAmount, 0.0, 1.5);
+                        float headroom = pow(max(1.0 - y, 0.0), .72);
+                        float highlightProtect = 1.0 - smoothstep(.74, .975, y);
+                        float lift = .125 * tone * headroom * (.72 + .28 * highlightProtect);
+                        float targetY = min(y + lift * q, .976);
+                        rgb = relightAndPale(rgb, targetY, q);
+                    }
+
+                    // Korean Skin Bright adds only its requested porcelain/rosy K-beauty finish.
+                    rgb = koreanPorcelainTone(rgb, q);
 
                     gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), source.a);
                 }
