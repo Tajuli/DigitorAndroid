@@ -28,7 +28,6 @@ private const val PERSON_ANALYSIS_LONG_EDGE_V43 = 512
 private const val MIN_PERSON_ANCHORS_V43 = 6
 private const val MAX_PERSON_ANCHORS_V43 = 96
 
-/** One cached soft foreground-confidence mask. White is foreground; black is background. */
 data class PersonCutoutMaskFrameV43(
     val sourceTimeUs: Long,
     val file: File,
@@ -109,13 +108,6 @@ object PersonCutoutMaskStoreV43 {
         .take(32)
 }
 
-/**
- * MediaPipe SelfieMulticlass person matte.
- *
- * The model exposes background as class 0. Using 1-background confidence keeps hair, clothes,
- * accessories and exposed body/face skin together and preserves soft boundary probabilities for
- * the GPU edge controls instead of baking a hard category mask.
- */
 class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
     private val segmenter: ImageSegmenter
 
@@ -134,29 +126,45 @@ class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
     }
 
     fun segmentAndStore(context: Context, clip: TimelineClip, bitmap: Bitmap, sourceTimeUs: Long): Boolean {
-        val result = segmenter.segment(BitmapImageBuilder(bitmap).build())
-        val masks = result.confidenceMasks().orElse(emptyList())
-        val background = masks.getOrNull(BACKGROUND_CLASS_V43) ?: return false
-        val width = background.width.coerceAtLeast(1)
-        val height = background.height.coerceAtLeast(1)
-        val confidences = ByteBufferExtractor.extract(background).asFloatBuffer()
-        confidences.rewind()
-        if (confidences.remaining() < width * height) return false
+        // MediaMetadataRetriever is allowed to return device-specific bitmap configs (commonly
+        // RGB_565). MediaPipe's BitmapImageBuilder requires ARGB_8888, so normalize every decoded
+        // frame at this boundary instead of depending on decoder/vendor behaviour.
+        val mediaPipeBitmap = if (bitmap.config == Bitmap.Config.ARGB_8888) {
+            bitmap
+        } else {
+            bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                ?: error("Could not convert decoded frame to ARGB_8888 for Auto Cutout")
+        }
 
-        val pixels = IntArray(width * height)
-        for (index in pixels.indices) {
-            val foreground = (1f - confidences.get().coerceIn(0f, 1f)).coerceIn(0f, 1f)
-            val value = (foreground * 255f).roundToInt().coerceIn(0, 255)
-            pixels[index] = Color.argb(255, value, value, value)
-        }
-        val mask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        mask.setPixels(pixels, 0, width, 0, 0, width, height)
         try {
-            PersonCutoutMaskStoreV43.save(context.applicationContext, clip.uri, sourceTimeUs, mask)
+            val result = segmenter.segment(BitmapImageBuilder(mediaPipeBitmap).build())
+            val masks = result.confidenceMasks().orElse(emptyList())
+            val background = masks.getOrNull(BACKGROUND_CLASS_V43) ?: return false
+            val width = background.width.coerceAtLeast(1)
+            val height = background.height.coerceAtLeast(1)
+            val confidences = ByteBufferExtractor.extract(background).asFloatBuffer()
+            confidences.rewind()
+            if (confidences.remaining() < width * height) return false
+
+            val pixels = IntArray(width * height)
+            for (index in pixels.indices) {
+                val foreground = (1f - confidences.get().coerceIn(0f, 1f)).coerceIn(0f, 1f)
+                val value = (foreground * 255f).roundToInt().coerceIn(0, 255)
+                pixels[index] = Color.argb(255, value, value, value)
+            }
+            val mask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            mask.setPixels(pixels, 0, width, 0, 0, width, height)
+            try {
+                PersonCutoutMaskStoreV43.save(context.applicationContext, clip.uri, sourceTimeUs, mask)
+            } finally {
+                mask.recycle()
+            }
+            return true
         } finally {
-            mask.recycle()
+            if (mediaPipeBitmap !== bitmap && !mediaPipeBitmap.isRecycled) {
+                mediaPipeBitmap.recycle()
+            }
         }
-        return true
     }
 
     override fun close() {
@@ -164,7 +172,6 @@ class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
     }
 }
 
-/** Bounded sparse analysis; the renderer interpolates adjacent semantic anchors for video. */
 class PersonCutoutAnalyzerV43(private val context: Context) {
     fun analyzeAndStore(
         clip: TimelineClip,
@@ -212,8 +219,7 @@ class PersonCutoutAnalyzerV43(private val context: Context) {
             val roughlyFourPerSecond = ((durationUs * 4L) / 1_000_000L).toInt() + 2
             val count = roughlyFourPerSecond.coerceIn(MIN_PERSON_ANCHORS_V43, MAX_PERSON_ANCHORS_V43)
             val regularTimes = evenlySpacedTimes(start, end, count)
-            val priority = prioritySourceUs
-                ?.coerceIn(start, (end - 1L).coerceAtLeast(start))
+            val priority = prioritySourceUs?.coerceIn(start, (end - 1L).coerceAtLeast(start))
             val times = buildList {
                 priority?.let(::add)
                 addAll(regularTimes)
