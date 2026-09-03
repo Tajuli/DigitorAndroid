@@ -4,7 +4,9 @@ import android.app.Application
 import androidx.lifecycle.viewModelScope
 import com.tajuli.digitorandroid.editor.model.ClipCutoutV43
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
+import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutAnalyzerV43
 import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 import java.util.concurrent.ConcurrentHashMap
@@ -50,6 +52,7 @@ fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
     val app = getApplication<Application>()
     if (hasPersonCutoutCoverageV43(app.applicationContext, clip)) {
         setEditorStatusV19("Auto Cutout ready · cached matte")
+        PreviewExportCoordinator.refreshActivePreviews()
     } else {
         analyzeSelectedPersonCutoutV43()
     }
@@ -67,19 +70,45 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
     }
     val analysisKey = "${clip.uri}|${clip.sourceInUs}|${clip.sourceOutUs}"
     if (!personCutoutAnalysisInFlightV43.add(analysisKey)) {
-        setEditorStatusV19("Auto Cutout analysis already running")
+        setEditorStatusV19("Auto Cutout · analysis already running")
         return
     }
 
-    setEditorStatusV19("Auto Cutout · analyzing person matte…")
+    val clockLocalUs = PreviewTransformClock.snapshotFor(clip.id)?.localUs
+    val prioritySourceUs = clockLocalUs?.let { localUs ->
+        (clip.sourceInUs + localUs).coerceIn(
+            clip.sourceInUs.coerceAtLeast(0L),
+            (clip.sourceOutUs - 1L).coerceAtLeast(clip.sourceInUs.coerceAtLeast(0L)),
+        )
+    }
+
+    setEditorStatusV19("Auto Cutout · analyzing visible frame…")
     val app = getApplication<Application>()
     viewModelScope.launch(Dispatchers.Default) {
         try {
-            val result = runCatching { PersonCutoutAnalyzerV43(app.applicationContext).analyzeAndStore(clip) }
+            val result = runCatching {
+                PersonCutoutAnalyzerV43(app.applicationContext).analyzeAndStore(
+                    clip = clip,
+                    prioritySourceUs = prioritySourceUs,
+                    onAnchorStored = { completed ->
+                        if (completed == 1) {
+                            // The matte cache is external to TimelineProject. Force the held decoder
+                            // frame through the GPU graph now so the first semantic result is visible
+                            // immediately instead of waiting for a scrub or another editor change.
+                            PreviewExportCoordinator.refreshActivePreviews()
+                            viewModelScope.launch(Dispatchers.Main) {
+                                setEditorStatusV19("Auto Cutout · preview ready · analyzing remaining frames…")
+                            }
+                        }
+                    },
+                )
+            }
             withContext(Dispatchers.Main) {
                 result.onSuccess { track ->
+                    PreviewExportCoordinator.refreshActivePreviews()
                     setEditorStatusV19("Auto Cutout ready · ${track.frames.size} cached matte frame(s)")
                 }.onFailure { error ->
+                    PreviewExportCoordinator.refreshActivePreviews()
                     setEditorStatusV19(error.message ?: "Auto Cutout analysis failed")
                 }
             }
