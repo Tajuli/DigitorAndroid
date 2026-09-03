@@ -20,11 +20,13 @@ fun hasPersonCutoutCoverageV43(context: Context, clip: TimelineClip): Boolean {
     val endUs = clip.sourceOutUs.coerceAtLeast(startUs + 1L) - 1L
     val durationUs = (endUs - startUs + 1L).coerceAtLeast(1L)
 
-    // Analyzer targets roughly 4 anchors/sec, capped at 96. The tolerance intentionally allows
-    // twice the expected anchor spacing (and never less than 750 ms) for decoder misses/VFR media.
-    val expectedCount = (((durationUs * 4L) / 1_000_000L).toInt() + 2).coerceIn(6, 96)
+    // Quality analyzer targets roughly 5 anchors/sec, capped at 300. The binary SelfieSegmenter is
+    // much faster than the old multiclass model, so motion can be sampled densely enough to reduce
+    // mask interpolation lag while still keeping long clips bounded. Allow roughly two missed
+    // samples before declaring the cache incomplete, with a 450 ms floor for VFR/decoder misses.
+    val expectedCount = (((durationUs * 5L) / 1_000_000L).toInt() + 2).coerceIn(8, 300)
     val expectedGapUs = durationUs / (expectedCount - 1).coerceAtLeast(1)
-    val maxGapUs = max(750_000L, expectedGapUs * 2L)
+    val maxGapUs = max(450_000L, expectedGapUs * 2L)
 
     val relevant = frames.filter {
         it.sourceTimeUs >= startUs - maxGapUs && it.sourceTimeUs <= endUs + maxGapUs
