@@ -41,13 +41,7 @@ import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 
 private val V8CutoutAccent = Color(0xFF30E0C3)
 
-/**
- * V43 discoverability wrapper.
- *
- * CreatorMediaWorkspaceV8 already owns the full creator-tools surface, but the V7 workspace bar
- * intentionally hides MEDIA. Keep V7 stable and expose Cutout as a dedicated always-visible quick
- * action instead of forcing users to discover a hidden workspace.
- */
+/** Always-visible V44 Pro Cutout quick action; MEDIA remains hidden in the legacy V7 workspace bar. */
 @OptIn(ExperimentalMaterial3Api::class)
 @UnstableApi
 @Composable
@@ -75,13 +69,13 @@ fun DigitorEditorScreenV8(
 
     if (showCutout) {
         ModalBottomSheet(onDismissRequest = { showCutout = false }) {
-            CutoutQuickPanelV43(vm = vm)
+            CutoutQuickPanelV44(vm = vm)
         }
     }
 }
 
 @Composable
-private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
+private fun CutoutQuickPanelV44(vm: EditorViewModelV4) {
     val state by vm.state.collectAsState()
     val clip = state.project.clip(state.selectedClipId)
     val isVisualClip = clip != null && state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO
@@ -93,9 +87,9 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
             .padding(start = 16.dp, end = 16.dp, bottom = 30.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("Background Remove & Chroma Key", fontSize = 17.sp)
+        Text("Pro Cutout & Chroma Key", fontSize = 17.sp)
         Text(
-            "Select a video or image clip, then choose Auto Cutout or Chroma Key.",
+            "MODNet portrait matting + hair refinement + temporal stabilization for normal footage; Chroma Key for controlled screens.",
             fontSize = 10.sp,
             color = Color.White.copy(alpha = .62f),
         )
@@ -116,9 +110,13 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
         val settings = selectedClip.resolvedCutoutV43()
         val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
         val personReady = hasPersonCutoutCoverageV43(appContext, selectedClip)
-        val analysisStatus = state.status.takeIf { it.startsWith("Auto Cutout") }
+        val analysisStatus = state.status.takeIf {
+            it.startsWith("Pro Cutout") || it.startsWith("Auto Cutout")
+        }
         val analysisBusy = analysisStatus?.let { status ->
-            status.contains("preparing", ignoreCase = true) ||
+            status.contains("loading", ignoreCase = true) ||
+                status.contains("preparing", ignoreCase = true) ||
+                status.contains("matting", ignoreCase = true) ||
                 status.contains("analyzing", ignoreCase = true)
         } == true
         val analysisFailed = analysisStatus?.contains("failed", ignoreCase = true) == true ||
@@ -141,7 +139,7 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
             FilledTonalButton(
                 enabled = !analysisBusy,
                 onClick = { vm.enablePersonCutoutV43(settings) },
-            ) { Text(if (settings.mode == CutoutModeV43.PERSON) "✓ Auto Cutout" else "Auto Cutout", fontSize = 9.sp) }
+            ) { Text(if (settings.mode == CutoutModeV43.PERSON) "✓ Pro Cutout" else "Pro Cutout", fontSize = 9.sp) }
 
             FilledTonalButton(
                 enabled = !analysisBusy,
@@ -158,7 +156,7 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
         when (settings.mode) {
             CutoutModeV43.NONE -> {
                 Text(
-                    "Auto Cutout removes a person background without a green screen. Chroma Key is for green/blue or other controlled key backgrounds.",
+                    "Pro Cutout creates a soft portrait alpha without a green screen. Chroma Key is faster and more controllable when a clean green/blue screen is available.",
                     fontSize = 10.sp,
                     color = Color.White.copy(alpha = .62f),
                 )
@@ -168,10 +166,10 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         when {
-                            analysisBusy -> "Analyzing person matte…"
-                            personReady -> "Person matte ready"
+                            analysisBusy -> "Building refined portrait matte…"
+                            personReady -> "Pro matte ready"
                             analysisFailed -> "Analysis failed / incomplete"
-                            else -> "Person matte needs analysis"
+                            else -> "Portrait matte needs analysis"
                         },
                         fontSize = 10.sp,
                         color = if (personReady) V8CutoutAccent else Color.White.copy(alpha = .62f),
@@ -183,8 +181,8 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
                     ) {
                         Text(
                             when {
-                                analysisBusy -> "Analyzing…"
-                                personReady -> "Refresh"
+                                analysisBusy -> "Matting…"
+                                personReady -> "Refresh Matte"
                                 else -> "Analyze"
                             },
                             fontSize = 9.sp,
@@ -198,14 +196,42 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
                         color = if (analysisFailed) Color(0xFFFFB4AB) else V8CutoutAccent.copy(alpha = .82f),
                     )
                 }
-                CutoutSliderV43("Threshold", settings.personThreshold, .05f..0.95f) {
-                    vm.setSelectedCutoutV43(settings.copy(personThreshold = it), status = "Auto Cutout edge updated")
+
+                Text("Realtime edge refinement", fontSize = 10.sp, color = Color.White.copy(alpha = .78f))
+                CutoutSliderV43("Shrink / Grow", settings.edgeShiftV44, -.18f..0.18f) {
+                    vm.setSelectedCutoutV43(settings.copy(edgeShiftV44 = it), status = "Pro Cutout edge shift updated")
                 }
-                CutoutSliderV43("Feather", settings.personFeather, .005f..0.45f) {
-                    vm.setSelectedCutoutV43(settings.copy(personFeather = it), status = "Auto Cutout feather updated")
+                CutoutSliderV43("Edge Clean", settings.edgeCleanV44, 0f..1f) {
+                    vm.setSelectedCutoutV43(settings.copy(edgeCleanV44 = it), status = "Pro Cutout edge clean updated")
                 }
+                CutoutSliderV43("Dehalo", settings.dehaloV44, 0f..1f) {
+                    vm.setSelectedCutoutV43(settings.copy(dehaloV44 = it), status = "Pro Cutout dehalo updated")
+                }
+
+                Text("Matte analysis quality", fontSize = 10.sp, color = Color.White.copy(alpha = .78f))
+                CutoutSliderV43("Hair Detail", settings.hairDetailV44, 0f..1f) {
+                    vm.setSelectedCutoutV43(
+                        settings.copy(hairDetailV44 = it),
+                        status = "Pro Cutout Hair Detail changed · Refresh Matte",
+                    )
+                }
+                CutoutSliderV43("Temporal Stability", settings.temporalStabilityV44, 0f..0.92f) {
+                    vm.setSelectedCutoutV43(
+                        settings.copy(temporalStabilityV44 = it),
+                        status = "Pro Cutout temporal stability changed · Refresh Matte",
+                    )
+                }
+
+                Text("Advanced alpha shaping", fontSize = 10.sp, color = Color.White.copy(alpha = .78f))
+                CutoutSliderV43("Alpha Bias", settings.personThreshold, .05f..0.95f) {
+                    vm.setSelectedCutoutV43(settings.copy(personThreshold = it), status = "Pro Cutout alpha bias updated")
+                }
+                CutoutSliderV43("Edge Softness", settings.personFeather, .005f..0.45f) {
+                    vm.setSelectedCutoutV43(settings.copy(personFeather = it), status = "Pro Cutout edge softness updated")
+                }
+
                 Text(
-                    "During analysis Digitor temporarily pauses the GPU decoder so MediaPipe can decode the clip reliably. Wait until Person matte ready before export. For background replacement, place the replacement clip on a lower V track.",
+                    "Hair Detail and Temporal Stability are baked into the analyzed matte; press Refresh Matte after changing them. Shrink/Grow, Edge Clean, Dehalo, Alpha Bias and Edge Softness update in realtime. Put a replacement clip on a lower V track.",
                     fontSize = 9.sp,
                     color = Color.White.copy(alpha = .55f),
                 )
