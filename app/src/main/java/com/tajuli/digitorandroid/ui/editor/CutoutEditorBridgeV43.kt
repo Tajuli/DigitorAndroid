@@ -82,34 +82,42 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         )
     }
 
-    setEditorStatusV19("Auto Cutout · analyzing visible frame…")
+    setEditorStatusV19("Auto Cutout · preparing analysis…")
     val app = getApplication<Application>()
     viewModelScope.launch(Dispatchers.Default) {
         try {
             val result = runCatching {
-                PersonCutoutAnalyzerV43(app.applicationContext).analyzeAndStore(
-                    clip = clip,
-                    prioritySourceUs = prioritySourceUs,
-                    onAnchorStored = { completed ->
-                        if (completed == 1) {
-                            // The matte cache is external to TimelineProject. Force the held decoder
-                            // frame through the GPU graph now so the first semantic result is visible
-                            // immediately instead of waiting for a scrub or another editor change.
-                            PreviewExportCoordinator.refreshActivePreviews()
-                            viewModelScope.launch(Dispatchers.Main) {
-                                setEditorStatusV19("Auto Cutout · preview ready · analyzing remaining frames…")
+                // MediaMetadataRetriever can contend with the realtime MediaCodec preview on
+                // low/mid-range devices. Give semantic analysis exclusive ownership of decoder/GPU
+                // resources; the lease restores the exact paused preview when analysis finishes.
+                PreviewExportCoordinator.acquireAnalysisLease().use {
+                    PersonCutoutAnalyzerV43(app.applicationContext).analyzeAndStore(
+                        clip = clip,
+                        prioritySourceUs = prioritySourceUs,
+                        onAnchorStored = { completed ->
+                            if (completed == 1 || completed % 8 == 0) {
+                                viewModelScope.launch(Dispatchers.Main) {
+                                    setEditorStatusV19("Auto Cutout · analyzing… $completed matte frame(s)")
+                                }
                             }
-                        }
-                    },
-                )
+                        },
+                    )
+                }
             }
             withContext(Dispatchers.Main) {
                 result.onSuccess { track ->
-                    PreviewExportCoordinator.refreshActivePreviews()
-                    setEditorStatusV19("Auto Cutout ready · ${track.frames.size} cached matte frame(s)")
+                    val ready = hasPersonCutoutCoverageV43(app.applicationContext, clip)
+                    PreviewExportCoordinator.refreshActivePreviews(220L)
+                    if (ready) {
+                        setEditorStatusV19("Auto Cutout ready · ${track.frames.size} cached matte frame(s)")
+                    } else {
+                        setEditorStatusV19("Auto Cutout incomplete · tap Analyze again")
+                    }
                 }.onFailure { error ->
-                    PreviewExportCoordinator.refreshActivePreviews()
-                    setEditorStatusV19(error.message ?: "Auto Cutout analysis failed")
+                    PreviewExportCoordinator.refreshActivePreviews(220L)
+                    val detail = error.message?.takeIf { it.isNotBlank() }
+                        ?: error::class.java.simpleName
+                    setEditorStatusV19("Auto Cutout failed · $detail")
                 }
             }
         } finally {
