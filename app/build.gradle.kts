@@ -170,9 +170,9 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // The unified LiteRT AAR exposes both the Kotlin CompiledModel API and native runtime. Adding
-    // litert-api separately duplicates the same Android namespace in AGP 9.x.
-    implementation("com.google.ai.edge.litert:litert:2.2.0")
+    // LiteRT 2.1.6+ currently has an AGP namespace collision between litert and its transitive
+    // litert-api AAR. 2.1.5 predates that packaging regression and still exposes CompiledModel.
+    implementation("com.google.ai.edge.litert:litert:2.1.5")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
