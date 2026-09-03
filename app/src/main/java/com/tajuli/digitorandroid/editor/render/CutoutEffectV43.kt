@@ -21,13 +21,12 @@ import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskFrameV43
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
 
 /**
- * Shared GPU alpha-matte stage for Auto Cutout and Chroma Key.
+ * Shared GPU alpha stage for V44 Pro Cutout and Chroma Key.
  *
- * This effect runs in the same Media3 chain for preview and export. Person mode consumes cached
- * SelfieMulticlass confidence masks and temporally interpolates adjacent semantic anchors. Chroma
- * mode uses a neighbourhood-filtered Cb/Cr distance, then neutralizes key-colour spill only around
- * transparent/soft-edge pixels. The filtered chroma-distance pattern follows the same production
- * principle used by mature live-video keyers such as OBS while keeping Digitor's controls compact.
+ * PERSON consumes MODNet soft alpha mattes that already include hair fusion + motion-aware temporal
+ * stabilization. The shader therefore avoids re-binarizing the matte: it performs realtime edge
+ * shift/cleanup and foreground-color decontamination (dehalo) while preserving translucent detail.
+ * Chroma mode keeps the proven neighbourhood-filtered Cb/Cr keyer from V43.
  */
 @UnstableApi
 internal class CutoutEffectV43 private constructor(
@@ -108,6 +107,9 @@ internal class CutoutEffectV43 private constructor(
                 program.setFloatUniform("uTemporalMix", bracket.mix)
                 program.setFloatUniform("uPersonThreshold", settings.personThreshold)
                 program.setFloatUniform("uPersonFeather", settings.personFeather)
+                program.setFloatUniform("uEdgeShiftV44", settings.edgeShiftV44)
+                program.setFloatUniform("uEdgeCleanV44", settings.edgeCleanV44)
+                program.setFloatUniform("uDehaloV44", settings.dehaloV44)
                 program.setFloatsUniform("uKeyRgb", floatArrayOf(settings.keyRed, settings.keyGreen, settings.keyBlue))
                 program.setFloatUniform("uChromaSimilarity", settings.chromaSimilarity)
                 program.setFloatUniform("uChromaSoftness", settings.chromaSoftness)
@@ -231,6 +233,9 @@ internal class CutoutEffectV43 private constructor(
                 uniform float uTemporalMix;
                 uniform float uPersonThreshold;
                 uniform float uPersonFeather;
+                uniform float uEdgeShiftV44;
+                uniform float uEdgeCleanV44;
+                uniform float uDehaloV44;
                 uniform vec3 uKeyRgb;
                 uniform float uChromaSimilarity;
                 uniform float uChromaSoftness;
@@ -244,45 +249,65 @@ internal class CutoutEffectV43 private constructor(
                     );
                 }
 
-                // GLUtils uploads Android bitmaps top-to-bottom while Media3's frame UV is
-                // bottom-to-top in this shader. Flip only semantic-mask Y; the decoded video
-                // sampler already has the correct orientation. Without this the person silhouette
-                // is vertically mirrored (wide shoulders appear above the head, as seen on-device).
+                // Android bitmap texture Y is opposite Media3 frame UV. Only matte UV is flipped.
                 vec2 personMaskUv(vec2 videoUv) {
                     return vec2(videoUv.x, 1.0 - videoUv.y);
                 }
 
-                float samplePersonA(vec2 uv) {
-                    vec2 px = vec2(1.0 / 256.0, 1.0 / 256.0);
-                    vec2 maskUv = personMaskUv(uv);
-                    float value = texture2D(uMaskA, maskUv).r * 4.0;
-                    value += texture2D(uMaskA, maskUv + vec2(px.x, 0.0)).r;
-                    value += texture2D(uMaskA, maskUv - vec2(px.x, 0.0)).r;
-                    value += texture2D(uMaskA, maskUv + vec2(0.0, px.y)).r;
-                    value += texture2D(uMaskA, maskUv - vec2(0.0, px.y)).r;
-                    return value / 8.0;
-                }
-
-                float samplePersonB(vec2 uv) {
-                    vec2 px = vec2(1.0 / 256.0, 1.0 / 256.0);
-                    vec2 maskUv = personMaskUv(uv);
-                    float value = texture2D(uMaskB, maskUv).r * 4.0;
-                    value += texture2D(uMaskB, maskUv + vec2(px.x, 0.0)).r;
-                    value += texture2D(uMaskB, maskUv - vec2(px.x, 0.0)).r;
-                    value += texture2D(uMaskB, maskUv + vec2(0.0, px.y)).r;
-                    value += texture2D(uMaskB, maskUv - vec2(0.0, px.y)).r;
-                    return value / 8.0;
-                }
-
-                float softPersonMask() {
+                float rawPersonAt(vec2 uv) {
                     if (uHasMaskA < 0.5 && uHasMaskB < 0.5) return 1.0;
-                    float a = uHasMaskA > 0.5 ? samplePersonA(vTexCoord) : 0.0;
-                    float b = uHasMaskB > 0.5 ? samplePersonB(vTexCoord) : a;
+                    vec2 maskUv = personMaskUv(clamp(uv, vec2(0.0), vec2(1.0)));
+                    float a = uHasMaskA > 0.5 ? texture2D(uMaskA, maskUv).r : 0.0;
+                    float b = uHasMaskB > 0.5 ? texture2D(uMaskB, maskUv).r : a;
                     if (uHasMaskA < 0.5) a = b;
-                    float confidence = mix(a, b, clamp(uTemporalMix, 0.0, 1.0));
-                    float lo = clamp(uPersonThreshold - uPersonFeather, 0.0, 1.0);
-                    float hi = clamp(uPersonThreshold + uPersonFeather, lo + 0.0001, 1.0);
-                    return smoothstep(lo, hi, confidence);
+                    return mix(a, b, clamp(uTemporalMix, 0.0, 1.0));
+                }
+
+                float refinedPersonMask() {
+                    float raw = rawPersonAt(vTexCoord);
+
+                    // Legacy threshold becomes a subtle alpha bias rather than a hard binary cut.
+                    // V44 edge shift is the creator-facing shrink/grow control.
+                    float thresholdBias = (0.5 - uPersonThreshold) * 0.22;
+                    float shifted = clamp(raw + uEdgeShiftV44 + thresholdBias, 0.0, 1.0);
+
+                    // Clean ambiguous matte pixels while leaving near-0 and near-1 MODNet alpha
+                    // untouched. This keeps fine hair translucency instead of re-binarizing it.
+                    float contrast = 1.0 + clamp(uEdgeCleanV44, 0.0, 1.0) * 1.65;
+                    float cleaned = clamp((shifted - 0.5) * contrast + 0.5, 0.0, 1.0);
+
+                    // Feather is now a small spatial anti-jaggedness blend, not a broad confidence
+                    // threshold. It only acts strongly in the uncertain alpha band.
+                    float neighbor = (
+                        rawPersonAt(vTexCoord + vec2(uTexelSize.x, 0.0)) +
+                        rawPersonAt(vTexCoord - vec2(uTexelSize.x, 0.0)) +
+                        rawPersonAt(vTexCoord + vec2(0.0, uTexelSize.y)) +
+                        rawPersonAt(vTexCoord - vec2(0.0, uTexelSize.y))
+                    ) * 0.25;
+                    float uncertain = 1.0 - abs(cleaned * 2.0 - 1.0);
+                    float featherMix = clamp(uPersonFeather * 2.2, 0.0, 0.42) * uncertain;
+                    return mix(cleaned, clamp(neighbor + uEdgeShiftV44, 0.0, 1.0), featherMix);
+                }
+
+                vec3 dehaloPersonRgb(vec3 sourceRgb, float matte) {
+                    float edge = (1.0 - abs(matte * 2.0 - 1.0));
+                    edge *= smoothstep(0.015, 0.12, matte) * (1.0 - smoothstep(0.88, 0.995, matte));
+                    if (edge <= 0.0001 || uDehaloV44 <= 0.0001) return sourceRgb;
+
+                    // Alpha gradient points from contaminated exterior toward reliable foreground.
+                    float l = rawPersonAt(vTexCoord - vec2(uTexelSize.x * 2.0, 0.0));
+                    float r = rawPersonAt(vTexCoord + vec2(uTexelSize.x * 2.0, 0.0));
+                    float d = rawPersonAt(vTexCoord - vec2(0.0, uTexelSize.y * 2.0));
+                    float u = rawPersonAt(vTexCoord + vec2(0.0, uTexelSize.y * 2.0));
+                    vec2 grad = vec2(r - l, u - d);
+                    float gradLength = length(grad);
+                    if (gradLength < 0.0002) return sourceRgb;
+                    vec2 inward = grad / gradLength;
+                    float reach = 1.5 + 3.0 * clamp(uDehaloV44, 0.0, 1.0);
+                    vec2 interiorUv = clamp(vTexCoord + inward * uTexelSize * reach, vec2(0.0), vec2(1.0));
+                    vec3 interiorRgb = texture2D(uTexSampler, interiorUv).rgb;
+                    float weight = clamp(uDehaloV44, 0.0, 1.0) * edge * 0.82;
+                    return mix(sourceRgb, interiorRgb, weight);
                 }
 
                 float chromaDistance(vec3 rgb) {
@@ -314,7 +339,8 @@ internal class CutoutEffectV43 private constructor(
                     vec3 rgb = source.rgb;
 
                     if (uMode > 0.5 && uMode < 1.5) {
-                        matte = softPersonMask();
+                        matte = refinedPersonMask();
+                        rgb = dehaloPersonRgb(rgb, matte);
                     } else if (uMode >= 1.5) {
                         float distanceToKey = filteredChromaDistance(rgb);
                         matte = keyedMatte(distanceToKey);
