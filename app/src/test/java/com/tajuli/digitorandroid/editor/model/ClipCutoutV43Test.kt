@@ -63,6 +63,24 @@ class ClipCutoutV43Test {
     }
 
     @Test
+    fun untouchedV44QualityTupleMigratesToSpatialFlowDefaults() {
+        val normalized = ClipCutoutV43(
+            mode = CutoutModeV43.PERSON,
+            edgeShiftV44 = -.015f,
+            edgeCleanV44 = .34f,
+            dehaloV44 = .62f,
+            hairDetailV44 = .72f,
+            temporalStabilityV44 = .68f,
+        ).normalized()
+
+        assertEquals(-.008f, normalized.edgeShiftV44, .0001f)
+        assertEquals(.30f, normalized.edgeCleanV44, .0001f)
+        assertEquals(.46f, normalized.dehaloV44, .0001f)
+        assertEquals(.84f, normalized.hairDetailV44, .0001f)
+        assertEquals(.62f, normalized.temporalStabilityV44, .0001f)
+    }
+
+    @Test
     fun userTunedPersonEdgesAreNotOverridden() {
         val normalized = ClipCutoutV43(
             mode = CutoutModeV43.PERSON,
