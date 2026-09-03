@@ -244,22 +244,30 @@ internal class CutoutEffectV43 private constructor(
                     );
                 }
 
-                float samplePerson(sampler2D maskTexture, vec2 uv) {
-                    // SelfieMulticlass produces a 256x256 confidence mask. A compact cross filter
-                    // reduces single-pixel semantic noise while preserving hair detail.
+                float samplePersonA(vec2 uv) {
                     vec2 px = vec2(1.0 / 256.0, 1.0 / 256.0);
-                    float value = texture2D(maskTexture, uv).r * 4.0;
-                    value += texture2D(maskTexture, uv + vec2(px.x, 0.0)).r;
-                    value += texture2D(maskTexture, uv - vec2(px.x, 0.0)).r;
-                    value += texture2D(maskTexture, uv + vec2(0.0, px.y)).r;
-                    value += texture2D(maskTexture, uv - vec2(0.0, px.y)).r;
+                    float value = texture2D(uMaskA, uv).r * 4.0;
+                    value += texture2D(uMaskA, uv + vec2(px.x, 0.0)).r;
+                    value += texture2D(uMaskA, uv - vec2(px.x, 0.0)).r;
+                    value += texture2D(uMaskA, uv + vec2(0.0, px.y)).r;
+                    value += texture2D(uMaskA, uv - vec2(0.0, px.y)).r;
+                    return value / 8.0;
+                }
+
+                float samplePersonB(vec2 uv) {
+                    vec2 px = vec2(1.0 / 256.0, 1.0 / 256.0);
+                    float value = texture2D(uMaskB, uv).r * 4.0;
+                    value += texture2D(uMaskB, uv + vec2(px.x, 0.0)).r;
+                    value += texture2D(uMaskB, uv - vec2(px.x, 0.0)).r;
+                    value += texture2D(uMaskB, uv + vec2(0.0, px.y)).r;
+                    value += texture2D(uMaskB, uv - vec2(0.0, px.y)).r;
                     return value / 8.0;
                 }
 
                 float softPersonMask() {
                     if (uHasMaskA < 0.5 && uHasMaskB < 0.5) return 1.0;
-                    float a = uHasMaskA > 0.5 ? samplePerson(uMaskA, vTexCoord) : 0.0;
-                    float b = uHasMaskB > 0.5 ? samplePerson(uMaskB, vTexCoord) : a;
+                    float a = uHasMaskA > 0.5 ? samplePersonA(vTexCoord) : 0.0;
+                    float b = uHasMaskB > 0.5 ? samplePersonB(vTexCoord) : a;
                     if (uHasMaskA < 0.5) a = b;
                     float confidence = mix(a, b, clamp(uTemporalMix, 0.0, 1.0));
                     float lo = clamp(uPersonThreshold - uPersonFeather, 0.0, 1.0);
