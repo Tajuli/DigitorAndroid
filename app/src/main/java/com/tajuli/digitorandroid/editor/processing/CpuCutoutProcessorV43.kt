@@ -10,13 +10,15 @@ import java.io.File
 import java.util.LinkedHashMap
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-/** CPU fallback parity for V43 person mattes and chroma keying. */
+/** CPU fallback parity for V44 portrait mattes and the V43 chroma keyer. */
 class CpuCutoutProcessorV43(
     private val context: Context,
     workerCount: Int = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(2, 8),
@@ -28,9 +30,9 @@ class CpuCutoutProcessorV43(
     }
 
     /**
-     * Person mattes are applied in source coordinates before [CpuTransformProcessor]. Geometry then
-     * transforms RGB and alpha together, matching the GPU compositor contract without reverse-
-     * mapping project-space pixels back into the source mask.
+     * V44 mattes are applied in source coordinates before CpuTransformProcessor. Soft MODNet alpha,
+     * edge shift/clean and dehalo are kept close to the GPU shader contract so CPU-only devices do
+     * not fall back to a visibly different binary silhouette.
      */
     fun applyPersonToSource(source: Bitmap, clip: TimelineClip, sourceTimeUs: Long): Bitmap {
         val settings = clip.resolvedCutoutV43()
@@ -40,22 +42,71 @@ class CpuCutoutProcessorV43(
         val b = loadMask(bracket.b.file) ?: a
         val width = source.width.coerceAtLeast(1)
         val height = source.height.coerceAtLeast(1)
-        val pixels = IntArray(width * height)
-        source.getPixels(pixels, 0, width, 0, 0, width, height)
+        val sourcePixels = IntArray(width * height)
+        source.getPixels(sourcePixels, 0, width, 0, 0, width, height)
+        val pixels = sourcePixels.copyOf()
+
+        fun rawMask(u: Float, v: Float): Float =
+            lerp(a.sample(u, v), b.sample(u, v), bracket.mix)
+
+        val du = if (width <= 1) 0f else 1f / (width - 1).toFloat()
+        val dv = if (height <= 1) 0f else 1f / (height - 1).toFloat()
 
         parallelRows(width, height) { index ->
             val x = index % width
             val y = index / width
             val u = if (width <= 1) 0f else x.toFloat() / (width - 1).toFloat()
             val v = if (height <= 1) 0f else y.toFloat() / (height - 1).toFloat()
-            val confidence = lerp(a.sample(u, v), b.sample(u, v), bracket.mix)
-            val lo = (settings.personThreshold - settings.personFeather).coerceIn(0f, 1f)
-            val hi = (settings.personThreshold + settings.personFeather).coerceIn(lo + .0001f, 1f)
-            val matte = smoothstep(lo, hi, confidence)
-            val argb = pixels[index]
-            val alpha = ((argb ushr 24) and 0xFF)
-            val outAlpha = (alpha * matte + .5f).toInt().coerceIn(0, 255)
-            pixels[index] = (outAlpha shl 24) or (argb and 0x00FFFFFF)
+
+            val raw = rawMask(u, v)
+            val thresholdBias = (.5f - settings.personThreshold) * .22f
+            val shifted = (raw + settings.edgeShiftV44 + thresholdBias).coerceIn(0f, 1f)
+            val contrast = 1f + settings.edgeCleanV44 * 1.65f
+            val cleaned = ((shifted - .5f) * contrast + .5f).coerceIn(0f, 1f)
+            val neighbour = (
+                rawMask(u + du, v) + rawMask(u - du, v) +
+                    rawMask(u, v + dv) + rawMask(u, v - dv)
+                ) * .25f
+            val uncertain = (1f - abs(cleaned * 2f - 1f)).coerceIn(0f, 1f)
+            val featherMix = (settings.personFeather * 2.2f).coerceIn(0f, .42f) * uncertain
+            val matte = lerp(
+                cleaned,
+                (neighbour + settings.edgeShiftV44).coerceIn(0f, 1f),
+                featherMix,
+            ).coerceIn(0f, 1f)
+
+            val argb = sourcePixels[index]
+            val sourceAlpha = (argb ushr 24) and 0xFF
+            var r = ((argb ushr 16) and 0xFF) / 255f
+            var g = ((argb ushr 8) and 0xFF) / 255f
+            var blue = (argb and 0xFF) / 255f
+
+            val edgeBand = (1f - abs(matte * 2f - 1f)) *
+                smoothstep(.015f, .12f, matte) * (1f - smoothstep(.88f, .995f, matte))
+            if (edgeBand > .0001f && settings.dehaloV44 > .0001f) {
+                val gx = rawMask(u + du * 2f, v) - rawMask(u - du * 2f, v)
+                val gy = rawMask(u, v + dv * 2f) - rawMask(u, v - dv * 2f)
+                val length = sqrt(gx * gx + gy * gy)
+                if (length > .0002f) {
+                    val reach = 1.5f + 3f * settings.dehaloV44
+                    val interiorX = (x + (gx / length) * reach).roundToInt().coerceIn(0, width - 1)
+                    val interiorY = (y + (gy / length) * reach).roundToInt().coerceIn(0, height - 1)
+                    val interior = sourcePixels[interiorY * width + interiorX]
+                    val ir = ((interior ushr 16) and 0xFF) / 255f
+                    val ig = ((interior ushr 8) and 0xFF) / 255f
+                    val ib = (interior and 0xFF) / 255f
+                    val weight = (settings.dehaloV44 * edgeBand * .82f).coerceIn(0f, 1f)
+                    r = lerp(r, ir, weight)
+                    g = lerp(g, ig, weight)
+                    blue = lerp(blue, ib, weight)
+                }
+            }
+
+            val outAlpha = (sourceAlpha * matte + .5f).toInt().coerceIn(0, 255)
+            val rr = (r * 255f + .5f).toInt().coerceIn(0, 255)
+            val gg = (g * 255f + .5f).toInt().coerceIn(0, 255)
+            val bb = (blue * 255f + .5f).toInt().coerceIn(0, 255)
+            pixels[index] = (outAlpha shl 24) or (rr shl 16) or (gg shl 8) or bb
         }
 
         return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
@@ -93,7 +144,6 @@ class CpuCutoutProcessorV43(
         parallelRows(width, height) { index ->
             val x = index % width
             val y = index / width
-            // Same five-sample weighted neighbourhood principle as the GPU shader/OBS-style key.
             var distance = distanceAt(x - 1, y)
             distance += distanceAt(x + 1, y)
             distance += distanceAt(x, y - 1)
