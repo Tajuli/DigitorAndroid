@@ -244,23 +244,33 @@ internal class CutoutEffectV43 private constructor(
                     );
                 }
 
+                // GLUtils uploads Android bitmaps top-to-bottom while Media3's frame UV is
+                // bottom-to-top in this shader. Flip only semantic-mask Y; the decoded video
+                // sampler already has the correct orientation. Without this the person silhouette
+                // is vertically mirrored (wide shoulders appear above the head, as seen on-device).
+                vec2 personMaskUv(vec2 videoUv) {
+                    return vec2(videoUv.x, 1.0 - videoUv.y);
+                }
+
                 float samplePersonA(vec2 uv) {
                     vec2 px = vec2(1.0 / 256.0, 1.0 / 256.0);
-                    float value = texture2D(uMaskA, uv).r * 4.0;
-                    value += texture2D(uMaskA, uv + vec2(px.x, 0.0)).r;
-                    value += texture2D(uMaskA, uv - vec2(px.x, 0.0)).r;
-                    value += texture2D(uMaskA, uv + vec2(0.0, px.y)).r;
-                    value += texture2D(uMaskA, uv - vec2(0.0, px.y)).r;
+                    vec2 maskUv = personMaskUv(uv);
+                    float value = texture2D(uMaskA, maskUv).r * 4.0;
+                    value += texture2D(uMaskA, maskUv + vec2(px.x, 0.0)).r;
+                    value += texture2D(uMaskA, maskUv - vec2(px.x, 0.0)).r;
+                    value += texture2D(uMaskA, maskUv + vec2(0.0, px.y)).r;
+                    value += texture2D(uMaskA, maskUv - vec2(0.0, px.y)).r;
                     return value / 8.0;
                 }
 
                 float samplePersonB(vec2 uv) {
                     vec2 px = vec2(1.0 / 256.0, 1.0 / 256.0);
-                    float value = texture2D(uMaskB, uv).r * 4.0;
-                    value += texture2D(uMaskB, uv + vec2(px.x, 0.0)).r;
-                    value += texture2D(uMaskB, uv - vec2(px.x, 0.0)).r;
-                    value += texture2D(uMaskB, uv + vec2(0.0, px.y)).r;
-                    value += texture2D(uMaskB, uv - vec2(0.0, px.y)).r;
+                    vec2 maskUv = personMaskUv(uv);
+                    float value = texture2D(uMaskB, maskUv).r * 4.0;
+                    value += texture2D(uMaskB, maskUv + vec2(px.x, 0.0)).r;
+                    value += texture2D(uMaskB, maskUv - vec2(px.x, 0.0)).r;
+                    value += texture2D(uMaskB, maskUv + vec2(0.0, px.y)).r;
+                    value += texture2D(uMaskB, maskUv - vec2(0.0, px.y)).r;
                     return value / 8.0;
                 }
 
