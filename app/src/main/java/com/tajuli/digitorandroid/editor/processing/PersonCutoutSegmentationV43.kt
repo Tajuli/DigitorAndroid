@@ -114,7 +114,7 @@ object PersonCutoutMaskStoreV43 {
 
 /**
  * MODNet portrait matting engine. GPU+CPU is requested so LiteRT can use the GPU where supported
- * and retain a legal CPU partition/fallback on devices with incomplete GPU op coverage.
+ * and retain a CPU partition/fallback on devices with incomplete GPU op coverage.
  */
 private class ModNetPortraitMatteV44(context: Context) : AutoCloseable {
     private val model: CompiledModel
@@ -124,13 +124,13 @@ private class ModNetPortraitMatteV44(context: Context) : AutoCloseable {
     init {
         val app = context.applicationContext
         val accelerated = runCatching {
-            val options = CompiledModel.Options(Accelerator.GPU, Accelerator.CPU).apply {
-                gpuOptions = CompiledModel.GpuOptions(
-                    precision = CompiledModel.GpuOptions.Precision.FP16_WITH_FP32_ACCUM,
-                    priority = CompiledModel.GpuOptions.Priority.HIGH,
-                )
-            }
-            CompiledModel.create(app.assets, MODNET_MODEL_ASSET_V44, options)
+            // Keep GPU options at LiteRT's validated defaults. This remains source-compatible with
+            // the stable 2.1.5 runtime while still allowing GPU execution with CPU partition/fallback.
+            CompiledModel.create(
+                app.assets,
+                MODNET_MODEL_ASSET_V44,
+                CompiledModel.Options(Accelerator.GPU, Accelerator.CPU),
+            )
         }
         model = accelerated.getOrElse {
             CompiledModel.create(
