@@ -37,9 +37,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tajuli.digitorandroid.editor.model.ClipCutoutV43
+import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TextAlignmentV2
 import com.tajuli.digitorandroid.editor.model.TextAnimationSpecV2
 import com.tajuli.digitorandroid.editor.model.TextAnimationV2
@@ -50,9 +53,11 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
 import com.tajuli.digitorandroid.editor.model.audioSelection
+import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.model.resolvedEntryAnimationV2
 import com.tajuli.digitorandroid.editor.model.resolvedExitAnimationV2
 import com.tajuli.digitorandroid.editor.model.resolvedTextStyleV2
+import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
 import kotlin.math.min
 
 private val C8Panel = Color(0xFF0B0B0F)
@@ -93,7 +98,7 @@ fun CreatorMediaWorkspaceV8(
             Text("Creator tools", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
             Text(
-                busyOperation ?: "Text V2 · Transition V22 · Retime",
+                busyOperation ?: "Text V2 · Cutout V43 · Transition V22 · Retime",
                 fontSize = 8.sp,
                 color = if (busyOperation == null) C8Muted else C8Accent,
             )
@@ -138,6 +143,14 @@ fun CreatorMediaWorkspaceV8(
                 }
             }
 
+            SectionCardV8("Cutout V43") {
+                if (!selectedIsVideo) {
+                    Text("Select a video or image clip", fontSize = 8.sp, color = C8Muted)
+                } else {
+                    CutoutEditorV43(selectedClip!!, vm)
+                }
+            }
+
             SectionCardV8("Transition") {
                 if (!selectedIsVideo) {
                     Text("Select the clip after a cut", fontSize = 8.sp, color = C8Muted)
@@ -176,6 +189,116 @@ fun CreatorMediaWorkspaceV8(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun CutoutEditorV43(clip: TimelineClip, vm: EditorViewModelV4) {
+    val context = LocalContext.current
+    val settings = clip.resolvedCutoutV43()
+    val personReady = remember(clip.uri, settings.mode) {
+        PersonCutoutMaskStoreV43.hasAny(context.applicationContext, clip)
+    }
+
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        V2ChoiceButton("Off", settings.mode == CutoutModeV43.NONE) {
+            vm.setSelectedCutoutV43(settings.copy(mode = CutoutModeV43.NONE), status = "Cutout off", coalesce = false)
+        }
+        V2ChoiceButton("Auto Cutout", settings.mode == CutoutModeV43.PERSON) {
+            vm.enablePersonCutoutV43(settings)
+        }
+        V2ChoiceButton("Chroma Key", settings.mode == CutoutModeV43.CHROMA_KEY) {
+            vm.setSelectedCutoutV43(
+                settings.copy(mode = CutoutModeV43.CHROMA_KEY),
+                status = "Chroma Key enabled",
+                coalesce = false,
+            )
+        }
+    }
+
+    when (settings.mode) {
+        CutoutModeV43.NONE -> {
+            Text(
+                "Auto Cutout removes a person background without green screen. Chroma Key is best for controlled green/blue-screen footage.",
+                fontSize = 8.sp,
+                color = C8Muted,
+            )
+        }
+        CutoutModeV43.PERSON -> {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (personReady) "Semantic matte cached" else "Semantic matte needs analysis",
+                    fontSize = 8.sp,
+                    color = if (personReady) C8Accent else C8Muted,
+                )
+                Spacer(Modifier.weight(1f))
+                FilledTonalButton(onClick = vm::analyzeSelectedPersonCutoutV43) {
+                    Text(if (personReady) "Refresh matte" else "Analyze", fontSize = 8.sp)
+                }
+            }
+            CommitSliderV2("Threshold", settings.personThreshold, .05f..95f) { value ->
+                vm.setSelectedCutoutV43(settings.copy(personThreshold = value), status = "Auto Cutout edge updated")
+            }
+            CommitSliderV2("Feather", settings.personFeather, .005f..45f) { value ->
+                vm.setSelectedCutoutV43(settings.copy(personFeather = value), status = "Auto Cutout feather updated")
+            }
+            Text(
+                "Soft foreground confidence is interpolated between cached semantic frames. Put the replacement background on a lower V track.",
+                fontSize = 8.sp,
+                color = C8Muted,
+            )
+        }
+        CutoutModeV43.CHROMA_KEY -> {
+            val keyColor = Color(settings.keyRed, settings.keyGreen, settings.keyBlue, 1f)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Box(
+                    Modifier.size(24.dp)
+                        .background(keyColor, CircleShape)
+                        .border(1.dp, Color.White.copy(alpha = .35f), CircleShape),
+                )
+                Text("Key color", fontSize = 8.sp, color = C8Muted)
+                V2ChoiceButton("Green", false) {
+                    vm.setSelectedCutoutV43(
+                        settings.copy(keyRed = 0f, keyGreen = 1f, keyBlue = 0f),
+                        status = "Green screen key selected",
+                        coalesce = false,
+                    )
+                }
+                V2ChoiceButton("Blue", false) {
+                    vm.setSelectedCutoutV43(
+                        settings.copy(keyRed = 0f, keyGreen = .12f, keyBlue = 1f),
+                        status = "Blue screen key selected",
+                        coalesce = false,
+                    )
+                }
+            }
+            CreatorSliderV8("Key R", settings.keyRed, 0f..1f) { value ->
+                vm.setSelectedCutoutV43(settings.copy(keyRed = value), status = "Chroma key color updated")
+            }
+            CreatorSliderV8("Key G", settings.keyGreen, 0f..1f) { value ->
+                vm.setSelectedCutoutV43(settings.copy(keyGreen = value), status = "Chroma key color updated")
+            }
+            CreatorSliderV8("Key B", settings.keyBlue, 0f..1f) { value ->
+                vm.setSelectedCutoutV43(settings.copy(keyBlue = value), status = "Chroma key color updated")
+            }
+            CommitSliderV2("Similarity", settings.chromaSimilarity, .01f..40f) { value ->
+                vm.setSelectedCutoutV43(settings.copy(chromaSimilarity = value), status = "Chroma similarity updated")
+            }
+            CommitSliderV2("Softness", settings.chromaSoftness, .005f..30f) { value ->
+                vm.setSelectedCutoutV43(settings.copy(chromaSoftness = value), status = "Chroma softness updated")
+            }
+            CommitSliderV2("Spill", settings.spillSuppression, 0f..1f) { value ->
+                vm.setSelectedCutoutV43(settings.copy(spillSuppression = value), status = "Spill suppression updated")
+            }
+            Text(
+                "Cb/Cr keying ignores much of the screen brightness variation; Softness protects hair/motion edges and Spill neutralizes reflected key color.",
+                fontSize = 8.sp,
+                color = C8Muted,
+            )
         }
     }
 }
