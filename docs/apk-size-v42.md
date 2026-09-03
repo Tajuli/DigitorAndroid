@@ -12,7 +12,7 @@ Normal local debug builds without `-PdigitorAbi` remain universal and unminified
 
 Gallery/Photos imports normally use `content://` URIs. The earlier native-image export regression only exercised an app-private `file://` PNG, so provider-backed single-image projects were not covered. Before GPU export, V42 now materializes only still-image `content://` sources into short-lived app-private cache files, preserving the image MIME type and leaving video/audio URIs untouched. Temporary image files are deleted after success, failure, or cancellation.
 
-CI now covers both app-private still images and a real MediaStore `content://` still image through `GpuExportBackend`. Run #676 completed 11/11 instrumentation tests with 0 failures, and the packaged-phone New Project -> 16:9 -> Editor UI smoke test also passed.
+CI covers both app-private still images and a real MediaStore `content://` still image through `GpuExportBackend`. Run #676 completed 11/11 instrumentation tests with 0 failures, and the packaged-phone New Project -> 16:9 -> Editor UI smoke test also passed.
 
 Examples:
 
