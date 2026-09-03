@@ -39,4 +39,28 @@ class ClipCutoutV43Test {
         assertEquals(.005f, normalized.chromaSoftness, .0001f)
         assertEquals(1f, normalized.spillSuppression, .0001f)
     }
+
+    @Test
+    fun untouchedLegacyPersonDefaultsMigrateToTighterEdgeTuning() {
+        val normalized = ClipCutoutV43(
+            mode = CutoutModeV43.PERSON,
+            personThreshold = .42f,
+            personFeather = .12f,
+        ).normalized()
+
+        assertEquals(.50f, normalized.personThreshold, .0001f)
+        assertEquals(.06f, normalized.personFeather, .0001f)
+    }
+
+    @Test
+    fun userTunedPersonEdgesAreNotOverridden() {
+        val normalized = ClipCutoutV43(
+            mode = CutoutModeV43.PERSON,
+            personThreshold = .47f,
+            personFeather = .09f,
+        ).normalized()
+
+        assertEquals(.47f, normalized.personThreshold, .0001f)
+        assertEquals(.09f, normalized.personFeather, .0001f)
+    }
 }
