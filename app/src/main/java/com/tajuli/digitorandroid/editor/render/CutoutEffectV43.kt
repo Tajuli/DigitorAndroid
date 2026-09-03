@@ -25,8 +25,9 @@ import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
  *
  * This effect runs in the same Media3 chain for preview and export. Person mode consumes cached
  * SelfieMulticlass confidence masks and temporally interpolates adjacent semantic anchors. Chroma
- * mode keys in Cb/Cr space, which is deliberately less sensitive to screen brightness than raw RGB
- * distance, then neutralizes key-colour spill only around transparent/soft-edge pixels.
+ * mode uses a neighbourhood-filtered Cb/Cr distance, then neutralizes key-colour spill only around
+ * transparent/soft-edge pixels. The filtered chroma-distance pattern follows the same production
+ * principle used by mature live-video keyers such as OBS while keeping Digitor's controls compact.
  */
 @UnstableApi
 internal class CutoutEffectV43 private constructor(
@@ -55,6 +56,8 @@ internal class CutoutEffectV43 private constructor(
         private var maskTextureB = 0
         private var loadedPathA: String? = null
         private var loadedPathB: String? = null
+        private var inputWidth = 1
+        private var inputHeight = 1
 
         init {
             try {
@@ -72,7 +75,11 @@ internal class CutoutEffectV43 private constructor(
             }
         }
 
-        override fun configure(inputWidth: Int, inputHeight: Int): Size = Size(inputWidth, inputHeight)
+        override fun configure(inputWidth: Int, inputHeight: Int): Size {
+            this.inputWidth = inputWidth.coerceAtLeast(1)
+            this.inputHeight = inputHeight.coerceAtLeast(1)
+            return Size(inputWidth, inputHeight)
+        }
 
         override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
             try {
@@ -87,6 +94,10 @@ internal class CutoutEffectV43 private constructor(
                 program.setSamplerTexIdUniform("uTexSampler", inputTexId, 0)
                 program.setSamplerTexIdUniform("uMaskA", maskTextureA, 1)
                 program.setSamplerTexIdUniform("uMaskB", maskTextureB, 2)
+                program.setFloatsUniform(
+                    "uTexelSize",
+                    floatArrayOf(1f / inputWidth.toFloat(), 1f / inputHeight.toFloat()),
+                )
                 program.setFloatUniform("uMode", when (settings.mode) {
                     CutoutModeV43.PERSON -> 1f
                     CutoutModeV43.CHROMA_KEY -> 2f
@@ -213,6 +224,7 @@ internal class CutoutEffectV43 private constructor(
                 uniform sampler2D uTexSampler;
                 uniform sampler2D uMaskA;
                 uniform sampler2D uMaskB;
+                uniform vec2 uTexelSize;
                 uniform float uMode;
                 uniform float uHasMaskA;
                 uniform float uHasMaskB;
@@ -232,10 +244,22 @@ internal class CutoutEffectV43 private constructor(
                     );
                 }
 
+                float samplePerson(sampler2D maskTexture, vec2 uv) {
+                    // SelfieMulticlass produces a 256x256 confidence mask. A compact cross filter
+                    // reduces single-pixel semantic noise while preserving hair detail.
+                    vec2 px = vec2(1.0 / 256.0, 1.0 / 256.0);
+                    float value = texture2D(maskTexture, uv).r * 4.0;
+                    value += texture2D(maskTexture, uv + vec2(px.x, 0.0)).r;
+                    value += texture2D(maskTexture, uv - vec2(px.x, 0.0)).r;
+                    value += texture2D(maskTexture, uv + vec2(0.0, px.y)).r;
+                    value += texture2D(maskTexture, uv - vec2(0.0, px.y)).r;
+                    return value / 8.0;
+                }
+
                 float softPersonMask() {
                     if (uHasMaskA < 0.5 && uHasMaskB < 0.5) return 1.0;
-                    float a = uHasMaskA > 0.5 ? texture2D(uMaskA, vTexCoord).r : 0.0;
-                    float b = uHasMaskB > 0.5 ? texture2D(uMaskB, vTexCoord).r : a;
+                    float a = uHasMaskA > 0.5 ? samplePerson(uMaskA, vTexCoord) : 0.0;
+                    float b = uHasMaskB > 0.5 ? samplePerson(uMaskB, vTexCoord) : a;
                     if (uHasMaskA < 0.5) a = b;
                     float confidence = mix(a, b, clamp(uTemporalMix, 0.0, 1.0));
                     float lo = clamp(uPersonThreshold - uPersonFeather, 0.0, 1.0);
@@ -243,11 +267,27 @@ internal class CutoutEffectV43 private constructor(
                     return smoothstep(lo, hi, confidence);
                 }
 
-                float chromaMatte(vec3 rgb) {
-                    float distanceToKey = distance(rgbToChroma(rgb), rgbToChroma(uKeyRgb));
-                    float lo = max(0.0, uChromaSimilarity);
-                    float hi = lo + max(0.0005, uChromaSoftness);
-                    return smoothstep(lo, hi, distanceToKey);
+                float chromaDistance(vec3 rgb) {
+                    return distance(rgbToChroma(rgb), rgbToChroma(uKeyRgb));
+                }
+
+                float filteredChromaDistance(vec3 centerRgb) {
+                    vec2 halfPx = uTexelSize * 0.5;
+                    vec2 point0 = vec2(uTexelSize.x, halfPx.y);
+                    vec2 point1 = vec2(halfPx.x, -uTexelSize.y);
+                    float dist = chromaDistance(texture2D(uTexSampler, vTexCoord - point0).rgb);
+                    dist += chromaDistance(texture2D(uTexSampler, vTexCoord + point0).rgb);
+                    dist += chromaDistance(texture2D(uTexSampler, vTexCoord - point1).rgb);
+                    dist += chromaDistance(texture2D(uTexSampler, vTexCoord + point1).rgb);
+                    dist *= 2.0;
+                    dist += chromaDistance(centerRgb);
+                    return dist / 9.0;
+                }
+
+                float keyedMatte(float distanceToKey) {
+                    float baseMask = distanceToKey - max(0.0, uChromaSimilarity);
+                    float softness = max(0.0005, uChromaSoftness);
+                    return pow(clamp(baseMask / softness, 0.0, 1.0), 1.5);
                 }
 
                 void main() {
@@ -258,10 +298,15 @@ internal class CutoutEffectV43 private constructor(
                     if (uMode > 0.5 && uMode < 1.5) {
                         matte = softPersonMask();
                     } else if (uMode >= 1.5) {
-                        matte = chromaMatte(rgb);
-                        float edgeSpill = (1.0 - matte) * clamp(uSpill, 0.0, 1.0);
+                        float distanceToKey = filteredChromaDistance(rgb);
+                        matte = keyedMatte(distanceToKey);
+
+                        float baseMask = distanceToKey - max(0.0, uChromaSimilarity);
+                        float spillRange = max(0.005, uChromaSoftness * 2.5);
+                        float cleanColor = pow(clamp(baseMask / spillRange, 0.0, 1.0), 1.5);
+                        float spillWeight = (1.0 - cleanColor) * clamp(uSpill, 0.0, 1.0);
                         float luma = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
-                        rgb = mix(rgb, vec3(luma), edgeSpill * 0.78);
+                        rgb = mix(rgb, vec3(luma), spillWeight * 0.78);
                     }
 
                     gl_FragColor = vec4(rgb, source.a * clamp(matte, 0.0, 1.0));
