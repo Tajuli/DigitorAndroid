@@ -6,6 +6,7 @@ import com.tajuli.digitorandroid.editor.model.ClipCutoutV43
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutAnalyzerV43
 import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
