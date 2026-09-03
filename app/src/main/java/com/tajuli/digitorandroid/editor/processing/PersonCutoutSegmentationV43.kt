@@ -22,11 +22,16 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 
-private const val PERSON_MODEL_ASSET_V43 = "selfie_multiclass_256x256.tflite"
-private const val BACKGROUND_CLASS_V43 = 0
+// Google's dedicated two-class portrait model is a better fit for background replacement than
+// SelfieMulticlass. The latter's "others/accessories" class can occasionally absorb nearby chair /
+// background detail when person alpha is inferred as 1-background. The binary model outputs an
+// explicit person confidence mask and is much faster, allowing denser temporal sampling.
+private const val PERSON_MODEL_ASSET_V43 = "selfie_segmenter.tflite"
+private const val PERSON_CLASS_V43 = 1
 private const val PERSON_ANALYSIS_LONG_EDGE_V43 = 512
-private const val MIN_PERSON_ANCHORS_V43 = 6
-private const val MAX_PERSON_ANCHORS_V43 = 96
+private const val MIN_PERSON_ANCHORS_V43 = 8
+private const val MAX_PERSON_ANCHORS_V43 = 300
+private const val PERSON_ANCHORS_PER_SECOND_V43 = 5L
 
 data class PersonCutoutMaskFrameV43(
     val sourceTimeUs: Long,
@@ -100,7 +105,9 @@ object PersonCutoutMaskStoreV43 {
     }
 
     private fun sourceDir(context: Context, sourceUri: String): File =
-        File(File(context.filesDir, "person_cutout_masks_v43_confidence_256"), cacheKey(sourceUri))
+        // Cache version intentionally changed from the multiclass implementation. Never mix old
+        // 1-background mattes with the new explicit binary person-confidence mattes.
+        File(File(context.filesDir, "person_cutout_masks_v43_binary_person_256"), cacheKey(sourceUri))
 
     private fun cacheKey(sourceUri: String): String = MessageDigest.getInstance("SHA-256")
         .digest(sourceUri.toByteArray())
@@ -139,16 +146,16 @@ class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
         try {
             val result = segmenter.segment(BitmapImageBuilder(mediaPipeBitmap).build())
             val masks = result.confidenceMasks().orElse(emptyList())
-            val background = masks.getOrNull(BACKGROUND_CLASS_V43) ?: return false
-            val width = background.width.coerceAtLeast(1)
-            val height = background.height.coerceAtLeast(1)
-            val confidences = ByteBufferExtractor.extract(background).asFloatBuffer()
+            val person = masks.getOrNull(PERSON_CLASS_V43) ?: return false
+            val width = person.width.coerceAtLeast(1)
+            val height = person.height.coerceAtLeast(1)
+            val confidences = ByteBufferExtractor.extract(person).asFloatBuffer()
             confidences.rewind()
             if (confidences.remaining() < width * height) return false
 
             val pixels = IntArray(width * height)
             for (index in pixels.indices) {
-                val foreground = (1f - confidences.get().coerceIn(0f, 1f)).coerceIn(0f, 1f)
+                val foreground = confidences.get().coerceIn(0f, 1f)
                 val value = (foreground * 255f).roundToInt().coerceIn(0, 255)
                 pixels[index] = Color.argb(255, value, value, value)
             }
@@ -216,11 +223,14 @@ class PersonCutoutAnalyzerV43(private val context: Context) {
             val start = clip.sourceInUs.coerceAtLeast(0L)
             val end = clip.sourceOutUs.coerceAtLeast(start + 1L)
             val durationUs = (end - start).coerceAtLeast(1L)
-            val roughlyFourPerSecond = ((durationUs * 4L) / 1_000_000L).toInt() + 2
-            val count = roughlyFourPerSecond.coerceIn(MIN_PERSON_ANCHORS_V43, MAX_PERSON_ANCHORS_V43)
+            val denseTarget = ((durationUs * PERSON_ANCHORS_PER_SECOND_V43) / 1_000_000L).toInt() + 2
+            val count = denseTarget.coerceIn(MIN_PERSON_ANCHORS_V43, MAX_PERSON_ANCHORS_V43)
             val regularTimes = evenlySpacedTimes(start, end, count)
             val priority = prioritySourceUs?.coerceIn(start, (end - 1L).coerceAtLeast(start))
             val times = buildList {
+                // Keep UX responsive: analyze the visible playhead frame first, then fill the denser
+                // temporal track. The binary model is fast enough that a ~1 minute clip can use a few
+                // hundred anchors instead of the old 96-anchor ceiling.
                 priority?.let(::add)
                 addAll(regularTimes)
             }.distinct()
