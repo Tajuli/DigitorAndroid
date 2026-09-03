@@ -50,34 +50,34 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
     }
 }
 
-// Auto Cutout uses Google's dedicated binary person/background model instead of deriving person
-// alpha as 1-background from SelfieMulticlass. The binary model is both substantially faster and
-// specifically trained for background replacement, so Digitor can sample more video frames while
-// avoiding multiclass "other/accessory" leakage into the foreground matte.
-val personSegmenterModelFile = generatedFaceSkinModelAssets.map { it.file("selfie_segmenter.tflite") }
-val downloadPersonSegmenterModel by tasks.registering {
-    outputs.file(personSegmenterModelFile)
+// V44 Pro Cutout uses MODNet's soft portrait alpha instead of a binary person mask. MODNet and
+// its published weights are Apache-2.0. This LiteRT conversion is GPU-friendly and keeps the model
+// outside git history while still producing deterministic CI/phone builds.
+val generatedPortraitMattingAssets = layout.buildDirectory.dir("generated/portraitMattingAssets")
+val modNetModelFile = generatedPortraitMattingAssets.map { it.file("modnet_v44.tflite") }
+val downloadModNetModel by tasks.registering {
+    outputs.file(modNetModelFile)
     doLast {
-        val output = personSegmenterModelFile.get().asFile
-        if (output.isFile && output.length() > 100_000L) return@doLast
+        val output = modNetModelFile.get().asFile
+        if (output.isFile && output.length() > 20_000_000L) return@doLast
         output.parentFile.mkdirs()
         val temp = File(output.parentFile, output.name + ".download")
         if (temp.exists()) temp.delete()
         val url = URI(
-            "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
+            "https://huggingface.co/litert-community/MODNet-LiteRT/resolve/main/modnet.tflite?download=true",
         ).toURL()
         url.openStream().use { input ->
-            temp.outputStream().buffered().use { target -> input.copyTo(target) }
+            temp.outputStream().buffered().use { target -> input.copyTo(target, 1024 * 1024) }
         }
-        require(temp.length() > 100_000L) { "Downloaded SelfieSegmenter model is unexpectedly small" }
+        require(temp.length() > 20_000_000L) { "Downloaded MODNet LiteRT model is unexpectedly small" }
         if (output.exists()) output.delete()
-        check(temp.renameTo(output)) { "Could not install generated selfie_segmenter.tflite asset" }
+        check(temp.renameTo(output)) { "Could not install generated modnet_v44.tflite asset" }
     }
 }
 
 // Optional CI/local packaging filter. Normal builds keep every ABI, while a phone APK can be built
-// with `-PdigitorAbi=arm64-v8a` so MediaPipe/ML Kit native libraries are not duplicated for x86,
-// x86_64 and armeabi-v7a. This changes packaging only; editor/beauty behavior is unchanged.
+// with `-PdigitorAbi=arm64-v8a` so MediaPipe/LiteRT native libraries are not duplicated for x86,
+// x86_64 and armeabi-v7a. This changes packaging only; editor behavior is unchanged.
 val requestedAbi = providers.gradleProperty("digitorAbi").orNull
     ?.trim()
     ?.takeIf { it.isNotEmpty() }
@@ -107,9 +107,6 @@ android {
     }
 
     buildTypes {
-        // Installable CI/phone build. Keep it behavior-identical to debug and reduce size only by
-        // packaging a single requested ABI. Do not combine debuggable=true with R8/resource shrink;
-        // AGP explicitly treats that combination as unsupported and it caused a real New Project crash.
         create("phone") {
             initWith(getByName("debug"))
             isDebuggable = true
@@ -137,12 +134,13 @@ android {
 
     sourceSets["main"].assets.srcDir(generatedHairModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedFaceSkinModelAssets.get().asFile)
+    sourceSets["main"].assets.srcDir(generatedPortraitMattingAssets.get().asFile)
 }
 
 tasks.named("preBuild").configure {
     dependsOn(downloadHairSegmenterModel)
     dependsOn(downloadFaceSkinSegmenterModel)
-    dependsOn(downloadPersonSegmenterModel)
+    dependsOn(downloadModNetModel)
 }
 
 dependencies {
@@ -171,6 +169,10 @@ dependencies {
     implementation("com.google.code.gson:gson:2.13.1")
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
+
+    // LiteRT 2.2 splits compile API from the runtime implementation.
+    implementation("com.google.ai.edge.litert:litert-api:2.2.0")
+    runtimeOnly("com.google.ai.edge.litert:litert:2.2.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
