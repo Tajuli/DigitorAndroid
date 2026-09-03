@@ -16,7 +16,7 @@ import kotlinx.coroutines.withContext
 
 private val personCutoutAnalysisInFlightV43 = ConcurrentHashMap.newKeySet<String>()
 
-/** Public-state bridge keeps V43 isolated without widening EditorViewModelV4's private mutation API. */
+/** V44 bridge retains historical symbols so existing project/editor code remains source-compatible. */
 fun EditorViewModelV4.setSelectedCutoutV43(
     settings: ClipCutoutV43,
     status: String = "Cutout updated",
@@ -38,7 +38,7 @@ fun EditorViewModelV4.setSelectedCutoutV43(
         })
     }
     commitProjectV19(
-        label = "cutout-v43",
+        label = "cutout-v44",
         project = snapshot.project.copy(tracks = tracks),
         status = status,
         coalesce = coalesce,
@@ -47,11 +47,11 @@ fun EditorViewModelV4.setSelectedCutoutV43(
 
 fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
     val person = settings.copy(mode = CutoutModeV43.PERSON).normalized()
-    setSelectedCutoutV43(person, status = "Auto Cutout enabled", coalesce = false)
+    setSelectedCutoutV43(person, status = "Pro Cutout enabled", coalesce = false)
     val clip = state.value.project.clip(state.value.selectedClipId) ?: return
     val app = getApplication<Application>()
     if (hasPersonCutoutCoverageV43(app.applicationContext, clip)) {
-        setEditorStatusV19("Auto Cutout ready · cached matte")
+        setEditorStatusV19("Pro Cutout ready · cached MODNet matte")
         PreviewExportCoordinator.refreshActivePreviews()
     } else {
         analyzeSelectedPersonCutoutV43()
@@ -61,16 +61,20 @@ fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
 fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
     val snapshot = state.value
     val clip = snapshot.project.clip(snapshot.selectedClipId) ?: run {
-        setEditorStatusV19("Select a video/image clip for Auto Cutout")
+        setEditorStatusV19("Select a video/image clip for Pro Cutout")
         return
     }
     if (snapshot.project.trackContaining(clip.id)?.kind != TrackKind.VIDEO) {
-        setEditorStatusV19("Auto Cutout works on video/image clips")
+        setEditorStatusV19("Pro Cutout works on video/image clips")
         return
     }
-    val analysisKey = "${clip.uri}|${clip.sourceInUs}|${clip.sourceOutUs}"
+    val settings = clip.resolvedCutoutV43()
+    val analysisKey = buildString {
+        append(clip.uri); append('|'); append(clip.sourceInUs); append('|'); append(clip.sourceOutUs)
+        append('|'); append(settings.hairDetailV44); append('|'); append(settings.temporalStabilityV44)
+    }
     if (!personCutoutAnalysisInFlightV43.add(analysisKey)) {
-        setEditorStatusV19("Auto Cutout · analysis already running")
+        setEditorStatusV19("Pro Cutout · analysis already running")
         return
     }
 
@@ -82,14 +86,11 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         )
     }
 
-    setEditorStatusV19("Auto Cutout · preparing analysis…")
+    setEditorStatusV19("Pro Cutout · loading portrait matting engine…")
     val app = getApplication<Application>()
     viewModelScope.launch(Dispatchers.Default) {
         try {
             val result = runCatching {
-                // MediaMetadataRetriever can contend with the realtime MediaCodec preview on
-                // low/mid-range devices. Give semantic analysis exclusive ownership of decoder/GPU
-                // resources; the lease restores the exact paused preview when analysis finishes.
                 PreviewExportCoordinator.acquireAnalysisLease().use {
                     PersonCutoutAnalyzerV43(app.applicationContext).analyzeAndStore(
                         clip = clip,
@@ -97,7 +98,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                         onAnchorStored = { completed ->
                             if (completed == 1 || completed % 8 == 0) {
                                 viewModelScope.launch(Dispatchers.Main) {
-                                    setEditorStatusV19("Auto Cutout · analyzing… $completed matte frame(s)")
+                                    setEditorStatusV19("Pro Cutout · MODNet matting… $completed frame(s)")
                                 }
                             }
                         },
@@ -109,15 +110,15 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                     val ready = hasPersonCutoutCoverageV43(app.applicationContext, clip)
                     PreviewExportCoordinator.refreshActivePreviews(220L)
                     if (ready) {
-                        setEditorStatusV19("Auto Cutout ready · ${track.frames.size} cached matte frame(s)")
+                        setEditorStatusV19("Pro Cutout ready · ${track.frames.size} refined matte frame(s)")
                     } else {
-                        setEditorStatusV19("Auto Cutout incomplete · tap Analyze again")
+                        setEditorStatusV19("Pro Cutout incomplete · tap Analyze again")
                     }
                 }.onFailure { error ->
                     PreviewExportCoordinator.refreshActivePreviews(220L)
                     val detail = error.message?.takeIf { it.isNotBlank() }
                         ?: error::class.java.simpleName
-                    setEditorStatusV19("Auto Cutout failed · $detail")
+                    setEditorStatusV19("Pro Cutout failed · $detail")
                 }
             }
         } finally {
