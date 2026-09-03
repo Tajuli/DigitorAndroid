@@ -41,7 +41,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.tajuli.digitorandroid.editor.model.ClipCutoutV43
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TextAlignmentV2
 import com.tajuli.digitorandroid.editor.model.TextAnimationSpecV2
@@ -197,9 +196,7 @@ fun CreatorMediaWorkspaceV8(
 private fun CutoutEditorV43(clip: TimelineClip, vm: EditorViewModelV4) {
     val context = LocalContext.current
     val settings = clip.resolvedCutoutV43()
-    val personReady = remember(clip.uri, settings.mode) {
-        PersonCutoutMaskStoreV43.hasAny(context.applicationContext, clip)
-    }
+    val personReady = PersonCutoutMaskStoreV43.hasAny(context.applicationContext, clip)
 
     Row(
         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -240,10 +237,10 @@ private fun CutoutEditorV43(clip: TimelineClip, vm: EditorViewModelV4) {
                     Text(if (personReady) "Refresh matte" else "Analyze", fontSize = 8.sp)
                 }
             }
-            CommitSliderV2("Threshold", settings.personThreshold, .05f..95f) { value ->
+            CommitSliderV2("Threshold", settings.personThreshold, .05f..0.95f) { value ->
                 vm.setSelectedCutoutV43(settings.copy(personThreshold = value), status = "Auto Cutout edge updated")
             }
-            CommitSliderV2("Feather", settings.personFeather, .005f..45f) { value ->
+            CommitSliderV2("Feather", settings.personFeather, .005f..0.45f) { value ->
                 vm.setSelectedCutoutV43(settings.copy(personFeather = value), status = "Auto Cutout feather updated")
             }
             Text(
@@ -285,10 +282,10 @@ private fun CutoutEditorV43(clip: TimelineClip, vm: EditorViewModelV4) {
             CreatorSliderV8("Key B", settings.keyBlue, 0f..1f) { value ->
                 vm.setSelectedCutoutV43(settings.copy(keyBlue = value), status = "Chroma key color updated")
             }
-            CommitSliderV2("Similarity", settings.chromaSimilarity, .01f..40f) { value ->
+            CommitSliderV2("Similarity", settings.chromaSimilarity, .01f..0.40f) { value ->
                 vm.setSelectedCutoutV43(settings.copy(chromaSimilarity = value), status = "Chroma similarity updated")
             }
-            CommitSliderV2("Softness", settings.chromaSoftness, .005f..30f) { value ->
+            CommitSliderV2("Softness", settings.chromaSoftness, .005f..0.30f) { value ->
                 vm.setSelectedCutoutV43(settings.copy(chromaSoftness = value), status = "Chroma softness updated")
             }
             CommitSliderV2("Spill", settings.spillSuppression, 0f..1f) { value ->
