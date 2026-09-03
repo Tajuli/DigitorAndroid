@@ -54,7 +54,20 @@ class GpuExportBackend(
                 return@suspendCancellableCoroutine
             }
 
-        val videoTrackCount = project.tracks.count { track ->
+        // Gallery/Photos providers normally hand the editor content:// URIs. Some vendor DataSource
+        // implementations can preview those URIs but fail when Transformer re-opens a still image
+        // through ImageAssetLoader during export. Materialize only still-image sources into a short-
+        // lived app-private file so the real export path always sees a stable seekable source.
+        // Moving-video/audio URIs are untouched.
+        val preparedImages = runCatching { materializeStillImageSources(project) }
+            .getOrElse { error ->
+                previewLease.close()
+                if (continuation.isActive) continuation.resumeWithException(error)
+                return@suspendCancellableCoroutine
+            }
+        val exportProject = preparedImages.project
+
+        val videoTrackCount = exportProject.tracks.count { track ->
             track.kind == TrackKind.VIDEO && !track.muted && track.clips.isNotEmpty()
         }
         val compositionStage = if (videoTrackCount == 1) {
@@ -69,6 +82,7 @@ class GpuExportBackend(
         // URIs. The file is tiny, app-private, and can be reused across exports.
         val blankFrameUri = runCatching { ensureBlankFramePngUri() }
             .getOrElse { error ->
+                preparedImages.close()
                 previewLease.close()
                 if (continuation.isActive) continuation.resumeWithException(error)
                 return@suspendCancellableCoroutine
@@ -76,8 +90,9 @@ class GpuExportBackend(
         val compositionBuilder = StableGpuExportCompositionBuilder(
             Media3CompositionBuilder(blankFrameUri = blankFrameUri),
         )
-        val composition = runCatching { compositionBuilder.build(project) }
+        val composition = runCatching { compositionBuilder.build(exportProject) }
             .getOrElse { error ->
+                preparedImages.close()
                 previewLease.close()
                 if (continuation.isActive) continuation.resumeWithException(error)
                 return@suspendCancellableCoroutine
@@ -98,6 +113,7 @@ class GpuExportBackend(
         }
 
         fun restorePreview() {
+            preparedImages.close()
             previewLease.close()
         }
 
@@ -240,13 +256,14 @@ class GpuExportBackend(
 
         continuation.invokeOnCancellation {
             stopCallbacks()
-            restorePreview()
             if (transformerStarted.get()) {
                 handler.post {
                     runCatching { transformer.cancel() }
+                    restorePreview()
                     cleanupFailedOutput()
                 }
             } else {
+                restorePreview()
                 cleanupFailedOutput()
             }
         }
@@ -256,6 +273,52 @@ class GpuExportBackend(
         // opening the export decoder + encoder pair.
         onProgress(ExportProgress.Stage("GPU: waiting for codec release · ${quality.label}", 0.03f))
         handler.postDelayed(starter, EXPORT_START_GRACE_MS)
+    }
+
+    private fun materializeStillImageSources(project: TimelineProject): PreparedImageProject {
+        val tempFiles = mutableListOf<File>()
+        val supportDir = File(context.cacheDir, IMAGE_SOURCE_DIR).apply { mkdirs() }
+        return try {
+            val tracks = project.tracks.map { track ->
+                track.copy(
+                    clips = track.clips.map { clip ->
+                        if (!clip.isImageV21) return@map clip
+                        val source = Uri.parse(clip.uri)
+                        if (source.scheme.equals("file", ignoreCase = true)) return@map clip
+
+                        val mimeType = clip.sourceMimeTypeV21
+                            ?.takeIf { it.startsWith("image/") }
+                            ?: context.contentResolver.getType(source)?.takeIf { it.startsWith("image/") }
+                            ?: "image/png"
+                        val suffix = when (mimeType.lowercase()) {
+                            "image/jpeg", "image/jpg" -> ".jpg"
+                            "image/webp" -> ".webp"
+                            "image/heic" -> ".heic"
+                            "image/heif" -> ".heif"
+                            else -> ".png"
+                        }
+                        val stableFile = File.createTempFile("still_${clip.id.take(8)}_", suffix, supportDir)
+                        val input = context.contentResolver.openInputStream(source)
+                            ?: error("Could not open still image for export: ${clip.label}")
+                        input.use { sourceStream ->
+                            stableFile.outputStream().buffered().use { target ->
+                                sourceStream.copyTo(target, 1024 * 1024)
+                            }
+                        }
+                        require(stableFile.length() > 0L) { "Still image source was empty: ${clip.label}" }
+                        tempFiles += stableFile
+                        clip.copy(
+                            uri = Uri.fromFile(stableFile).toString(),
+                            sourceMimeTypeV21 = mimeType,
+                        )
+                    },
+                )
+            }
+            PreparedImageProject(project.copy(tracks = tracks), tempFiles)
+        } catch (error: Throwable) {
+            tempFiles.forEach { file -> runCatching { file.delete() } }
+            throw error
+        }
     }
 
     private fun ensureBlankFramePngUri(): String {
@@ -285,8 +348,21 @@ class GpuExportBackend(
             ?.contains("unisoc", ignoreCase = true) == true
     }.getOrDefault(false)
 
+    private class PreparedImageProject(
+        val project: TimelineProject,
+        private val tempFiles: List<File>,
+    ) : AutoCloseable {
+        private val closed = AtomicBoolean(false)
+
+        override fun close() {
+            if (!closed.compareAndSet(false, true)) return
+            tempFiles.forEach { file -> runCatching { file.delete() } }
+        }
+    }
+
     private companion object {
         const val EXPORT_START_GRACE_MS = 350L
         const val BLANK_FRAME_FILE_NAME = "blank_frame_v15.png"
+        const val IMAGE_SOURCE_DIR = "digitor_export_images_v42"
     }
 }
