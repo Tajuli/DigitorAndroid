@@ -9,20 +9,21 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Hands heavy video resources from realtime preview to export and back.
+ * Hands heavy video resources from realtime preview to export/analysis and back.
  *
  * Low/mid-range Android devices often expose only a small number of simultaneous MediaCodec
  * instances and a limited GPU texture budget. Keeping either the GPU preview decoder or the
- * software fallback MediaMetadataRetriever alive while Transformer opens export decode/encode can
- * terminate the process in native codec/driver code instead of returning a Kotlin exception.
+ * software fallback MediaMetadataRetriever alive while Transformer or semantic analysis opens a
+ * second decoder can terminate the process in native codec/driver code or make retriever frames
+ * silently fail. External decode work therefore takes this shared lease first.
  */
 internal object PreviewExportCoordinator {
     private val engines = CopyOnWriteArraySet<DavinciFramePreviewEngine>()
 
     // A Semaphore is deliberately used instead of a ReentrantLock/ReadWriteLock: Transformer may
     // finish on a different application-looper thread than the coroutine that starts export, and a
-    // semaphore can safely be released cross-thread. Software fallback frames take this same gate,
-    // so export waits for any in-flight retriever decode and blocks new fallback decodes until done.
+    // semaphore can safely be released cross-thread. Software fallback and semantic analysis take
+    // this same gate, so only one heavy decoder owner exists at a time.
     private val previewDecodeGate = Semaphore(1, true)
     private val mutableExportActive = MutableStateFlow(false)
     val exportActive: StateFlow<Boolean> = mutableExportActive.asStateFlow()
@@ -54,6 +55,52 @@ internal object PreviewExportCoordinator {
             block()
         } finally {
             previewDecodeGate.release()
+        }
+    }
+
+    /**
+     * Auto Cutout uses MediaMetadataRetriever plus MediaPipe. Some Android codec stacks cannot keep
+     * that retriever alive beside Digitor's realtime MediaCodec session. Temporarily release preview
+     * decode/GL resources, let semantic analysis own the decoder budget, then restore the exact
+     * paused playhead when the lease closes.
+     */
+    fun acquireAnalysisLease(): AnalysisLease {
+        previewDecodeGate.acquireUninterruptibly()
+        val suspended = mutableListOf<DavinciFramePreviewEngine>()
+        try {
+            SoftwarePreviewRenderer.releaseCachedDecoderForExport()
+            engines.toList().forEach { engine ->
+                if (!engine.suspendForExternalGpuWork()) {
+                    throw IllegalStateException("Preview resources did not release for Auto Cutout analysis")
+                }
+                suspended += engine
+            }
+            return AnalysisLease(suspended)
+        } catch (error: Throwable) {
+            suspended.forEach { engine ->
+                engine.resumeAfterExternalGpuWork()
+                engine.scheduleCurrentFrameRefresh(180L)
+            }
+            previewDecodeGate.release()
+            throw error
+        }
+    }
+
+    class AnalysisLease internal constructor(
+        private val engines: List<DavinciFramePreviewEngine>,
+    ) : Closeable {
+        private val closed = AtomicBoolean(false)
+
+        override fun close() {
+            if (!closed.compareAndSet(false, true)) return
+            try {
+                engines.forEach { engine ->
+                    engine.resumeAfterExternalGpuWork()
+                    engine.scheduleCurrentFrameRefresh(180L)
+                }
+            } finally {
+                previewDecodeGate.release()
+            }
         }
     }
 
