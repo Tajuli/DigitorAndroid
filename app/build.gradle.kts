@@ -170,9 +170,9 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // LiteRT 2.2 splits compile API from the runtime implementation.
-    implementation("com.google.ai.edge.litert:litert-api:2.2.0")
-    runtimeOnly("com.google.ai.edge.litert:litert:2.2.0")
+    // The unified LiteRT AAR exposes both the Kotlin CompiledModel API and native runtime. Adding
+    // litert-api separately duplicates the same Android namespace in AGP 9.x.
+    implementation("com.google.ai.edge.litert:litert:2.2.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
