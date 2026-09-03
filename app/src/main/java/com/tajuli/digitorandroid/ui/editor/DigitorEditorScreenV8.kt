@@ -37,7 +37,7 @@ import androidx.media3.common.util.UnstableApi
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
-import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
+import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 
 private val V8CutoutAccent = Color(0xFF30E0C3)
 
@@ -114,12 +114,15 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
 
         val selectedClip = clip!!
         val settings = selectedClip.resolvedCutoutV43()
-        val personReady = PersonCutoutMaskStoreV43.hasAny(
-            androidx.compose.ui.platform.LocalContext.current.applicationContext,
-            selectedClip,
-        )
+        val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+        val personReady = hasPersonCutoutCoverageV43(appContext, selectedClip)
         val analysisStatus = state.status.takeIf { it.startsWith("Auto Cutout") }
-        val analyzing = analysisStatus?.contains("analyzing", ignoreCase = true) == true
+        val analysisBusy = analysisStatus?.let { status ->
+            status.contains("preparing", ignoreCase = true) ||
+                status.contains("analyzing", ignoreCase = true)
+        } == true
+        val analysisFailed = analysisStatus?.contains("failed", ignoreCase = true) == true ||
+            analysisStatus?.contains("incomplete", ignoreCase = true) == true
 
         Row(
             Modifier.fillMaxWidth(),
@@ -136,10 +139,12 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
             ) { Text(if (settings.mode == CutoutModeV43.NONE) "✓ Off" else "Off", fontSize = 9.sp) }
 
             FilledTonalButton(
+                enabled = !analysisBusy,
                 onClick = { vm.enablePersonCutoutV43(settings) },
             ) { Text(if (settings.mode == CutoutModeV43.PERSON) "✓ Auto Cutout" else "Auto Cutout", fontSize = 9.sp) }
 
             FilledTonalButton(
+                enabled = !analysisBusy,
                 onClick = {
                     vm.setSelectedCutoutV43(
                         settings.copy(mode = CutoutModeV43.CHROMA_KEY),
@@ -163,9 +168,9 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         when {
-                            analyzing && personReady -> "Preview matte ready · finishing clip…"
-                            analyzing -> "Analyzing visible frame…"
+                            analysisBusy -> "Analyzing person matte…"
                             personReady -> "Person matte ready"
+                            analysisFailed -> "Analysis failed / incomplete"
                             else -> "Person matte needs analysis"
                         },
                         fontSize = 10.sp,
@@ -173,12 +178,12 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
                     )
                     Spacer(Modifier.weight(1f))
                     FilledTonalButton(
-                        enabled = !analyzing,
+                        enabled = !analysisBusy,
                         onClick = vm::analyzeSelectedPersonCutoutV43,
                     ) {
                         Text(
                             when {
-                                analyzing -> "Analyzing…"
+                                analysisBusy -> "Analyzing…"
                                 personReady -> "Refresh"
                                 else -> "Analyze"
                             },
@@ -190,7 +195,7 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
                     Text(
                         analysisStatus,
                         fontSize = 9.sp,
-                        color = V8CutoutAccent.copy(alpha = .82f),
+                        color = if (analysisFailed) Color(0xFFFFB4AB) else V8CutoutAccent.copy(alpha = .82f),
                     )
                 }
                 CutoutSliderV43("Threshold", settings.personThreshold, .05f..0.95f) {
@@ -200,7 +205,7 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
                     vm.setSelectedCutoutV43(settings.copy(personFeather = it), status = "Auto Cutout feather updated")
                 }
                 Text(
-                    "The visible frame is analyzed first for a fast preview; remaining frames continue in the background. For background replacement, place the replacement clip on a lower V track.",
+                    "During analysis Digitor temporarily pauses the GPU decoder so MediaPipe can decode the clip reliably. Wait until Person matte ready before export. For background replacement, place the replacement clip on a lower V track.",
                     fontSize = 9.sp,
                     color = Color.White.copy(alpha = .55f),
                 )
