@@ -251,22 +251,33 @@ class PersonCutoutAnalyzerV43(private val context: Context) {
         return scaled
     }
 
-    private fun decodeImage(uri: Uri): Bitmap? {
+    private fun decodeImage(uri: Uri): Bitmap? = runCatching {
         val raw = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            runCatching { ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri)) }.getOrNull()
+            val source = ImageDecoder.createSource(context.contentResolver, uri)
+            ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                val longEdge = max(info.size.width, info.size.height)
+                if (longEdge > PERSON_ANALYSIS_LONG_EDGE_V43) {
+                    val scale = PERSON_ANALYSIS_LONG_EDGE_V43 / longEdge.toFloat()
+                    decoder.setTargetSize(
+                        (info.size.width * scale).roundToInt().coerceAtLeast(1),
+                        (info.size.height * scale).roundToInt().coerceAtLeast(1),
+                    )
+                }
+            }
         } else {
-            runCatching { context.contentResolver.openInputStream(uri)?.use(BitmapFactory::decodeStream) }.getOrNull()
-        } ?: return null
+            context.contentResolver.openInputStream(uri)?.use(BitmapFactory::decodeStream)
+        } ?: return@runCatching null
+
         val longEdge = max(raw.width, raw.height)
-        if (longEdge <= PERSON_ANALYSIS_LONG_EDGE_V43) return raw
-        val scale = PERSON_ANALYSIS_LONG_EDGE_V43 / longEdge.toFloat()
-        val scaled = Bitmap.createScaledBitmap(
-            raw,
-            (raw.width * scale).roundToInt().coerceAtLeast(1),
-            (raw.height * scale).roundToInt().coerceAtLeast(1),
-            true,
-        )
-        raw.recycle()
-        return scaled
-    }
+        if (longEdge <= PERSON_ANALYSIS_LONG_EDGE_V43) raw else {
+            val scale = PERSON_ANALYSIS_LONG_EDGE_V43 / longEdge.toFloat()
+            Bitmap.createScaledBitmap(
+                raw,
+                (raw.width * scale).roundToInt().coerceAtLeast(1),
+                (raw.height * scale).roundToInt().coerceAtLeast(1),
+                true,
+            ).also { if (it !== raw) raw.recycle() }
+        }
+    }.getOrNull()
 }
