@@ -166,25 +166,43 @@ class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
 
 /** Bounded sparse analysis; the renderer interpolates adjacent semantic anchors for video. */
 class PersonCutoutAnalyzerV43(private val context: Context) {
-    fun analyzeAndStore(clip: TimelineClip): PersonCutoutMaskTrackV43 {
+    fun analyzeAndStore(
+        clip: TimelineClip,
+        prioritySourceUs: Long? = null,
+        onAnchorStored: ((completedAnchors: Int) -> Unit)? = null,
+    ): PersonCutoutMaskTrackV43 {
         PersonCutoutSegmenterV43(context).use { segmenter ->
-            if (clip.isImageV21) analyzeImage(clip, segmenter) else analyzeVideo(clip, segmenter)
+            if (clip.isImageV21) {
+                analyzeImage(clip, segmenter, onAnchorStored)
+            } else {
+                analyzeVideo(clip, segmenter, prioritySourceUs, onAnchorStored)
+            }
         }
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
 
-    private fun analyzeImage(clip: TimelineClip, segmenter: PersonCutoutSegmenterV43) {
+    private fun analyzeImage(
+        clip: TimelineClip,
+        segmenter: PersonCutoutSegmenterV43,
+        onAnchorStored: ((Int) -> Unit)?,
+    ) {
         val bitmap = decodeImage(Uri.parse(clip.uri)) ?: error("Could not decode image for Auto Cutout")
         try {
             check(segmenter.segmentAndStore(context, clip, bitmap, clip.sourceInUs)) {
                 "Person segmentation returned no confidence mask"
             }
+            onAnchorStored?.invoke(1)
         } finally {
             bitmap.recycle()
         }
     }
 
-    private fun analyzeVideo(clip: TimelineClip, segmenter: PersonCutoutSegmenterV43) {
+    private fun analyzeVideo(
+        clip: TimelineClip,
+        segmenter: PersonCutoutSegmenterV43,
+        prioritySourceUs: Long?,
+        onAnchorStored: ((Int) -> Unit)?,
+    ) {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(context, Uri.parse(clip.uri))
@@ -193,12 +211,22 @@ class PersonCutoutAnalyzerV43(private val context: Context) {
             val durationUs = (end - start).coerceAtLeast(1L)
             val roughlyFourPerSecond = ((durationUs * 4L) / 1_000_000L).toInt() + 2
             val count = roughlyFourPerSecond.coerceIn(MIN_PERSON_ANCHORS_V43, MAX_PERSON_ANCHORS_V43)
-            val times = evenlySpacedTimes(start, end, count)
+            val regularTimes = evenlySpacedTimes(start, end, count)
+            val priority = prioritySourceUs
+                ?.coerceIn(start, (end - 1L).coerceAtLeast(start))
+            val times = buildList {
+                priority?.let(::add)
+                addAll(regularTimes)
+            }.distinct()
+
             var completed = 0
             for (sourceUs in times) {
                 val frame = scaledFrameAtTime(retriever, sourceUs) ?: continue
                 try {
-                    if (segmenter.segmentAndStore(context, clip, frame, sourceUs)) completed++
+                    if (segmenter.segmentAndStore(context, clip, frame, sourceUs)) {
+                        completed++
+                        onAnchorStored?.invoke(completed)
+                    }
                 } finally {
                     frame.recycle()
                 }
