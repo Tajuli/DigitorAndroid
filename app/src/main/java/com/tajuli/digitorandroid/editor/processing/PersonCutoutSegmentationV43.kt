@@ -22,16 +22,15 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 
-// Google's dedicated two-class portrait model is a better fit for background replacement than
-// SelfieMulticlass. The latter's "others/accessories" class can occasionally absorb nearby chair /
-// background detail when person alpha is inferred as 1-background. The binary model outputs an
-// explicit person confidence mask and is much faster, allowing denser temporal sampling.
+// Google's dedicated portrait segmentation model is a better fit for background replacement than
+// SelfieMulticlass. MediaPipe's official Android confidence-mask sample consumes index 0 for this
+// model; unlike the multiclass model there is not a separate background/person mask pair to index.
 private const val PERSON_MODEL_ASSET_V43 = "selfie_segmenter.tflite"
-private const val PERSON_CLASS_V43 = 1
-private const val PERSON_ANALYSIS_LONG_EDGE_V43 = 512
+private const val PERSON_CONFIDENCE_MASK_INDEX_V43 = 0
+private const val PERSON_ANALYSIS_LONG_EDGE_V43 = 384
 private const val MIN_PERSON_ANCHORS_V43 = 8
-private const val MAX_PERSON_ANCHORS_V43 = 300
-private const val PERSON_ANCHORS_PER_SECOND_V43 = 5L
+private const val MAX_PERSON_ANCHORS_V43 = 120
+private const val PERSON_ANCHORS_PER_SECOND_V43 = 2L
 
 data class PersonCutoutMaskFrameV43(
     val sourceTimeUs: Long,
@@ -105,8 +104,6 @@ object PersonCutoutMaskStoreV43 {
     }
 
     private fun sourceDir(context: Context, sourceUri: String): File =
-        // Cache version intentionally changed from the multiclass implementation. Never mix old
-        // 1-background mattes with the new explicit binary person-confidence mattes.
         File(File(context.filesDir, "person_cutout_masks_v43_binary_person_256"), cacheKey(sourceUri))
 
     private fun cacheKey(sourceUri: String): String = MessageDigest.getInstance("SHA-256")
@@ -133,9 +130,6 @@ class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
     }
 
     fun segmentAndStore(context: Context, clip: TimelineClip, bitmap: Bitmap, sourceTimeUs: Long): Boolean {
-        // MediaMetadataRetriever is allowed to return device-specific bitmap configs (commonly
-        // RGB_565). MediaPipe's BitmapImageBuilder requires ARGB_8888, so normalize every decoded
-        // frame at this boundary instead of depending on decoder/vendor behaviour.
         val mediaPipeBitmap = if (bitmap.config == Bitmap.Config.ARGB_8888) {
             bitmap
         } else {
@@ -146,12 +140,17 @@ class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
         try {
             val result = segmenter.segment(BitmapImageBuilder(mediaPipeBitmap).build())
             val masks = result.confidenceMasks().orElse(emptyList())
-            val person = masks.getOrNull(PERSON_CLASS_V43) ?: return false
+            val person = masks.getOrNull(PERSON_CONFIDENCE_MASK_INDEX_V43)
+                ?: error(
+                    "Selfie Segmenter returned ${masks.size} confidence mask(s); expected mask index 0",
+                )
             val width = person.width.coerceAtLeast(1)
             val height = person.height.coerceAtLeast(1)
             val confidences = ByteBufferExtractor.extract(person).asFloatBuffer()
             confidences.rewind()
-            if (confidences.remaining() < width * height) return false
+            check(confidences.remaining() >= width * height) {
+                "Selfie Segmenter confidence mask was incomplete"
+            }
 
             val pixels = IntArray(width * height)
             for (index in pixels.indices) {
@@ -223,22 +222,24 @@ class PersonCutoutAnalyzerV43(private val context: Context) {
             val start = clip.sourceInUs.coerceAtLeast(0L)
             val end = clip.sourceOutUs.coerceAtLeast(start + 1L)
             val durationUs = (end - start).coerceAtLeast(1L)
-            val denseTarget = ((durationUs * PERSON_ANCHORS_PER_SECOND_V43) / 1_000_000L).toInt() + 2
-            val count = denseTarget.coerceIn(MIN_PERSON_ANCHORS_V43, MAX_PERSON_ANCHORS_V43)
+            val target = ((durationUs * PERSON_ANCHORS_PER_SECOND_V43) / 1_000_000L).toInt() + 2
+            val count = target.coerceIn(MIN_PERSON_ANCHORS_V43, MAX_PERSON_ANCHORS_V43)
             val regularTimes = evenlySpacedTimes(start, end, count)
             val priority = prioritySourceUs?.coerceIn(start, (end - 1L).coerceAtLeast(start))
             val times = buildList {
-                // Keep UX responsive: analyze the visible playhead frame first, then fill the denser
-                // temporal track. The binary model is fast enough that a ~1 minute clip can use a few
-                // hundred anchors instead of the old 96-anchor ceiling.
                 priority?.let(::add)
                 addAll(regularTimes)
             }.distinct()
 
             var completed = 0
+            var decoded = 0
             for (sourceUs in times) {
                 val frame = scaledFrameAtTime(retriever, sourceUs) ?: continue
+                decoded++
                 try {
+                    // A model/output contract failure must abort on the first decodable frame. The
+                    // previous implementation silently returned false for every frame and could make
+                    // the user wait several minutes before reporting completed=0.
                     if (segmenter.segmentAndStore(context, clip, frame, sourceUs)) {
                         completed++
                         onAnchorStored?.invoke(completed)
@@ -247,6 +248,7 @@ class PersonCutoutAnalyzerV43(private val context: Context) {
                     frame.recycle()
                 }
             }
+            check(decoded > 0) { "Could not decode any video frame for Auto Cutout" }
             check(completed > 0) { "Could not analyze any video frame for Auto Cutout" }
         } finally {
             runCatching { retriever.release() }
