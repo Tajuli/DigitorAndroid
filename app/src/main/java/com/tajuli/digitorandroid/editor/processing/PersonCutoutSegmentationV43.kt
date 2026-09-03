@@ -64,7 +64,7 @@ data class PersonCutoutMaskTrackV43(
     }
 }
 
-/** V44 cache is deliberately separate from every V43 segmentation cache. */
+/** V45 cache is deliberately separate from every V43/V44 segmentation or global-motion cache. */
 object PersonCutoutMaskStoreV43 {
     private val indexCache = ConcurrentHashMap<String, PersonCutoutMaskTrackV43>()
 
@@ -82,11 +82,11 @@ object PersonCutoutMaskStoreV43 {
         val temp = File(dir, "$sourceTimeUs.png.tmp")
         temp.outputStream().buffered().use { stream ->
             check(mask.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
-                "Could not encode V44 portrait alpha matte"
+                "Could not encode V45 portrait alpha matte"
             }
         }
         if (target.exists()) target.delete()
-        check(temp.renameTo(target)) { "Could not install V44 portrait alpha matte" }
+        check(temp.renameTo(target)) { "Could not install V45 portrait alpha matte" }
         indexCache.remove(cacheKey(sourceUri))
         return target
     }
@@ -104,7 +104,7 @@ object PersonCutoutMaskStoreV43 {
     }
 
     private fun sourceDir(context: Context, sourceUri: String): File =
-        File(File(context.filesDir, "person_cutout_masks_v44_modnet_hair_temporal_512"), cacheKey(sourceUri))
+        File(File(context.filesDir, "person_cutout_masks_v45_modnet_hair_spatialflow_512"), cacheKey(sourceUri))
 
     private fun cacheKey(sourceUri: String): String = MessageDigest.getInstance("SHA-256")
         .digest(sourceUri.toByteArray())
@@ -241,10 +241,8 @@ private class ModNetPortraitMatteV44(context: Context) : AutoCloseable {
 }
 
 /**
- * Lightweight motion-aware temporal stabilization. It estimates foreground centroid displacement,
- * warps the previous matte by that displacement, then blends only uncertain edge pixels that agree
- * with the current matte. This avoids smearing interior detail while suppressing frame-to-frame
- * silhouette shimmer. It is intentionally license-clean and independent of GPL RVM code.
+ * Legacy V44 centroid stabilizer retained only for source compatibility while V45 uses the local
+ * spatial-flow implementation in SpatialFlowTemporalMatteV45.kt.
  */
 private class TemporalMatteStabilizerV44 {
     private var previous: Bitmap? = null
@@ -334,14 +332,14 @@ private class TemporalMatteStabilizerV44 {
 }
 
 /**
- * Historical class name kept so the UI bridge does not churn. V44 implementation is MODNet alpha
- * matting + MediaPipe hair fusion + motion-aware temporal stabilization.
+ * Historical class name kept so the UI bridge does not churn. V45 implementation is MODNet alpha
+ * matting + MediaPipe hair fusion + local spatial-flow temporal stabilization.
  */
 class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private val modnet = ModNetPortraitMatteV44(appContext)
     private val hair = BeautyHairSegmenterV29(appContext)
-    private val temporal = TemporalMatteStabilizerV44()
+    private val temporal = SpatialFlowTemporalMatteStabilizerV45()
 
     fun segmentAndStore(context: Context, clip: TimelineClip, bitmap: Bitmap, sourceTimeUs: Long): Boolean {
         val source = if (bitmap.config == Bitmap.Config.ARGB_8888) {
@@ -359,7 +357,7 @@ class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
                 modnetMatte.recycle()
             }
             val stabilized = try {
-                temporal.stabilize(fused, sourceTimeUs, settings.temporalStabilityV44)
+                temporal.stabilize(source, fused, sourceTimeUs, settings.temporalStabilityV44)
             } finally {
                 fused.recycle()
             }
