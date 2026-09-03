@@ -6,7 +6,7 @@ import com.tajuli.digitorandroid.editor.model.ClipCutoutV43
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutAnalyzerV43
-import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
+import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -48,7 +48,7 @@ fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
     setSelectedCutoutV43(person, status = "Auto Cutout enabled", coalesce = false)
     val clip = state.value.project.clip(state.value.selectedClipId) ?: return
     val app = getApplication<Application>()
-    if (PersonCutoutMaskStoreV43.hasAny(app.applicationContext, clip)) {
+    if (hasPersonCutoutCoverageV43(app.applicationContext, clip)) {
         setEditorStatusV19("Auto Cutout ready · cached matte")
     } else {
         analyzeSelectedPersonCutoutV43()
@@ -65,7 +65,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         setEditorStatusV19("Auto Cutout works on video/image clips")
         return
     }
-    val analysisKey = clip.uri
+    val analysisKey = "${clip.uri}|${clip.sourceInUs}|${clip.sourceOutUs}"
     if (!personCutoutAnalysisInFlightV43.add(analysisKey)) {
         setEditorStatusV19("Auto Cutout analysis already running")
         return
@@ -78,7 +78,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
             val result = runCatching { PersonCutoutAnalyzerV43(app.applicationContext).analyzeAndStore(clip) }
             withContext(Dispatchers.Main) {
                 result.onSuccess { track ->
-                    setEditorStatusV19("Auto Cutout ready · ${track.frames.size} matte frame(s)")
+                    setEditorStatusV19("Auto Cutout ready · ${track.frames.size} cached matte frame(s)")
                 }.onFailure { error ->
                     setEditorStatusV19(error.message ?: "Auto Cutout analysis failed")
                 }
