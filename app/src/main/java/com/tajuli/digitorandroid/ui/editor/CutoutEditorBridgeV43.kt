@@ -6,6 +6,7 @@ import com.tajuli.digitorandroid.editor.model.ClipCutoutV43
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutAnalyzerV43
+import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -41,8 +42,14 @@ fun EditorViewModelV4.setSelectedCutoutV43(
 
 fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
     val person = settings.copy(mode = CutoutModeV43.PERSON).normalized()
-    setSelectedCutoutV43(person, status = "Auto Cutout enabled · analyzing…", coalesce = false)
-    analyzeSelectedPersonCutoutV43()
+    setSelectedCutoutV43(person, status = "Auto Cutout enabled", coalesce = false)
+    val clip = state.value.project.clip(state.value.selectedClipId) ?: return
+    val app = getApplication<Application>()
+    if (PersonCutoutMaskStoreV43.hasAny(app.applicationContext, clip)) {
+        setEditorStatusV19("Auto Cutout ready · cached matte")
+    } else {
+        analyzeSelectedPersonCutoutV43()
+    }
 }
 
 fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
