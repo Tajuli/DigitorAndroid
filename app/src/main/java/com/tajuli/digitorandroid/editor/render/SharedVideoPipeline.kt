@@ -13,6 +13,8 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
  *
  * Spatial BEAUTY remains separate because smoothing/lips/eyes/hair need neighbouring pixels or
  * semantic geometry. V39's adaptive skin qualifier also remains a post-color spatial refinement.
+ * V43 applies the final clip cutout matte after creator/beauty processing and before transition so
+ * the exact same alpha reaches the multitrack compositor in preview and export.
  *
  * Order:
  *  1. Transform.
@@ -21,7 +23,8 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
  *  4. V39 adaptive color qualifier / beauty refinement.
  *  5. Timed creator effects.
  *  6. Optional semantic FINISH beauty.
- *  7. Transition.
+ *  7. V43 Auto Cutout / Chroma Key alpha matte.
+ *  8. Transition.
  */
 @UnstableApi
 object SharedVideoPipeline {
@@ -32,6 +35,7 @@ object SharedVideoPipeline {
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = false)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
+        CutoutEffectV43.forClip(clip, preview = false)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
     }
 
@@ -47,6 +51,7 @@ object SharedVideoPipeline {
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = false)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
+        CutoutEffectV43.forClip(clip, preview = false)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
     }
 
@@ -57,6 +62,7 @@ object SharedVideoPipeline {
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
+        CutoutEffectV43.forClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
     }
 
@@ -67,6 +73,7 @@ object SharedVideoPipeline {
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
+        CutoutEffectV43.forClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
     }
 }
