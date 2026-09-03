@@ -1,7 +1,6 @@
 package com.tajuli.digitorandroid.editor.model
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 class ClipCutoutV43Test {
@@ -31,14 +30,13 @@ class ClipCutoutV43Test {
             spillSuppression = 3f,
         ).normalized()
 
-        assertEquals(.05f, normalized.personThreshold)
-        assertEquals(.45f, normalized.personFeather)
-        assertEquals(0f, normalized.keyRed)
-        assertEquals(1f, normalized.keyGreen)
-        assertEquals(.4f, normalized.keyBlue)
-        assertEquals(.40f, normalized.chromaSimilarity)
-        assertEquals(.005f, normalized.chromaSoftness)
-        assertEquals(1f, normalized.spillSuppression)
-        assertNotNull(normalized)
+        assertEquals(.05f, normalized.personThreshold, .0001f)
+        assertEquals(.45f, normalized.personFeather, .0001f)
+        assertEquals(0f, normalized.keyRed, .0001f)
+        assertEquals(1f, normalized.keyGreen, .0001f)
+        assertEquals(.4f, normalized.keyBlue, .0001f)
+        assertEquals(.40f, normalized.chromaSimilarity, .0001f)
+        assertEquals(.005f, normalized.chromaSoftness, .0001f)
+        assertEquals(1f, normalized.spillSuppression, .0001f)
     }
 }
