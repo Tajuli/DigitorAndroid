@@ -22,15 +22,21 @@ jobs:
         run: gradle :app:testDebugUnitTest
       - name: Compile instrumentation parity test
         run: gradle :app:assembleDebugAndroidTest
-      - name: Build debug APK
-        run: gradle :app:assembleDebug
-      - name: Upload debug APK
+      - name: Build arm64 phone APK
+        run: gradle :app:assemblePhone -PdigitorAbi=arm64-v8a
+      - name: Report phone APK size
+        run: |
+          ls -lh app/build/outputs/apk/phone/app-phone.apk
+          du -h app/build/outputs/apk/phone/app-phone.apk
+      - name: Upload phone APK
         uses: actions/upload-artifact@v4
         with:
-          name: DigitorAndroid-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: DigitorAndroid-phone-apk
+          path: app/build/outputs/apk/phone/app-phone.apk
           if-no-files-found: error
           retention-days: 14
+      - name: Verify optimized release build
+        run: gradle :app:assembleRelease -PdigitorAbi=arm64-v8a
 
   pixel-parity:
     needs: build
@@ -49,7 +55,7 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Run render parity and semantic beauty tests
+      - name: Run render parity, semantic beauty, and phone UI smoke tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
@@ -57,4 +63,20 @@ jobs:
           profile: pixel_2
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
-          script: gradle :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.tajuli.digitorandroid.editor.render.PreviewExportPixelParityInstrumentedTest,com.tajuli.digitorandroid.editor.render.PureTextExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.NativeImageExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.TransitionExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.BeautyFilterExportInstrumentedTest,com.tajuli.digitorandroid.editor.processing.HairSegmentationInstrumentedTest,com.tajuli.digitorandroid.editor.processing.FaceSkinSegmentationInstrumentedTest
+          script: |
+            gradle :app:connectedDebugAndroidTest -PdigitorAbi=x86_64 -Pandroid.testInstrumentationRunnerArguments.class=com.tajuli.digitorandroid.editor.render.PreviewExportPixelParityInstrumentedTest,com.tajuli.digitorandroid.editor.render.PureTextExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.NativeImageExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.TransitionExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.BeautyFilterExportInstrumentedTest,com.tajuli.digitorandroid.editor.processing.HairSegmentationInstrumentedTest,com.tajuli.digitorandroid.editor.processing.FaceSkinSegmentationInstrumentedTest
+            gradle :app:assemblePhone -PdigitorAbi=x86_64
+            adb install -r app/build/outputs/apk/phone/app-phone.apk
+            adb shell pm clear com.tajuli.digitorandroid
+            adb logcat -c
+            adb shell am start -W -n com.tajuli.digitorandroid/.MainActivity
+            sleep 3
+            PID="$(adb shell pidof com.tajuli.digitorandroid | tr -d '\r')"; if [ -z "$PID" ]; then echo '=== Digitor startup failed ==='; adb logcat -d -v threadtime | grep -E -A 80 -B 20 'FATAL EXCEPTION|AndroidRuntime|com.tajuli.digitorandroid' | tail -400 || true; exit 1; fi
+            python3 -c 'import re,subprocess,xml.etree.ElementTree as ET; subprocess.run(["adb","shell","uiautomator","dump","/sdcard/window.xml"],check=True,stdout=subprocess.DEVNULL); root=ET.fromstring(subprocess.check_output(["adb","shell","cat","/sdcard/window.xml"],text=True)); n=next(e for e in root.iter("node") if e.attrib.get("text")=="New project"); b=list(map(int,re.findall(r"\d+",n.attrib["bounds"]))); subprocess.run(["adb","shell","input","tap",str((b[0]+b[2])//2),str((b[1]+b[3])//2)],check=True)'
+            sleep 2
+            PID="$(adb shell pidof com.tajuli.digitorandroid | tr -d '\r')"; if [ -z "$PID" ]; then echo '=== New Project button crashed Digitor ==='; adb logcat -d -v threadtime | grep -E -A 100 -B 30 'FATAL EXCEPTION|AndroidRuntime|com.tajuli.digitorandroid' | tail -500 || true; exit 1; fi
+            python3 -c 'import re,subprocess,xml.etree.ElementTree as ET; subprocess.run(["adb","shell","uiautomator","dump","/sdcard/window.xml"],check=True,stdout=subprocess.DEVNULL); root=ET.fromstring(subprocess.check_output(["adb","shell","cat","/sdcard/window.xml"],text=True)); n=next(e for e in root.iter("node") if e.attrib.get("text")=="16:9"); b=list(map(int,re.findall(r"\d+",n.attrib["bounds"]))); subprocess.run(["adb","shell","input","tap",str((b[0]+b[2])//2),str((b[1]+b[3])//2)],check=True)'
+            sleep 5
+            PID="$(adb shell pidof com.tajuli.digitorandroid | tr -d '\r')"; if [ -z "$PID" ]; then echo '=== 16:9 project creation crashed Digitor ==='; adb logcat -d -v threadtime | grep -E -A 120 -B 40 'FATAL EXCEPTION|AndroidRuntime|com.tajuli.digitorandroid' | tail -600 || true; exit 1; fi
+            python3 -c 'import subprocess,xml.etree.ElementTree as ET; subprocess.run(["adb","shell","uiautomator","dump","/sdcard/window.xml"],check=True,stdout=subprocess.DEVNULL); root=ET.fromstring(subprocess.check_output(["adb","shell","cat","/sdcard/window.xml"],text=True)); assert any(e.attrib.get("text")=="Export" for e in root.iter("node")), "Editor did not open after New Project -> 16:9"'
+            echo "Phone New Project flow passed"

@@ -50,6 +50,17 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
     }
 }
 
+// Optional CI/local packaging filter. Normal builds keep every ABI, while a phone APK can be built
+// with `-PdigitorAbi=arm64-v8a` so MediaPipe/ML Kit native libraries are not duplicated for x86,
+// x86_64 and armeabi-v7a. This changes packaging only; editor/beauty behavior is unchanged.
+val requestedAbi = providers.gradleProperty("digitorAbi").orNull
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+val supportedPackageAbis = setOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+require(requestedAbi == null || requestedAbi in supportedPackageAbis) {
+    "Unsupported -PdigitorAbi=$requestedAbi. Expected one of ${supportedPackageAbis.joinToString()}."
+}
+
 android {
     namespace = "com.tajuli.digitorandroid"
     compileSdk = 37
@@ -62,11 +73,30 @@ android {
         versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        requestedAbi?.let { abi ->
+            ndk {
+                abiFilters += abi
+            }
+        }
     }
 
     buildTypes {
-        release {
+        // Installable CI/phone build. Keep it behavior-identical to debug and reduce size only by
+        // packaging a single requested ABI. Do not combine debuggable=true with R8/resource shrink;
+        // AGP explicitly treats that combination as unsupported and it caused a real New Project crash.
+        create("phone") {
+            initWith(getByName("debug"))
+            isDebuggable = true
             isMinifyEnabled = false
+            isShrinkResources = false
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("debug")
+        }
+
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

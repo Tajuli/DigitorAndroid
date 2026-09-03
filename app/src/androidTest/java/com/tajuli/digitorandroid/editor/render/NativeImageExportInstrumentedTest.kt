@@ -1,8 +1,10 @@
 package com.tajuli.digitorandroid.editor.render
 
+import android.content.ContentValues
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
+import android.provider.MediaStore
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.transformer.Composition
@@ -16,15 +18,19 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TimelineVisualMediaV21
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.processing.ExportQuality
+import com.tajuli.digitorandroid.editor.processing.GpuExportBackend
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Runtime regression for a native V-track still image going through the real export router. */
+/** Runtime regressions for native V-track still images going through the real export paths. */
 @UnstableApi
 @RunWith(AndroidJUnit4::class)
 class NativeImageExportInstrumentedTest {
@@ -48,30 +54,7 @@ class NativeImageExportInstrumentedTest {
             bitmap.recycle()
         }
 
-        val clip = TimelineClip(
-            id = "native-image",
-            uri = Uri.fromFile(source).toString(),
-            label = "source.png",
-            timelineStartUs = 0L,
-            sourceInUs = 0L,
-            sourceOutUs = 1_000_000L,
-            visualMediaV21 = TimelineVisualMediaV21.IMAGE,
-            sourceMimeTypeV21 = "image/png",
-        )
-        val project = TimelineProject(
-            width = 320,
-            height = 240,
-            frameRate = 24,
-            tracks = listOf(
-                TimelineTrack(
-                    id = "v1",
-                    name = "V1",
-                    kind = TrackKind.VIDEO,
-                    clips = listOf(clip),
-                ),
-            ),
-        )
-
+        val project = singleImageProject(Uri.fromFile(source).toString())
         assertTrue(shouldUseStableSingleInputExportV17(project))
 
         val composition = StableGpuExportCompositionBuilder().build(project)
@@ -112,5 +95,69 @@ class NativeImageExportInstrumentedTest {
             output.delete()
             source.delete()
         }
+    }
+
+    @Test
+    fun galleryContentUriImageExportsThroughGpuBackend() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val resolver = context.contentResolver
+        val sourceUri = resolver.insert(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "digitor_native_image_${System.currentTimeMillis()}.png")
+                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+            },
+        ) ?: error("Could not create MediaStore image for export regression")
+        val output = File(context.cacheDir, "gallery_content_image_export.mp4")
+        if (output.exists()) output.delete()
+
+        try {
+            val bitmap = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888)
+            try {
+                bitmap.eraseColor(Color.rgb(195, 72, 64))
+                resolver.openOutputStream(sourceUri, "w")?.use { stream ->
+                    check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream))
+                } ?: error("Could not write MediaStore image")
+            } finally {
+                bitmap.recycle()
+            }
+
+            val project = singleImageProject(sourceUri.toString())
+            runBlocking {
+                withTimeout(45_000L) {
+                    GpuExportBackend(context).export(project, output, ExportQuality.MEDIUM) { }
+                }
+            }
+            assertTrue("Gallery content URI image export produced no bytes", output.exists() && output.length() > 0L)
+        } finally {
+            output.delete()
+            runCatching { resolver.delete(sourceUri, null, null) }
+        }
+    }
+
+    private fun singleImageProject(uri: String): TimelineProject {
+        val clip = TimelineClip(
+            id = "native-image",
+            uri = uri,
+            label = "source.png",
+            timelineStartUs = 0L,
+            sourceInUs = 0L,
+            sourceOutUs = 1_000_000L,
+            visualMediaV21 = TimelineVisualMediaV21.IMAGE,
+            sourceMimeTypeV21 = "image/png",
+        )
+        return TimelineProject(
+            width = 320,
+            height = 240,
+            frameRate = 24,
+            tracks = listOf(
+                TimelineTrack(
+                    id = "v1",
+                    name = "V1",
+                    kind = TrackKind.VIDEO,
+                    clips = listOf(clip),
+                ),
+            ),
+        )
     }
 }
