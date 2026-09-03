@@ -55,7 +55,6 @@ fun DigitorEditorScreenV8(
     vm: EditorViewModelV4,
     onHome: () -> Unit = {},
 ) {
-    val state by vm.state.collectAsState()
     var showCutout by remember { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
@@ -119,6 +118,8 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
             androidx.compose.ui.platform.LocalContext.current.applicationContext,
             selectedClip,
         )
+        val analysisStatus = state.status.takeIf { it.startsWith("Auto Cutout") }
+        val analyzing = analysisStatus?.contains("analyzing", ignoreCase = true) == true
 
         Row(
             Modifier.fillMaxWidth(),
@@ -161,14 +162,36 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
             CutoutModeV43.PERSON -> {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        if (personReady) "Person matte ready" else "Person matte needs analysis",
+                        when {
+                            analyzing && personReady -> "Preview matte ready · finishing clip…"
+                            analyzing -> "Analyzing visible frame…"
+                            personReady -> "Person matte ready"
+                            else -> "Person matte needs analysis"
+                        },
                         fontSize = 10.sp,
                         color = if (personReady) V8CutoutAccent else Color.White.copy(alpha = .62f),
                     )
                     Spacer(Modifier.weight(1f))
-                    FilledTonalButton(onClick = vm::analyzeSelectedPersonCutoutV43) {
-                        Text(if (personReady) "Refresh" else "Analyze", fontSize = 9.sp)
+                    FilledTonalButton(
+                        enabled = !analyzing,
+                        onClick = vm::analyzeSelectedPersonCutoutV43,
+                    ) {
+                        Text(
+                            when {
+                                analyzing -> "Analyzing…"
+                                personReady -> "Refresh"
+                                else -> "Analyze"
+                            },
+                            fontSize = 9.sp,
+                        )
                     }
+                }
+                if (analysisStatus != null) {
+                    Text(
+                        analysisStatus,
+                        fontSize = 9.sp,
+                        color = V8CutoutAccent.copy(alpha = .82f),
+                    )
                 }
                 CutoutSliderV43("Threshold", settings.personThreshold, .05f..0.95f) {
                     vm.setSelectedCutoutV43(settings.copy(personThreshold = it), status = "Auto Cutout edge updated")
@@ -177,7 +200,7 @@ private fun CutoutQuickPanelV43(vm: EditorViewModelV4) {
                     vm.setSelectedCutoutV43(settings.copy(personFeather = it), status = "Auto Cutout feather updated")
                 }
                 Text(
-                    "For background replacement, place the replacement clip on a lower V track.",
+                    "The visible frame is analyzed first for a fast preview; remaining frames continue in the background. For background replacement, place the replacement clip on a lower V track.",
                     fontSize = 9.sp,
                     color = Color.White.copy(alpha = .55f),
                 )
