@@ -17,7 +17,7 @@ class ClipCutoutV43Test {
     }
 
     @Test
-    fun normalizationKeepsCutoutControlsInsideShaderContract() {
+    fun normalizationKeepsV44AndChromaControlsInsideRenderContract() {
         val normalized = ClipCutoutV43(
             mode = CutoutModeV43.CHROMA_KEY,
             personThreshold = -4f,
@@ -28,6 +28,11 @@ class ClipCutoutV43Test {
             chromaSimilarity = 8f,
             chromaSoftness = -2f,
             spillSuppression = 3f,
+            edgeShiftV44 = -9f,
+            edgeCleanV44 = 4f,
+            dehaloV44 = -3f,
+            hairDetailV44 = 7f,
+            temporalStabilityV44 = 8f,
         ).normalized()
 
         assertEquals(.05f, normalized.personThreshold, .0001f)
@@ -38,6 +43,11 @@ class ClipCutoutV43Test {
         assertEquals(.40f, normalized.chromaSimilarity, .0001f)
         assertEquals(.005f, normalized.chromaSoftness, .0001f)
         assertEquals(1f, normalized.spillSuppression, .0001f)
+        assertEquals(-.18f, normalized.edgeShiftV44, .0001f)
+        assertEquals(1f, normalized.edgeCleanV44, .0001f)
+        assertEquals(0f, normalized.dehaloV44, .0001f)
+        assertEquals(1f, normalized.hairDetailV44, .0001f)
+        assertEquals(.92f, normalized.temporalStabilityV44, .0001f)
     }
 
     @Test
@@ -58,9 +68,13 @@ class ClipCutoutV43Test {
             mode = CutoutModeV43.PERSON,
             personThreshold = .47f,
             personFeather = .09f,
+            edgeShiftV44 = .04f,
+            dehaloV44 = .81f,
         ).normalized()
 
         assertEquals(.47f, normalized.personThreshold, .0001f)
         assertEquals(.09f, normalized.personFeather, .0001f)
+        assertEquals(.04f, normalized.edgeShiftV44, .0001f)
+        assertEquals(.81f, normalized.dehaloV44, .0001f)
     }
 }
