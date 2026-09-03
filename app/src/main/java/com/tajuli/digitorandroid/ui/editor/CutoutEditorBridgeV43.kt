@@ -7,9 +7,12 @@ import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutAnalyzerV43
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private val personCutoutAnalysisInFlightV43 = ConcurrentHashMap.newKeySet<String>()
 
 /** Public-state bridge keeps V43 isolated without widening EditorViewModelV4's private mutation API. */
 fun EditorViewModelV4.setSelectedCutoutV43(
@@ -62,16 +65,26 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         setEditorStatusV19("Auto Cutout works on video/image clips")
         return
     }
+    val analysisKey = clip.uri
+    if (!personCutoutAnalysisInFlightV43.add(analysisKey)) {
+        setEditorStatusV19("Auto Cutout analysis already running")
+        return
+    }
+
     setEditorStatusV19("Auto Cutout · analyzing person matte…")
     val app = getApplication<Application>()
     viewModelScope.launch(Dispatchers.Default) {
-        val result = runCatching { PersonCutoutAnalyzerV43(app.applicationContext).analyzeAndStore(clip) }
-        withContext(Dispatchers.Main) {
-            result.onSuccess { track ->
-                setEditorStatusV19("Auto Cutout ready · ${track.frames.size} matte frame(s)")
-            }.onFailure { error ->
-                setEditorStatusV19(error.message ?: "Auto Cutout analysis failed")
+        try {
+            val result = runCatching { PersonCutoutAnalyzerV43(app.applicationContext).analyzeAndStore(clip) }
+            withContext(Dispatchers.Main) {
+                result.onSuccess { track ->
+                    setEditorStatusV19("Auto Cutout ready · ${track.frames.size} matte frame(s)")
+                }.onFailure { error ->
+                    setEditorStatusV19(error.message ?: "Auto Cutout analysis failed")
+                }
             }
+        } finally {
+            personCutoutAnalysisInFlightV43.remove(analysisKey)
         }
     }
 }
