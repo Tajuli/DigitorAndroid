@@ -35,6 +35,18 @@ internal object PreviewExportCoordinator {
         engines -= engine
     }
 
+    /**
+     * Forces the currently visible paused frame through the GPU graph again.
+     *
+     * Cached semantic assets such as V43 Auto Cutout mattes live outside the immutable project
+     * snapshot, so writing a new matte does not by itself change the project StateFlow. Re-submit
+     * the held playhead frame after an anchor is written so the new alpha mask is visible without
+     * requiring the user to scrub, toggle a slider, or reopen the project.
+     */
+    fun refreshActivePreviews(delayMs: Long = 0L) {
+        engines.forEach { engine -> engine.scheduleCurrentFrameRefresh(delayMs) }
+    }
+
     /** Software fallback frame decode participates in the same resource barrier as GPU preview. */
     fun <T> withSoftwarePreviewDecode(block: () -> T): T {
         previewDecodeGate.acquireUninterruptibly()
