@@ -50,6 +50,31 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
     }
 }
 
+// Auto Cutout uses Google's dedicated binary person/background model instead of deriving person
+// alpha as 1-background from SelfieMulticlass. The binary model is both substantially faster and
+// specifically trained for background replacement, so Digitor can sample more video frames while
+// avoiding multiclass "other/accessory" leakage into the foreground matte.
+val personSegmenterModelFile = generatedFaceSkinModelAssets.map { it.file("selfie_segmenter.tflite") }
+val downloadPersonSegmenterModel by tasks.registering {
+    outputs.file(personSegmenterModelFile)
+    doLast {
+        val output = personSegmenterModelFile.get().asFile
+        if (output.isFile && output.length() > 100_000L) return@doLast
+        output.parentFile.mkdirs()
+        val temp = File(output.parentFile, output.name + ".download")
+        if (temp.exists()) temp.delete()
+        val url = URI(
+            "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite",
+        ).toURL()
+        url.openStream().use { input ->
+            temp.outputStream().buffered().use { target -> input.copyTo(target) }
+        }
+        require(temp.length() > 100_000L) { "Downloaded SelfieSegmenter model is unexpectedly small" }
+        if (output.exists()) output.delete()
+        check(temp.renameTo(output)) { "Could not install generated selfie_segmenter.tflite asset" }
+    }
+}
+
 // Optional CI/local packaging filter. Normal builds keep every ABI, while a phone APK can be built
 // with `-PdigitorAbi=arm64-v8a` so MediaPipe/ML Kit native libraries are not duplicated for x86,
 // x86_64 and armeabi-v7a. This changes packaging only; editor/beauty behavior is unchanged.
@@ -117,6 +142,7 @@ android {
 tasks.named("preBuild").configure {
     dependsOn(downloadHairSegmenterModel)
     dependsOn(downloadFaceSkinSegmenterModel)
+    dependsOn(downloadPersonSegmenterModel)
 }
 
 dependencies {
