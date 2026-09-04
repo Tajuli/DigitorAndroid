@@ -16,6 +16,7 @@ import com.google.ai.edge.litert.CompiledModel
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -25,12 +26,12 @@ private const val MODNET_SIZE_V47 = 512
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
 /**
- * V48 throughput revision of the V47 adaptive GPU-first analyzer.
+ * V48 throughput revision of the adaptive GPU-first analyzer.
  *
- * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Hardware decode now overlaps a bounded
- * GPU-inference worker; MODNet requests GPU-only first; MediaPipe hair is GPU-first and refreshed at
- * a lower semantic cadence while the GL spatial-flow stage carries detail between refreshes. PNG
- * persistence runs asynchronously so CPU compression no longer serializes every GPU inference.
+ * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Hardware decode overlaps a bounded
+ * GPU-inference worker. All LiteRT/MediaPipe/EGL objects for video are created, executed and closed
+ * on that same inference thread to preserve GPU delegate/context affinity. PNG persistence runs on a
+ * separate bounded worker so compression no longer serializes every GPU inference.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -40,36 +41,42 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         onBackendResolved: ((backend: String) -> Unit)? = null,
     ): PersonCutoutMaskTrackV43 {
         preparePersonCutoutGenerationV47(context, clip)
-        var completed = 0
-        GpuPersonCutoutSegmenterV47(context).use { segmenter ->
-            onBackendResolved?.invoke(segmenter.backendSummary())
-            if (clip.isImageV21) {
-                val bitmap = decodeImage(Uri.parse(clip.uri)) ?: error("Could not decode image for Pro Cutout")
-                try {
-                    check(segmenter.segmentAndStore(clip, bitmap, clip.sourceInUs)) {
-                        "Portrait matting returned no alpha"
-                    }
-                    completed = 1
-                    onAnchorStored?.invoke(completed)
-                } finally {
-                    bitmap.recycle()
-                }
-            } else {
-                completed = analyzeVideo(clip, segmenter, prioritySourceUs, onAnchorStored)
-            }
-            // Do not publish the ready marker until all asynchronously compressed mattes are durable.
-            segmenter.awaitPendingStores()
+        val completed = if (clip.isImageV21) {
+            analyzeImage(clip, onAnchorStored, onBackendResolved)
+        } else {
+            analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
         check(completed > 0) { "Could not generate any V48 portrait matte" }
         markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
 
+    private fun analyzeImage(
+        clip: TimelineClip,
+        onAnchorStored: ((Int) -> Unit)?,
+        onBackendResolved: ((String) -> Unit)?,
+    ): Int {
+        val bitmap = decodeImage(Uri.parse(clip.uri)) ?: error("Could not decode image for Pro Cutout")
+        try {
+            GpuPersonCutoutSegmenterV47(context).use { segmenter ->
+                onBackendResolved?.invoke(segmenter.backendSummary())
+                check(segmenter.segmentAndStore(clip, bitmap, clip.sourceInUs)) {
+                    "Portrait matting returned no alpha"
+                }
+                onAnchorStored?.invoke(1)
+                segmenter.awaitPendingStores()
+            }
+        } finally {
+            bitmap.recycle()
+        }
+        return 1
+    }
+
     private fun analyzeVideo(
         clip: TimelineClip,
-        segmenter: GpuPersonCutoutSegmenterV47,
         prioritySourceUs: Long?,
         onAnchorStored: ((Int) -> Unit)?,
+        onBackendResolved: ((String) -> Unit)?,
     ): Int {
         val start = clip.sourceInUs.coerceAtLeast(0L)
         val end = clip.sourceOutUs.coerceAtLeast(start + 1L)
@@ -77,39 +84,53 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         val quality = settings.analysisQualityV47
         val cadence = personCutoutCadenceV47(quality)
         val targetTimes = personCutoutTargetTimesV47(start, end, quality)
-        var completed = 0
 
-        // LOW/MEDIUM retain one priority playhead seek for fast first feedback. HIGH intentionally
-        // uses only actual decoded source-frame timestamps.
-        val priority = if (quality == CutoutAnalysisQualityV47.HIGH) {
-            null
-        } else {
-            prioritySourceUs?.coerceIn(start, (end - 1L).coerceAtLeast(start))
+        // Important: lazy initialization happens on the inference worker, not this producer thread.
+        // MediaPipe GPU delegates and EGL contexts therefore keep create/run/close thread affinity.
+        val segmenterLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+            GpuPersonCutoutSegmenterV47(context).also { onBackendResolved?.invoke(it.backendSummary()) }
         }
-        if (priority != null) {
-            val frame = decodeSinglePriorityFrame(clip, priority)
-            if (frame != null) {
+        val segmenterClosed = AtomicBoolean(false)
+        val worker = AsyncCutoutInferenceWorkerV48(
+            process = { sourceUs, bitmap -> segmenterLazy.value.segmentAndStore(clip, bitmap, sourceUs) },
+            onCompleted = onAnchorStored,
+        )
+
+        fun closeSegmenterOnWorker() {
+            if (segmenterClosed.compareAndSet(false, true) && segmenterLazy.isInitialized()) {
+                val segmenter = segmenterLazy.value
                 try {
-                    if (segmenter.segmentAndStore(clip, frame, priority)) {
-                        completed++
-                        onAnchorStored?.invoke(completed)
-                    }
+                    segmenter.awaitPendingStores()
                 } finally {
-                    frame.recycle()
+                    segmenter.close()
                 }
             }
         }
 
-        // MediaCodec/OES decode and model inference used to be serialized in the callback. A bounded
-        // two-frame worker lets the hardware decoder prepare the next selected frame while the prior
-        // one is running through MODNet/Hair/GL flow, without unbounded bitmap growth.
-        val baseCompleted = completed
-        val sequentialResult = runCatching {
-            AsyncCutoutInferenceWorkerV48(
-                process = { sourceUs, bitmap -> segmenter.segmentAndStore(clip, bitmap, sourceUs) },
-                onCompleted = { workerDone -> onAnchorStored?.invoke(baseCompleted + workerDone) },
-            ).use { worker ->
-                val decoded = GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
+        try {
+            // LOW/MEDIUM retain one playhead-priority frame, but it is enqueued to the same GPU
+            // worker rather than executing the delegate on the producer thread. HIGH uses only true
+            // decoded source-frame timestamps.
+            val priority = if (quality == CutoutAnalysisQualityV47.HIGH) {
+                null
+            } else {
+                prioritySourceUs?.coerceIn(start, (end - 1L).coerceAtLeast(start))
+            }
+            if (priority != null) {
+                val frame = decodeSinglePriorityFrame(clip, priority)
+                if (frame != null) {
+                    try {
+                        worker.enqueueCopy(priority, frame)
+                    } finally {
+                        frame.recycle()
+                    }
+                }
+            }
+
+            // Producer: MediaCodec + OES + GL scale. Consumer: LiteRT GPU + MediaPipe GPU + GL flow.
+            // The two-frame bound keeps decode and inference overlapped without ballooning memory.
+            val sequentialResult = runCatching {
+                GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
                     uri = Uri.parse(clip.uri),
                     startUs = start,
                     endUs = end,
@@ -118,45 +139,44 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                 ) { sourceUs, bitmap ->
                     worker.enqueueCopy(sourceUs, bitmap)
                 }
-                val processed = worker.awaitIdle()
-                check(decoded > 0 && processed > 0) { "Sequential GPU cutout pipeline produced no frames" }
-                processed
             }
-        }
 
-        if (sequentialResult.isSuccess) {
-            completed += sequentialResult.getOrThrow()
-            return completed
-        }
+            if (sequentialResult.isFailure || sequentialResult.getOrDefault(0) <= 0) {
+                if (quality == CutoutAnalysisQualityV47.HIGH) {
+                    val cause = sequentialResult.exceptionOrNull()
+                    error(
+                        "High quality requires every-frame MediaCodec GPU decode on this device" +
+                            (cause?.message?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""),
+                    )
+                }
 
-        if (quality == CutoutAnalysisQualityV47.HIGH) {
-            val cause = sequentialResult.exceptionOrNull()
-            error(
-                "High quality requires every-frame MediaCodec GPU decode on this device" +
-                    (cause?.message?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""),
-            )
-        }
-
-        // LOW/MEDIUM retain a reliability fallback for unusual vendor codecs. Model/temporal stages
-        // still remain GPU-first when this target-seek decode fallback is needed.
-        val retriever = MediaMetadataRetriever()
-        try {
-            retriever.setDataSource(context, Uri.parse(clip.uri))
-            for (sourceUs in targetTimes) {
-                val frame = scaledFrameAtTime(retriever, sourceUs) ?: continue
+                // LOW/MEDIUM reliability fallback for unusual vendor codecs. Frames still enter the
+                // same GPU inference worker, so model/flow thread affinity and pipelined persistence remain.
+                val retriever = MediaMetadataRetriever()
                 try {
-                    if (segmenter.segmentAndStore(clip, frame, sourceUs)) {
-                        completed++
-                        onAnchorStored?.invoke(completed)
+                    retriever.setDataSource(context, Uri.parse(clip.uri))
+                    for (sourceUs in targetTimes) {
+                        val frame = scaledFrameAtTime(retriever, sourceUs) ?: continue
+                        try {
+                            worker.enqueueCopy(sourceUs, frame)
+                        } finally {
+                            frame.recycle()
+                        }
                     }
                 } finally {
-                    frame.recycle()
+                    runCatching { retriever.release() }
                 }
             }
+
+            val completed = worker.awaitIdle()
+            worker.runAfterPending { closeSegmenterOnWorker() }
+            return completed
         } finally {
-            runCatching { retriever.release() }
+            if (!segmenterClosed.get()) {
+                runCatching { worker.runAfterPending { closeSegmenterOnWorker() } }
+            }
+            runCatching { worker.close() }
         }
-        return completed
     }
 
     private fun decodeSinglePriorityFrame(clip: TimelineClip, sourceUs: Long): Bitmap? {
@@ -280,7 +300,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
             }
 
             // Ownership transfers to the async writer; PNG compression no longer blocks model work.
-            matteWriter.enqueue(appContext = appContext, sourceUri = clip.uri, sourceTimeUs = sourceTimeUs, mask = stabilized)
+            matteWriter.enqueue(clip.uri, sourceTimeUs, stabilized)
             return true
         } finally {
             if (source !== bitmap && !source.isRecycled) source.recycle()
@@ -419,7 +439,6 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
     private val alphaSquare = Bitmap.createBitmap(MODNET_SIZE_V47, MODNET_SIZE_V47, Bitmap.Config.ARGB_8888)
     private val inputCanvas = Canvas(inputSquare)
     private val filterPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val fullSquareRect = Rect(0, 0, MODNET_SIZE_V47, MODNET_SIZE_V47)
 
     init {
         val app = context.applicationContext
@@ -481,8 +500,8 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
             MODNET_SIZE_V47,
         )
 
-        // Reuse the input arrays across frames. The current LiteRT Kotlin API still exposes a host
-        // FloatArray boundary, but no per-frame IntArray/FloatArray/letterbox Bitmap allocation remains.
+        // Current LiteRT Kotlin still exposes a host FloatArray boundary, but these buffers and the
+        // letterbox bitmap are reused instead of allocated for every frame.
         for (i in 0 until plane) {
             val pixel = inputPixels[i]
             inputTensor[i] = Color.red(pixel) / 127.5f - 1f
@@ -500,8 +519,8 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
         }
         alphaSquare.setPixels(alphaPixels, 0, MODNET_SIZE_V47, 0, 0, MODNET_SIZE_V47, MODNET_SIZE_V47)
 
-        // Draw directly from the valid letterbox region to source resolution. This removes the old
-        // per-frame cropped intermediate Bitmap and createScaledBitmap allocation.
+        // Draw straight from the valid letterbox region to source resolution; no per-frame cropped
+        // intermediate Bitmap or createScaledBitmap allocation remains.
         val output = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
         Canvas(output).drawBitmap(
             alphaSquare,
