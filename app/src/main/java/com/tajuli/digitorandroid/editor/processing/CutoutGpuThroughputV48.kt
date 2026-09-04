@@ -59,10 +59,21 @@ internal class AsyncCutoutInferenceWorkerV48(
     }
 
     fun awaitIdle(): Int {
-        failure.get()?.let { throw it }
         executor.submit {}.get()
         failure.get()?.let { throw it }
         return completed.get()
+    }
+
+    /** Runs after all queued frames, on the exact same thread as GPU model/GL inference. */
+    fun runAfterPending(action: () -> Unit) {
+        executor.submit {
+            try {
+                action()
+            } catch (error: Throwable) {
+                failure.compareAndSet(null, error)
+            }
+        }.get()
+        failure.get()?.let { throw it }
     }
 
     override fun close() {
@@ -115,7 +126,6 @@ internal class AsyncPersonCutoutMaskWriterV48(
     }
 
     fun awaitIdle() {
-        failure.get()?.let { throw it }
         executor.submit {}.get()
         failure.get()?.let { throw it }
     }
