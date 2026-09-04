@@ -10,52 +10,65 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Small bounded producer/consumer helpers used by V48 Cutout.
+ * Bounded producer/consumer helpers used by V49 Cutout.
  *
- * Decode, GPU inference and PNG persistence used to be serialized in one callback. These helpers
- * overlap hardware decode with inference and move PNG compression off the inference critical path
- * without allowing an unbounded number of full-resolution Bitmaps to accumulate.
+ * The GPU fast path transfers decoder Bitmap ownership directly into the inference queue. V48 made
+ * a second full ARGB copy for every decoded frame before inference; at 720p High mode that extra
+ * memory bandwidth was large enough to starve the GPU on mid-range phones. Decode can now stay up
+ * to three frames ahead while the model is busy, with no duplicate frame copy in the hot path.
  */
 internal class AsyncCutoutInferenceWorkerV48(
     private val process: (sourceTimeUs: Long, bitmap: Bitmap) -> Boolean,
     private val onCompleted: ((completedFrames: Int) -> Unit)? = null,
 ) : AutoCloseable {
     private val executor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "DigitorCutoutGpuInferV48").apply { priority = Thread.NORM_PRIORITY + 1 }
+        Thread(runnable, "DigitorCutoutGpuInferV49").apply { priority = Thread.NORM_PRIORITY + 1 }
     }
-    private val slots = Semaphore(2)
+    private val slots = Semaphore(3)
     private val failure = AtomicReference<Throwable?>(null)
     private val completed = AtomicInteger(0)
     @Volatile private var closed = false
 
     /**
-     * Retains one bounded ARGB copy because the V47 decoder owns/recycles its callback Bitmap.
-     * The copy lets hardware decode continue while the previous frame is inside GPU inference.
+     * Takes ownership of [owned]. The bitmap is always recycled after GPU inference finishes.
+     * Callers must not touch or recycle it after this method returns successfully.
      */
-    fun enqueueCopy(sourceTimeUs: Long, source: Bitmap) {
-        failure.get()?.let { throw it }
-        check(!closed) { "V48 Cutout inference worker is closed" }
+    fun enqueueOwned(sourceTimeUs: Long, owned: Bitmap) {
+        failure.get()?.let {
+            if (!owned.isRecycled) owned.recycle()
+            throw it
+        }
+        check(!closed) {
+            if (!owned.isRecycled) owned.recycle()
+            "V49 Cutout inference worker is closed"
+        }
         slots.acquire()
-        val owned = try {
-            source.copy(Bitmap.Config.ARGB_8888, false)
-                ?: error("Could not retain decoded frame for V48 GPU inference")
+        try {
+            executor.execute {
+                try {
+                    if (failure.get() == null && process(sourceTimeUs, owned)) {
+                        val done = completed.incrementAndGet()
+                        onCompleted?.invoke(done)
+                    }
+                } catch (error: Throwable) {
+                    failure.compareAndSet(null, error)
+                } finally {
+                    if (!owned.isRecycled) owned.recycle()
+                    slots.release()
+                }
+            }
         } catch (error: Throwable) {
             slots.release()
+            if (!owned.isRecycled) owned.recycle()
             throw error
         }
-        executor.execute {
-            try {
-                if (failure.get() == null && process(sourceTimeUs, owned)) {
-                    val done = completed.incrementAndGet()
-                    onCompleted?.invoke(done)
-                }
-            } catch (error: Throwable) {
-                failure.compareAndSet(null, error)
-            } finally {
-                if (!owned.isRecycled) owned.recycle()
-                slots.release()
-            }
-        }
+    }
+
+    /** Compatibility helper for call sites that cannot transfer ownership. */
+    fun enqueueCopy(sourceTimeUs: Long, source: Bitmap) {
+        val owned = source.copy(Bitmap.Config.ARGB_8888, false)
+            ?: error("Could not retain decoded frame for V49 GPU inference")
+        enqueueOwned(sourceTimeUs, owned)
     }
 
     fun awaitIdle(): Int {
@@ -86,14 +99,19 @@ internal class AsyncCutoutInferenceWorkerV48(
     }
 }
 
-/** PNG compression is CPU work, but it no longer blocks the GPU inference loop frame-by-frame. */
+/**
+ * Matte persistence is the intentional CPU/file-I/O boundary. Two low-priority encoders keep PNG
+ * compression behind GPU inference instead of letting one encoder back-pressure High mode. Each
+ * frame has a unique timestamp/file, so the writes are independent; the ready marker is still
+ * published only after awaitIdle() drains both workers.
+ */
 internal class AsyncPersonCutoutMaskWriterV48(
     private val context: Context,
 ) : AutoCloseable {
-    private val executor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "DigitorCutoutMaskIoV48").apply { priority = Thread.NORM_PRIORITY - 1 }
+    private val executor = Executors.newFixedThreadPool(2) { runnable ->
+        Thread(runnable, "DigitorCutoutMaskIoV49").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
-    private val slots = Semaphore(4)
+    private val slots = Semaphore(8)
     private val failure = AtomicReference<Throwable?>(null)
     @Volatile private var closed = false
 
@@ -103,7 +121,7 @@ internal class AsyncPersonCutoutMaskWriterV48(
             if (!mask.isRecycled) mask.recycle()
             throw it
         }
-        check(!closed) { "V48 matte writer is closed" }
+        check(!closed) { "V49 matte writer is closed" }
         slots.acquire()
         executor.execute {
             try {
@@ -119,7 +137,7 @@ internal class AsyncPersonCutoutMaskWriterV48(
         }
     }
 
-    /** Compatibility overload for the V48 analyzer's explicit application-context call site. */
+    /** Compatibility overload for the analyzer's explicit application-context call site. */
     fun enqueue(appContext: Context, sourceUri: String, sourceTimeUs: Long, mask: Bitmap) {
         check(appContext.applicationContext.packageName == context.applicationContext.packageName)
         enqueue(sourceUri, sourceTimeUs, mask)
@@ -127,13 +145,14 @@ internal class AsyncPersonCutoutMaskWriterV48(
 
     fun awaitIdle() {
         executor.submit {}.get()
+        executor.submit {}.get()
         failure.get()?.let { throw it }
     }
 
     override fun close() {
         if (closed) return
         closed = true
-        runCatching { executor.submit {}.get() }
+        runCatching { awaitIdle() }
         executor.shutdown()
         if (!executor.awaitTermination(30, TimeUnit.SECONDS)) executor.shutdownNow()
         failure.get()?.let { throw it }
