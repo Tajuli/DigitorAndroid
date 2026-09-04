@@ -5,11 +5,12 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import kotlin.math.max
 
 /**
- * V46 matte-cache coverage contract. Analyzer and readiness validation share the same target-count
- * policy: roughly 4 anchors/sec, capped at 320 for long clips. Missing one or two decoder samples is
- * tolerated because the renderer interpolates neighbouring mattes.
+ * V47 matte-cache coverage contract. Analyzer and readiness validation share the same target-count
+ * policy: roughly 4 anchors/sec, capped at 320 for long clips. A V47 generation marker is required
+ * so a complete older V46 cache cannot silently bypass the new GPU-first analysis path.
  */
 fun hasPersonCutoutCoverageV43(context: Context, clip: TimelineClip): Boolean {
+    if (!hasPersonCutoutGenerationV47Marker(context, clip.uri)) return false
     val frames = PersonCutoutMaskStoreV43.index(context, clip).frames
         .filter { it.file.isFile }
         .sortedBy { it.sourceTimeUs }
@@ -23,10 +24,10 @@ fun hasPersonCutoutCoverageV43(context: Context, clip: TimelineClip): Boolean {
     val expectedCount = personCutoutTargetAnchorCountV46(durationUs)
     val expectedGapUs = durationUs / (expectedCount - 1).coerceAtLeast(1)
 
-    // Allow roughly 2.4 nominal anchor intervals for VFR/long-GOP decoder misses. Short footage
-    // still gets a firm 700 ms floor; long clips naturally receive a larger tolerance once capped.
+    // Allow roughly 2.4 nominal anchor intervals for VFR/vendor decoder misses. Short footage still
+    // gets a firm 700 ms floor; long clips naturally receive a larger tolerance once capped.
     val maxGapUs = max(
-        PERSON_COVERAGE_MIN_GAP_TOLERANCE_US_V46,
+        PERSON_COVERAGE_MIN_GAP_TOLERANCE_US_V47,
         (expectedGapUs * 12L) / 5L + 50_000L,
     )
 
@@ -45,4 +46,4 @@ fun hasPersonCutoutCoverageV43(context: Context, clip: TimelineClip): Boolean {
     }
 }
 
-private const val PERSON_COVERAGE_MIN_GAP_TOLERANCE_US_V46 = 700_000L
+private const val PERSON_COVERAGE_MIN_GAP_TOLERANCE_US_V47 = 700_000L
