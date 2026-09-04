@@ -28,17 +28,14 @@ internal class AsyncCutoutInferenceWorkerV48(
     private val completed = AtomicInteger(0)
     @Volatile private var closed = false
 
-    fun enqueue(sourceTimeUs: Long, source: Bitmap) {
-        failure.get()?.let { throw it }
+    /** Takes ownership of [owned] so MediaCodec does not need an extra full-frame CPU copy. */
+    fun enqueueOwned(sourceTimeUs: Long, owned: Bitmap) {
+        failure.get()?.let {
+            if (!owned.isRecycled) owned.recycle()
+            throw it
+        }
         check(!closed) { "V48 Cutout inference worker is closed" }
         slots.acquire()
-        val owned = try {
-            source.copy(Bitmap.Config.ARGB_8888, false)
-                ?: error("Could not retain decoded frame for V48 GPU inference")
-        } catch (error: Throwable) {
-            slots.release()
-            throw error
-        }
         executor.execute {
             try {
                 if (failure.get() == null && process(sourceTimeUs, owned)) {
