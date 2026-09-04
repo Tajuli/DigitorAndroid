@@ -1,9 +1,64 @@
 import java.io.File
+import java.net.HttpURLConnection
 import java.net.URI
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+fun downloadGeneratedAssetWithRetry(
+    urls: List<String>,
+    output: File,
+    minimumBytes: Long,
+    label: String,
+) {
+    if (output.isFile && output.length() > minimumBytes) return
+    output.parentFile.mkdirs()
+    val temp = File(output.parentFile, output.name + ".download")
+    var lastError: Throwable? = null
+    val attempts = 5
+
+    for (attempt in 1..attempts) {
+        if (temp.exists()) temp.delete()
+        val sourceUrl = urls[(attempt - 1) % urls.size]
+        var connection: HttpURLConnection? = null
+        try {
+            connection = URI(sourceUrl).toURL().openConnection() as HttpURLConnection
+            connection.instanceFollowRedirects = true
+            connection.connectTimeout = 30_000
+            connection.readTimeout = 180_000
+            connection.setRequestProperty("User-Agent", "DigitorAndroid-build/1.0")
+            connection.setRequestProperty("Accept", "application/octet-stream,*/*")
+            val responseCode = connection.responseCode
+            if (responseCode !in 200..299) {
+                connection.errorStream?.use { it.readBytes() }
+                error("$label download returned HTTP $responseCode")
+            }
+            connection.inputStream.buffered().use { input ->
+                temp.outputStream().buffered().use { target -> input.copyTo(target, 1024 * 1024) }
+            }
+            require(temp.length() > minimumBytes) {
+                "$label download is unexpectedly small (${temp.length()} bytes)"
+            }
+            if (output.exists()) output.delete()
+            check(temp.renameTo(output)) { "Could not install ${output.name}" }
+            return
+        } catch (error: Throwable) {
+            lastError = error
+            if (temp.exists()) temp.delete()
+            if (attempt < attempts) {
+                // GitHub-hosted runners can briefly share a Hugging Face/IP rate limit. Back off
+                // rather than turning a transient HTTP 429 into a false code failure.
+                val delayMs = minOf(20_000L, 2_000L shl (attempt - 1))
+                logger.warn("$label download attempt $attempt/$attempts failed: ${error.message}; retrying in ${delayMs}ms")
+                Thread.sleep(delayMs)
+            }
+        } finally {
+            connection?.disconnect()
+        }
+    }
+    throw org.gradle.api.GradleException("Could not download $label after $attempts attempts", lastError)
 }
 
 val generatedHairModelAssets = layout.buildDirectory.dir("generated/hairSegmenterAssets")
@@ -12,19 +67,14 @@ val downloadHairSegmenterModel by tasks.registering {
     outputs.file(hairSegmenterModelFile)
     doLast {
         val output = hairSegmenterModelFile.get().asFile
-        if (output.isFile && output.length() > 500_000L) return@doLast
-        output.parentFile.mkdirs()
-        val temp = File(output.parentFile, output.name + ".download")
-        if (temp.exists()) temp.delete()
-        val url = URI(
-            "https://storage.googleapis.com/mediapipe-models/image_segmenter/hair_segmenter/float32/latest/hair_segmenter.tflite",
-        ).toURL()
-        url.openStream().use { input ->
-            temp.outputStream().buffered().use { target -> input.copyTo(target) }
-        }
-        require(temp.length() > 500_000L) { "Downloaded MediaPipe HairSegmenter model is unexpectedly small" }
-        if (output.exists()) output.delete()
-        check(temp.renameTo(output)) { "Could not install generated hair_segmenter.tflite asset" }
+        downloadGeneratedAssetWithRetry(
+            urls = listOf(
+                "https://storage.googleapis.com/mediapipe-models/image_segmenter/hair_segmenter/float32/latest/hair_segmenter.tflite",
+            ),
+            output = output,
+            minimumBytes = 500_000L,
+            label = "MediaPipe HairSegmenter",
+        )
     }
 }
 
@@ -34,23 +84,18 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
     outputs.file(faceSkinSegmenterModelFile)
     doLast {
         val output = faceSkinSegmenterModelFile.get().asFile
-        if (output.isFile && output.length() > 200_000L) return@doLast
-        output.parentFile.mkdirs()
-        val temp = File(output.parentFile, output.name + ".download")
-        if (temp.exists()) temp.delete()
-        val url = URI(
-            "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite",
-        ).toURL()
-        url.openStream().use { input ->
-            temp.outputStream().buffered().use { target -> input.copyTo(target) }
-        }
-        require(temp.length() > 200_000L) { "Downloaded SelfieMulticlass model is unexpectedly small" }
-        if (output.exists()) output.delete()
-        check(temp.renameTo(output)) { "Could not install generated selfie_multiclass_256x256.tflite asset" }
+        downloadGeneratedAssetWithRetry(
+            urls = listOf(
+                "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite",
+            ),
+            output = output,
+            minimumBytes = 200_000L,
+            label = "SelfieMulticlass",
+        )
     }
 }
 
-// V44 Pro Cutout uses MODNet's soft portrait alpha instead of a binary person mask. MODNet and
+// V44+ Pro Cutout uses MODNet's soft portrait alpha instead of a binary person mask. MODNet and
 // its published weights are Apache-2.0. This LiteRT conversion is GPU-friendly and keeps the model
 // outside git history while still producing deterministic CI/phone builds.
 val generatedPortraitMattingAssets = layout.buildDirectory.dir("generated/portraitMattingAssets")
@@ -59,19 +104,15 @@ val downloadModNetModel by tasks.registering {
     outputs.file(modNetModelFile)
     doLast {
         val output = modNetModelFile.get().asFile
-        if (output.isFile && output.length() > 20_000_000L) return@doLast
-        output.parentFile.mkdirs()
-        val temp = File(output.parentFile, output.name + ".download")
-        if (temp.exists()) temp.delete()
-        val url = URI(
-            "https://huggingface.co/litert-community/MODNet-LiteRT/resolve/main/modnet.tflite?download=true",
-        ).toURL()
-        url.openStream().use { input ->
-            temp.outputStream().buffered().use { target -> input.copyTo(target, 1024 * 1024) }
-        }
-        require(temp.length() > 20_000_000L) { "Downloaded MODNet LiteRT model is unexpectedly small" }
-        if (output.exists()) output.delete()
-        check(temp.renameTo(output)) { "Could not install generated modnet_v44.tflite asset" }
+        downloadGeneratedAssetWithRetry(
+            urls = listOf(
+                "https://huggingface.co/litert-community/MODNet-LiteRT/resolve/main/modnet.tflite",
+                "https://huggingface.co/litert-community/MODNet-LiteRT/resolve/main/modnet.tflite?download=true",
+            ),
+            output = output,
+            minimumBytes = 20_000_000L,
+            label = "MODNet LiteRT",
+        )
     }
 }
 
