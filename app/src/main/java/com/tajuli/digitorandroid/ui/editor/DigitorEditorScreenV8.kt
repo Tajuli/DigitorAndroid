@@ -35,15 +35,17 @@ import androidx.compose.ui.unit.sp
 import androidx.media3.common.util.UnstableApi
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
+import com.tajuli.digitorandroid.editor.model.PersonMattingBackendV50
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
+import com.tajuli.digitorandroid.editor.model.resolvedPersonMattingBackendV50
 import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 
 private val V8CutoutAccent = Color(0xFF30E0C3)
 private val V8CutoutPanel = Color(0xF20B0B0F)
 private val V8CutoutText = Color.White
 
-/** Always-visible V47 Pro Cutout quick action with a non-modal, scrollable control panel. */
+/** Always-visible V50 Pro Cutout quick action with a non-modal, scrollable control panel. */
 @UnstableApi
 @Composable
 fun DigitorEditorScreenV8(
@@ -106,7 +108,7 @@ private fun CutoutQuickPanelV44(
             OutlinedButton(onClick = onClose) { Text("Close", fontSize = 9.sp, color = V8CutoutText) }
         }
         Text(
-            "GPU-first portrait matting. Choose analysis quality first, then press Analyze. This panel stays scrollable without hiding the whole preview.",
+            "Portrait matting with selectable MODNet / experimental PP-MattingV2. Choose model and analysis quality first, then press Analyze. This panel stays scrollable without hiding the whole preview.",
             fontSize = 9.sp,
             color = V8CutoutText,
         )
@@ -206,6 +208,44 @@ private fun CutoutQuickPanelV44(
             }
 
             CutoutModeV43.PERSON -> {
+                val matteBackend = settings.resolvedPersonMattingBackendV50()
+
+                Text("AI matte model", fontSize = 10.sp, color = V8CutoutText)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    QualityChoiceV47(
+                        label = "MODNet\nCurrent",
+                        selected = matteBackend == PersonMattingBackendV50.MODNET,
+                        enabled = !analysisBusy,
+                    ) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(personMattingBackendV50 = PersonMattingBackendV50.MODNET),
+                            status = "Pro Cutout model · MODNet · tap Analyze",
+                            coalesce = false,
+                        )
+                    }
+                    QualityChoiceV47(
+                        label = "PP-MattingV2\nExperimental",
+                        selected = matteBackend == PersonMattingBackendV50.PP_MATTING_V2,
+                        enabled = !analysisBusy,
+                    ) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(personMattingBackendV50 = PersonMattingBackendV50.PP_MATTING_V2),
+                            status = "Pro Cutout model · PP-MattingV2 experimental · tap Analyze",
+                            coalesce = false,
+                        )
+                    }
+                }
+                if (matteBackend == PersonMattingBackendV50.PP_MATTING_V2) {
+                    Text(
+                        "A/B test mode: PP-MattingV2/STDC1 512 uses the same Hair Detail, temporal flow and edge refinement as MODNet. Its first implementation prioritizes quality validation over speed.",
+                        fontSize = 9.sp,
+                        color = V8CutoutText,
+                    )
+                }
+
                 Text("Analysis quality", fontSize = 10.sp, color = V8CutoutText)
                 Row(
                     Modifier.fillMaxWidth(),
@@ -259,7 +299,7 @@ private fun CutoutQuickPanelV44(
                             analysisBusy -> "Building refined portrait matte…"
                             personReady -> "Pro matte ready"
                             analysisFailed -> "Analysis failed / incomplete"
-                            else -> "Choose quality, then Analyze"
+                            else -> "Choose model + quality, then Analyze"
                         },
                         fontSize = 10.sp,
                         color = V8CutoutText,
@@ -322,7 +362,7 @@ private fun CutoutQuickPanelV44(
                 }
 
                 Text(
-                    "Quality, Hair Detail and Temporal Stability are baked into the analyzed matte; press Analyze/Refresh Matte after changing them. Other edge controls update in realtime.",
+                    "Model, Quality, Hair Detail and Temporal Stability are baked into the analyzed matte; press Analyze/Refresh Matte after changing them. Other edge controls update in realtime.",
                     fontSize = 9.sp,
                     color = V8CutoutText,
                 )
