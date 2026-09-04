@@ -3,6 +3,7 @@ package com.tajuli.digitorandroid.ui.editor
 import android.app.Application
 import androidx.lifecycle.viewModelScope
 import com.tajuli.digitorandroid.editor.model.ClipCutoutV43
+import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TrackKind
@@ -48,14 +49,17 @@ fun EditorViewModelV4.setSelectedCutoutV43(
 
 fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
     val person = settings.copy(mode = CutoutModeV43.PERSON).normalized()
-    setSelectedCutoutV43(person, status = "Pro Cutout enabled", coalesce = false)
+    val label = person.analysisQualityV47.uiLabelV47()
+    setSelectedCutoutV43(
+        person,
+        status = "Pro Cutout enabled · $label · tap Analyze",
+        coalesce = false,
+    )
     val clip = state.value.project.clip(state.value.selectedClipId) ?: return
     val app = getApplication<Application>()
     if (hasPersonCutoutCoverageV43(app.applicationContext, clip)) {
-        setEditorStatusV19("Pro Cutout ready · cached V47 GPU matte")
+        setEditorStatusV19("Pro Cutout ready · $label · cached V47 GPU matte")
         PreviewExportCoordinator.refreshActivePreviews()
-    } else {
-        analyzeSelectedPersonCutoutV43()
     }
 }
 
@@ -70,13 +74,16 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         return
     }
     val settings = clip.resolvedCutoutV43()
+    val quality = settings.analysisQualityV47
+    val label = quality.uiLabelV47()
     val analysisKey = buildString {
-        append("v47|")
+        append("v47-adaptive|")
         append(clip.uri); append('|'); append(clip.sourceInUs); append('|'); append(clip.sourceOutUs)
+        append('|'); append(quality.name)
         append('|'); append(settings.hairDetailV44); append('|'); append(settings.temporalStabilityV44)
     }
     if (!personCutoutAnalysisInFlightV43.add(analysisKey)) {
-        setEditorStatusV19("Pro Cutout · analysis already running")
+        setEditorStatusV19("Pro Cutout · $label · analysis already running")
         return
     }
 
@@ -88,8 +95,13 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         )
     }
 
-    setEditorStatusV19("Pro Cutout · starting V47 GPU-first analysis…")
+    setEditorStatusV19("Pro Cutout · $label · starting GPU-first analysis…")
     val app = getApplication<Application>()
+    val progressStride = when (quality) {
+        CutoutAnalysisQualityV47.LOW -> 8
+        CutoutAnalysisQualityV47.MEDIUM -> 24
+        CutoutAnalysisQualityV47.HIGH -> 30
+    }
     viewModelScope.launch(Dispatchers.Default) {
         try {
             val result = runCatching {
@@ -98,9 +110,9 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                         clip = clip,
                         prioritySourceUs = prioritySourceUs,
                         onAnchorStored = { completed ->
-                            if (completed == 1 || completed % 8 == 0) {
+                            if (completed == 1 || completed % progressStride == 0) {
                                 viewModelScope.launch(Dispatchers.Main) {
-                                    setEditorStatusV19("Pro Cutout · GPU-first matting… $completed frame(s)")
+                                    setEditorStatusV19("Pro Cutout · $label · $completed refined frame(s)")
                                 }
                             }
                         },
@@ -109,22 +121,31 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
             }
             withContext(Dispatchers.Main) {
                 result.onSuccess { track ->
-                    val ready = hasPersonCutoutCoverageV43(app.applicationContext, clip)
+                    val currentClip = state.value.project.clip(clip.id) ?: clip
+                    val ready = hasPersonCutoutCoverageV43(app.applicationContext, currentClip)
                     PreviewExportCoordinator.refreshActivePreviews(220L)
                     if (ready) {
-                        setEditorStatusV19("Pro Cutout ready · ${track.frames.size} V47 refined matte frame(s)")
+                        setEditorStatusV19(
+                            "Pro Cutout ready · $label · ${track.frames.size} refined matte frame(s)",
+                        )
                     } else {
-                        setEditorStatusV19("Pro Cutout incomplete · tap Analyze again")
+                        setEditorStatusV19("Pro Cutout incomplete · $label · tap Analyze again")
                     }
                 }.onFailure { error ->
                     PreviewExportCoordinator.refreshActivePreviews(220L)
                     val detail = error.message?.takeIf { it.isNotBlank() }
                         ?: error::class.java.simpleName
-                    setEditorStatusV19("Pro Cutout failed · $detail")
+                    setEditorStatusV19("Pro Cutout failed · $label · $detail")
                 }
             }
         } finally {
             personCutoutAnalysisInFlightV43.remove(analysisKey)
         }
     }
+}
+
+internal fun CutoutAnalysisQualityV47.uiLabelV47(): String = when (this) {
+    CutoutAnalysisQualityV47.LOW -> "Low · 4 fps"
+    CutoutAnalysisQualityV47.MEDIUM -> "Medium · 12 fps"
+    CutoutAnalysisQualityV47.HIGH -> "High · every frame"
 }
