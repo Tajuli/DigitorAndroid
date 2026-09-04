@@ -110,33 +110,37 @@ object BeautyHairMaskStoreV29 {
         .take(32)
 }
 
-/** Dedicated semantic hair segmenter using Google's MediaPipe HairSegmenter model. */
+/**
+ * Dedicated semantic hair segmenter. V47 asks MediaPipe for GPU execution first and falls back to
+ * CPU only on devices/drivers where the GPU delegate cannot be created. Cutout analysis can consume
+ * [segmentSoftMask] directly, avoiding the old encode-PNG/decode-PNG round trip for every anchor.
+ */
 class BeautyHairSegmenterV29(context: Context) : AutoCloseable {
     private val segmenter: ImageSegmenter
+    val usingGpuDelegate: Boolean
 
     init {
-        val baseOptions = BaseOptions.builder()
-            .setModelAssetPath(HAIR_MODEL_ASSET_V29)
-            .setDelegate(Delegate.CPU)
-            .build()
-        val options = ImageSegmenter.ImageSegmenterOptions.builder()
-            .setBaseOptions(baseOptions)
-            .setRunningMode(RunningMode.IMAGE)
-            .setOutputCategoryMask(false)
-            .setOutputConfidenceMasks(true)
-            .build()
-        segmenter = ImageSegmenter.createFromOptions(context.applicationContext, options)
+        val app = context.applicationContext
+        val gpu = runCatching { createSegmenter(app, Delegate.GPU) }
+        if (gpu.isSuccess) {
+            segmenter = gpu.getOrThrow()
+            usingGpuDelegate = true
+        } else {
+            segmenter = createSegmenter(app, Delegate.CPU)
+            usingGpuDelegate = false
+        }
     }
 
-    fun segmentAndStore(context: Context, clip: TimelineClip, bitmap: Bitmap, sourceTimeUs: Long): Boolean {
+    /** Returns a soft grayscale hair-confidence bitmap owned by the caller. */
+    fun segmentSoftMask(bitmap: Bitmap): Bitmap? {
         val result = segmenter.segment(BitmapImageBuilder(bitmap).build())
         val masks = result.confidenceMasks().orElse(emptyList())
-        val mpMask = masks.getOrNull(HAIR_CLASS_V34) ?: return false
+        val mpMask = masks.getOrNull(HAIR_CLASS_V34) ?: return null
         val width = mpMask.width.coerceAtLeast(1)
         val height = mpMask.height.coerceAtLeast(1)
         val confidences = ByteBufferExtractor.extract(mpMask).asFloatBuffer()
         confidences.rewind()
-        if (confidences.remaining() < width * height) return false
+        if (confidences.remaining() < width * height) return null
 
         val pixels = IntArray(width * height)
         for (index in pixels.indices) {
@@ -150,27 +154,43 @@ class BeautyHairSegmenterV29(context: Context) : AutoCloseable {
         val fullMask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         fullMask.setPixels(pixels, 0, width, 0, 0, width, height)
         val longEdge = max(width, height)
-        val storedMask = if (longEdge <= HAIR_MASK_LONG_EDGE_V29) {
-            fullMask
-        } else {
-            val scale = HAIR_MASK_LONG_EDGE_V29.toFloat() / longEdge.toFloat()
-            Bitmap.createScaledBitmap(
-                fullMask,
-                (width * scale).toInt().coerceAtLeast(1),
-                (height * scale).toInt().coerceAtLeast(1),
-                true,
-            )
-        }
+        if (longEdge <= HAIR_MASK_LONG_EDGE_V29) return fullMask
+        val scale = HAIR_MASK_LONG_EDGE_V29.toFloat() / longEdge.toFloat()
+        return Bitmap.createScaledBitmap(
+            fullMask,
+            (width * scale).toInt().coerceAtLeast(1),
+            (height * scale).toInt().coerceAtLeast(1),
+            true,
+        ).also { fullMask.recycle() }
+    }
+
+    fun segmentAndStore(context: Context, clip: TimelineClip, bitmap: Bitmap, sourceTimeUs: Long): Boolean {
+        val storedMask = segmentSoftMask(bitmap) ?: return false
         try {
             BeautyHairMaskStoreV29.save(context.applicationContext, clip.uri, sourceTimeUs, storedMask)
         } finally {
-            if (storedMask !== fullMask) storedMask.recycle()
-            fullMask.recycle()
+            storedMask.recycle()
         }
         return true
     }
 
     override fun close() {
         segmenter.close()
+    }
+
+    private companion object {
+        fun createSegmenter(context: Context, delegate: Delegate): ImageSegmenter {
+            val baseOptions = BaseOptions.builder()
+                .setModelAssetPath(HAIR_MODEL_ASSET_V29)
+                .setDelegate(delegate)
+                .build()
+            val options = ImageSegmenter.ImageSegmenterOptions.builder()
+                .setBaseOptions(baseOptions)
+                .setRunningMode(RunningMode.IMAGE)
+                .setOutputCategoryMask(false)
+                .setOutputConfidenceMasks(true)
+                .build()
+            return ImageSegmenter.createFromOptions(context, options)
+        }
     }
 }
