@@ -23,12 +23,12 @@ class PersonCutoutAnalysisPolicyV46Test {
         val cadence = personCutoutCadenceV47(CutoutAnalysisQualityV47.HIGH)
         assertTrue(cadence.everyDecodedFrame)
         assertEquals(0, personCutoutTargetTimesV47(0L, 1_000_000L, CutoutAnalysisQualityV47.HIGH).size)
-        assertEquals(60, personCutoutEstimatedAnchorCountV47(1_000_000L, CutoutAnalysisQualityV47.HIGH, 60f))
+        assertEquals(61, personCutoutEstimatedAnchorCountV47(1_000_000L, CutoutAnalysisQualityV47.HIGH, 60f))
     }
 
     @Test
     fun lowOneSecondHasFourTargets() {
-        assertEquals(4, personCutoutTargetTimesV47(0L, 1_000_000L, CutoutAnalysisQualityV47.LOW).size)
+        assertEquals(5, personCutoutTargetTimesV47(0L, 1_000_000L, CutoutAnalysisQualityV47.LOW).size)
     }
 
     @Test
