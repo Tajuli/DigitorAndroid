@@ -30,4 +30,11 @@ class PersonCutoutAnalysisPolicyV46Test {
     fun lowOneSecondHasFourTargets() {
         assertEquals(4, personCutoutTargetTimesV47(0L, 1_000_000L, CutoutAnalysisQualityV47.LOW).size)
     }
+
+    @Test
+    fun v48HairSemanticRefreshIsSparseRelativeToDenseMatting() {
+        assertEquals(250_000L, hairSemanticRefreshIntervalUsV48(CutoutAnalysisQualityV47.LOW))
+        assertEquals(250_000L, hairSemanticRefreshIntervalUsV48(CutoutAnalysisQualityV47.MEDIUM))
+        assertEquals(125_000L, hairSemanticRefreshIntervalUsV48(CutoutAnalysisQualityV47.HIGH))
+    }
 }
