@@ -26,12 +26,17 @@ private const val MODNET_SIZE_V47 = 512
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
 /**
- * V48 throughput revision of the adaptive GPU-first analyzer.
+ * V49 near-fully-GPU revision of the adaptive analyzer.
  *
- * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Hardware decode overlaps a bounded
- * GPU-inference worker. All LiteRT/MediaPipe/EGL objects for video are created, executed and closed
- * on that same inference thread to preserve GPU delegate/context affinity. PNG persistence runs on a
- * separate bounded worker so compression no longer serializes every GPU inference.
+ * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Hardware decode overlaps a bounded GPU
+ * inference worker, decoded frame ownership moves straight into that queue with no second ARGB copy,
+ * MODNet letterbox/normalization/NCHW packing and alpha crop/scale run in ES3 shaders, LiteRT is
+ * GPU-first, Hair is GPU-first and temporal local-flow refinement remains on GL. PNG persistence is
+ * deliberately kept on parallel low-priority CPU workers because the existing preview/export cache
+ * contract is file-backed.
+ *
+ * LiteRT 2.1.5 Kotlin still exposes host TensorBuffer read/write boundaries, so this is intentionally
+ * described as near-fully-GPU rather than claiming impossible literal zero-copy model I/O.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -46,7 +51,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         } else {
             analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
-        check(completed > 0) { "Could not generate any V48 portrait matte" }
+        check(completed > 0) { "Could not generate any V49 portrait matte" }
         markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
@@ -108,27 +113,21 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         }
 
         try {
-            // LOW/MEDIUM retain one playhead-priority frame, but it is enqueued to the same GPU
-            // worker rather than executing the delegate on the producer thread. HIGH uses only true
-            // decoded source-frame timestamps.
+            // LOW/MEDIUM retain one playhead-priority frame, but it is ownership-transferred to the
+            // same GPU worker. HIGH uses only true decoded source-frame timestamps.
             val priority = if (quality == CutoutAnalysisQualityV47.HIGH) {
                 null
             } else {
                 prioritySourceUs?.coerceIn(start, (end - 1L).coerceAtLeast(start))
             }
             if (priority != null) {
-                val frame = decodeSinglePriorityFrame(clip, priority)
-                if (frame != null) {
-                    try {
-                        worker.enqueueCopy(priority, frame)
-                    } finally {
-                        frame.recycle()
-                    }
+                decodeSinglePriorityFrame(clip, priority)?.let { frame ->
+                    worker.enqueueOwned(priority, frame)
                 }
             }
 
             // Producer: MediaCodec + OES + GL scale. Consumer: LiteRT GPU + MediaPipe GPU + GL flow.
-            // The two-frame bound keeps decode and inference overlapped without ballooning memory.
+            // V49 transfers the decoder Bitmap directly to the bounded worker instead of copying it.
             val sequentialResult = runCatching {
                 GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
                     uri = Uri.parse(clip.uri),
@@ -137,7 +136,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                     targetTimesUs = targetTimes,
                     emitEveryFrame = cadence.everyDecodedFrame,
                 ) { sourceUs, bitmap ->
-                    worker.enqueueCopy(sourceUs, bitmap)
+                    worker.enqueueOwned(sourceUs, bitmap)
                 }
             }
 
@@ -150,18 +149,14 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                     )
                 }
 
-                // LOW/MEDIUM reliability fallback for unusual vendor codecs. Frames still enter the
-                // same GPU inference worker, so model/flow thread affinity and pipelined persistence remain.
+                // LOW/MEDIUM reliability fallback for unusual vendor codecs. These Bitmaps are also
+                // ownership-transferred, so even the fallback avoids the old second ARGB copy.
                 val retriever = MediaMetadataRetriever()
                 try {
                     retriever.setDataSource(context, Uri.parse(clip.uri))
                     for (sourceUs in targetTimes) {
                         val frame = scaledFrameAtTime(retriever, sourceUs) ?: continue
-                        try {
-                            worker.enqueueCopy(sourceUs, frame)
-                        } finally {
-                            frame.recycle()
-                        }
+                        worker.enqueueOwned(sourceUs, frame)
                     }
                 } finally {
                     runCatching { retriever.release() }
@@ -267,7 +262,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         append("MODNet "); append(modnet.backendLabel)
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
         append(" · Flow "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
-        append(" · decode/inference overlapped")
+        append(" · direct frame queue")
     }
 
     fun segmentAndStore(clip: TimelineClip, bitmap: Bitmap, sourceTimeUs: Long): Boolean {
@@ -299,7 +294,8 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 modnetMatte.recycle()
             }
 
-            // Ownership transfers to the async writer; PNG compression no longer blocks model work.
+            // Ownership transfers to the parallel low-priority writers; compression never runs on
+            // the GPU inference worker.
             matteWriter.enqueue(clip.uri, sourceTimeUs, stabilized)
             return true
         } finally {
@@ -366,7 +362,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
             gpuTemporal = null
         }
 
-        // Compatibility fallback only; normal V48 devices stay on the GL path above.
+        // Compatibility fallback only; normal V49 devices stay on the GL path above.
         val fused = fuseHairCpu(modnetMatte, hairMask, hairStrength)
         return try {
             cpuTemporal.stabilize(source, fused, sourceTimeUs, temporalStrength)
@@ -442,7 +438,7 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
     private var gpuTensorPacker: GpuModNetTensorPackerV48? = null
 
     val backendLabel: String
-        get() = "$modelBackendLabel · ${if (gpuTensorPacker != null) "GPU tensor-pack" else "CPU tensor-pack"}"
+        get() = "$modelBackendLabel · ${if (gpuTensorPacker != null) "GPU pre/post" else "CPU pre/post"}"
 
     init {
         val app = context.applicationContext
@@ -484,23 +480,25 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
             "MODNet did not expose input/output buffers"
         }
 
-        // ES3/float-FBO devices offload normalization and NCHW transposition to a shader. This
-        // helper releases its EGL context after every pack so LiteRT can bind its own GPU context.
+        // ES3/float-FBO devices offload letterbox/resize, normalization, NCHW transposition and
+        // alpha crop/scale to shaders. The helper releases its EGL context before LiteRT runs.
         gpuTensorPacker = runCatching { GpuModNetTensorPackerV48() }.getOrNull()
     }
 
     fun infer(source: Bitmap): Bitmap {
         val prepared = letterboxGeometry(source)
-        inputSquare.eraseColor(Color.BLACK)
-        inputCanvas.drawBitmap(
-            source,
-            null,
-            Rect(prepared.left, prepared.top, prepared.left + prepared.contentWidth, prepared.top + prepared.contentHeight),
-            filterPaint,
-        )
-
-        val packedOnGpu = gpuTensorPacker?.let { packer ->
-            val ok = runCatching { packer.pack(inputSquare, inputTensor) }.getOrDefault(false)
+        val packerBeforeRun = gpuTensorPacker
+        val packedOnGpu = packerBeforeRun?.let { packer ->
+            val ok = runCatching {
+                packer.pack(
+                    source = source,
+                    letterboxLeft = prepared.left,
+                    letterboxTop = prepared.top,
+                    letterboxWidth = prepared.contentWidth,
+                    letterboxHeight = prepared.contentHeight,
+                    destination = inputTensor,
+                )
+            }.getOrDefault(false)
             if (!ok) {
                 runCatching { packer.close() }
                 gpuTensorPacker = null
@@ -509,8 +507,20 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
         } ?: false
 
         if (!packedOnGpu) {
-            // Compatibility fallback. Reused arrays keep this cheaper than the old per-frame
-            // allocation path even when the device cannot render RGBA32F tensor targets.
+            // Compatibility fallback only. GPU-capable devices avoid both this Canvas resize and the
+            // per-pixel Kotlin normalization/transposition loop entirely.
+            inputSquare.eraseColor(Color.BLACK)
+            inputCanvas.drawBitmap(
+                source,
+                null,
+                Rect(
+                    prepared.left,
+                    prepared.top,
+                    prepared.left + prepared.contentWidth,
+                    prepared.top + prepared.contentHeight,
+                ),
+                filterPaint,
+            )
             inputSquare.getPixels(
                 inputPixels,
                 0,
@@ -528,21 +538,42 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
             }
         }
 
-        // LiteRT 2.1.5 Kotlin still exposes a host-visible FloatArray boundary. The GPU packer
-        // removes the per-pixel CPU arithmetic/transposition; this is now one bulk tensor write.
+        // LiteRT Kotlin still exposes a host-visible FloatArray boundary. On the accelerated path
+        // this is one bulk write after GPU preprocessing rather than hundreds of thousands of CPU ops.
         inputBuffers[0].writeFloat(inputTensor)
         model.run(inputBuffers, outputBuffers)
         val alpha = outputBuffers[0].readFloat()
         check(alpha.size >= plane) { "MODNet alpha output was ${alpha.size}; expected at least $plane values" }
 
+        if (packedOnGpu) {
+            val packer = gpuTensorPacker
+            if (packer != null) {
+                val gpuOutput = runCatching {
+                    packer.unpackAlpha(
+                        alpha = alpha,
+                        letterboxLeft = prepared.left,
+                        letterboxTop = prepared.top,
+                        letterboxWidth = prepared.contentWidth,
+                        letterboxHeight = prepared.contentHeight,
+                        outputWidth = source.width,
+                        outputHeight = source.height,
+                    )
+                }.getOrNull()
+                if (gpuOutput != null) return gpuOutput
+
+                // A device can expose float packing yet fail a post-process FBO at runtime. Disable
+                // the helper once and finish this/current future frames through the proven CPU path.
+                runCatching { packer.close() }
+                gpuTensorPacker = null
+            }
+        }
+
+        // CPU compatibility output shaping. Normal V49 ES3 devices skip this whole loop/Canvas path.
         for (i in 0 until plane) {
             val v = (alpha[i].coerceIn(0f, 1f) * 255f).roundToInt().coerceIn(0, 255)
             alphaPixels[i] = Color.argb(255, v, v, v)
         }
         alphaSquare.setPixels(alphaPixels, 0, MODNET_SIZE_V47, 0, 0, MODNET_SIZE_V47, MODNET_SIZE_V47)
-
-        // Draw straight from the valid letterbox region to source resolution; no per-frame cropped
-        // intermediate Bitmap or createScaledBitmap allocation remains.
         val output = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
         Canvas(output).drawBitmap(
             alphaSquare,
