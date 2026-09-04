@@ -13,22 +13,16 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.roundToInt
 
-/** Shared contract so the V50 experiment changes only the base portrait model, not refinement. */
 internal interface PortraitMatteBackendV50 : AutoCloseable {
     val backendLabel: String
     fun infer(source: Bitmap): Bitmap
 }
 
 /**
- * Experimental PP-MattingV2/STDC1 512 portrait matte backend.
+ * PP-MattingV2/STDC1 512 portrait matte backend used by Pro Cutout.
  *
  * Upstream PP-MattingV2 is published by PaddleSeg under Apache-2.0. The fixed 512x512 ONNX export
  * is downloaded and SHA-256 pinned by app/build.gradle.kts; ONNX Runtime Android is MIT licensed.
- *
- * This deliberately starts with the CPU execution provider. The experiment is intended to answer
- * the quality question first while MODNet keeps its existing LiteRT GPU path. If PP-MattingV2 wins
- * device A/B tests, its execution provider/pre-post path can be optimized separately without
- * changing the matte cache/render contract.
  */
 internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBackendV50 {
     private companion object {
@@ -60,8 +54,6 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         get() = "PP-MattingV2 · ONNX Runtime CPU · 512"
 
     init {
-        // AssetManager does not expose every generated asset as a stable filesystem path. The model
-        // byte array is only retained for session creation and is eligible for GC immediately after.
         val modelBytes = appContext.assets.open(MODEL_ASSET).use { it.readBytes() }
         session = environment.createSession(modelBytes, sessionOptions)
         inputName = session.inputNames.firstOrNull()
