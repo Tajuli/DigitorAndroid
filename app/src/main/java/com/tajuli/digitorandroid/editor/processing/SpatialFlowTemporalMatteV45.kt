@@ -275,8 +275,8 @@ internal class SpatialMotionFieldV45 private constructor(
 /**
  * V45 temporal stabilizer: a local optical-flow-style block field is estimated from source luma,
  * interpolated into a dense warp, then used only where the current MODNet alpha is uncertain.
- * Strong foreground/background pixels always remain authoritative. Flow confidence, alpha
- * disagreement and scene-cut detection reject occlusions and bad matches rather than smearing them.
+ * Strong foreground/background pixels normally remain authoritative, except for the targeted V48
+ * static-foreground-birth guard that rejects stationary attached-background false positives.
  */
 internal class SpatialFlowTemporalMatteStabilizerV45 : AutoCloseable {
     private var previousMatte: Bitmap? = null
@@ -328,8 +328,7 @@ internal class SpatialFlowTemporalMatteStabilizerV45 : AutoCloseable {
             for (x in 0 until current.width) {
                 val index = y * current.width + x
                 val curr = Color.red(currentPixels[index]) / 255f
-                // Do not temporally soften pixels MODNet is already certain about.
-                if (curr <= .015f || curr >= .985f) {
+                if (curr <= .015f) {
                     out[index] = currentPixels[index]
                     continue
                 }
@@ -343,8 +342,36 @@ internal class SpatialFlowTemporalMatteStabilizerV45 : AutoCloseable {
                 val previousX = x + vector.dx * flowToMatteX
                 val previousY = y + vector.dy * flowToMatteY
                 val prev = sampleMatte(previousPixels, current.width, current.height, previousX, previousY)
-                val disagreement = abs(curr - prev)
-                val uncertainty = (4f * curr * (1f - curr)).coerceIn(0f, 1f)
+
+                var guardedCurrent = curr
+                if (curr >= .52f) {
+                    val support = sampleSupport(
+                        previousPixels,
+                        current.width,
+                        current.height,
+                        previousX,
+                        previousY,
+                        flowToMatteX * 1.75f,
+                        flowToMatteY * 1.75f,
+                    )
+                    val motionBlocks = abs(vector.dx) + abs(vector.dy)
+                    val staticMatch = 1f - smoothstepV48(.45f, 2.10f, motionBlocks)
+                    val reliableFlow = smoothstepV48(.12f, .42f, vector.confidence)
+                    val unsupportedBirth = smoothstepV48(.52f, .90f, curr) *
+                        (1f - smoothstepV48(.08f, .44f, support))
+                    val birthGuard = (unsupportedBirth * staticMatch * reliableFlow).coerceIn(0f, 1f)
+                    val guardedTarget = min(curr, support + .055f)
+                    guardedCurrent = curr + (guardedTarget - curr) * (birthGuard * .97f)
+                }
+
+                if (guardedCurrent >= .985f) {
+                    val v = (guardedCurrent * 255f).roundToInt().coerceIn(0, 255)
+                    out[index] = Color.argb(255, v, v, v)
+                    continue
+                }
+
+                val disagreement = abs(guardedCurrent - prev)
+                val uncertainty = (4f * guardedCurrent * (1f - guardedCurrent)).coerceIn(0f, 1f)
                 val agreement = (1f - disagreement / .34f).coerceIn(0f, 1f)
                 // Occlusion/disocclusion gate: a large alpha disagreement means the current matte
                 // must win even if the photometric flow looked plausible.
@@ -356,7 +383,7 @@ internal class SpatialFlowTemporalMatteStabilizerV45 : AutoCloseable {
                 val temporalWeight = (
                     s * .78f * uncertainty * vector.confidence * (.22f + .78f * agreement) * occlusionGate
                 ).coerceIn(0f, .78f)
-                val alpha = (curr + (prev - curr) * temporalWeight).coerceIn(0f, 1f)
+                val alpha = (guardedCurrent + (prev - guardedCurrent) * temporalWeight).coerceIn(0f, 1f)
                 val v = (alpha * 255f).roundToInt().coerceIn(0, 255)
                 out[index] = Color.argb(255, v, v, v)
             }
@@ -366,6 +393,32 @@ internal class SpatialFlowTemporalMatteStabilizerV45 : AutoCloseable {
         result.setPixels(out, 0, current.width, 0, 0, current.width, current.height)
         replacePrevious(result, nowLuma, sourceTimeUs)
         return result
+    }
+
+    private fun sampleSupport(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        x: Float,
+        y: Float,
+        radiusX: Float,
+        radiusY: Float,
+    ): Float {
+        var support = sampleMatte(pixels, width, height, x, y)
+        support = max(support, sampleMatte(pixels, width, height, x + radiusX, y))
+        support = max(support, sampleMatte(pixels, width, height, x - radiusX, y))
+        support = max(support, sampleMatte(pixels, width, height, x, y + radiusY))
+        support = max(support, sampleMatte(pixels, width, height, x, y - radiusY))
+        support = max(support, sampleMatte(pixels, width, height, x + radiusX, y + radiusY))
+        support = max(support, sampleMatte(pixels, width, height, x - radiusX, y - radiusY))
+        support = max(support, sampleMatte(pixels, width, height, x + radiusX, y - radiusY))
+        support = max(support, sampleMatte(pixels, width, height, x - radiusX, y + radiusY))
+        return support
+    }
+
+    private fun smoothstepV48(edge0: Float, edge1: Float, value: Float): Float {
+        val t = ((value - edge0) / (edge1 - edge0).coerceAtLeast(.0001f)).coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
     }
 
     private fun sampleMatte(
