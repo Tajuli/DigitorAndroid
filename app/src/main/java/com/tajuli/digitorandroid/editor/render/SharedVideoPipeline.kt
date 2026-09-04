@@ -13,6 +13,9 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
  *
  * Spatial BEAUTY remains separate because smoothing/lips/eyes/hair need neighbouring pixels or
  * semantic geometry. V39's adaptive skin qualifier also remains a post-color spatial refinement.
+ * V45 applies the portrait/chroma alpha matte after creator/beauty processing. V46 then performs a
+ * source-RGB-guided fabric/cloth realism pass on PERSON mattes only before transition/compositing.
+ * The same order is used by preview and export.
  *
  * Order:
  *  1. Transform.
@@ -21,7 +24,9 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
  *  4. V39 adaptive color qualifier / beauty refinement.
  *  5. Timed creator effects.
  *  6. Optional semantic FINISH beauty.
- *  7. Transition.
+ *  7. V45 Pro Cutout / Chroma Key alpha matte.
+ *  8. V46 fabric-aware RGB-guided portrait-edge refinement (PERSON only).
+ *  9. Transition.
  */
 @UnstableApi
 object SharedVideoPipeline {
@@ -32,6 +37,8 @@ object SharedVideoPipeline {
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = false)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
+        CutoutEffectV43.forClip(clip, preview = false)?.let(::add)
+        FabricAwareCutoutRefineV46.forClip(clip, preview = false)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
     }
 
@@ -47,6 +54,8 @@ object SharedVideoPipeline {
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = false)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
+        CutoutEffectV43.forClip(clip, preview = false)?.let(::add)
+        FabricAwareCutoutRefineV46.forClip(clip, preview = false)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
     }
 
@@ -57,6 +66,8 @@ object SharedVideoPipeline {
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
+        CutoutEffectV43.forClip(clip, preview = true)?.let(::add)
+        FabricAwareCutoutRefineV46.forClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
     }
 
@@ -67,6 +78,8 @@ object SharedVideoPipeline {
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
+        CutoutEffectV43.forClip(clip, preview = true)?.let(::add)
+        FabricAwareCutoutRefineV46.forClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
     }
 }

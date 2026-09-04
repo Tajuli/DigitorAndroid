@@ -3,7 +3,9 @@ package com.tajuli.digitorandroid.editor.processing
 import android.content.Context
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.transformer.ExportException
+import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.render.VisualOverlayRenderEnvironmentV19
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -27,10 +29,12 @@ class ProcessingRouter(context: Context) {
         quality: ExportQuality,
         onProgress: (ExportProgress) -> Unit,
     ): ExportResult {
-        // Low-latency contract: Export never waits for whole-video ML preprocessing. The shared GPU
-        // beauty stage renders immediately from the same deterministic fast fallback used by preview
-        // and upgrades to cached face/semantic masks whenever they already exist. Background ML is
-        // therefore an optional quality refinement, never an export prerequisite.
+        validateAutoCutoutReady(project)
+
+        // Low-latency contract: Export never waits for whole-video ML preprocessing for beauty.
+        // Auto Cutout is different: its matte is the actual edit, not an optional quality upgrade.
+        // Export must therefore refuse to silently pass through the original background when the
+        // requested clip has not finished semantic analysis.
         if (capabilities.supportsGpuEditing()) {
             val gpuName = capabilities.gpuDescription()
             onProgress(ExportProgress.Stage("GPU selected · $gpuName · ${quality.label}", 0f))
@@ -59,5 +63,21 @@ class ProcessingRouter(context: Context) {
 
         onProgress(ExportProgress.Stage("No compatible GPU · CPU fallback · ${quality.label}", 0f))
         return cpu.export(project, output, quality, onProgress)
+    }
+
+    private fun validateAutoCutoutReady(project: TimelineProject) {
+        val missing = project.tracks
+            .asSequence()
+            .flatMap { track -> track.clips.asSequence() }
+            .firstOrNull { clip ->
+                clip.resolvedCutoutV43().mode == CutoutModeV43.PERSON &&
+                    !hasPersonCutoutCoverageV43(appContext, clip)
+            }
+            ?: return
+
+        val name = missing.label.takeIf { it.isNotBlank() } ?: "selected clip"
+        throw IllegalStateException(
+            "Auto Cutout is not ready for $name. Open Cutout, tap Analyze, and wait for 'Person matte ready' before exporting.",
+        )
     }
 }

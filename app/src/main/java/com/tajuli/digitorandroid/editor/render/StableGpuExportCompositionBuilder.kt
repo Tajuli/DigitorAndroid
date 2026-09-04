@@ -10,10 +10,12 @@ import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
+import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.model.resolvedVisualOverlaysV19
 
 /**
@@ -23,6 +25,12 @@ import com.tajuli.digitorandroid.editor.model.resolvedVisualOverlaysV19
  * SingleInputVideoGraph is materially safer for camera Log media because it avoids the multi-input
  * GL compositor and sentinel video inputs while still running Digitor's per-clip transform, color,
  * qualifier and node effects.
+ *
+ * Cutout is the exception: Auto Cutout/Chroma Key produce foreground alpha. H.264 has no alpha
+ * channel, so a direct SingleInputVideoGraph would encode the original RGB behind transparent
+ * pixels and make the background reappear. Any cutout clip is therefore routed through Digitor's
+ * shared compositor, where the alpha is blended over the lower V track or the blank sentinel before
+ * the opaque H.264 frame reaches the encoder.
  *
  * Native still images are TimelineClip items too, but they are not encoded video sources. They must
  * use Media3's image contract (MediaItem.imageDurationMs + EditedMediaItem.frameRate) instead of a
@@ -240,7 +248,8 @@ internal fun findLinkedEmbeddedAudioMirror(
 
 /**
  * Historical name retained for existing tests. Direct SingleInputVideoGraph export is safe only
- * while every composition overlay frame sits on top of a real decoded video frame.
+ * while every composition overlay frame sits on top of a real decoded video frame and the clip
+ * does not require alpha compositing.
  */
 internal fun textOverlaysAreCoveredByRealVideoV14(project: TimelineProject): Boolean {
     val ranges = buildList {
@@ -259,6 +268,8 @@ internal fun canUseDirectSingleInputExport(project: TimelineProject): Boolean {
     val videoTracks = resolveCompositionVideoTracks(project)
     if (videoTracks.size != 1) return false
     return videoTracks.single().clips.all { clip ->
-        clip.opacity >= .9999f && clip.transition.isIdentity
+        clip.opacity >= .9999f &&
+            clip.transition.isIdentity &&
+            clip.resolvedCutoutV43().mode == CutoutModeV43.NONE
     }
 }

@@ -14,7 +14,7 @@ import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** CPU fallback: no OpenGL. Decode -> transform/color/effects/composite -> byte-buffer AVC encode. */
+/** CPU fallback: no OpenGL. Decode -> transform/color/effects/cutout/composite -> byte-buffer AVC encode. */
 class CpuExportBackend(private val context: Context) : ExportBackend {
     override suspend fun export(
         project: TimelineProject,
@@ -54,7 +54,7 @@ class CpuExportBackend(private val context: Context) : ExportBackend {
                     if (frameIndex % 4 == 0 || frameIndex == frameCount - 1) {
                         onProgress(
                             ExportProgress.Stage(
-                                "CPU: transform + color + effects + AVC encode · ${quality.label}",
+                                "CPU: transform + color + effects + V46 cutout + AVC encode · ${quality.label}",
                                 (frameIndex + 1f) / frameCount,
                             )
                         )
@@ -77,6 +77,7 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
     private val workerCount = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(2, 8)
     private val color = CpuColorProcessor(workerCount)
     private val effects = CpuNodeEffectsProcessor(workerCount)
+    private val cutout = CpuCutoutProcessorV43(context, workerCount)
     private val workers = Executors.newFixedThreadPool(workerCount)
     private val retrievers = mutableMapOf<String, MediaMetadataRetriever>()
 
@@ -93,9 +94,11 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
         active.forEach { (_, clip) ->
             val clipLocalUs = timeUs - clip.timelineStartUs
             val sourceUs = clip.sourceInUs + clipLocalUs
-            val bitmap = frameFor(clip, sourceUs) ?: return@forEach
+            val decoded = frameFor(clip, sourceUs) ?: return@forEach
+            val personCut = cutout.applyPersonToSource(decoded, clip, sourceUs)
+            val source = CpuFabricAwareCutoutRefineV46.refine(personCut, clip)
             val transformed = CpuTransformProcessor.render(
-                source = bitmap,
+                source = source,
                 outputWidth = project.width,
                 outputHeight = project.height,
                 clip = clip,
@@ -105,9 +108,13 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
             transformed.getPixels(overlay, 0, project.width, 0, 0, project.width, project.height)
             color.processClipArgb8888(overlay, project.width, project.height, clip, sourceUs)
             effects.processClipArgb8888(overlay, project.width, project.height, clip, sourceUs)
+            cutout.processChromaArgb8888(overlay, project.width, project.height, clip)
             blend(canvas, overlay, project.width, project.height, clip.opacity)
-            if (transformed !== bitmap) transformed.recycle()
-            bitmap.recycle()
+
+            if (transformed !== source) transformed.recycle()
+            if (source !== personCut) source.recycle()
+            if (personCut !== decoded) personCut.recycle()
+            decoded.recycle()
         }
         return canvas
     }
@@ -157,6 +164,7 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
         retrievers.values.forEach { it.release() }
         color.close()
         effects.close()
+        cutout.close()
         workers.shutdown()
     }
 }

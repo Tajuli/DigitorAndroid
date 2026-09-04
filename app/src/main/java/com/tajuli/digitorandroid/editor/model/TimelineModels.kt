@@ -137,6 +137,8 @@ data class TimelineClip(
     val visualMediaV21: TimelineVisualMediaV21? = null,
     /** Persisted source MIME lets Media3 build still-image items without guessing the file extension. */
     val sourceMimeTypeV21: String? = null,
+    /** V43 clip-level person/chroma cutout. Nullable keeps every older saved project readable. */
+    val cutoutV43: ClipCutoutV43? = null,
 ) {
     val durationUs: Long get() = (sourceOutUs - sourceInUs).coerceAtLeast(1L)
     val timelineEndUs: Long get() = timelineStartUs + durationUs
