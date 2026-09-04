@@ -27,10 +27,14 @@ private const val DECODER_TIMEOUT_US_V47 = 10_000L
 private const val FINAL_TARGET_EARLY_TOLERANCE_US_V47 = 50_000L
 
 /**
- * Sequential V47 video sampler. MediaCodec decodes once from the trim start instead of asking
+ * Sequential V49 video sampler. MediaCodec decodes once from the trim start instead of asking
  * MediaMetadataRetriever to perform hundreds/thousands of independent seeks. Decoder output lands
  * on an OES SurfaceTexture, then an offscreen GL pass rotates/scales selected frames to analysis
  * size. HIGH mode can emit every decoded source frame; LOW/MEDIUM emit only requested anchors.
+ *
+ * The emitted Bitmap is ownership-transferred to [onFrame]. This removes V48's second full-frame
+ * ARGB copy before GPU inference. If the callback throws before accepting ownership the decoder
+ * still recycles the Bitmap, so failure paths stay leak-safe.
  */
 internal class GpuSequentialCutoutDecoderV47(
     private val context: Context,
@@ -125,10 +129,15 @@ internal class GpuSequentialCutoutDecoderV47(
                         if (render) {
                             reader.awaitAndUpdateFrame()
                             val bitmap = reader.readBitmap()
+                            var transferred = false
                             try {
-                                onFrame(pts.coerceIn(startUs, (endUs - 1L).coerceAtLeast(startUs)), bitmap)
+                                onFrame(
+                                    pts.coerceIn(startUs, (endUs - 1L).coerceAtLeast(startUs)),
+                                    bitmap,
+                                )
+                                transferred = true
                             } finally {
-                                bitmap.recycle()
+                                if (!transferred && !bitmap.isRecycled) bitmap.recycle()
                             }
                             emitted++
                             if (!emitEveryFrame) {
@@ -166,7 +175,7 @@ private class OesFrameReaderV47(
     analysisLongEdge: Int,
 ) : AutoCloseable {
     private val egl = DecoderEglV47()
-    private val callbackThread = HandlerThread("DigitorCutoutV47Frame").apply { start() }
+    private val callbackThread = HandlerThread("DigitorCutoutV49Frame").apply { start() }
     private val callbackHandler = Handler(callbackThread.looper)
     private val frameLock = Object()
     @Volatile private var frameAvailable = false
@@ -187,6 +196,7 @@ private class OesFrameReaderV47(
     private val textureMatrix = FloatArray(16)
     private val outputWidth: Int
     private val outputHeight: Int
+    private val readbackBytes: ByteBuffer
 
     init {
         egl.makeCurrent()
@@ -196,6 +206,9 @@ private class OesFrameReaderV47(
         val scale = if (longEdge <= analysisLongEdge) 1f else analysisLongEdge / longEdge.toFloat()
         outputWidth = (rotatedWidth * scale).roundToInt().coerceAtLeast(1)
         outputHeight = (rotatedHeight * scale).roundToInt().coerceAtLeast(1)
+        readbackBytes = ByteBuffer
+            .allocateDirect(outputWidth * outputHeight * 4)
+            .order(ByteOrder.nativeOrder())
 
         oesTexture = createOesTexture()
         surfaceTexture = SurfaceTexture(oesTexture).apply {
@@ -242,7 +255,7 @@ private class OesFrameReaderV47(
             0,
         )
         check(GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) == GLES20.GL_FRAMEBUFFER_COMPLETE) {
-            "V47 decoder framebuffer is incomplete"
+            "V49 decoder framebuffer is incomplete"
         }
         GLES20.glViewport(0, 0, outputWidth, outputHeight)
         GLES20.glUseProgram(program)
@@ -264,13 +277,21 @@ private class OesFrameReaderV47(
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         checkGlV47("render sequential decode")
 
-        val bytes = ByteBuffer.allocateDirect(outputWidth * outputHeight * 4).order(ByteOrder.nativeOrder())
-        GLES20.glReadPixels(0, 0, outputWidth, outputHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, bytes)
+        readbackBytes.clear()
+        GLES20.glReadPixels(
+            0,
+            0,
+            outputWidth,
+            outputHeight,
+            GLES20.GL_RGBA,
+            GLES20.GL_UNSIGNED_BYTE,
+            readbackBytes,
+        )
         checkGlV47("read sequential decode")
-        bytes.rewind()
+        readbackBytes.rewind()
         return Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888).also { bitmap ->
             // Fragment shader swaps R/B and vertically maps for Android's little-endian ARGB memory.
-            bitmap.copyPixelsFromBuffer(bytes)
+            bitmap.copyPixelsFromBuffer(readbackBytes)
         }
     }
 
@@ -392,7 +413,7 @@ private class DecoderEglV47 : AutoCloseable {
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE),
             0,
         )
-        check(context != EGL14.EGL_NO_CONTEXT) { "Could not create decoder EGL context" }
+        check(context != EGL14.EGL_NO_CONTEXT) { "Could not create EGL context for V49 cutout decode" }
         surface = EGL14.eglCreatePbufferSurface(
             display,
             config,
@@ -427,7 +448,7 @@ private fun compileProgramV47(vertex: String, fragment: String): Int {
     val log = GLES20.glGetProgramInfoLog(program)
     GLES20.glDeleteShader(vs)
     GLES20.glDeleteShader(fs)
-    check(status[0] == GLES20.GL_TRUE) { "V47 decoder program link failed: $log" }
+    check(status[0] == GLES20.GL_TRUE) { "V49 GPU decoder program link failed: $log" }
     return program
 }
 
@@ -438,7 +459,7 @@ private fun compileShaderV47(type: Int, source: String): Int {
     val status = IntArray(1)
     GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, status, 0)
     val log = GLES20.glGetShaderInfoLog(shader)
-    check(status[0] == GLES20.GL_TRUE) { "V47 decoder shader compile failed: $log" }
+    check(status[0] == GLES20.GL_TRUE) { "V49 GPU decoder shader compile failed: $log" }
     return shader
 }
 
