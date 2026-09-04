@@ -3,39 +3,28 @@ package com.tajuli.digitorandroid.editor.processing
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ImageDecoder
-import android.graphics.Paint
-import android.graphics.Rect
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
-import com.google.ai.edge.litert.Accelerator
-import com.google.ai.edge.litert.CompiledModel
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
-import com.tajuli.digitorandroid.editor.model.PersonMattingBackendV50
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
-import com.tajuli.digitorandroid.editor.model.resolvedPersonMattingBackendV50
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.roundToInt
 
-private const val MODNET_MODEL_ASSET_V47 = "modnet_v44.tflite"
-private const val MODNET_SIZE_V47 = 512
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
 /**
- * V50 selectable portrait-matting revision of the V49 adaptive analyzer.
+ * V50 PP-MattingV2-only revision of the adaptive Pro Cutout analyzer.
  *
  * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Hardware decode overlaps a bounded
  * inference worker and decoded frame ownership moves straight into that queue with no second ARGB
- * copy. MODNet keeps its near-fully-GPU LiteRT + ES3 pre/post path. Experimental PP-MattingV2 uses
- * ONNX Runtime CPU for the base matte while deliberately sharing the exact same HairSegmenter,
- * temporal local-flow refinement, matte writer and preview/export cache contract. This makes the
- * device A/B test about portrait-model quality rather than accidentally comparing two refiners.
+ * copy. PP-MattingV2/STDC1 512 supplies the base soft alpha. MediaPipe HairSegmenter and the
+ * existing GPU-first local spatial-flow stabilizer then refine the matte before it is persisted for
+ * shared preview/export use.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -61,9 +50,8 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         onBackendResolved: ((String) -> Unit)?,
     ): Int {
         val bitmap = decodeImage(Uri.parse(clip.uri)) ?: error("Could not decode image for Pro Cutout")
-        val backend = clip.resolvedCutoutV43().resolvedPersonMattingBackendV50()
         try {
-            GpuPersonCutoutSegmenterV47(context, backend).use { segmenter ->
+            GpuPersonCutoutSegmenterV47(context).use { segmenter ->
                 onBackendResolved?.invoke(segmenter.backendSummary())
                 check(segmenter.segmentAndStore(clip, bitmap, clip.sourceInUs)) {
                     "Portrait matting returned no alpha"
@@ -87,14 +75,13 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         val end = clip.sourceOutUs.coerceAtLeast(start + 1L)
         val settings = clip.resolvedCutoutV43()
         val quality = settings.analysisQualityV47
-        val backend = settings.resolvedPersonMattingBackendV50()
         val cadence = personCutoutCadenceV47(quality)
         val targetTimes = personCutoutTargetTimesV47(start, end, quality)
 
         // Important: lazy initialization happens on the inference worker, not this producer thread.
         // MediaPipe GPU delegates and EGL contexts therefore keep create/run/close thread affinity.
         val segmenterLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-            GpuPersonCutoutSegmenterV47(context, backend).also {
+            GpuPersonCutoutSegmenterV47(context).also {
                 onBackendResolved?.invoke(it.backendSummary())
             }
         }
@@ -129,8 +116,8 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                 }
             }
 
-            // Producer: MediaCodec + OES + GL scale. Consumer: selected base matte + MediaPipe Hair
-            // + GL flow. V49/V50 transfer the decoder Bitmap directly to the bounded worker.
+            // Producer: MediaCodec + OES + GL scale. Consumer: PP-MattingV2 + MediaPipe Hair + GL
+            // temporal flow. Decoder Bitmaps are transferred directly to the bounded worker.
             val sequentialResult = runCatching {
                 GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
                     uri = Uri.parse(clip.uri),
@@ -153,7 +140,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                 }
 
                 // LOW/MEDIUM reliability fallback for unusual vendor codecs. These Bitmaps are also
-                // ownership-transferred, so even the fallback avoids the old second ARGB copy.
+                // ownership-transferred, so the fallback avoids the old second ARGB copy.
                 val retriever = MediaMetadataRetriever()
                 try {
                     retriever.setDataSource(context, Uri.parse(clip.uri))
@@ -249,15 +236,9 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     }.getOrNull()
 }
 
-private class GpuPersonCutoutSegmenterV47(
-    context: Context,
-    backend: PersonMattingBackendV50,
-) : AutoCloseable {
+private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
-    private val portraitMatte: PortraitMatteBackendV50 = when (backend) {
-        PersonMattingBackendV50.MODNET -> GpuModNetPortraitMatteV47(appContext)
-        PersonMattingBackendV50.PP_MATTING_V2 -> PpMattingV2PortraitMatteV50(appContext)
-    }
+    private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
     private val hair = BeautyHairSegmenterV29(appContext)
     private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
     private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
@@ -427,201 +408,4 @@ private class GpuPersonCutoutSegmenterV47(
         runCatching { hair.close() }
         runCatching { portraitMatte.close() }
     }
-}
-
-/** LiteRT CompiledModel requests GPU-only first, then hybrid, then CPU fallback. */
-private class GpuModNetPortraitMatteV47(context: Context) : PortraitMatteBackendV50 {
-    private val model: CompiledModel
-    private val modelBackendLabel: String
-    private val inputBuffers: List<com.google.ai.edge.litert.TensorBuffer>
-    private val outputBuffers: List<com.google.ai.edge.litert.TensorBuffer>
-
-    private val plane = MODNET_SIZE_V47 * MODNET_SIZE_V47
-    private val inputPixels = IntArray(plane)
-    private val inputTensor = FloatArray(plane * 3)
-    private val alphaPixels = IntArray(plane)
-    private val inputSquare = Bitmap.createBitmap(MODNET_SIZE_V47, MODNET_SIZE_V47, Bitmap.Config.ARGB_8888)
-    private val alphaSquare = Bitmap.createBitmap(MODNET_SIZE_V47, MODNET_SIZE_V47, Bitmap.Config.ARGB_8888)
-    private val inputCanvas = Canvas(inputSquare)
-    private val filterPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private var gpuTensorPacker: GpuModNetTensorPackerV48? = null
-
-    override val backendLabel: String
-        get() = "MODNet · $modelBackendLabel · ${if (gpuTensorPacker != null) "GPU pre/post" else "CPU pre/post"}"
-
-    init {
-        val app = context.applicationContext
-        val gpuOnly = runCatching {
-            CompiledModel.create(
-                app.assets,
-                MODNET_MODEL_ASSET_V47,
-                CompiledModel.Options(Accelerator.GPU),
-            )
-        }
-        if (gpuOnly.isSuccess) {
-            model = gpuOnly.getOrThrow()
-            modelBackendLabel = "GPU-only"
-        } else {
-            val hybrid = runCatching {
-                CompiledModel.create(
-                    app.assets,
-                    MODNET_MODEL_ASSET_V47,
-                    CompiledModel.Options(Accelerator.GPU, Accelerator.CPU),
-                )
-            }
-            if (hybrid.isSuccess) {
-                model = hybrid.getOrThrow()
-                modelBackendLabel = "GPU/hybrid"
-            } else {
-                model = CompiledModel.create(
-                    app.assets,
-                    MODNET_MODEL_ASSET_V47,
-                    CompiledModel.Options(Accelerator.CPU).apply {
-                        cpuOptions = CompiledModel.CpuOptions(numThreads = 4)
-                    },
-                )
-                modelBackendLabel = "CPU fallback"
-            }
-        }
-        inputBuffers = model.createInputBuffers()
-        outputBuffers = model.createOutputBuffers()
-        check(inputBuffers.isNotEmpty() && outputBuffers.isNotEmpty()) {
-            "MODNet did not expose input/output buffers"
-        }
-
-        // ES3/float-FBO devices offload letterbox/resize, normalization, NCHW transposition and
-        // alpha crop/scale to shaders. The helper releases its EGL context before LiteRT runs.
-        gpuTensorPacker = runCatching { GpuModNetTensorPackerV48() }.getOrNull()
-    }
-
-    override fun infer(source: Bitmap): Bitmap {
-        val prepared = letterboxGeometry(source)
-        val packerBeforeRun = gpuTensorPacker
-        val packedOnGpu = packerBeforeRun?.let { packer ->
-            val ok = runCatching {
-                packer.pack(
-                    source = source,
-                    letterboxLeft = prepared.left,
-                    letterboxTop = prepared.top,
-                    letterboxWidth = prepared.contentWidth,
-                    letterboxHeight = prepared.contentHeight,
-                    destination = inputTensor,
-                )
-            }.getOrDefault(false)
-            if (!ok) {
-                runCatching { packer.close() }
-                gpuTensorPacker = null
-            }
-            ok
-        } ?: false
-
-        if (!packedOnGpu) {
-            // Compatibility fallback only. GPU-capable devices avoid both this Canvas resize and the
-            // per-pixel Kotlin normalization/transposition loop entirely.
-            inputSquare.eraseColor(Color.BLACK)
-            inputCanvas.drawBitmap(
-                source,
-                null,
-                Rect(
-                    prepared.left,
-                    prepared.top,
-                    prepared.left + prepared.contentWidth,
-                    prepared.top + prepared.contentHeight,
-                ),
-                filterPaint,
-            )
-            inputSquare.getPixels(
-                inputPixels,
-                0,
-                MODNET_SIZE_V47,
-                0,
-                0,
-                MODNET_SIZE_V47,
-                MODNET_SIZE_V47,
-            )
-            for (i in 0 until plane) {
-                val pixel = inputPixels[i]
-                inputTensor[i] = Color.red(pixel) / 127.5f - 1f
-                inputTensor[plane + i] = Color.green(pixel) / 127.5f - 1f
-                inputTensor[plane * 2 + i] = Color.blue(pixel) / 127.5f - 1f
-            }
-        }
-
-        // LiteRT Kotlin still exposes a host-visible FloatArray boundary. On the accelerated path
-        // this is one bulk write after GPU preprocessing rather than hundreds of thousands of CPU ops.
-        inputBuffers[0].writeFloat(inputTensor)
-        model.run(inputBuffers, outputBuffers)
-        val alpha = outputBuffers[0].readFloat()
-        check(alpha.size >= plane) { "MODNet alpha output was ${alpha.size}; expected at least $plane values" }
-
-        if (packedOnGpu) {
-            val packer = gpuTensorPacker
-            if (packer != null) {
-                val gpuOutput = runCatching {
-                    packer.unpackAlpha(
-                        alpha = alpha,
-                        letterboxLeft = prepared.left,
-                        letterboxTop = prepared.top,
-                        letterboxWidth = prepared.contentWidth,
-                        letterboxHeight = prepared.contentHeight,
-                        outputWidth = source.width,
-                        outputHeight = source.height,
-                    )
-                }.getOrNull()
-                if (gpuOutput != null) return gpuOutput
-
-                // A device can expose float packing yet fail a post-process FBO at runtime. Disable
-                // the helper once and finish this/current future frames through the proven CPU path.
-                runCatching { packer.close() }
-                gpuTensorPacker = null
-            }
-        }
-
-        // CPU compatibility output shaping. Normal V49 ES3 devices skip this whole loop/Canvas path.
-        for (i in 0 until plane) {
-            val v = (alpha[i].coerceIn(0f, 1f) * 255f).roundToInt().coerceIn(0, 255)
-            alphaPixels[i] = Color.argb(255, v, v, v)
-        }
-        alphaSquare.setPixels(alphaPixels, 0, MODNET_SIZE_V47, 0, 0, MODNET_SIZE_V47, MODNET_SIZE_V47)
-        val output = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
-        Canvas(output).drawBitmap(
-            alphaSquare,
-            Rect(prepared.left, prepared.top, prepared.left + prepared.contentWidth, prepared.top + prepared.contentHeight),
-            Rect(0, 0, source.width, source.height),
-            filterPaint,
-        )
-        return output
-    }
-
-    private fun letterboxGeometry(source: Bitmap): LetterboxV47 {
-        val scale = min(
-            MODNET_SIZE_V47 / source.width.toFloat(),
-            MODNET_SIZE_V47 / source.height.toFloat(),
-        )
-        val width = (source.width * scale).roundToInt().coerceIn(1, MODNET_SIZE_V47)
-        val height = (source.height * scale).roundToInt().coerceIn(1, MODNET_SIZE_V47)
-        return LetterboxV47(
-            left = (MODNET_SIZE_V47 - width) / 2,
-            top = (MODNET_SIZE_V47 - height) / 2,
-            contentWidth = width,
-            contentHeight = height,
-        )
-    }
-
-    override fun close() {
-        runCatching { gpuTensorPacker?.close() }
-        gpuTensorPacker = null
-        inputBuffers.forEach { runCatching { it.close() } }
-        outputBuffers.forEach { runCatching { it.close() } }
-        runCatching { model.close() }
-        if (!inputSquare.isRecycled) inputSquare.recycle()
-        if (!alphaSquare.isRecycled) alphaSquare.recycle()
-    }
-
-    private data class LetterboxV47(
-        val left: Int,
-        val top: Int,
-        val contentWidth: Int,
-        val contentHeight: Int,
-    )
 }
