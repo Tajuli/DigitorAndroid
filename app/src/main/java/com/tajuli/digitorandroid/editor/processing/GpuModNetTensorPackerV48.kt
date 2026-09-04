@@ -19,29 +19,45 @@ private const val MODNET_PACK_WIDTH_V48 = 512
 private const val MODNET_PACK_HEIGHT_V48 = 384 // 512*384*4 == 3*512*512 floats
 
 /**
- * Packs a prepared 512x512 RGB bitmap into normalized NCHW MODNet floats on OpenGL ES 3.
+ * OpenGL ES 3 pre/post processor for MODNet.
  *
- * LiteRT 2.1.5's Kotlin TensorBuffer still accepts a host FloatArray, so one bulk GPU readback is
- * unavoidable here. The expensive per-pixel Kotlin Color extraction, normalization and CHW
- * transposition are removed from the hot loop. Unsupported float-render-target devices simply do
- * not construct this helper and keep the proven CPU fallback.
+ * V49 removes both CPU Canvas scaling stages from the accelerated path. The source analysis Bitmap
+ * is uploaded once, letterboxed/resampled and normalized into NCHW floats by a shader, then the
+ * host-visible LiteRT tensor boundary is crossed in one bulk readback. After inference, the returned
+ * alpha FloatArray is bulk-uploaded and the crop/scale back to analysis resolution is also rendered
+ * by a shader. There are no per-pixel Kotlin color/alpha loops on the supported GPU fast path.
+ *
+ * LiteRT 2.1.5 Kotlin still exposes host TensorBuffer read/write APIs, so literal zero-copy GPU
+ * model I/O is not available here; these two bulk boundaries are intentionally the only model-side
+ * CPU transfers.
  */
 internal class GpuModNetTensorPackerV48 : AutoCloseable {
     private val egl = PackerEglV48()
-    private val program: Int
+    private val packProgram: Int
+    private val alphaProgram: Int
     private val framebuffer: Int
     private val inputTexture: Int
-    private val outputTexture: Int
+    private val packedTexture: Int
+    private val alphaTexture: Int
+    private val alphaOutputTexture: Int
     private val quad: FloatBuffer = floatBufferV48(
         -1f, -1f,
          1f, -1f,
         -1f,  1f,
          1f,  1f,
     )
-    private val readback = ByteBuffer
+    private val tensorReadback = ByteBuffer
         .allocateDirect(MODNET_PACK_FLOATS_V48 * 4)
         .order(ByteOrder.nativeOrder())
         .asFloatBuffer()
+    private val alphaUpload = ByteBuffer
+        .allocateDirect(MODNET_PACK_PLANE_V48 * 4)
+        .order(ByteOrder.nativeOrder())
+        .asFloatBuffer()
+
+    private var alphaOutputWidth = 1
+    private var alphaOutputHeight = 1
+    private var alphaReadback = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
 
     init {
         egl.makeCurrent()
@@ -52,21 +68,17 @@ internal class GpuModNetTensorPackerV48 : AutoCloseable {
             check(extensions.contains("GL_EXT_color_buffer_float")) {
                 "GL_EXT_color_buffer_float is required for GPU tensor packing"
             }
-            program = compileProgramV48(VERTEX_SHADER, PACK_FRAGMENT_SHADER)
+            packProgram = compileProgramV48(FULLSCREEN_VERTEX, PACK_FRAGMENT_SHADER)
+            alphaProgram = compileProgramV48(FULLSCREEN_VERTEX, ALPHA_FRAGMENT_SHADER)
             framebuffer = IntArray(1).also { GLES30.glGenFramebuffers(1, it, 0) }[0]
             inputTexture = createInputTextureV48()
-            outputTexture = createOutputTextureV48()
+            packedTexture = createPackedTextureV48()
+            alphaTexture = createAlphaTextureV49()
+            alphaOutputTexture = createAlphaOutputTextureV49()
 
-            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, framebuffer)
-            GLES30.glFramebufferTexture2D(
-                GLES30.GL_FRAMEBUFFER,
-                GLES30.GL_COLOR_ATTACHMENT0,
-                GLES30.GL_TEXTURE_2D,
-                outputTexture,
-                0,
-            )
+            attachTextureV49(packedTexture)
             check(GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) == GLES30.GL_FRAMEBUFFER_COMPLETE) {
-                "V48 MODNet float framebuffer is incomplete"
+                "V49 MODNet float framebuffer is incomplete"
             }
             GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         } finally {
@@ -75,30 +87,55 @@ internal class GpuModNetTensorPackerV48 : AutoCloseable {
         }
     }
 
-    /** Returns true when [destination] was filled with 3x512x512 normalized NCHW floats. */
-    fun pack(prepared512: Bitmap, destination: FloatArray): Boolean {
-        check(prepared512.width == MODNET_PACK_SIZE_V48 && prepared512.height == MODNET_PACK_SIZE_V48)
+    /** Compatibility overload used by the instrumentation test and any already-prepared 512 input. */
+    fun pack(prepared512: Bitmap, destination: FloatArray): Boolean = pack(
+        source = prepared512,
+        letterboxLeft = 0,
+        letterboxTop = 0,
+        letterboxWidth = MODNET_PACK_SIZE_V48,
+        letterboxHeight = MODNET_PACK_SIZE_V48,
+        destination = destination,
+    )
+
+    /**
+     * GPU letterbox + bilinear resize + RGB normalization + NCHW packing.
+     * [letterboxLeft]/[letterboxTop]/[letterboxWidth]/[letterboxHeight] describe where [source]
+     * would have been drawn inside a 512x512 MODNet canvas.
+     */
+    fun pack(
+        source: Bitmap,
+        letterboxLeft: Int,
+        letterboxTop: Int,
+        letterboxWidth: Int,
+        letterboxHeight: Int,
+        destination: FloatArray,
+    ): Boolean {
         check(destination.size >= MODNET_PACK_FLOATS_V48)
+        check(letterboxWidth > 0 && letterboxHeight > 0)
         egl.makeCurrent()
         try {
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, inputTexture)
-            GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, prepared512, 0)
-            checkGlV48("upload MODNet input")
+            GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, source, 0)
+            checkGlV48("upload MODNet source")
 
-            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, framebuffer)
+            attachTextureV49(packedTexture)
             GLES30.glViewport(0, 0, MODNET_PACK_WIDTH_V48, MODNET_PACK_HEIGHT_V48)
-            GLES30.glUseProgram(program)
-            val position = GLES30.glGetAttribLocation(program, "aPosition")
-            quad.position(0)
-            GLES30.glEnableVertexAttribArray(position)
-            GLES30.glVertexAttribPointer(position, 2, GLES30.GL_FLOAT, false, 0, quad)
+            GLES30.glUseProgram(packProgram)
+            bindQuadV49(packProgram)
             GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, inputTexture)
-            GLES30.glUniform1i(GLES30.glGetUniformLocation(program, "uInput"), 0)
+            GLES30.glUniform1i(GLES30.glGetUniformLocation(packProgram, "uInput"), 0)
+            GLES30.glUniform4i(
+                GLES30.glGetUniformLocation(packProgram, "uLetterbox"),
+                letterboxLeft,
+                letterboxTop,
+                letterboxWidth,
+                letterboxHeight,
+            )
             GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
             checkGlV48("pack MODNet tensor")
 
-            readback.clear()
+            tensorReadback.clear()
             GLES30.glReadPixels(
                 0,
                 0,
@@ -106,11 +143,11 @@ internal class GpuModNetTensorPackerV48 : AutoCloseable {
                 MODNET_PACK_HEIGHT_V48,
                 GLES30.GL_RGBA,
                 GLES30.GL_FLOAT,
-                readback,
+                tensorReadback,
             )
             checkGlV48("read MODNet tensor")
-            readback.rewind()
-            readback.get(destination, 0, MODNET_PACK_FLOATS_V48)
+            tensorReadback.rewind()
+            tensorReadback.get(destination, 0, MODNET_PACK_FLOATS_V48)
             GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
             return true
         } finally {
@@ -120,30 +157,151 @@ internal class GpuModNetTensorPackerV48 : AutoCloseable {
         }
     }
 
+    /**
+     * Bulk-upload MODNet alpha and crop/scale it back to analysis resolution on GPU. The returned
+     * grayscale Bitmap is the unavoidable cache/MediaPipe interoperability boundary used by the
+     * existing temporal renderer and async matte writer.
+     */
+    fun unpackAlpha(
+        alpha: FloatArray,
+        letterboxLeft: Int,
+        letterboxTop: Int,
+        letterboxWidth: Int,
+        letterboxHeight: Int,
+        outputWidth: Int,
+        outputHeight: Int,
+    ): Bitmap {
+        check(alpha.size >= MODNET_PACK_PLANE_V48)
+        check(outputWidth > 0 && outputHeight > 0)
+        egl.makeCurrent()
+        try {
+            alphaUpload.clear()
+            alphaUpload.put(alpha, 0, MODNET_PACK_PLANE_V48)
+            alphaUpload.rewind()
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, alphaTexture)
+            GLES30.glTexSubImage2D(
+                GLES30.GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                MODNET_PACK_SIZE_V48,
+                MODNET_PACK_SIZE_V48,
+                GLES30.GL_RED,
+                GLES30.GL_FLOAT,
+                alphaUpload,
+            )
+            checkGlV48("upload MODNet alpha")
+
+            ensureAlphaOutputV49(outputWidth, outputHeight)
+            attachTextureV49(alphaOutputTexture)
+            GLES30.glViewport(0, 0, outputWidth, outputHeight)
+            GLES30.glUseProgram(alphaProgram)
+            bindQuadV49(alphaProgram)
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, alphaTexture)
+            GLES30.glUniform1i(GLES30.glGetUniformLocation(alphaProgram, "uAlpha"), 0)
+            GLES30.glUniform4f(
+                GLES30.glGetUniformLocation(alphaProgram, "uLetterbox"),
+                letterboxLeft.toFloat(),
+                letterboxTop.toFloat(),
+                letterboxWidth.toFloat(),
+                letterboxHeight.toFloat(),
+            )
+            GLES30.glUniform2f(
+                GLES30.glGetUniformLocation(alphaProgram, "uOutputSize"),
+                outputWidth.toFloat(),
+                outputHeight.toFloat(),
+            )
+            GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+            checkGlV48("render MODNet alpha")
+
+            alphaReadback.clear()
+            GLES30.glReadPixels(
+                0,
+                0,
+                outputWidth,
+                outputHeight,
+                GLES30.GL_RGBA,
+                GLES30.GL_UNSIGNED_BYTE,
+                alphaReadback,
+            )
+            checkGlV48("read MODNet alpha")
+            alphaReadback.rewind()
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+            return Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888).also { bitmap ->
+                bitmap.copyPixelsFromBuffer(alphaReadback)
+            }
+        } finally {
+            egl.releaseCurrent()
+        }
+    }
+
     override fun close() {
         runCatching {
             egl.makeCurrent()
-            GLES30.glDeleteProgram(program)
+            GLES30.glDeleteProgram(packProgram)
+            GLES30.glDeleteProgram(alphaProgram)
             GLES30.glDeleteFramebuffers(1, intArrayOf(framebuffer), 0)
-            GLES30.glDeleteTextures(1, intArrayOf(inputTexture), 0)
-            GLES30.glDeleteTextures(1, intArrayOf(outputTexture), 0)
+            GLES30.glDeleteTextures(
+                4,
+                intArrayOf(inputTexture, packedTexture, alphaTexture, alphaOutputTexture),
+                0,
+            )
             egl.releaseCurrent()
         }
         egl.close()
+    }
+
+    private fun bindQuadV49(program: Int) {
+        val position = GLES30.glGetAttribLocation(program, "aPosition")
+        quad.position(0)
+        GLES30.glEnableVertexAttribArray(position)
+        GLES30.glVertexAttribPointer(position, 2, GLES30.GL_FLOAT, false, 0, quad)
+    }
+
+    private fun attachTextureV49(texture: Int) {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, framebuffer)
+        GLES30.glFramebufferTexture2D(
+            GLES30.GL_FRAMEBUFFER,
+            GLES30.GL_COLOR_ATTACHMENT0,
+            GLES30.GL_TEXTURE_2D,
+            texture,
+            0,
+        )
+    }
+
+    private fun ensureAlphaOutputV49(width: Int, height: Int) {
+        if (width == alphaOutputWidth && height == alphaOutputHeight) return
+        alphaOutputWidth = width
+        alphaOutputHeight = height
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, alphaOutputTexture)
+        GLES30.glTexImage2D(
+            GLES30.GL_TEXTURE_2D,
+            0,
+            GLES30.GL_RGBA,
+            width,
+            height,
+            0,
+            GLES30.GL_RGBA,
+            GLES30.GL_UNSIGNED_BYTE,
+            null,
+        )
+        checkGlV48("resize MODNet alpha output")
+        alphaReadback = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder())
     }
 
     private fun createInputTextureV48(): Int {
         val ids = IntArray(1)
         GLES30.glGenTextures(1, ids, 0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, ids[0])
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_NEAREST)
-        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_NEAREST)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
         return ids[0]
     }
 
-    private fun createOutputTextureV48(): Int {
+    private fun createPackedTextureV48(): Int {
         val ids = IntArray(1)
         GLES30.glGenTextures(1, ids, 0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, ids[0])
@@ -166,8 +324,53 @@ internal class GpuModNetTensorPackerV48 : AutoCloseable {
         return ids[0]
     }
 
+    private fun createAlphaTextureV49(): Int {
+        val ids = IntArray(1)
+        GLES30.glGenTextures(1, ids, 0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, ids[0])
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexImage2D(
+            GLES30.GL_TEXTURE_2D,
+            0,
+            GLES30.GL_R32F,
+            MODNET_PACK_SIZE_V48,
+            MODNET_PACK_SIZE_V48,
+            0,
+            GLES30.GL_RED,
+            GLES30.GL_FLOAT,
+            null,
+        )
+        checkGlV48("allocate MODNet alpha texture")
+        return ids[0]
+    }
+
+    private fun createAlphaOutputTextureV49(): Int {
+        val ids = IntArray(1)
+        GLES30.glGenTextures(1, ids, 0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, ids[0])
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexImage2D(
+            GLES30.GL_TEXTURE_2D,
+            0,
+            GLES30.GL_RGBA,
+            1,
+            1,
+            0,
+            GLES30.GL_RGBA,
+            GLES30.GL_UNSIGNED_BYTE,
+            null,
+        )
+        return ids[0]
+    }
+
     private companion object {
-        const val VERTEX_SHADER = """#version 300 es
+        const val FULLSCREEN_VERTEX = """#version 300 es
             in vec2 aPosition;
             void main() {
                 gl_Position = vec4(aPosition, 0.0, 1.0);
@@ -178,17 +381,33 @@ internal class GpuModNetTensorPackerV48 : AutoCloseable {
             precision highp float;
             precision highp int;
             uniform sampler2D uInput;
+            uniform ivec4 uLetterbox;
             out vec4 outValue;
 
             const int SIZE = 512;
             const int PLANE = 262144;
+
+            vec3 letterboxedRgb(int x, int y) {
+                int left = uLetterbox.x;
+                int top = uLetterbox.y;
+                int width = uLetterbox.z;
+                int height = uLetterbox.w;
+                if (x < left || y < top || x >= left + width || y >= top + height) {
+                    return vec3(0.0);
+                }
+                vec2 uv = vec2(
+                    (float(x - left) + 0.5) / float(width),
+                    (float(y - top) + 0.5) / float(height)
+                );
+                return texture(uInput, uv).rgb;
+            }
 
             float tensorValue(int index) {
                 int channel = index / PLANE;
                 int spatial = index - channel * PLANE;
                 int x = spatial - (spatial / SIZE) * SIZE;
                 int y = spatial / SIZE;
-                vec3 rgb = texelFetch(uInput, ivec2(x, y), 0).rgb;
+                vec3 rgb = letterboxedRgb(x, y);
                 float value = channel == 0 ? rgb.r : (channel == 1 ? rgb.g : rgb.b);
                 return value * 2.0 - 1.0;
             }
@@ -205,6 +424,22 @@ internal class GpuModNetTensorPackerV48 : AutoCloseable {
                 );
             }
         """
+
+        const val ALPHA_FRAGMENT_SHADER = """#version 300 es
+            precision highp float;
+            uniform sampler2D uAlpha;
+            uniform vec4 uLetterbox;
+            uniform vec2 uOutputSize;
+            out vec4 outValue;
+
+            void main() {
+                vec2 outputUv = gl_FragCoord.xy / uOutputSize;
+                vec2 modelPixel = uLetterbox.xy + outputUv * uLetterbox.zw;
+                vec2 modelUv = modelPixel / 512.0;
+                float a = clamp(texture(uAlpha, modelUv).r, 0.0, 1.0);
+                outValue = vec4(a, a, a, 1.0);
+            }
+        """
     }
 }
 
@@ -215,9 +450,9 @@ private class PackerEglV48 : AutoCloseable {
 
     init {
         display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
-        check(display != EGL14.EGL_NO_DISPLAY) { "Could not get V48 packer EGL display" }
+        check(display != EGL14.EGL_NO_DISPLAY) { "Could not get V49 packer EGL display" }
         val version = IntArray(2)
-        check(EGL14.eglInitialize(display, version, 0, version, 1)) { "Could not initialize V48 packer EGL" }
+        check(EGL14.eglInitialize(display, version, 0, version, 1)) { "Could not initialize V49 packer EGL" }
         val configs = arrayOfNulls<EGLConfig>(1)
         val count = IntArray(1)
         val attrs = intArrayOf(
@@ -230,9 +465,9 @@ private class PackerEglV48 : AutoCloseable {
             EGL14.EGL_NONE,
         )
         check(EGL14.eglChooseConfig(display, attrs, 0, configs, 0, 1, count, 0) && count[0] > 0) {
-            "Could not choose V48 ES3 packer EGL config"
+            "Could not choose V49 ES3 packer EGL config"
         }
-        val config = configs[0] ?: error("Missing V48 packer EGL config")
+        val config = configs[0] ?: error("Missing V49 packer EGL config")
         context = EGL14.eglCreateContext(
             display,
             config,
@@ -240,18 +475,18 @@ private class PackerEglV48 : AutoCloseable {
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE),
             0,
         )
-        check(context != EGL14.EGL_NO_CONTEXT) { "Could not create V48 ES3 packer context" }
+        check(context != EGL14.EGL_NO_CONTEXT) { "Could not create V49 ES3 packer context" }
         surface = EGL14.eglCreatePbufferSurface(
             display,
             config,
             intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE),
             0,
         )
-        check(surface != EGL14.EGL_NO_SURFACE) { "Could not create V48 packer pbuffer" }
+        check(surface != EGL14.EGL_NO_SURFACE) { "Could not create V49 packer pbuffer" }
     }
 
     fun makeCurrent() {
-        check(EGL14.eglMakeCurrent(display, surface, surface, context)) { "Could not bind V48 packer EGL context" }
+        check(EGL14.eglMakeCurrent(display, surface, surface, context)) { "Could not bind V49 packer EGL context" }
     }
 
     fun releaseCurrent() {
@@ -262,7 +497,7 @@ private class PackerEglV48 : AutoCloseable {
                 EGL14.EGL_NO_SURFACE,
                 EGL14.EGL_NO_CONTEXT,
             ),
-        ) { "Could not release V48 packer EGL context" }
+        ) { "Could not release V49 packer EGL context" }
     }
 
     override fun close() {
@@ -285,7 +520,7 @@ private fun compileProgramV48(vertex: String, fragment: String): Int {
     val log = GLES30.glGetProgramInfoLog(program)
     GLES30.glDeleteShader(vs)
     GLES30.glDeleteShader(fs)
-    check(status[0] == GLES30.GL_TRUE) { "V48 MODNet packer link failed: $log" }
+    check(status[0] == GLES30.GL_TRUE) { "V49 MODNet GPU program link failed: $log" }
     return program
 }
 
@@ -296,7 +531,7 @@ private fun compileShaderV48(type: Int, source: String): Int {
     val status = IntArray(1)
     GLES30.glGetShaderiv(shader, GLES30.GL_COMPILE_STATUS, status, 0)
     val log = GLES30.glGetShaderInfoLog(shader)
-    check(status[0] == GLES30.GL_TRUE) { "V48 MODNet packer shader compile failed: $log" }
+    check(status[0] == GLES30.GL_TRUE) { "V49 MODNet GPU shader compile failed: $log" }
     return shader
 }
 
