@@ -54,7 +54,7 @@ class CpuExportBackend(private val context: Context) : ExportBackend {
                     if (frameIndex % 4 == 0 || frameIndex == frameCount - 1) {
                         onProgress(
                             ExportProgress.Stage(
-                                "CPU: transform + color + effects + cutout + AVC encode · ${quality.label}",
+                                "CPU: transform + color + effects + V46 cutout + AVC encode · ${quality.label}",
                                 (frameIndex + 1f) / frameCount,
                             )
                         )
@@ -95,7 +95,8 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
             val clipLocalUs = timeUs - clip.timelineStartUs
             val sourceUs = clip.sourceInUs + clipLocalUs
             val decoded = frameFor(clip, sourceUs) ?: return@forEach
-            val source = cutout.applyPersonToSource(decoded, clip, sourceUs)
+            val personCut = cutout.applyPersonToSource(decoded, clip, sourceUs)
+            val source = CpuFabricAwareCutoutRefineV46.refine(personCut, clip)
             val transformed = CpuTransformProcessor.render(
                 source = source,
                 outputWidth = project.width,
@@ -111,7 +112,8 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
             blend(canvas, overlay, project.width, project.height, clip.opacity)
 
             if (transformed !== source) transformed.recycle()
-            if (source !== decoded) source.recycle()
+            if (source !== personCut) source.recycle()
+            if (personCut !== decoded) personCut.recycle()
             decoded.recycle()
         }
         return canvas
