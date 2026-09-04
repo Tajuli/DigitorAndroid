@@ -13,9 +13,9 @@ import android.net.Uri
 import android.os.Build
 import com.google.ai.edge.litert.Accelerator
 import com.google.ai.edge.litert.CompiledModel
+import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -25,10 +25,11 @@ private const val MODNET_SIZE_V47 = 512
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
 /**
- * V47 analysis entry point used by the editor. The bulk path is GPU-first:
- * MediaCodec -> OES texture -> GL scale -> LiteRT GPU MODNet -> MediaPipe GPU Hair -> GL local flow.
- * CPU remains for orchestration, model tensor packing/readback, tiny scene-cut signatures and cache
- * I/O. If a device rejects the GL/GPU path, V45 CPU flow and random-seek decode remain a fallback.
+ * V47 adaptive GPU-first analysis entry point.
+ *
+ * LOW: 4 fps anchors. MEDIUM: 12 fps anchors. HIGH: every decoded source frame. Bulk video decode
+ * remains MediaCodec -> OES texture -> GL scale, followed by GPU-first MODNet/Hair and GL local
+ * spatial-flow refinement. CPU remains only at model host-visible boundaries/cache/orchestration.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -36,7 +37,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         prioritySourceUs: Long? = null,
         onAnchorStored: ((completedAnchors: Int) -> Unit)? = null,
     ): PersonCutoutMaskTrackV43 {
-        preparePersonCutoutGenerationV47(context, clip.uri)
+        preparePersonCutoutGenerationV47(context, clip)
         var completed = 0
         GpuPersonCutoutSegmenterV47(context).use { segmenter ->
             if (clip.isImageV21) {
@@ -55,7 +56,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
             }
         }
         check(completed > 0) { "Could not generate any V47 portrait matte" }
-        markPersonCutoutGenerationV47Ready(context, clip.uri)
+        markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
 
@@ -67,14 +68,19 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     ): Int {
         val start = clip.sourceInUs.coerceAtLeast(0L)
         val end = clip.sourceOutUs.coerceAtLeast(start + 1L)
-        val durationUs = (end - start).coerceAtLeast(1L)
-        val count = personCutoutTargetAnchorCountV46(durationUs)
-        val regularTimes = evenlySpacedTimes(start, end, count)
+        val settings = clip.resolvedCutoutV43()
+        val quality = settings.analysisQualityV47
+        val cadence = personCutoutCadenceV47(quality)
+        val targetTimes = personCutoutTargetTimesV47(start, end, quality)
         var completed = 0
 
-        // Preserve the old UX win: one requested playhead frame can become visible before the bulk
-        // sequential decode reaches that timestamp. It is the only intentional random seek in V47.
-        val priority = prioritySourceUs?.coerceIn(start, (end - 1L).coerceAtLeast(start))
+        // LOW/MEDIUM retain one priority playhead seek for fast first feedback. HIGH intentionally
+        // avoids synthetic/off-grid priority mattes so its cache contains actual decoded frames only.
+        val priority = if (quality == CutoutAnalysisQualityV47.HIGH) {
+            null
+        } else {
+            prioritySourceUs?.coerceIn(start, (end - 1L).coerceAtLeast(start))
+        }
         if (priority != null) {
             val frame = decodeSinglePriorityFrame(clip, priority)
             if (frame != null) {
@@ -94,7 +100,8 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                 uri = Uri.parse(clip.uri),
                 startUs = start,
                 endUs = end,
-                targetTimesUs = regularTimes,
+                targetTimesUs = targetTimes,
+                emitEveryFrame = cadence.everyDecodedFrame,
             ) { sourceUs, bitmap ->
                 if (segmenter.segmentAndStore(clip, bitmap, sourceUs)) {
                     completed++
@@ -105,13 +112,20 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 
         if (sequentialResult.isSuccess && sequentialResult.getOrDefault(0) > 0) return completed
 
-        // Codec/OES behavior varies across vendor decoders. Reliability wins over speed on an
-        // unsupported device: fall back to the old per-target retriever path, still using GPU-first
-        // MODNet/Hair when those delegates are available.
+        if (quality == CutoutAnalysisQualityV47.HIGH) {
+            val cause = sequentialResult.exceptionOrNull()
+            error(
+                "High quality requires every-frame MediaCodec GPU decode on this device" +
+                    (cause?.message?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""),
+            )
+        }
+
+        // LOW/MEDIUM can safely fall back to random target seeks while still using GPU-first model
+        // delegates and GPU temporal refinement whenever those paths are available.
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(context, Uri.parse(clip.uri))
-            for (sourceUs in regularTimes) {
+            for (sourceUs in targetTimes) {
                 val frame = scaledFrameAtTime(retriever, sourceUs) ?: continue
                 try {
                     if (segmenter.segmentAndStore(clip, frame, sourceUs)) {
@@ -136,16 +150,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         } finally {
             runCatching { retriever.release() }
         }
-    }
-
-    private fun evenlySpacedTimes(start: Long, end: Long, count: Int): List<Long> {
-        val last = (end - 1L).coerceAtLeast(start)
-        val safeCount = count.coerceAtLeast(2)
-        if (last <= start) return listOf(start)
-        return (0 until safeCount).map { index ->
-            if (index == safeCount - 1) last
-            else start + ((last - start) * index.toLong()) / (safeCount - 1).toLong()
-        }.distinct()
     }
 
     private fun scaledFrameAtTime(retriever: MediaMetadataRetriever, sourceUs: Long): Bitmap? {
@@ -214,7 +218,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private val modnet = GpuModNetPortraitMatteV47(appContext)
     private val hair = BeautyHairSegmenterV29(appContext)
-    private val gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
+    private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
     private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
 
     fun segmentAndStore(clip: TimelineClip, bitmap: Bitmap, sourceTimeUs: Long): Boolean {
@@ -233,24 +237,14 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 null
             }
             val stabilized = try {
-                val gpu = gpuTemporal
-                if (gpu != null) {
-                    gpu.stabilize(
-                        source = source,
-                        currentMatte = modnetMatte,
-                        hairMask = hairMask,
-                        sourceTimeUs = sourceTimeUs,
-                        hairStrength = settings.hairDetailV44,
-                        temporalStrength = settings.temporalStabilityV44,
-                    )
-                } else {
-                    val fused = fuseHairCpu(modnetMatte, hairMask, settings.hairDetailV44)
-                    try {
-                        cpuTemporal.stabilize(source, fused, sourceTimeUs, settings.temporalStabilityV44)
-                    } finally {
-                        fused.recycle()
-                    }
-                }
+                stabilizeWithGpuOrFallback(
+                    source = source,
+                    modnetMatte = modnetMatte,
+                    hairMask = hairMask,
+                    sourceTimeUs = sourceTimeUs,
+                    hairStrength = settings.hairDetailV44,
+                    temporalStrength = settings.temporalStabilityV44,
+                )
             } finally {
                 hairMask?.recycle()
                 modnetMatte.recycle()
@@ -263,6 +257,39 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
             return true
         } finally {
             if (source !== bitmap && !source.isRecycled) source.recycle()
+        }
+    }
+
+    private fun stabilizeWithGpuOrFallback(
+        source: Bitmap,
+        modnetMatte: Bitmap,
+        hairMask: Bitmap?,
+        sourceTimeUs: Long,
+        hairStrength: Float,
+        temporalStrength: Float,
+    ): Bitmap {
+        val gpu = gpuTemporal
+        if (gpu != null) {
+            val result = runCatching {
+                gpu.stabilize(
+                    source = source,
+                    currentMatte = modnetMatte,
+                    hairMask = hairMask,
+                    sourceTimeUs = sourceTimeUs,
+                    hairStrength = hairStrength,
+                    temporalStrength = temporalStrength,
+                )
+            }
+            result.getOrNull()?.let { return it }
+            runCatching { gpu.close() }
+            gpuTemporal = null
+        }
+
+        val fused = fuseHairCpu(modnetMatte, hairMask, hairStrength)
+        return try {
+            cpuTemporal.stabilize(source, fused, sourceTimeUs, temporalStrength)
+        } finally {
+            fused.recycle()
         }
     }
 
@@ -301,6 +328,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
 
     override fun close() {
         runCatching { gpuTemporal?.close() }
+        gpuTemporal = null
         cpuTemporal.close()
         runCatching { hair.close() }
         runCatching { modnet.close() }
