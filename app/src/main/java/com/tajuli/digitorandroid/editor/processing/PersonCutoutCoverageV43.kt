@@ -1,24 +1,34 @@
 package com.tajuli.digitorandroid.editor.processing
 
 import android.content.Context
+import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 
 /**
- * V47 adaptive matte-cache coverage contract. The generation marker already proves the selected
- * quality/trim/hair/temporal tuple completed; gap checks protect against vendor decoder holes.
+ * V47/V48 adaptive matte-cache coverage contract.
+ *
+ * A normal successful generation requires the ready marker. High/every-frame analysis has one
+ * additional recovery path for vendor codecs that fail only while draining the final EOS: when the
+ * exact pending generation signature still matches and the produced mattes already satisfy the High
+ * gap/end coverage contract, those mattes are safe to promote instead of forcing a full re-analysis.
  */
 fun hasPersonCutoutCoverageV43(context: Context, clip: TimelineClip): Boolean {
-    if (!hasPersonCutoutGenerationV47Marker(context, clip)) return false
+    val quality = clip.resolvedCutoutV43().analysisQualityV47
+    val readyGeneration = hasPersonCutoutGenerationV47Marker(context, clip)
+    val recoverableHighGeneration =
+        quality == CutoutAnalysisQualityV47.HIGH &&
+            hasPersonCutoutGenerationV47PendingMarker(context, clip)
+    if (!readyGeneration && !recoverableHighGeneration) return false
+
     val frames = PersonCutoutMaskStoreV43.index(context, clip).frames
         .filter { it.file.isFile }
         .sortedBy { it.sourceTimeUs }
     if (frames.isEmpty()) return false
-    if (clip.isImageV21) return true
+    if (clip.isImageV21) return readyGeneration
 
     val startUs = clip.sourceInUs.coerceAtLeast(0L)
     val endUs = clip.sourceOutUs.coerceAtLeast(startUs + 1L) - 1L
-    val quality = clip.resolvedCutoutV43().analysisQualityV47
     val maxGapUs = personCutoutMaxGapUsV47(quality)
 
     val relevant = frames.filter {
