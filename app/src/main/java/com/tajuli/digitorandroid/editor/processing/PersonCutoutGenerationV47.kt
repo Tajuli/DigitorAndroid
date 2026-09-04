@@ -3,13 +3,16 @@ package com.tajuli.digitorandroid.editor.processing
 import android.content.Context
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
+import com.tajuli.digitorandroid.editor.model.resolvedPersonMattingBackendV50
 import java.io.File
 import java.security.MessageDigest
 
+// Keep the historical directory name so existing MODNet cache storage remains discoverable. The V50
+// generation signature below invalidates incompatible ready markers and separates A/B model output.
 private const val V46_CACHE_DIR_NAME = "person_cutout_masks_v46_modnet_hair_spatialflow_512_320"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-private const val V47_GENERATION_VERSION = "adaptive-gpu-v49-direct-queue-gpu-prepost-r1"
+private const val V47_GENERATION_VERSION = "adaptive-v50-selectable-matte-backend-r1"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
@@ -17,9 +20,9 @@ internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineCl
         dir.listFiles().orEmpty().forEach { file -> runCatching { file.delete() } }
     }
     dir.mkdirs()
-    // Persist the exact quality/trim/hair/temporal tuple before decode starts. If a vendor codec
-    // fails only while draining EOS after already producing complete dense coverage, the UI can
-    // safely recover that generation instead of discarding hundreds/thousands of valid mattes.
+    // Persist the exact backend/quality/trim/hair/temporal tuple before decode starts. If a vendor
+    // codec fails only while draining EOS after already producing complete dense coverage, the UI
+    // can safely recover that generation instead of discarding hundreds/thousands of valid mattes.
     File(dir, V47_PENDING_MARKER).writeText(personCutoutGenerationSignatureV47(clip))
 }
 
@@ -45,6 +48,7 @@ private fun personCutoutGenerationSignatureV47(clip: TimelineClip): String {
     val settings = clip.resolvedCutoutV43()
     return buildString {
         append(V47_GENERATION_VERSION)
+        append('|'); append(settings.resolvedPersonMattingBackendV50().name)
         append('|'); append(settings.analysisQualityV47.name)
         append('|'); append(clip.sourceInUs)
         append('|'); append(clip.sourceOutUs)
