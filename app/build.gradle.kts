@@ -72,8 +72,6 @@ fun downloadGeneratedAssetWithRetry(
             lastError = error
             if (temp.exists()) temp.delete()
             if (attempt < attempts) {
-                // GitHub-hosted runners can briefly share a Hugging Face/IP rate limit. Back off
-                // rather than turning a transient HTTP 429 into a false code failure.
                 val delayMs = minOf(20_000L, 2_000L shl (attempt - 1))
                 logger.warn("$label download attempt $attempt/$attempts failed: ${error.message}; retrying in ${delayMs}ms")
                 Thread.sleep(delayMs)
@@ -119,31 +117,9 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
     }
 }
 
-// V44+ Pro Cutout uses MODNet's soft portrait alpha instead of a binary person mask. MODNet and
-// its published weights are Apache-2.0. This LiteRT conversion is GPU-friendly and keeps the model
-// outside git history while still producing deterministic CI/phone builds.
-val generatedPortraitMattingAssets = layout.buildDirectory.dir("generated/portraitMattingAssets")
-val modNetModelFile = generatedPortraitMattingAssets.map { it.file("modnet_v44.tflite") }
-val downloadModNetModel by tasks.registering {
-    outputs.file(modNetModelFile)
-    doLast {
-        val output = modNetModelFile.get().asFile
-        downloadGeneratedAssetWithRetry(
-            urls = listOf(
-                "https://huggingface.co/litert-community/MODNet-LiteRT/resolve/main/modnet.tflite",
-                "https://huggingface.co/litert-community/MODNet-LiteRT/resolve/main/modnet.tflite?download=true",
-            ),
-            output = output,
-            minimumBytes = 20_000_000L,
-            label = "MODNet LiteRT",
-        )
-    }
-}
-
-// V50 experimental A/B backend. PP-MattingV2/STDC1 is from PaddleSeg (Apache-2.0). The 512x512
-// ONNX export is derived from PaddleSeg's published human checkpoint and is downloaded at build time
-// so the ~36 MB model never enters git history. Pinning SHA-256 prevents a silent model replacement
-// from changing creator output between builds.
+// V50 Pro Cutout uses PP-MattingV2/STDC1 512 from PaddleSeg (Apache-2.0). The ONNX export is
+// downloaded at build time so the ~36 MB model never enters git history. SHA-256 pinning prevents
+// silent model replacement from changing creator output between builds.
 val generatedPpMattingV2Assets = layout.buildDirectory.dir("generated/ppMattingV2Assets")
 val ppMattingV2ModelFile = generatedPpMattingV2Assets.map { it.file("ppmattingv2_stdc1_human_512.onnx") }
 val downloadPpMattingV2Model by tasks.registering {
@@ -163,9 +139,6 @@ val downloadPpMattingV2Model by tasks.registering {
     }
 }
 
-// Optional CI/local packaging filter. Normal builds keep every ABI, while a phone APK can be built
-// with `-PdigitorAbi=arm64-v8a` so MediaPipe/LiteRT native libraries are not duplicated for x86,
-// x86_64 and armeabi-v7a. This changes packaging only; editor behavior is unchanged.
 val requestedAbi = providers.gradleProperty("digitorAbi").orNull
     ?.trim()
     ?.takeIf { it.isNotEmpty() }
@@ -222,14 +195,12 @@ android {
 
     sourceSets["main"].assets.srcDir(generatedHairModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedFaceSkinModelAssets.get().asFile)
-    sourceSets["main"].assets.srcDir(generatedPortraitMattingAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedPpMattingV2Assets.get().asFile)
 }
 
 tasks.named("preBuild").configure {
     dependsOn(downloadHairSegmenterModel)
     dependsOn(downloadFaceSkinSegmenterModel)
-    dependsOn(downloadModNetModel)
     dependsOn(downloadPpMattingV2Model)
 }
 
@@ -260,12 +231,7 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // LiteRT 2.1.6+ currently has an AGP namespace collision between litert and its transitive
-    // litert-api AAR. 2.1.5 predates that packaging regression and still exposes CompiledModel.
-    implementation("com.google.ai.edge.litert:litert:2.1.5")
-
-    // Experimental PP-MattingV2 A/B backend. ONNX Runtime Android is MIT licensed. Keep this as a
-    // separate backend so MODNet remains the default and can be restored without changing projects.
+    // PP-MattingV2 execution backend. ONNX Runtime Android is MIT licensed.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
 
     testImplementation("junit:junit:4.13.2")
