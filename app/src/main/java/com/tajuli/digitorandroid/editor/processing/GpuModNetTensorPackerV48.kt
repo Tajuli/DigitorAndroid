@@ -6,7 +6,6 @@ import android.opengl.EGLConfig
 import android.opengl.EGLContext
 import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
-import android.opengl.GLES20
 import android.opengl.GLES30
 import android.opengl.GLUtils
 import java.nio.ByteBuffer
@@ -46,29 +45,34 @@ internal class GpuModNetTensorPackerV48 : AutoCloseable {
 
     init {
         egl.makeCurrent()
-        val version = GLES30.glGetString(GLES30.GL_VERSION).orEmpty()
-        check(version.contains("OpenGL ES 3")) { "OpenGL ES 3 is required for GPU tensor packing" }
-        val extensions = GLES30.glGetString(GLES30.GL_EXTENSIONS).orEmpty()
-        check(extensions.contains("GL_EXT_color_buffer_float")) {
-            "GL_EXT_color_buffer_float is required for GPU tensor packing"
-        }
-        program = compileProgramV48(VERTEX_SHADER, PACK_FRAGMENT_SHADER)
-        framebuffer = IntArray(1).also { GLES30.glGenFramebuffers(1, it, 0) }[0]
-        inputTexture = createInputTextureV48()
-        outputTexture = createOutputTextureV48()
+        try {
+            val version = GLES30.glGetString(GLES30.GL_VERSION).orEmpty()
+            check(version.contains("OpenGL ES 3")) { "OpenGL ES 3 is required for GPU tensor packing" }
+            val extensions = GLES30.glGetString(GLES30.GL_EXTENSIONS).orEmpty()
+            check(extensions.contains("GL_EXT_color_buffer_float")) {
+                "GL_EXT_color_buffer_float is required for GPU tensor packing"
+            }
+            program = compileProgramV48(VERTEX_SHADER, PACK_FRAGMENT_SHADER)
+            framebuffer = IntArray(1).also { GLES30.glGenFramebuffers(1, it, 0) }[0]
+            inputTexture = createInputTextureV48()
+            outputTexture = createOutputTextureV48()
 
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, framebuffer)
-        GLES30.glFramebufferTexture2D(
-            GLES30.GL_FRAMEBUFFER,
-            GLES30.GL_COLOR_ATTACHMENT0,
-            GLES30.GL_TEXTURE_2D,
-            outputTexture,
-            0,
-        )
-        check(GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) == GLES30.GL_FRAMEBUFFER_COMPLETE) {
-            "V48 MODNet float framebuffer is incomplete"
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, framebuffer)
+            GLES30.glFramebufferTexture2D(
+                GLES30.GL_FRAMEBUFFER,
+                GLES30.GL_COLOR_ATTACHMENT0,
+                GLES30.GL_TEXTURE_2D,
+                outputTexture,
+                0,
+            )
+            check(GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) == GLES30.GL_FRAMEBUFFER_COMPLETE) {
+                "V48 MODNet float framebuffer is incomplete"
+            }
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        } finally {
+            // Do not leave our auxiliary context current while LiteRT builds/runs its own GPU delegate.
+            egl.releaseCurrent()
         }
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
     }
 
     /** Returns true when [destination] was filled with 3x512x512 normalized NCHW floats. */
@@ -76,39 +80,44 @@ internal class GpuModNetTensorPackerV48 : AutoCloseable {
         check(prepared512.width == MODNET_PACK_SIZE_V48 && prepared512.height == MODNET_PACK_SIZE_V48)
         check(destination.size >= MODNET_PACK_FLOATS_V48)
         egl.makeCurrent()
+        try {
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, inputTexture)
+            GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, prepared512, 0)
+            checkGlV48("upload MODNet input")
 
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, inputTexture)
-        GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, prepared512, 0)
-        checkGlV48("upload MODNet input")
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, framebuffer)
+            GLES30.glViewport(0, 0, MODNET_PACK_WIDTH_V48, MODNET_PACK_HEIGHT_V48)
+            GLES30.glUseProgram(program)
+            val position = GLES30.glGetAttribLocation(program, "aPosition")
+            quad.position(0)
+            GLES30.glEnableVertexAttribArray(position)
+            GLES30.glVertexAttribPointer(position, 2, GLES30.GL_FLOAT, false, 0, quad)
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, inputTexture)
+            GLES30.glUniform1i(GLES30.glGetUniformLocation(program, "uInput"), 0)
+            GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+            checkGlV48("pack MODNet tensor")
 
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, framebuffer)
-        GLES30.glViewport(0, 0, MODNET_PACK_WIDTH_V48, MODNET_PACK_HEIGHT_V48)
-        GLES30.glUseProgram(program)
-        val position = GLES30.glGetAttribLocation(program, "aPosition")
-        quad.position(0)
-        GLES30.glEnableVertexAttribArray(position)
-        GLES30.glVertexAttribPointer(position, 2, GLES30.GL_FLOAT, false, 0, quad)
-        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, inputTexture)
-        GLES30.glUniform1i(GLES30.glGetUniformLocation(program, "uInput"), 0)
-        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
-        checkGlV48("pack MODNet tensor")
-
-        readback.clear()
-        GLES30.glReadPixels(
-            0,
-            0,
-            MODNET_PACK_WIDTH_V48,
-            MODNET_PACK_HEIGHT_V48,
-            GLES30.GL_RGBA,
-            GLES30.GL_FLOAT,
-            readback,
-        )
-        checkGlV48("read MODNet tensor")
-        readback.rewind()
-        readback.get(destination, 0, MODNET_PACK_FLOATS_V48)
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-        return true
+            readback.clear()
+            GLES30.glReadPixels(
+                0,
+                0,
+                MODNET_PACK_WIDTH_V48,
+                MODNET_PACK_HEIGHT_V48,
+                GLES30.GL_RGBA,
+                GLES30.GL_FLOAT,
+                readback,
+            )
+            checkGlV48("read MODNet tensor")
+            readback.rewind()
+            readback.get(destination, 0, MODNET_PACK_FLOATS_V48)
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+            return true
+        } finally {
+            // LiteRT/MediaPipe/temporal GL all run on this same worker thread. Return it with no
+            // foreign EGL context bound so each GPU runtime can bind its own context safely.
+            egl.releaseCurrent()
+        }
     }
 
     override fun close() {
@@ -118,6 +127,7 @@ internal class GpuModNetTensorPackerV48 : AutoCloseable {
             GLES30.glDeleteFramebuffers(1, intArrayOf(framebuffer), 0)
             GLES30.glDeleteTextures(1, intArrayOf(inputTexture), 0)
             GLES30.glDeleteTextures(1, intArrayOf(outputTexture), 0)
+            egl.releaseCurrent()
         }
         egl.close()
     }
@@ -238,15 +248,25 @@ private class PackerEglV48 : AutoCloseable {
             0,
         )
         check(surface != EGL14.EGL_NO_SURFACE) { "Could not create V48 packer pbuffer" }
-        makeCurrent()
     }
 
     fun makeCurrent() {
         check(EGL14.eglMakeCurrent(display, surface, surface, context)) { "Could not bind V48 packer EGL context" }
     }
 
+    fun releaseCurrent() {
+        check(
+            EGL14.eglMakeCurrent(
+                display,
+                EGL14.EGL_NO_SURFACE,
+                EGL14.EGL_NO_SURFACE,
+                EGL14.EGL_NO_CONTEXT,
+            ),
+        ) { "Could not release V48 packer EGL context" }
+    }
+
     override fun close() {
-        runCatching { EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT) }
+        runCatching { releaseCurrent() }
         runCatching { EGL14.eglDestroySurface(display, surface) }
         runCatching { EGL14.eglDestroyContext(display, context) }
         // Do not eglTerminate(EGL_DEFAULT_DISPLAY): decoder/temporal/model contexts may share it.
