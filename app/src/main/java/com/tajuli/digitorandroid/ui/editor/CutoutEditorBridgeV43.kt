@@ -9,6 +9,7 @@ import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
+import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisPowerGuardV48
 import com.tajuli.digitorandroid.editor.processing.GpuPersonCutoutAnalyzerV47
 import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 import java.util.concurrent.ConcurrentHashMap
@@ -18,7 +19,7 @@ import kotlinx.coroutines.withContext
 
 private val personCutoutAnalysisInFlightV43 = ConcurrentHashMap.newKeySet<String>()
 
-/** V47 bridge retains historical symbols so existing project/editor code remains source-compatible. */
+/** V48 bridge retains historical symbols so existing project/editor code remains source-compatible. */
 fun EditorViewModelV4.setSelectedCutoutV43(
     settings: ClipCutoutV43,
     status: String = "Cutout updated",
@@ -40,7 +41,7 @@ fun EditorViewModelV4.setSelectedCutoutV43(
         })
     }
     commitProjectV19(
-        label = "cutout-v47",
+        label = "cutout-v48",
         project = snapshot.project.copy(tracks = tracks),
         status = status,
         coalesce = coalesce,
@@ -58,7 +59,7 @@ fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
     val clip = state.value.project.clip(state.value.selectedClipId) ?: return
     val app = getApplication<Application>()
     if (hasPersonCutoutCoverageV43(app.applicationContext, clip)) {
-        setEditorStatusV19("Pro Cutout ready · $label · cached V47 GPU matte")
+        setEditorStatusV19("Pro Cutout ready · $label · cached GPU matte")
         PreviewExportCoordinator.refreshActivePreviews()
     }
 }
@@ -77,7 +78,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
     val quality = settings.analysisQualityV47
     val label = quality.uiLabelV47()
     val analysisKey = buildString {
-        append("v47-adaptive|")
+        append("v48-gpu-throughput|")
         append(clip.uri); append('|'); append(clip.sourceInUs); append('|'); append(clip.sourceOutUs)
         append('|'); append(quality.name)
         append('|'); append(settings.hairDetailV44); append('|'); append(settings.temporalStabilityV44)
@@ -95,7 +96,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         )
     }
 
-    setEditorStatusV19("Pro Cutout · $label · starting GPU-first analysis…")
+    setEditorStatusV19("Pro Cutout · $label · starting V48 GPU pipeline…")
     val app = getApplication<Application>()
     val progressStride = when (quality) {
         CutoutAnalysisQualityV47.LOW -> 8
@@ -105,18 +106,27 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
     viewModelScope.launch(Dispatchers.Default) {
         try {
             val result = runCatching {
-                PreviewExportCoordinator.acquireAnalysisLease().use {
-                    GpuPersonCutoutAnalyzerV47(app.applicationContext).analyzeAndStore(
-                        clip = clip,
-                        prioritySourceUs = prioritySourceUs,
-                        onAnchorStored = { completed ->
-                            if (completed == 1 || completed % progressStride == 0) {
+                // The power lease outlives Activity screen timeout. MainActivity also keeps the
+                // display awake while this lease is active; manual screen-off still keeps CPU/codec alive.
+                CutoutAnalysisPowerGuardV48.acquire(app.applicationContext).use {
+                    PreviewExportCoordinator.acquireAnalysisLease().use {
+                        GpuPersonCutoutAnalyzerV47(app.applicationContext).analyzeAndStore(
+                            clip = clip,
+                            prioritySourceUs = prioritySourceUs,
+                            onBackendResolved = { backend ->
                                 viewModelScope.launch(Dispatchers.Main) {
-                                    setEditorStatusV19("Pro Cutout · $label · $completed refined frame(s)")
+                                    setEditorStatusV19("Pro Cutout · $label · $backend")
                                 }
-                            }
-                        },
-                    )
+                            },
+                            onAnchorStored = { completed ->
+                                if (completed == 1 || completed % progressStride == 0) {
+                                    viewModelScope.launch(Dispatchers.Main) {
+                                        setEditorStatusV19("Pro Cutout · $label · $completed refined frame(s)")
+                                    }
+                                }
+                            },
+                        )
+                    }
                 }
             }
             withContext(Dispatchers.Main) {
