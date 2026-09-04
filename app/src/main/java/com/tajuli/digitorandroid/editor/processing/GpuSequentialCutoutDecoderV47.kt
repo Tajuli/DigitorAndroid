@@ -28,9 +28,9 @@ private const val FINAL_TARGET_EARLY_TOLERANCE_US_V47 = 50_000L
 
 /**
  * Sequential V47 video sampler. MediaCodec decodes once from the trim start instead of asking
- * MediaMetadataRetriever to perform hundreds of independent seeks. Decoder output lands on an OES
- * SurfaceTexture, then a tiny offscreen GL pass rotates/scales the selected frame to the analysis
- * size. Only requested matte anchors cross back to a Bitmap for the model APIs.
+ * MediaMetadataRetriever to perform hundreds/thousands of independent seeks. Decoder output lands
+ * on an OES SurfaceTexture, then an offscreen GL pass rotates/scales selected frames to analysis
+ * size. HIGH mode can emit every decoded source frame; LOW/MEDIUM emit only requested anchors.
  */
 internal class GpuSequentialCutoutDecoderV47(
     private val context: Context,
@@ -41,6 +41,7 @@ internal class GpuSequentialCutoutDecoderV47(
         startUs: Long,
         endUs: Long,
         targetTimesUs: List<Long>,
+        emitEveryFrame: Boolean = false,
         onFrame: (sourceTimeUs: Long, bitmap: Bitmap) -> Unit,
     ): Int {
         val targets = targetTimesUs
@@ -49,7 +50,7 @@ internal class GpuSequentialCutoutDecoderV47(
             .distinct()
             .sorted()
             .toList()
-        if (targets.isEmpty()) return 0
+        if (!emitEveryFrame && targets.isEmpty()) return 0
 
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
@@ -82,7 +83,11 @@ internal class GpuSequentialCutoutDecoderV47(
             var emitted = 0
             var idleRounds = 0
 
-            while (!outputDone && targetIndex < targets.size && idleRounds < 2_000) {
+            while (
+                !outputDone &&
+                (emitEveryFrame || targetIndex < targets.size) &&
+                idleRounds < 2_000
+            ) {
                 var progressed = false
                 if (!inputDone) {
                     val inputIndex = codec.dequeueInputBuffer(DECODER_TIMEOUT_US_V47)
@@ -112,9 +117,10 @@ internal class GpuSequentialCutoutDecoderV47(
                     outputIndex >= 0 -> {
                         progressed = true
                         val pts = info.presentationTimeUs
+                        val withinTrim = pts >= startUs && pts < endUs
                         val pending = targets.getOrNull(targetIndex)
                         val nearPending = pending != null && pts + FINAL_TARGET_EARLY_TOLERANCE_US_V47 >= pending
-                        val render = pts >= startUs && pts <= endUs + FINAL_TARGET_EARLY_TOLERANCE_US_V47 && nearPending
+                        val render = withinTrim && (emitEveryFrame || nearPending)
                         codec.releaseOutputBuffer(outputIndex, render)
                         if (render) {
                             reader.awaitAndUpdateFrame()
@@ -125,11 +131,13 @@ internal class GpuSequentialCutoutDecoderV47(
                                 bitmap.recycle()
                             }
                             emitted++
-                            while (
-                                targetIndex < targets.size &&
-                                targets[targetIndex] <= pts + FINAL_TARGET_EARLY_TOLERANCE_US_V47
-                            ) {
-                                targetIndex++
+                            if (!emitEveryFrame) {
+                                while (
+                                    targetIndex < targets.size &&
+                                    targets[targetIndex] <= pts + FINAL_TARGET_EARLY_TOLERANCE_US_V47
+                                ) {
+                                    targetIndex++
+                                }
                             }
                         }
                         if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) outputDone = true
@@ -139,6 +147,7 @@ internal class GpuSequentialCutoutDecoderV47(
 
                 idleRounds = if (progressed) 0 else idleRounds + 1
             }
+            check(idleRounds < 2_000) { "MediaCodec stalled during Pro Cutout analysis" }
             return emitted
         } finally {
             runCatching { codec?.stop() }
@@ -402,7 +411,7 @@ private class DecoderEglV47 : AutoCloseable {
         runCatching { EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT) }
         runCatching { EGL14.eglDestroySurface(display, surface) }
         runCatching { EGL14.eglDestroyContext(display, context) }
-        runCatching { EGL14.eglTerminate(display) }
+        // Do not eglTerminate the shared default display; temporal analysis owns another EGL context.
     }
 }
 
