@@ -39,18 +39,14 @@ internal fun personCutoutTargetTimesV47(
     val cadence = personCutoutCadenceV47(quality)
     if (cadence.everyDecodedFrame) return emptyList()
     val fps = cadence.anchorsPerSecond ?: return emptyList()
-    val intervalUs = (1_000_000L / fps.toLong()).coerceAtLeast(1L)
-    val last = (end - 1L).coerceAtLeast(start)
-    val result = ArrayList<Long>()
-    var timeUs = start
-    while (timeUs < last) {
-        result += timeUs
-        val next = timeUs + intervalUs
-        if (next <= timeUs) break
-        timeUs = next
+    val durationUs = (end - start).coerceAtLeast(1L)
+    val count = ((durationUs * fps.toLong() + 999_999L) / 1_000_000L)
+        .coerceIn(1L, Int.MAX_VALUE.toLong())
+        .toInt()
+    return (0 until count).mapNotNull { index ->
+        val timeUs = start + (index.toLong() * 1_000_000L) / fps.toLong()
+        timeUs.takeIf { it < end }
     }
-    if (result.isEmpty() || result.last() != last) result += last
-    return result
 }
 
 internal fun personCutoutEstimatedAnchorCountV47(
@@ -65,7 +61,7 @@ internal fun personCutoutEstimatedAnchorCountV47(
     } else {
         cadence.anchorsPerSecond!!.toFloat()
     }
-    val count = kotlin.math.ceil(safeDuration / 1_000_000.0 * fps.toDouble()).toLong() + 1L
+    val count = kotlin.math.ceil(safeDuration / 1_000_000.0 * fps.toDouble()).toLong()
     return count.coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
 }
 
@@ -77,6 +73,6 @@ internal fun personCutoutMaxGapUsV47(quality: CutoutAnalysisQualityV47): Long =
         CutoutAnalysisQualityV47.HIGH -> 200_000L
     }
 
-/** Historical helper retained for source-compatible older tests/callers; V47 default is Medium. */
+/** Historical helper retained for source-compatible older callers; V47 default is Medium. */
 internal fun personCutoutTargetAnchorCountV46(durationUs: Long): Int =
     personCutoutEstimatedAnchorCountV47(durationUs, CutoutAnalysisQualityV47.MEDIUM)
