@@ -115,7 +115,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                             prioritySourceUs = prioritySourceUs,
                             onBackendResolved = { backend ->
                                 viewModelScope.launch(Dispatchers.Main) {
-                                    setEditorStatusV19("Pro Cutout · $label · $backend")
+                                    setEditorStatusV19("Pro Cutout · $label · analysis · $backend")
                                 }
                             },
                             onAnchorStored = { completed ->
