@@ -14,8 +14,10 @@ import android.os.Build
 import com.google.ai.edge.litert.Accelerator
 import com.google.ai.edge.litert.CompiledModel
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
+import com.tajuli.digitorandroid.editor.model.PersonMattingBackendV50
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
+import com.tajuli.digitorandroid.editor.model.resolvedPersonMattingBackendV50
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.min
@@ -26,17 +28,14 @@ private const val MODNET_SIZE_V47 = 512
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
 /**
- * V49 near-fully-GPU revision of the adaptive analyzer.
+ * V50 selectable portrait-matting revision of the V49 adaptive analyzer.
  *
- * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Hardware decode overlaps a bounded GPU
- * inference worker, decoded frame ownership moves straight into that queue with no second ARGB copy,
- * MODNet letterbox/normalization/NCHW packing and alpha crop/scale run in ES3 shaders, LiteRT is
- * GPU-first, Hair is GPU-first and temporal local-flow refinement remains on GL. PNG persistence is
- * deliberately kept on parallel low-priority CPU workers because the existing preview/export cache
- * contract is file-backed.
- *
- * LiteRT 2.1.5 Kotlin still exposes host TensorBuffer read/write boundaries, so this is intentionally
- * described as near-fully-GPU rather than claiming impossible literal zero-copy model I/O.
+ * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Hardware decode overlaps a bounded
+ * inference worker and decoded frame ownership moves straight into that queue with no second ARGB
+ * copy. MODNet keeps its near-fully-GPU LiteRT + ES3 pre/post path. Experimental PP-MattingV2 uses
+ * ONNX Runtime CPU for the base matte while deliberately sharing the exact same HairSegmenter,
+ * temporal local-flow refinement, matte writer and preview/export cache contract. This makes the
+ * device A/B test about portrait-model quality rather than accidentally comparing two refiners.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -51,7 +50,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         } else {
             analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
-        check(completed > 0) { "Could not generate any V49 portrait matte" }
+        check(completed > 0) { "Could not generate any V50 portrait matte" }
         markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
@@ -62,8 +61,9 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         onBackendResolved: ((String) -> Unit)?,
     ): Int {
         val bitmap = decodeImage(Uri.parse(clip.uri)) ?: error("Could not decode image for Pro Cutout")
+        val backend = clip.resolvedCutoutV43().resolvedPersonMattingBackendV50()
         try {
-            GpuPersonCutoutSegmenterV47(context).use { segmenter ->
+            GpuPersonCutoutSegmenterV47(context, backend).use { segmenter ->
                 onBackendResolved?.invoke(segmenter.backendSummary())
                 check(segmenter.segmentAndStore(clip, bitmap, clip.sourceInUs)) {
                     "Portrait matting returned no alpha"
@@ -87,13 +87,16 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         val end = clip.sourceOutUs.coerceAtLeast(start + 1L)
         val settings = clip.resolvedCutoutV43()
         val quality = settings.analysisQualityV47
+        val backend = settings.resolvedPersonMattingBackendV50()
         val cadence = personCutoutCadenceV47(quality)
         val targetTimes = personCutoutTargetTimesV47(start, end, quality)
 
         // Important: lazy initialization happens on the inference worker, not this producer thread.
         // MediaPipe GPU delegates and EGL contexts therefore keep create/run/close thread affinity.
         val segmenterLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-            GpuPersonCutoutSegmenterV47(context).also { onBackendResolved?.invoke(it.backendSummary()) }
+            GpuPersonCutoutSegmenterV47(context, backend).also {
+                onBackendResolved?.invoke(it.backendSummary())
+            }
         }
         val segmenterClosed = AtomicBoolean(false)
         val worker = AsyncCutoutInferenceWorkerV48(
@@ -114,7 +117,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 
         try {
             // LOW/MEDIUM retain one playhead-priority frame, but it is ownership-transferred to the
-            // same GPU worker. HIGH uses only true decoded source-frame timestamps.
+            // same inference worker. HIGH uses only true decoded source-frame timestamps.
             val priority = if (quality == CutoutAnalysisQualityV47.HIGH) {
                 null
             } else {
@@ -126,8 +129,8 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                 }
             }
 
-            // Producer: MediaCodec + OES + GL scale. Consumer: LiteRT GPU + MediaPipe GPU + GL flow.
-            // V49 transfers the decoder Bitmap directly to the bounded worker instead of copying it.
+            // Producer: MediaCodec + OES + GL scale. Consumer: selected base matte + MediaPipe Hair
+            // + GL flow. V49/V50 transfer the decoder Bitmap directly to the bounded worker.
             val sequentialResult = runCatching {
                 GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
                     uri = Uri.parse(clip.uri),
@@ -246,9 +249,15 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     }.getOrNull()
 }
 
-private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
+private class GpuPersonCutoutSegmenterV47(
+    context: Context,
+    backend: PersonMattingBackendV50,
+) : AutoCloseable {
     private val appContext = context.applicationContext
-    private val modnet = GpuModNetPortraitMatteV47(appContext)
+    private val portraitMatte: PortraitMatteBackendV50 = when (backend) {
+        PersonMattingBackendV50.MODNET -> GpuModNetPortraitMatteV47(appContext)
+        PersonMattingBackendV50.PP_MATTING_V2 -> PpMattingV2PortraitMatteV50(appContext)
+    }
     private val hair = BeautyHairSegmenterV29(appContext)
     private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
     private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
@@ -259,7 +268,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private var cachedHairQuality: CutoutAnalysisQualityV47? = null
 
     fun backendSummary(): String = buildString {
-        append("MODNet "); append(modnet.backendLabel)
+        append(portraitMatte.backendLabel)
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
         append(" · Flow "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
         append(" · direct frame queue")
@@ -274,7 +283,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         }
         try {
             val settings = clip.resolvedCutoutV43()
-            val modnetMatte = modnet.infer(source)
+            val baseMatte = portraitMatte.infer(source)
             val hairMask = hairMaskForFrame(
                 source = source,
                 sourceTimeUs = sourceTimeUs,
@@ -284,18 +293,18 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
             val stabilized = try {
                 stabilizeWithGpuOrFallback(
                     source = source,
-                    modnetMatte = modnetMatte,
+                    baseMatte = baseMatte,
                     hairMask = hairMask,
                     sourceTimeUs = sourceTimeUs,
                     hairStrength = settings.hairDetailV44,
                     temporalStrength = settings.temporalStabilityV44,
                 )
             } finally {
-                modnetMatte.recycle()
+                baseMatte.recycle()
             }
 
             // Ownership transfers to the parallel low-priority writers; compression never runs on
-            // the GPU inference worker.
+            // the inference worker.
             matteWriter.enqueue(clip.uri, sourceTimeUs, stabilized)
             return true
         } finally {
@@ -339,7 +348,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
 
     private fun stabilizeWithGpuOrFallback(
         source: Bitmap,
-        modnetMatte: Bitmap,
+        baseMatte: Bitmap,
         hairMask: Bitmap?,
         sourceTimeUs: Long,
         hairStrength: Float,
@@ -350,7 +359,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
             val result = runCatching {
                 gpu.stabilize(
                     source = source,
-                    currentMatte = modnetMatte,
+                    currentMatte = baseMatte,
                     hairMask = hairMask,
                     sourceTimeUs = sourceTimeUs,
                     hairStrength = hairStrength,
@@ -362,8 +371,8 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
             gpuTemporal = null
         }
 
-        // Compatibility fallback only; normal V49 devices stay on the GL path above.
-        val fused = fuseHairCpu(modnetMatte, hairMask, hairStrength)
+        // Compatibility fallback only; normal devices stay on the GL path above.
+        val fused = fuseHairCpu(baseMatte, hairMask, hairStrength)
         return try {
             cpuTemporal.stabilize(source, fused, sourceTimeUs, temporalStrength)
         } finally {
@@ -416,12 +425,12 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         gpuTemporal = null
         cpuTemporal.close()
         runCatching { hair.close() }
-        runCatching { modnet.close() }
+        runCatching { portraitMatte.close() }
     }
 }
 
 /** LiteRT CompiledModel requests GPU-only first, then hybrid, then CPU fallback. */
-private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
+private class GpuModNetPortraitMatteV47(context: Context) : PortraitMatteBackendV50 {
     private val model: CompiledModel
     private val modelBackendLabel: String
     private val inputBuffers: List<com.google.ai.edge.litert.TensorBuffer>
@@ -437,8 +446,8 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
     private val filterPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private var gpuTensorPacker: GpuModNetTensorPackerV48? = null
 
-    val backendLabel: String
-        get() = "$modelBackendLabel · ${if (gpuTensorPacker != null) "GPU pre/post" else "CPU pre/post"}"
+    override val backendLabel: String
+        get() = "MODNet · $modelBackendLabel · ${if (gpuTensorPacker != null) "GPU pre/post" else "CPU pre/post"}"
 
     init {
         val app = context.applicationContext
@@ -485,7 +494,7 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
         gpuTensorPacker = runCatching { GpuModNetTensorPackerV48() }.getOrNull()
     }
 
-    fun infer(source: Bitmap): Bitmap {
+    override fun infer(source: Bitmap): Bitmap {
         val prepared = letterboxGeometry(source)
         val packerBeforeRun = gpuTensorPacker
         val packedOnGpu = packerBeforeRun?.let { packer ->
