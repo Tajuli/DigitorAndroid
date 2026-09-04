@@ -17,7 +17,7 @@ class ClipCutoutV43Test {
     }
 
     @Test
-    fun normalizationKeepsV44AndChromaControlsInsideRenderContract() {
+    fun normalizationKeepsV46AndChromaControlsInsideRenderContract() {
         val normalized = ClipCutoutV43(
             mode = CutoutModeV43.CHROMA_KEY,
             personThreshold = -4f,
@@ -51,7 +51,7 @@ class ClipCutoutV43Test {
     }
 
     @Test
-    fun untouchedLegacyPersonDefaultsMigrateToTighterEdgeTuning() {
+    fun untouchedLegacyPersonDefaultsMigrateToNaturalSoftEdge() {
         val normalized = ClipCutoutV43(
             mode = CutoutModeV43.PERSON,
             personThreshold = .42f,
@@ -59,13 +59,14 @@ class ClipCutoutV43Test {
         ).normalized()
 
         assertEquals(.50f, normalized.personThreshold, .0001f)
-        assertEquals(.06f, normalized.personFeather, .0001f)
+        assertEquals(.075f, normalized.personFeather, .0001f)
     }
 
     @Test
-    fun untouchedV44QualityTupleMigratesToSpatialFlowDefaults() {
+    fun untouchedV44QualityTupleMigratesDirectlyToV46FabricDefaults() {
         val normalized = ClipCutoutV43(
             mode = CutoutModeV43.PERSON,
+            personFeather = .06f,
             edgeShiftV44 = -.015f,
             edgeCleanV44 = .34f,
             dehaloV44 = .62f,
@@ -73,11 +74,32 @@ class ClipCutoutV43Test {
             temporalStabilityV44 = .68f,
         ).normalized()
 
-        assertEquals(-.008f, normalized.edgeShiftV44, .0001f)
-        assertEquals(.30f, normalized.edgeCleanV44, .0001f)
-        assertEquals(.46f, normalized.dehaloV44, .0001f)
-        assertEquals(.84f, normalized.hairDetailV44, .0001f)
-        assertEquals(.62f, normalized.temporalStabilityV44, .0001f)
+        assertEquals(.075f, normalized.personFeather, .0001f)
+        assertEquals(-.004f, normalized.edgeShiftV44, .0001f)
+        assertEquals(.24f, normalized.edgeCleanV44, .0001f)
+        assertEquals(.30f, normalized.dehaloV44, .0001f)
+        assertEquals(.62f, normalized.hairDetailV44, .0001f)
+        assertEquals(.54f, normalized.temporalStabilityV44, .0001f)
+    }
+
+    @Test
+    fun untouchedV45QualityTupleMigratesToV46FabricDefaults() {
+        val normalized = ClipCutoutV43(
+            mode = CutoutModeV43.PERSON,
+            personFeather = .06f,
+            edgeShiftV44 = -.008f,
+            edgeCleanV44 = .30f,
+            dehaloV44 = .46f,
+            hairDetailV44 = .84f,
+            temporalStabilityV44 = .62f,
+        ).normalized()
+
+        assertEquals(.075f, normalized.personFeather, .0001f)
+        assertEquals(-.004f, normalized.edgeShiftV44, .0001f)
+        assertEquals(.24f, normalized.edgeCleanV44, .0001f)
+        assertEquals(.30f, normalized.dehaloV44, .0001f)
+        assertEquals(.62f, normalized.hairDetailV44, .0001f)
+        assertEquals(.54f, normalized.temporalStabilityV44, .0001f)
     }
 
     @Test
