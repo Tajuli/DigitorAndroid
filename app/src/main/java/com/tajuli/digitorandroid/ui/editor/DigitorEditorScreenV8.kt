@@ -41,6 +41,7 @@ import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 
 private val V8CutoutAccent = Color(0xFF30E0C3)
 private val V8CutoutPanel = Color(0xF20B0B0F)
+private val V8CutoutText = Color.White
 
 /** Always-visible V47 Pro Cutout quick action with a non-modal, scrollable control panel. */
 @UnstableApi
@@ -64,7 +65,7 @@ fun DigitorEditorScreenV8(
                     .height(38.dp),
                 shape = RoundedCornerShape(9.dp),
             ) {
-                Text("Cutout", fontSize = 10.sp)
+                Text("Cutout", fontSize = 10.sp, color = V8CutoutText)
             }
         }
 
@@ -100,14 +101,14 @@ private fun CutoutQuickPanelV44(
         verticalArrangement = Arrangement.spacedBy(9.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Pro Cutout & Chroma Key", fontSize = 16.sp)
+            Text("Pro Cutout & Chroma Key", fontSize = 16.sp, color = V8CutoutText)
             Spacer(Modifier.weight(1f))
-            OutlinedButton(onClick = onClose) { Text("Close", fontSize = 9.sp) }
+            OutlinedButton(onClick = onClose) { Text("Close", fontSize = 9.sp, color = V8CutoutText) }
         }
         Text(
             "GPU-first portrait matting. Choose analysis quality first, then press Analyze. This panel stays scrollable without hiding the whole preview.",
             fontSize = 9.sp,
-            color = Color.White.copy(alpha = .62f),
+            color = V8CutoutText,
         )
 
         if (!isVisualClip) {
@@ -117,7 +118,11 @@ private fun CutoutQuickPanelV44(
                     .background(Color.White.copy(alpha = .06f), RoundedCornerShape(10.dp))
                     .padding(14.dp),
             ) {
-                Text("No video/image clip selected. Tap a clip on the timeline first.", fontSize = 11.sp)
+                Text(
+                    "No video/image clip selected. Tap a clip on the timeline first.",
+                    fontSize = 11.sp,
+                    color = V8CutoutText,
+                )
             }
             return@Column
         }
@@ -154,12 +159,24 @@ private fun CutoutQuickPanelV44(
                         coalesce = false,
                     )
                 },
-            ) { Text(if (settings.mode == CutoutModeV43.NONE) "✓ Off" else "Off", fontSize = 9.sp) }
+            ) {
+                Text(
+                    if (settings.mode == CutoutModeV43.NONE) "✓ Off" else "Off",
+                    fontSize = 9.sp,
+                    color = V8CutoutText,
+                )
+            }
 
             FilledTonalButton(
                 enabled = !analysisBusy,
                 onClick = { vm.enablePersonCutoutV43(settings) },
-            ) { Text(if (settings.mode == CutoutModeV43.PERSON) "✓ Pro Cutout" else "Pro Cutout", fontSize = 9.sp) }
+            ) {
+                Text(
+                    if (settings.mode == CutoutModeV43.PERSON) "✓ Pro Cutout" else "Pro Cutout",
+                    fontSize = 9.sp,
+                    color = V8CutoutText,
+                )
+            }
 
             FilledTonalButton(
                 enabled = !analysisBusy,
@@ -170,7 +187,13 @@ private fun CutoutQuickPanelV44(
                         coalesce = false,
                     )
                 },
-            ) { Text(if (settings.mode == CutoutModeV43.CHROMA_KEY) "✓ Chroma Key" else "Chroma Key", fontSize = 9.sp) }
+            ) {
+                Text(
+                    if (settings.mode == CutoutModeV43.CHROMA_KEY) "✓ Chroma Key" else "Chroma Key",
+                    fontSize = 9.sp,
+                    color = V8CutoutText,
+                )
+            }
         }
 
         when (settings.mode) {
@@ -178,12 +201,12 @@ private fun CutoutQuickPanelV44(
                 Text(
                     "Pro Cutout creates a soft portrait alpha without a green screen. Chroma Key is faster and more controllable with a clean green/blue screen.",
                     fontSize = 10.sp,
-                    color = Color.White.copy(alpha = .62f),
+                    color = V8CutoutText,
                 )
             }
 
             CutoutModeV43.PERSON -> {
-                Text("Analysis quality", fontSize = 10.sp, color = Color.White.copy(alpha = .82f))
+                Text("Analysis quality", fontSize = 10.sp, color = V8CutoutText)
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -226,7 +249,7 @@ private fun CutoutQuickPanelV44(
                     Text(
                         "High analyzes every decoded source frame. It gives the best motion accuracy but can take much longer and use more storage.",
                         fontSize = 9.sp,
-                        color = Color.White.copy(alpha = .58f),
+                        color = V8CutoutText,
                     )
                 }
 
@@ -239,7 +262,7 @@ private fun CutoutQuickPanelV44(
                             else -> "Choose quality, then Analyze"
                         },
                         fontSize = 10.sp,
-                        color = if (personReady) V8CutoutAccent else Color.White.copy(alpha = .62f),
+                        color = V8CutoutText,
                     )
                     Spacer(Modifier.weight(1f))
                     FilledTonalButton(
@@ -253,6 +276,7 @@ private fun CutoutQuickPanelV44(
                                 else -> "Analyze"
                             },
                             fontSize = 9.sp,
+                            color = V8CutoutText,
                         )
                     }
                 }
@@ -260,11 +284,11 @@ private fun CutoutQuickPanelV44(
                     Text(
                         analysisStatus,
                         fontSize = 9.sp,
-                        color = if (analysisFailed) Color(0xFFFFB4AB) else V8CutoutAccent.copy(alpha = .82f),
+                        color = V8CutoutText,
                     )
                 }
 
-                Text("Realtime edge refinement", fontSize = 10.sp, color = Color.White.copy(alpha = .78f))
+                Text("Realtime edge refinement", fontSize = 10.sp, color = V8CutoutText)
                 CutoutSliderV43("Shrink / Grow", settings.edgeShiftV44, -.18f..0.18f) {
                     vm.setSelectedCutoutV43(settings.copy(edgeShiftV44 = it), status = "Pro Cutout edge shift updated")
                 }
@@ -275,7 +299,7 @@ private fun CutoutQuickPanelV44(
                     vm.setSelectedCutoutV43(settings.copy(dehaloV44 = it), status = "Pro Cutout dehalo updated")
                 }
 
-                Text("Analysis-time refinement", fontSize = 10.sp, color = Color.White.copy(alpha = .78f))
+                Text("Analysis-time refinement", fontSize = 10.sp, color = V8CutoutText)
                 CutoutSliderV43("Hair Detail", settings.hairDetailV44, 0f..1f) {
                     vm.setSelectedCutoutV43(
                         settings.copy(hairDetailV44 = it),
@@ -289,7 +313,7 @@ private fun CutoutQuickPanelV44(
                     )
                 }
 
-                Text("Advanced alpha shaping", fontSize = 10.sp, color = Color.White.copy(alpha = .78f))
+                Text("Advanced alpha shaping", fontSize = 10.sp, color = V8CutoutText)
                 CutoutSliderV43("Alpha Bias", settings.personThreshold, .05f..0.95f) {
                     vm.setSelectedCutoutV43(settings.copy(personThreshold = it), status = "Pro Cutout alpha bias updated")
                 }
@@ -300,7 +324,7 @@ private fun CutoutQuickPanelV44(
                 Text(
                     "Quality, Hair Detail and Temporal Stability are baked into the analyzed matte; press Analyze/Refresh Matte after changing them. Other edge controls update in realtime.",
                     fontSize = 9.sp,
-                    color = Color.White.copy(alpha = .55f),
+                    color = V8CutoutText,
                 )
             }
 
@@ -314,7 +338,7 @@ private fun CutoutQuickPanelV44(
                                 coalesce = false,
                             )
                         },
-                    ) { Text("Green", fontSize = 9.sp) }
+                    ) { Text("Green", fontSize = 9.sp, color = V8CutoutText) }
                     FilledTonalButton(
                         onClick = {
                             vm.setSelectedCutoutV43(
@@ -323,7 +347,7 @@ private fun CutoutQuickPanelV44(
                                 coalesce = false,
                             )
                         },
-                    ) { Text("Blue", fontSize = 9.sp) }
+                    ) { Text("Blue", fontSize = 9.sp, color = V8CutoutText) }
                 }
 
                 CutoutSliderV43("Key R", settings.keyRed, 0f..1f) {
@@ -358,11 +382,11 @@ private fun RowScope.QualityChoiceV47(
 ) {
     if (selected) {
         FilledTonalButton(enabled = enabled, onClick = onClick, modifier = Modifier.weight(1f)) {
-            Text("✓ $label", fontSize = 8.sp)
+            Text("✓ $label", fontSize = 8.sp, color = V8CutoutText)
         }
     } else {
         OutlinedButton(enabled = enabled, onClick = onClick, modifier = Modifier.weight(1f)) {
-            Text(label, fontSize = 8.sp)
+            Text(label, fontSize = 8.sp, color = V8CutoutText)
         }
     }
 }
@@ -376,9 +400,9 @@ private fun CutoutSliderV43(
 ) {
     Column(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(label, fontSize = 10.sp)
+            Text(label, fontSize = 10.sp, color = V8CutoutText)
             Spacer(Modifier.weight(1f))
-            Text("%.2f".format(value), fontSize = 9.sp, color = V8CutoutAccent)
+            Text("%.2f".format(value), fontSize = 9.sp, color = V8CutoutText)
         }
         Slider(value = value.coerceIn(range.start, range.endInclusive), onValueChange = onValueChange, valueRange = range)
     }
