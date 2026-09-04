@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -129,13 +130,15 @@ private fun CutoutQuickPanelV44(
             it.startsWith("Pro Cutout") || it.startsWith("Auto Cutout")
         }
         val analysisBusy = analysisStatus?.let { status ->
-            status.contains("starting", ignoreCase = true) ||
+            val active = status.contains("starting", ignoreCase = true) ||
                 status.contains("matting", ignoreCase = true) ||
                 status.contains("analysis", ignoreCase = true) ||
                 status.contains("refined frame", ignoreCase = true)
-        } == true && analysisStatus.contains("ready", ignoreCase = true).not() &&
-            analysisStatus.contains("failed", ignoreCase = true).not() &&
-            analysisStatus.contains("incomplete", ignoreCase = true).not()
+            active &&
+                !status.contains("ready", ignoreCase = true) &&
+                !status.contains("failed", ignoreCase = true) &&
+                !status.contains("incomplete", ignoreCase = true)
+        } == true
         val analysisFailed = analysisStatus?.contains("failed", ignoreCase = true) == true ||
             analysisStatus?.contains("incomplete", ignoreCase = true) == true
 
@@ -347,7 +350,7 @@ private fun CutoutQuickPanelV44(
 }
 
 @Composable
-private fun QualityChoiceV47(
+private fun RowScope.QualityChoiceV47(
     label: String,
     selected: Boolean,
     enabled: Boolean,
