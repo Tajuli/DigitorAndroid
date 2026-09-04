@@ -1,10 +1,24 @@
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
+import java.security.MessageDigest
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+fun sha256Of(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().buffered().use { input ->
+        val buffer = ByteArray(1024 * 1024)
+        while (true) {
+            val read = input.read(buffer)
+            if (read <= 0) break
+            digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
 }
 
 fun downloadGeneratedAssetWithRetry(
@@ -12,8 +26,12 @@ fun downloadGeneratedAssetWithRetry(
     output: File,
     minimumBytes: Long,
     label: String,
+    expectedSha256: String? = null,
 ) {
-    if (output.isFile && output.length() > minimumBytes) return
+    if (output.isFile && output.length() > minimumBytes) {
+        if (expectedSha256 == null || sha256Of(output).equals(expectedSha256, ignoreCase = true)) return
+        output.delete()
+    }
     output.parentFile.mkdirs()
     val temp = File(output.parentFile, output.name + ".download")
     var lastError: Throwable? = null
@@ -40,6 +58,12 @@ fun downloadGeneratedAssetWithRetry(
             }
             require(temp.length() > minimumBytes) {
                 "$label download is unexpectedly small (${temp.length()} bytes)"
+            }
+            expectedSha256?.let { expected ->
+                val actual = sha256Of(temp)
+                require(actual.equals(expected, ignoreCase = true)) {
+                    "$label SHA-256 mismatch. Expected $expected but downloaded $actual"
+                }
             }
             if (output.exists()) output.delete()
             check(temp.renameTo(output)) { "Could not install ${output.name}" }
@@ -116,6 +140,29 @@ val downloadModNetModel by tasks.registering {
     }
 }
 
+// V50 experimental A/B backend. PP-MattingV2/STDC1 is from PaddleSeg (Apache-2.0). The 512x512
+// ONNX export is derived from PaddleSeg's published human checkpoint and is downloaded at build time
+// so the ~36 MB model never enters git history. Pinning SHA-256 prevents a silent model replacement
+// from changing creator output between builds.
+val generatedPpMattingV2Assets = layout.buildDirectory.dir("generated/ppMattingV2Assets")
+val ppMattingV2ModelFile = generatedPpMattingV2Assets.map { it.file("ppmattingv2_stdc1_human_512.onnx") }
+val downloadPpMattingV2Model by tasks.registering {
+    outputs.file(ppMattingV2ModelFile)
+    doLast {
+        val output = ppMattingV2ModelFile.get().asFile
+        downloadGeneratedAssetWithRetry(
+            urls = listOf(
+                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2-stdc1-human_512.onnx",
+                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2-stdc1-human_512.onnx?download=true",
+            ),
+            output = output,
+            minimumBytes = 30_000_000L,
+            label = "PP-MattingV2 STDC1 ONNX",
+            expectedSha256 = "448d0a5d143426057e6cedbd1711ee8059b4f7057e030f0a33cab3a1ed141567",
+        )
+    }
+}
+
 // Optional CI/local packaging filter. Normal builds keep every ABI, while a phone APK can be built
 // with `-PdigitorAbi=arm64-v8a` so MediaPipe/LiteRT native libraries are not duplicated for x86,
 // x86_64 and armeabi-v7a. This changes packaging only; editor behavior is unchanged.
@@ -176,12 +223,14 @@ android {
     sourceSets["main"].assets.srcDir(generatedHairModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedFaceSkinModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedPortraitMattingAssets.get().asFile)
+    sourceSets["main"].assets.srcDir(generatedPpMattingV2Assets.get().asFile)
 }
 
 tasks.named("preBuild").configure {
     dependsOn(downloadHairSegmenterModel)
     dependsOn(downloadFaceSkinSegmenterModel)
     dependsOn(downloadModNetModel)
+    dependsOn(downloadPpMattingV2Model)
 }
 
 dependencies {
@@ -214,6 +263,10 @@ dependencies {
     // LiteRT 2.1.6+ currently has an AGP namespace collision between litert and its transitive
     // litert-api AAR. 2.1.5 predates that packaging regression and still exposes CompiledModel.
     implementation("com.google.ai.edge.litert:litert:2.1.5")
+
+    // Experimental PP-MattingV2 A/B backend. ONNX Runtime Android is MIT licensed. Keep this as a
+    // separate backend so MODNet remains the default and can be restored without changing projects.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
