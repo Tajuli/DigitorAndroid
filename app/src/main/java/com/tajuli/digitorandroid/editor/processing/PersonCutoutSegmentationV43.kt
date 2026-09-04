@@ -26,9 +26,6 @@ import kotlin.math.roundToInt
 private const val MODNET_MODEL_ASSET_V44 = "modnet_v44.tflite"
 private const val MODNET_SIZE_V44 = 512
 private const val PERSON_ANALYSIS_LONG_EDGE_V44 = 720
-private const val MIN_PERSON_ANCHORS_V44 = 12
-private const val MAX_PERSON_ANCHORS_V44 = 160
-private const val PERSON_ANCHORS_PER_SECOND_V44 = 4L
 private const val TEMPORAL_RESET_GAP_US_V44 = 1_200_000L
 
 data class PersonCutoutMaskFrameV43(
@@ -64,7 +61,7 @@ data class PersonCutoutMaskTrackV43(
     }
 }
 
-/** V45 cache is deliberately separate from every V43/V44 segmentation or global-motion cache. */
+/** V46 cache is separate so old 160-anchor V45 mattes cannot be mistaken for the denser policy. */
 object PersonCutoutMaskStoreV43 {
     private val indexCache = ConcurrentHashMap<String, PersonCutoutMaskTrackV43>()
 
@@ -82,11 +79,11 @@ object PersonCutoutMaskStoreV43 {
         val temp = File(dir, "$sourceTimeUs.png.tmp")
         temp.outputStream().buffered().use { stream ->
             check(mask.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
-                "Could not encode V45 portrait alpha matte"
+                "Could not encode V46 portrait alpha matte"
             }
         }
         if (target.exists()) target.delete()
-        check(temp.renameTo(target)) { "Could not install V45 portrait alpha matte" }
+        check(temp.renameTo(target)) { "Could not install V46 portrait alpha matte" }
         indexCache.remove(cacheKey(sourceUri))
         return target
     }
@@ -104,7 +101,7 @@ object PersonCutoutMaskStoreV43 {
     }
 
     private fun sourceDir(context: Context, sourceUri: String): File =
-        File(File(context.filesDir, "person_cutout_masks_v45_modnet_hair_spatialflow_512"), cacheKey(sourceUri))
+        File(File(context.filesDir, "person_cutout_masks_v46_modnet_hair_spatialflow_512_320"), cacheKey(sourceUri))
 
     private fun cacheKey(sourceUri: String): String = MessageDigest.getInstance("SHA-256")
         .digest(sourceUri.toByteArray())
@@ -332,7 +329,7 @@ private class TemporalMatteStabilizerV44 {
 }
 
 /**
- * Historical class name kept so the UI bridge does not churn. V45 implementation is MODNet alpha
+ * Historical class name kept so the UI bridge does not churn. V46 implementation is MODNet alpha
  * matting + MediaPipe hair fusion + local spatial-flow temporal stabilization.
  */
 class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
@@ -468,8 +465,7 @@ class PersonCutoutAnalyzerV43(private val context: Context) {
             val start = clip.sourceInUs.coerceAtLeast(0L)
             val end = clip.sourceOutUs.coerceAtLeast(start + 1L)
             val durationUs = (end - start).coerceAtLeast(1L)
-            val target = ((durationUs * PERSON_ANCHORS_PER_SECOND_V44) / 1_000_000L).toInt() + 2
-            val count = target.coerceIn(MIN_PERSON_ANCHORS_V44, MAX_PERSON_ANCHORS_V44)
+            val count = personCutoutTargetAnchorCountV46(durationUs)
             val regularTimes = evenlySpacedTimes(start, end, count)
             val priority = prioritySourceUs?.coerceIn(start, (end - 1L).coerceAtLeast(start))
             val times = buildList {
