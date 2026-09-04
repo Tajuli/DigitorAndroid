@@ -1,10 +1,24 @@
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
+import java.security.MessageDigest
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+fun sha256Of(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().buffered().use { input ->
+        val buffer = ByteArray(1024 * 1024)
+        while (true) {
+            val read = input.read(buffer)
+            if (read <= 0) break
+            digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
 }
 
 fun downloadGeneratedAssetWithRetry(
@@ -12,8 +26,12 @@ fun downloadGeneratedAssetWithRetry(
     output: File,
     minimumBytes: Long,
     label: String,
+    expectedSha256: String? = null,
 ) {
-    if (output.isFile && output.length() > minimumBytes) return
+    if (output.isFile && output.length() > minimumBytes) {
+        if (expectedSha256 == null || sha256Of(output).equals(expectedSha256, ignoreCase = true)) return
+        output.delete()
+    }
     output.parentFile.mkdirs()
     val temp = File(output.parentFile, output.name + ".download")
     var lastError: Throwable? = null
@@ -41,6 +59,12 @@ fun downloadGeneratedAssetWithRetry(
             require(temp.length() > minimumBytes) {
                 "$label download is unexpectedly small (${temp.length()} bytes)"
             }
+            expectedSha256?.let { expected ->
+                val actual = sha256Of(temp)
+                require(actual.equals(expected, ignoreCase = true)) {
+                    "$label SHA-256 mismatch. Expected $expected but downloaded $actual"
+                }
+            }
             if (output.exists()) output.delete()
             check(temp.renameTo(output)) { "Could not install ${output.name}" }
             return
@@ -48,8 +72,6 @@ fun downloadGeneratedAssetWithRetry(
             lastError = error
             if (temp.exists()) temp.delete()
             if (attempt < attempts) {
-                // GitHub-hosted runners can briefly share a Hugging Face/IP rate limit. Back off
-                // rather than turning a transient HTTP 429 into a false code failure.
                 val delayMs = minOf(20_000L, 2_000L shl (attempt - 1))
                 logger.warn("$label download attempt $attempt/$attempts failed: ${error.message}; retrying in ${delayMs}ms")
                 Thread.sleep(delayMs)
@@ -95,30 +117,28 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
     }
 }
 
-// V44+ Pro Cutout uses MODNet's soft portrait alpha instead of a binary person mask. MODNet and
-// its published weights are Apache-2.0. This LiteRT conversion is GPU-friendly and keeps the model
-// outside git history while still producing deterministic CI/phone builds.
-val generatedPortraitMattingAssets = layout.buildDirectory.dir("generated/portraitMattingAssets")
-val modNetModelFile = generatedPortraitMattingAssets.map { it.file("modnet_v44.tflite") }
-val downloadModNetModel by tasks.registering {
-    outputs.file(modNetModelFile)
+// V50 Pro Cutout uses PP-MattingV2/STDC1 512 from PaddleSeg (Apache-2.0). The ONNX export is
+// downloaded at build time so the ~36 MB model never enters git history. SHA-256 pinning prevents
+// silent model replacement from changing creator output between builds.
+val generatedPpMattingV2Assets = layout.buildDirectory.dir("generated/ppMattingV2Assets")
+val ppMattingV2ModelFile = generatedPpMattingV2Assets.map { it.file("ppmattingv2_stdc1_human_512.onnx") }
+val downloadPpMattingV2Model by tasks.registering {
+    outputs.file(ppMattingV2ModelFile)
     doLast {
-        val output = modNetModelFile.get().asFile
+        val output = ppMattingV2ModelFile.get().asFile
         downloadGeneratedAssetWithRetry(
             urls = listOf(
-                "https://huggingface.co/litert-community/MODNet-LiteRT/resolve/main/modnet.tflite",
-                "https://huggingface.co/litert-community/MODNet-LiteRT/resolve/main/modnet.tflite?download=true",
+                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2-stdc1-human_512.onnx",
+                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2-stdc1-human_512.onnx?download=true",
             ),
             output = output,
-            minimumBytes = 20_000_000L,
-            label = "MODNet LiteRT",
+            minimumBytes = 30_000_000L,
+            label = "PP-MattingV2 STDC1 ONNX",
+            expectedSha256 = "448d0a5d143426057e6cedbd1711ee8059b4f7057e030f0a33cab3a1ed141567",
         )
     }
 }
 
-// Optional CI/local packaging filter. Normal builds keep every ABI, while a phone APK can be built
-// with `-PdigitorAbi=arm64-v8a` so MediaPipe/LiteRT native libraries are not duplicated for x86,
-// x86_64 and armeabi-v7a. This changes packaging only; editor behavior is unchanged.
 val requestedAbi = providers.gradleProperty("digitorAbi").orNull
     ?.trim()
     ?.takeIf { it.isNotEmpty() }
@@ -175,13 +195,13 @@ android {
 
     sourceSets["main"].assets.srcDir(generatedHairModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedFaceSkinModelAssets.get().asFile)
-    sourceSets["main"].assets.srcDir(generatedPortraitMattingAssets.get().asFile)
+    sourceSets["main"].assets.srcDir(generatedPpMattingV2Assets.get().asFile)
 }
 
 tasks.named("preBuild").configure {
     dependsOn(downloadHairSegmenterModel)
     dependsOn(downloadFaceSkinSegmenterModel)
-    dependsOn(downloadModNetModel)
+    dependsOn(downloadPpMattingV2Model)
 }
 
 dependencies {
@@ -211,9 +231,8 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // LiteRT 2.1.6+ currently has an AGP namespace collision between litert and its transitive
-    // litert-api AAR. 2.1.5 predates that packaging regression and still exposes CompiledModel.
-    implementation("com.google.ai.edge.litert:litert:2.1.5")
+    // PP-MattingV2 execution backend. ONNX Runtime Android is MIT licensed.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")

@@ -48,9 +48,9 @@ private val X5Muted = Color(0xFF909098)
 private val X5Accent = Color(0xFF30E0C3)
 private val X5Danger = Color(0xFFFF7474)
 
-private enum class EditPageV5 { TIMELINE, TRANSFORM, RETIME }
+private enum class EditPageV5 { TIMELINE, TRANSFORM, RETIME, CUTOUT }
 
-/** Timeline, transform and retime live under Edit; cut transitions are edited directly on the timeline. */
+/** Timeline, transform, retime and cutout live under Edit; transitions stay on the timeline. */
 @Composable
 fun EditWorkspaceV5(
     project: TimelineProject,
@@ -94,6 +94,9 @@ fun EditWorkspaceV5(
             TextButton(onClick = { page = EditPageV5.RETIME }, enabled = canEditVideo) {
                 Text("Retime", fontSize = 8.sp, color = if (page == EditPageV5.RETIME) X5Accent else X5Muted)
             }
+            TextButton(onClick = { page = EditPageV5.CUTOUT }, enabled = canEditVideo) {
+                Text("Cutout", fontSize = 8.sp, color = if (page == EditPageV5.CUTOUT) X5Accent else X5Muted)
+            }
             Spacer(Modifier.weight(1f))
             if (page == EditPageV5.TRANSFORM) {
                 Text("◆ keyframe at playhead", fontSize = 7.sp, color = X5Muted)
@@ -134,6 +137,12 @@ fun EditWorkspaceV5(
             EditPageV5.RETIME -> {
                 if (selectedClip != null && canEditVideo) {
                     RetimeWorkspaceV5(selectedClip, cursorUs, vm, Modifier.fillMaxSize())
+                }
+            }
+
+            EditPageV5.CUTOUT -> {
+                if (selectedClip != null && canEditVideo) {
+                    CutoutWorkspaceV50(vm = vm, modifier = Modifier.fillMaxSize())
                 }
             }
         }

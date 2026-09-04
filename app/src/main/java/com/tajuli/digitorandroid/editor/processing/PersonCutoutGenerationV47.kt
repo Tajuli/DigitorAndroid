@@ -6,10 +6,10 @@ import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import java.io.File
 import java.security.MessageDigest
 
-private const val V46_CACHE_DIR_NAME = "person_cutout_masks_v46_modnet_hair_spatialflow_512_320"
+private const val V50_CACHE_DIR_NAME = "person_cutout_masks_v50_ppmattingv2_hair_spatialflow_512"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-private const val V47_GENERATION_VERSION = "adaptive-gpu-v49-direct-queue-gpu-prepost-r1"
+private const val V47_GENERATION_VERSION = "adaptive-v50-ppmattingv2-only-r2"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
@@ -54,7 +54,7 @@ private fun personCutoutGenerationSignatureV47(clip: TimelineClip): String {
 }
 
 private fun personCutoutSourceDirV47(context: Context, sourceUri: String): File =
-    File(File(context.filesDir, V46_CACHE_DIR_NAME), personCutoutCacheKeyV47(sourceUri))
+    File(File(context.filesDir, V50_CACHE_DIR_NAME), personCutoutCacheKeyV47(sourceUri))
 
 private fun personCutoutCacheKeyV47(sourceUri: String): String = MessageDigest.getInstance("SHA-256")
     .digest(sourceUri.toByteArray())
