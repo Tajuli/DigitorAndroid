@@ -12,6 +12,7 @@ import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
 import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisPowerGuardV48
 import com.tajuli.digitorandroid.editor.processing.GpuPersonCutoutAnalyzerV47
 import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
+import com.tajuli.digitorandroid.editor.processing.markPersonCutoutGenerationV47Ready
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -142,10 +143,24 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                         setEditorStatusV19("Pro Cutout incomplete · $label · tap Analyze again")
                     }
                 }.onFailure { error ->
+                    val currentClip = state.value.project.clip(clip.id) ?: clip
+                    val recoveredHigh =
+                        quality == CutoutAnalysisQualityV47.HIGH &&
+                            hasPersonCutoutCoverageV43(app.applicationContext, currentClip)
                     PreviewExportCoordinator.refreshActivePreviews(220L)
-                    val detail = error.message?.takeIf { it.isNotBlank() }
-                        ?: error::class.java.simpleName
-                    setEditorStatusV19("Pro Cutout failed · $label · $detail")
+                    if (recoveredHigh) {
+                        // Some Android codecs decode every useful source frame but fail while draining
+                        // the final EOS buffer. Dense gap/end coverage plus the matching pending
+                        // generation signature proves this matte is complete enough for preview/export.
+                        markPersonCutoutGenerationV47Ready(app.applicationContext, currentClip)
+                        setEditorStatusV19(
+                            "Pro Cutout ready · $label · recovered complete matte after decoder tail stop",
+                        )
+                    } else {
+                        val detail = error.message?.takeIf { it.isNotBlank() }
+                            ?: error::class.java.simpleName
+                        setEditorStatusV19("Pro Cutout failed · $label · $detail")
+                    }
                 }
             }
         } finally {
