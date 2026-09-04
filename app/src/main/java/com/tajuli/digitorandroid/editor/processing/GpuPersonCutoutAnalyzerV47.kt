@@ -424,10 +424,10 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     }
 }
 
-/** LiteRT CompiledModel requests a true GPU-only compile first, then hybrid, then CPU fallback. */
+/** LiteRT CompiledModel requests GPU-only first, then hybrid, then CPU fallback. */
 private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
     private val model: CompiledModel
-    val backendLabel: String
+    private val modelBackendLabel: String
     private val inputBuffers: List<com.google.ai.edge.litert.TensorBuffer>
     private val outputBuffers: List<com.google.ai.edge.litert.TensorBuffer>
 
@@ -439,6 +439,10 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
     private val alphaSquare = Bitmap.createBitmap(MODNET_SIZE_V47, MODNET_SIZE_V47, Bitmap.Config.ARGB_8888)
     private val inputCanvas = Canvas(inputSquare)
     private val filterPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private var gpuTensorPacker: GpuModNetTensorPackerV48? = null
+
+    val backendLabel: String
+        get() = "$modelBackendLabel · ${if (gpuTensorPacker != null) "GPU tensor-pack" else "CPU tensor-pack"}"
 
     init {
         val app = context.applicationContext
@@ -451,7 +455,7 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
         }
         if (gpuOnly.isSuccess) {
             model = gpuOnly.getOrThrow()
-            backendLabel = "GPU-only"
+            modelBackendLabel = "GPU-only"
         } else {
             val hybrid = runCatching {
                 CompiledModel.create(
@@ -462,7 +466,7 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
             }
             if (hybrid.isSuccess) {
                 model = hybrid.getOrThrow()
-                backendLabel = "GPU/hybrid"
+                modelBackendLabel = "GPU/hybrid"
             } else {
                 model = CompiledModel.create(
                     app.assets,
@@ -471,7 +475,7 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
                         cpuOptions = CompiledModel.CpuOptions(numThreads = 4)
                     },
                 )
-                backendLabel = "CPU fallback"
+                modelBackendLabel = "CPU fallback"
             }
         }
         inputBuffers = model.createInputBuffers()
@@ -479,6 +483,10 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
         check(inputBuffers.isNotEmpty() && outputBuffers.isNotEmpty()) {
             "MODNet did not expose input/output buffers"
         }
+
+        // ES3/float-FBO devices offload normalization and NCHW transposition to a shader. This
+        // helper releases its EGL context after every pack so LiteRT can bind its own GPU context.
+        gpuTensorPacker = runCatching { GpuModNetTensorPackerV48() }.getOrNull()
     }
 
     fun infer(source: Bitmap): Bitmap {
@@ -490,24 +498,38 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
             Rect(prepared.left, prepared.top, prepared.left + prepared.contentWidth, prepared.top + prepared.contentHeight),
             filterPaint,
         )
-        inputSquare.getPixels(
-            inputPixels,
-            0,
-            MODNET_SIZE_V47,
-            0,
-            0,
-            MODNET_SIZE_V47,
-            MODNET_SIZE_V47,
-        )
 
-        // Current LiteRT Kotlin still exposes a host FloatArray boundary, but these buffers and the
-        // letterbox bitmap are reused instead of allocated for every frame.
-        for (i in 0 until plane) {
-            val pixel = inputPixels[i]
-            inputTensor[i] = Color.red(pixel) / 127.5f - 1f
-            inputTensor[plane + i] = Color.green(pixel) / 127.5f - 1f
-            inputTensor[plane * 2 + i] = Color.blue(pixel) / 127.5f - 1f
+        val packedOnGpu = gpuTensorPacker?.let { packer ->
+            val ok = runCatching { packer.pack(inputSquare, inputTensor) }.getOrDefault(false)
+            if (!ok) {
+                runCatching { packer.close() }
+                gpuTensorPacker = null
+            }
+            ok
+        } ?: false
+
+        if (!packedOnGpu) {
+            // Compatibility fallback. Reused arrays keep this cheaper than the old per-frame
+            // allocation path even when the device cannot render RGBA32F tensor targets.
+            inputSquare.getPixels(
+                inputPixels,
+                0,
+                MODNET_SIZE_V47,
+                0,
+                0,
+                MODNET_SIZE_V47,
+                MODNET_SIZE_V47,
+            )
+            for (i in 0 until plane) {
+                val pixel = inputPixels[i]
+                inputTensor[i] = Color.red(pixel) / 127.5f - 1f
+                inputTensor[plane + i] = Color.green(pixel) / 127.5f - 1f
+                inputTensor[plane * 2 + i] = Color.blue(pixel) / 127.5f - 1f
+            }
         }
+
+        // LiteRT 2.1.5 Kotlin still exposes a host-visible FloatArray boundary. The GPU packer
+        // removes the per-pixel CPU arithmetic/transposition; this is now one bulk tensor write.
         inputBuffers[0].writeFloat(inputTensor)
         model.run(inputBuffers, outputBuffers)
         val alpha = outputBuffers[0].readFloat()
@@ -547,6 +569,8 @@ private class GpuModNetPortraitMatteV47(context: Context) : AutoCloseable {
     }
 
     override fun close() {
+        runCatching { gpuTensorPacker?.close() }
+        gpuTensorPacker = null
         inputBuffers.forEach { runCatching { it.close() } }
         outputBuffers.forEach { runCatching { it.close() } }
         runCatching { model.close() }
