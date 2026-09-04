@@ -123,17 +123,23 @@ internal class AsyncPersonCutoutMaskWriterV48(
         }
         check(!closed) { "V49 matte writer is closed" }
         slots.acquire()
-        executor.execute {
-            try {
-                if (failure.get() == null) {
-                    PersonCutoutMaskStoreV43.save(context, sourceUri, sourceTimeUs, mask)
+        try {
+            executor.execute {
+                try {
+                    if (failure.get() == null) {
+                        PersonCutoutMaskStoreV43.save(context, sourceUri, sourceTimeUs, mask)
+                    }
+                } catch (error: Throwable) {
+                    failure.compareAndSet(null, error)
+                } finally {
+                    if (!mask.isRecycled) mask.recycle()
+                    slots.release()
                 }
-            } catch (error: Throwable) {
-                failure.compareAndSet(null, error)
-            } finally {
-                if (!mask.isRecycled) mask.recycle()
-                slots.release()
             }
+        } catch (error: Throwable) {
+            slots.release()
+            if (!mask.isRecycled) mask.recycle()
+            throw error
         }
     }
 
@@ -144,8 +150,11 @@ internal class AsyncPersonCutoutMaskWriterV48(
     }
 
     fun awaitIdle() {
-        executor.submit {}.get()
-        executor.submit {}.get()
+        // Every queued writer owns exactly one permit until its file is durable. Acquiring the whole
+        // pool is therefore a true drain barrier even with two workers; two no-op Futures are not,
+        // because one fast worker could execute both while the other still compresses a large PNG.
+        slots.acquire(8)
+        slots.release(8)
         failure.get()?.let { throw it }
     }
 
