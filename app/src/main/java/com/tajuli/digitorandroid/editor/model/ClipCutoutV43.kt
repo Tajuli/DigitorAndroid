@@ -11,32 +11,18 @@ enum class CutoutAnalysisQualityV47 {
 }
 
 /**
- * V50 portrait matting model selector.
- *
- * The nullable field on [ClipCutoutV43] is intentional: Gson may materialize newly-added fields as
- * null when an older saved project is opened. [resolvedPersonMattingBackendV50] therefore preserves
- * MODNet as the exact legacy/default behavior while allowing PP-MattingV2 to be A/B tested safely.
- */
-enum class PersonMattingBackendV50 {
-    MODNET,
-    PP_MATTING_V2,
-}
-
-/**
  * V50 Pro Cutout settings. The historical V43 type name is intentionally retained so projects
  * created while the experimental cutout branches were being tested remain readable.
  *
- * PERSON means portrait alpha matting, not binary person segmentation. The selected portrait model
- * supplies a soft alpha matte; semantic hair fusion and GPU-first local spatial-flow stabilization
- * happen during analysis. V46+ keep the realtime source-RGB-guided fabric/cloth refinement shared
- * by preview/export.
+ * PERSON means portrait alpha matting, not binary person segmentation. PP-MattingV2 supplies the
+ * soft alpha matte; semantic hair fusion and GPU-first local spatial-flow stabilization happen
+ * during analysis. V46+ keep the realtime source-RGB-guided fabric/cloth refinement shared by
+ * preview/export.
  */
 data class ClipCutoutV43(
     val mode: CutoutModeV43 = CutoutModeV43.NONE,
     /** LOW=4 fps, MEDIUM=12 fps, HIGH=every decoded source frame. */
     val analysisQualityV47: CutoutAnalysisQualityV47 = CutoutAnalysisQualityV47.MEDIUM,
-    /** Null resolves to MODNet for projects saved before the V50 experiment. */
-    val personMattingBackendV50: PersonMattingBackendV50? = null,
     // Legacy controls retained for project compatibility. V46 maps them to matte alpha shaping.
     val personThreshold: Float = .50f,
     val personFeather: Float = .075f,
@@ -52,7 +38,7 @@ data class ClipCutoutV43(
     val edgeCleanV44: Float = .24f,
     /** Texture-preserving edge colour decontamination strength. */
     val dehaloV44: Float = .30f,
-    /** Strength used when MediaPipe HairSegmenter is fused into the portrait alpha. */
+    /** Strength used when MediaPipe HairSegmenter is fused into the PP-MattingV2 alpha. */
     val hairDetailV44: Float = .62f,
     /** Local-flow previous-matte stabilization; 0 = none, 1 = strongest. */
     val temporalStabilityV44: Float = .54f,
@@ -106,9 +92,6 @@ data class ClipCutoutV43(
         )
     }
 }
-
-fun ClipCutoutV43.resolvedPersonMattingBackendV50(): PersonMattingBackendV50 =
-    personMattingBackendV50 ?: PersonMattingBackendV50.MODNET
 
 fun TimelineClip.resolvedCutoutV43(): ClipCutoutV43 =
     (cutoutV43 ?: ClipCutoutV43()).normalized()
