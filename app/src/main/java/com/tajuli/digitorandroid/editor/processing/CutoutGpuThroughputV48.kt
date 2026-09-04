@@ -28,14 +28,21 @@ internal class AsyncCutoutInferenceWorkerV48(
     private val completed = AtomicInteger(0)
     @Volatile private var closed = false
 
-    /** Takes ownership of [owned] so MediaCodec does not need an extra full-frame CPU copy. */
-    fun enqueueOwned(sourceTimeUs: Long, owned: Bitmap) {
-        failure.get()?.let {
-            if (!owned.isRecycled) owned.recycle()
-            throw it
-        }
+    /**
+     * Retains one bounded ARGB copy because the V47 decoder owns/recycles its callback Bitmap.
+     * The copy lets hardware decode continue while the previous frame is inside GPU inference.
+     */
+    fun enqueueCopy(sourceTimeUs: Long, source: Bitmap) {
+        failure.get()?.let { throw it }
         check(!closed) { "V48 Cutout inference worker is closed" }
         slots.acquire()
+        val owned = try {
+            source.copy(Bitmap.Config.ARGB_8888, false)
+                ?: error("Could not retain decoded frame for V48 GPU inference")
+        } catch (error: Throwable) {
+            slots.release()
+            throw error
+        }
         executor.execute {
             try {
                 if (failure.get() == null && process(sourceTimeUs, owned)) {
