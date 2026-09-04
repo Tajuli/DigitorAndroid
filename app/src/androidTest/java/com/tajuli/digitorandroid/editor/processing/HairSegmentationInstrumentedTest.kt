@@ -13,7 +13,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Runtime smoke tests for the semantic hair model and V47 GPU matte refinement. */
+/** Runtime smoke tests for semantic hair and V47/V48 GPU matte refinement. */
 @RunWith(AndroidJUnit4::class)
 class HairSegmentationInstrumentedTest {
     @Test
@@ -23,8 +23,6 @@ class HairSegmentationInstrumentedTest {
         val bitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
         try {
             bitmap.eraseColor(Color.rgb(180, 150, 125))
-            // Add a dark upper region so the input vaguely resembles a portrait; the smoke test only
-            // requires model execution and mask persistence, not a particular semantic prediction.
             for (y in 0 until 92) {
                 for (x in 48 until 208) bitmap.setPixel(x, y, Color.rgb(30, 24, 22))
             }
@@ -113,6 +111,49 @@ class HairSegmentationInstrumentedTest {
             sourceB.recycle()
             matteA.recycle()
             matteB.recycle()
+        }
+    }
+
+    @Test
+    fun v48GpuTensorPackerPreservesNchwChannelsAndCornersWhenSupported() {
+        val packer = runCatching { GpuModNetTensorPackerV48() }.getOrNull() ?: return
+        val size = 512
+        val plane = size * size
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val tensor = FloatArray(plane * 3)
+        try {
+            bitmap.eraseColor(Color.BLACK)
+            bitmap.setPixel(0, 0, Color.RED)
+            bitmap.setPixel(size - 1, 0, Color.BLUE)
+            bitmap.setPixel(0, size - 1, Color.GREEN)
+            bitmap.setPixel(size - 1, size - 1, Color.WHITE)
+
+            assertTrue(packer.pack(bitmap, tensor))
+
+            fun index(x: Int, y: Int): Int = y * size + x
+            val topLeft = index(0, 0)
+            val topRight = index(size - 1, 0)
+            val bottomLeft = index(0, size - 1)
+            val bottomRight = index(size - 1, size - 1)
+
+            // R plane
+            assertEquals(1f, tensor[topLeft], .03f)
+            assertEquals(-1f, tensor[topRight], .03f)
+            assertEquals(-1f, tensor[bottomLeft], .03f)
+            assertEquals(1f, tensor[bottomRight], .03f)
+            // G plane
+            assertEquals(-1f, tensor[plane + topLeft], .03f)
+            assertEquals(-1f, tensor[plane + topRight], .03f)
+            assertEquals(1f, tensor[plane + bottomLeft], .03f)
+            assertEquals(1f, tensor[plane + bottomRight], .03f)
+            // B plane
+            assertEquals(-1f, tensor[plane * 2 + topLeft], .03f)
+            assertEquals(1f, tensor[plane * 2 + topRight], .03f)
+            assertEquals(-1f, tensor[plane * 2 + bottomLeft], .03f)
+            assertEquals(1f, tensor[plane * 2 + bottomRight], .03f)
+        } finally {
+            bitmap.recycle()
+            packer.close()
         }
     }
 }
