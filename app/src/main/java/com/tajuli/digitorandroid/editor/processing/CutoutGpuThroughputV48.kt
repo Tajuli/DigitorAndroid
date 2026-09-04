@@ -108,6 +108,12 @@ internal class AsyncPersonCutoutMaskWriterV48(
         }
     }
 
+    /** Compatibility overload for the V48 analyzer's explicit application-context call site. */
+    fun enqueue(appContext: Context, sourceUri: String, sourceTimeUs: Long, mask: Bitmap) {
+        check(appContext.applicationContext.packageName == context.applicationContext.packageName)
+        enqueue(sourceUri, sourceTimeUs, mask)
+    }
+
     fun awaitIdle() {
         failure.get()?.let { throw it }
         executor.submit {}.get()
