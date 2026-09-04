@@ -5,9 +5,9 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import kotlin.math.max
 
 /**
- * V44 matte-cache coverage contract. Keep this aligned with PersonCutoutAnalyzerV43: MODNet targets
- * roughly 4 anchors/sec and caps long clips at 160. Missing one or two random decoder samples is not
- * a reason to re-run a heavy portrait-matting pass because the renderer interpolates neighbours.
+ * V46 matte-cache coverage contract. Analyzer and readiness validation share the same target-count
+ * policy: roughly 4 anchors/sec, capped at 320 for long clips. Missing one or two decoder samples is
+ * tolerated because the renderer interpolates neighbouring mattes.
  */
 fun hasPersonCutoutCoverageV43(context: Context, clip: TimelineClip): Boolean {
     val frames = PersonCutoutMaskStoreV43.index(context, clip).frames
@@ -20,14 +20,13 @@ fun hasPersonCutoutCoverageV43(context: Context, clip: TimelineClip): Boolean {
     val endUs = clip.sourceOutUs.coerceAtLeast(startUs + 1L) - 1L
     val durationUs = (endUs - startUs + 1L).coerceAtLeast(1L)
 
-    val expectedCount = (((durationUs * PERSON_COVERAGE_ANCHORS_PER_SECOND_V44) / 1_000_000L).toInt() + 2)
-        .coerceIn(PERSON_COVERAGE_MIN_ANCHORS_V44, PERSON_COVERAGE_MAX_ANCHORS_V44)
+    val expectedCount = personCutoutTargetAnchorCountV46(durationUs)
     val expectedGapUs = durationUs / (expectedCount - 1).coerceAtLeast(1)
 
     // Allow roughly 2.4 nominal anchor intervals for VFR/long-GOP decoder misses. Short footage
     // still gets a firm 700 ms floor; long clips naturally receive a larger tolerance once capped.
     val maxGapUs = max(
-        PERSON_COVERAGE_MIN_GAP_TOLERANCE_US_V44,
+        PERSON_COVERAGE_MIN_GAP_TOLERANCE_US_V46,
         (expectedGapUs * 12L) / 5L + 50_000L,
     )
 
@@ -46,7 +45,4 @@ fun hasPersonCutoutCoverageV43(context: Context, clip: TimelineClip): Boolean {
     }
 }
 
-private const val PERSON_COVERAGE_ANCHORS_PER_SECOND_V44 = 4L
-private const val PERSON_COVERAGE_MIN_ANCHORS_V44 = 12
-private const val PERSON_COVERAGE_MAX_ANCHORS_V44 = 160
-private const val PERSON_COVERAGE_MIN_GAP_TOLERANCE_US_V44 = 700_000L
+private const val PERSON_COVERAGE_MIN_GAP_TOLERANCE_US_V46 = 700_000L
