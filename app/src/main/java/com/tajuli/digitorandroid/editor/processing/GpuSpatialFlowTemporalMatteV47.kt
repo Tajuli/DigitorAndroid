@@ -412,6 +412,20 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             uniform float uHairStrength;
             uniform float uTemporalStrength;
 
+            float previousSupportAt(vec2 previousUv) {
+                vec2 radius = uSearchStep * 1.75;
+                float support = texture2D(uPreviousMatte, previousUv).r;
+                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + vec2(radius.x, 0.0), vec2(0.0), vec2(1.0))).r);
+                support = max(support, texture2D(uPreviousMatte, clamp(previousUv - vec2(radius.x, 0.0), vec2(0.0), vec2(1.0))).r);
+                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + vec2(0.0, radius.y), vec2(0.0), vec2(1.0))).r);
+                support = max(support, texture2D(uPreviousMatte, clamp(previousUv - vec2(0.0, radius.y), vec2(0.0), vec2(1.0))).r);
+                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + radius, vec2(0.0), vec2(1.0))).r);
+                support = max(support, texture2D(uPreviousMatte, clamp(previousUv - radius, vec2(0.0), vec2(1.0))).r);
+                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + vec2(radius.x, -radius.y), vec2(0.0), vec2(1.0))).r);
+                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + vec2(-radius.x, radius.y), vec2(0.0), vec2(1.0))).r);
+                return support;
+            }
+
             void main() {
                 float currentAlpha = texture2D(uCurrentMatte, vUv).r;
                 float uncertainty = clamp(4.0 * currentAlpha * (1.0 - currentAlpha), 0.0, 1.0);
@@ -424,7 +438,7 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                     currentAlpha = max(currentAlpha, currentAlpha + (1.0 - currentAlpha) * hairWeight);
                 }
 
-                if (uHasPrevious < 0.5 || uTemporalStrength <= 0.001 || currentAlpha <= 0.01 || currentAlpha >= 0.99) {
+                if (uHasPrevious < 0.5 || uTemporalStrength <= 0.001) {
                     gl_FragColor = vec4(currentAlpha, currentAlpha, currentAlpha, 1.0);
                     return;
                 }
@@ -434,6 +448,29 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 float dy = flow.g * 12.0 - 6.0;
                 vec2 previousUv = clamp(vUv + vec2(dx * uSearchStep.x, dy * uSearchStep.y), vec2(0.0), vec2(1.0));
                 float previousAlpha = texture2D(uPreviousMatte, previousUv).r;
+
+                // MODNet can occasionally classify a stationary object touching the subject (for
+                // example a chair back beside a shoulder) as certain foreground for one/few anchors.
+                // The old path returned immediately for alpha >= .99, so that false positive bypassed
+                // every temporal check and 12-fps interpolation made the chair flash into the result.
+                // Reject only *new*, well-matched, near-zero-motion foreground that has no nearby
+                // support in the previous stabilized matte. Genuine moving hands/hair/cloth retain
+                // their flow-warped support or non-zero motion and therefore pass this gate.
+                float previousSupport = previousSupportAt(previousUv);
+                float motionBlocks = length(vec2(dx, dy));
+                float staticMatch = 1.0 - smoothstep(0.35, 1.65, motionBlocks);
+                float reliableFlow = smoothstep(0.12, 0.42, flow.b);
+                float unsupportedBirth = smoothstep(0.52, 0.90, currentAlpha) *
+                    (1.0 - smoothstep(0.08, 0.44, previousSupport));
+                float birthGuard = clamp(unsupportedBirth * staticMatch * reliableFlow, 0.0, 1.0);
+                float guardedTarget = min(currentAlpha, previousSupport + 0.055);
+                currentAlpha = mix(currentAlpha, guardedTarget, birthGuard * 0.97);
+
+                if (currentAlpha <= 0.01 || currentAlpha >= 0.99) {
+                    gl_FragColor = vec4(currentAlpha, currentAlpha, currentAlpha, 1.0);
+                    return;
+                }
+
                 float disagreement = abs(currentAlpha - previousAlpha);
                 float agreement = clamp(1.0 - disagreement / 0.34, 0.0, 1.0);
                 float occlusion = 1.0 - smoothstep(0.20, 0.55, disagreement);
