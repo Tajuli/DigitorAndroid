@@ -20,7 +20,7 @@ import kotlinx.coroutines.withContext
 
 private val personCutoutAnalysisInFlightV43 = ConcurrentHashMap.newKeySet<String>()
 
-/** V48 bridge retains historical symbols so existing project/editor code remains source-compatible. */
+/** V49 bridge retains historical symbols so existing project/editor code remains source-compatible. */
 fun EditorViewModelV4.setSelectedCutoutV43(
     settings: ClipCutoutV43,
     status: String = "Cutout updated",
@@ -42,7 +42,7 @@ fun EditorViewModelV4.setSelectedCutoutV43(
         })
     }
     commitProjectV19(
-        label = "cutout-v48",
+        label = "cutout-v49",
         project = snapshot.project.copy(tracks = tracks),
         status = status,
         coalesce = coalesce,
@@ -79,7 +79,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
     val quality = settings.analysisQualityV47
     val label = quality.uiLabelV47()
     val analysisKey = buildString {
-        append("v48-gpu-throughput|")
+        append("v49-near-fully-gpu|")
         append(clip.uri); append('|'); append(clip.sourceInUs); append('|'); append(clip.sourceOutUs)
         append('|'); append(quality.name)
         append('|'); append(settings.hairDetailV44); append('|'); append(settings.temporalStabilityV44)
@@ -97,7 +97,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         )
     }
 
-    setEditorStatusV19("Pro Cutout · $label · starting V48 GPU pipeline…")
+    setEditorStatusV19("Pro Cutout · $label · starting V49 near-fully-GPU pipeline…")
     val app = getApplication<Application>()
     val progressStride = when (quality) {
         CutoutAnalysisQualityV47.LOW -> 8
@@ -116,7 +116,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                             prioritySourceUs = prioritySourceUs,
                             onBackendResolved = { backend ->
                                 viewModelScope.launch(Dispatchers.Main) {
-                                    setEditorStatusV19("Pro Cutout · $label · analysis · $backend")
+                                    setEditorStatusV19("Pro Cutout · $label · $backend")
                                 }
                             },
                             onAnchorStored = { completed ->
