@@ -6,19 +6,17 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -34,15 +32,16 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.util.UnstableApi
+import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 
 private val V8CutoutAccent = Color(0xFF30E0C3)
+private val V8CutoutPanel = Color(0xF20B0B0F)
 
-/** Always-visible V44 Pro Cutout quick action; MEDIA remains hidden in the legacy V7 workspace bar. */
-@OptIn(ExperimentalMaterial3Api::class)
+/** Always-visible V47 Pro Cutout quick action with a non-modal, scrollable control panel. */
 @UnstableApi
 @Composable
 fun DigitorEditorScreenV8(
@@ -54,43 +53,59 @@ fun DigitorEditorScreenV8(
     Box(Modifier.fillMaxSize()) {
         DigitorEditorScreenV7(vm = vm, onHome = onHome)
 
-        Button(
-            onClick = { showCutout = true },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .navigationBarsPadding()
-                .padding(end = 10.dp, bottom = 74.dp)
-                .height(38.dp),
-            shape = RoundedCornerShape(9.dp),
-        ) {
-            Text("Cutout", fontSize = 10.sp)
+        if (!showCutout) {
+            Button(
+                onClick = { showCutout = true },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .navigationBarsPadding()
+                    .padding(end = 10.dp, bottom = 74.dp)
+                    .height(38.dp),
+                shape = RoundedCornerShape(9.dp),
+            ) {
+                Text("Cutout", fontSize = 10.sp)
+            }
         }
-    }
 
-    if (showCutout) {
-        ModalBottomSheet(onDismissRequest = { showCutout = false }) {
-            CutoutQuickPanelV44(vm = vm)
+        if (showCutout) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .fillMaxHeight(.44f)
+                    .background(V8CutoutPanel, RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp))
+                    .navigationBarsPadding(),
+            ) {
+                CutoutQuickPanelV44(vm = vm, onClose = { showCutout = false })
+            }
         }
     }
 }
 
 @Composable
-private fun CutoutQuickPanelV44(vm: EditorViewModelV4) {
+private fun CutoutQuickPanelV44(
+    vm: EditorViewModelV4,
+    onClose: () -> Unit,
+) {
     val state by vm.state.collectAsState()
     val clip = state.project.clip(state.selectedClipId)
     val isVisualClip = clip != null && state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO
 
     Column(
         Modifier
-            .fillMaxWidth()
+            .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(start = 16.dp, end = 16.dp, bottom = 30.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
     ) {
-        Text("Pro Cutout & Chroma Key", fontSize = 17.sp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Pro Cutout & Chroma Key", fontSize = 16.sp)
+            Spacer(Modifier.weight(1f))
+            OutlinedButton(onClick = onClose) { Text("Close", fontSize = 9.sp) }
+        }
         Text(
-            "MODNet portrait matting + hair refinement + temporal stabilization for normal footage; Chroma Key for controlled screens.",
-            fontSize = 10.sp,
+            "GPU-first portrait matting. Choose analysis quality first, then press Analyze. This panel stays scrollable without hiding the whole preview.",
+            fontSize = 9.sp,
             color = Color.White.copy(alpha = .62f),
         )
 
@@ -114,11 +129,13 @@ private fun CutoutQuickPanelV44(vm: EditorViewModelV4) {
             it.startsWith("Pro Cutout") || it.startsWith("Auto Cutout")
         }
         val analysisBusy = analysisStatus?.let { status ->
-            status.contains("loading", ignoreCase = true) ||
-                status.contains("preparing", ignoreCase = true) ||
+            status.contains("starting", ignoreCase = true) ||
                 status.contains("matting", ignoreCase = true) ||
-                status.contains("analyzing", ignoreCase = true)
-        } == true
+                status.contains("analysis", ignoreCase = true) ||
+                status.contains("refined frame", ignoreCase = true)
+        } == true && analysisStatus.contains("ready", ignoreCase = true).not() &&
+            analysisStatus.contains("failed", ignoreCase = true).not() &&
+            analysisStatus.contains("incomplete", ignoreCase = true).not()
         val analysisFailed = analysisStatus?.contains("failed", ignoreCase = true) == true ||
             analysisStatus?.contains("incomplete", ignoreCase = true) == true
 
@@ -156,20 +173,67 @@ private fun CutoutQuickPanelV44(vm: EditorViewModelV4) {
         when (settings.mode) {
             CutoutModeV43.NONE -> {
                 Text(
-                    "Pro Cutout creates a soft portrait alpha without a green screen. Chroma Key is faster and more controllable when a clean green/blue screen is available.",
+                    "Pro Cutout creates a soft portrait alpha without a green screen. Chroma Key is faster and more controllable with a clean green/blue screen.",
                     fontSize = 10.sp,
                     color = Color.White.copy(alpha = .62f),
                 )
             }
 
             CutoutModeV43.PERSON -> {
+                Text("Analysis quality", fontSize = 10.sp, color = Color.White.copy(alpha = .82f))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    QualityChoiceV47(
+                        label = "Low\n4 fps",
+                        selected = settings.analysisQualityV47 == CutoutAnalysisQualityV47.LOW,
+                        enabled = !analysisBusy,
+                    ) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(analysisQualityV47 = CutoutAnalysisQualityV47.LOW),
+                            status = "Pro Cutout quality · Low · 4 fps · tap Analyze",
+                            coalesce = false,
+                        )
+                    }
+                    QualityChoiceV47(
+                        label = "Medium\n12 fps",
+                        selected = settings.analysisQualityV47 == CutoutAnalysisQualityV47.MEDIUM,
+                        enabled = !analysisBusy,
+                    ) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(analysisQualityV47 = CutoutAnalysisQualityV47.MEDIUM),
+                            status = "Pro Cutout quality · Medium · 12 fps · tap Analyze",
+                            coalesce = false,
+                        )
+                    }
+                    QualityChoiceV47(
+                        label = "High\nEvery frame",
+                        selected = settings.analysisQualityV47 == CutoutAnalysisQualityV47.HIGH,
+                        enabled = !analysisBusy,
+                    ) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(analysisQualityV47 = CutoutAnalysisQualityV47.HIGH),
+                            status = "Pro Cutout quality · High · every frame · tap Analyze",
+                            coalesce = false,
+                        )
+                    }
+                }
+                if (settings.analysisQualityV47 == CutoutAnalysisQualityV47.HIGH) {
+                    Text(
+                        "High analyzes every decoded source frame. It gives the best motion accuracy but can take much longer and use more storage.",
+                        fontSize = 9.sp,
+                        color = Color.White.copy(alpha = .58f),
+                    )
+                }
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         when {
                             analysisBusy -> "Building refined portrait matte…"
                             personReady -> "Pro matte ready"
                             analysisFailed -> "Analysis failed / incomplete"
-                            else -> "Portrait matte needs analysis"
+                            else -> "Choose quality, then Analyze"
                         },
                         fontSize = 10.sp,
                         color = if (personReady) V8CutoutAccent else Color.White.copy(alpha = .62f),
@@ -181,7 +245,7 @@ private fun CutoutQuickPanelV44(vm: EditorViewModelV4) {
                     ) {
                         Text(
                             when {
-                                analysisBusy -> "Matting…"
+                                analysisBusy -> "Analyzing…"
                                 personReady -> "Refresh Matte"
                                 else -> "Analyze"
                             },
@@ -208,17 +272,17 @@ private fun CutoutQuickPanelV44(vm: EditorViewModelV4) {
                     vm.setSelectedCutoutV43(settings.copy(dehaloV44 = it), status = "Pro Cutout dehalo updated")
                 }
 
-                Text("Matte analysis quality", fontSize = 10.sp, color = Color.White.copy(alpha = .78f))
+                Text("Analysis-time refinement", fontSize = 10.sp, color = Color.White.copy(alpha = .78f))
                 CutoutSliderV43("Hair Detail", settings.hairDetailV44, 0f..1f) {
                     vm.setSelectedCutoutV43(
                         settings.copy(hairDetailV44 = it),
-                        status = "Pro Cutout Hair Detail changed · Refresh Matte",
+                        status = "Pro Cutout Hair Detail changed · tap Analyze",
                     )
                 }
                 CutoutSliderV43("Temporal Stability", settings.temporalStabilityV44, 0f..0.92f) {
                     vm.setSelectedCutoutV43(
                         settings.copy(temporalStabilityV44 = it),
-                        status = "Pro Cutout temporal stability changed · Refresh Matte",
+                        status = "Pro Cutout temporal stability changed · tap Analyze",
                     )
                 }
 
@@ -231,7 +295,7 @@ private fun CutoutQuickPanelV44(vm: EditorViewModelV4) {
                 }
 
                 Text(
-                    "Hair Detail and Temporal Stability are baked into the analyzed matte; press Refresh Matte after changing them. Shrink/Grow, Edge Clean, Dehalo, Alpha Bias and Edge Softness update in realtime. Put a replacement clip on a lower V track.",
+                    "Quality, Hair Detail and Temporal Stability are baked into the analyzed matte; press Analyze/Refresh Matte after changing them. Other edge controls update in realtime.",
                     fontSize = 9.sp,
                     color = Color.White.copy(alpha = .55f),
                 )
@@ -278,6 +342,24 @@ private fun CutoutQuickPanelV44(vm: EditorViewModelV4) {
                     vm.setSelectedCutoutV43(settings.copy(spillSuppression = it), status = "Spill suppression updated")
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun QualityChoiceV47(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    if (selected) {
+        FilledTonalButton(enabled = enabled, onClick = onClick, modifier = Modifier.weight(1f)) {
+            Text("✓ $label", fontSize = 8.sp)
+        }
+    } else {
+        OutlinedButton(enabled = enabled, onClick = onClick, modifier = Modifier.weight(1f)) {
+            Text(label, fontSize = 8.sp)
         }
     }
 }
