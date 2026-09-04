@@ -3,16 +3,25 @@ package com.tajuli.digitorandroid.editor.model
 /** Clip-level cutout mode. Nullable TimelineClip persistence keeps legacy projects readable. */
 enum class CutoutModeV43 { NONE, PERSON, CHROMA_KEY }
 
+/** User-selected V47 analysis density. Analysis starts only after the explicit Analyze action. */
+enum class CutoutAnalysisQualityV47 {
+    LOW,
+    MEDIUM,
+    HIGH,
+}
+
 /**
- * V46 Pro Cutout settings. The historical V43 type name is intentionally retained so projects
+ * V47 Pro Cutout settings. The historical V43 type name is intentionally retained so projects
  * created while the experimental cutout branches were being tested remain readable.
  *
  * PERSON means portrait alpha matting, not binary person segmentation. MODNet supplies a soft alpha
- * matte; hair fusion and V45 local spatial-flow temporal stabilization happen during analysis.
- * V46 adds a realtime source-RGB-guided fabric/cloth refinement pass shared by preview/export.
+ * matte; semantic hair fusion and GPU-first local spatial-flow stabilization happen during analysis.
+ * V46/V47 keep the realtime source-RGB-guided fabric/cloth refinement shared by preview/export.
  */
 data class ClipCutoutV43(
     val mode: CutoutModeV43 = CutoutModeV43.NONE,
+    /** LOW=4 fps, MEDIUM=12 fps, HIGH=every decoded source frame. */
+    val analysisQualityV47: CutoutAnalysisQualityV47 = CutoutAnalysisQualityV47.MEDIUM,
     // Legacy controls retained for project compatibility. V46 maps them to matte alpha shaping.
     val personThreshold: Float = .50f,
     val personFeather: Float = .075f,
