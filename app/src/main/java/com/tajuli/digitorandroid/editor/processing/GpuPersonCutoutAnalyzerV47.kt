@@ -19,16 +19,15 @@ private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
  * V53 adaptive accelerated Pro Cutout analyzer.
  *
  * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Video qualities use MediaCodec + OES +
- * GL decode. Base person segmentation prefers MediaPipe GPU, then direct LiteRT GPU, and finally the
- * small 256x256 CPU model only when both GPU routes fail. Hair enhancement is GPU-only: when that
- * delegate is unavailable the optional hair stage is skipped rather than becoming a slow CPU job.
- * GLES temporal refinement remains accelerated.
+ * GL decode. Person segmentation uses MediaPipe GPU with cloth/accessory-aware edge protection;
+ * phones that cannot create that GPU task retain the existing Direct LiteRT GPU -> CPU fallback.
+ * Hair enhancement is GPU-only: when that delegate is unavailable the optional hair stage is
+ * skipped rather than becoming a slow CPU job. GLES temporal refinement remains accelerated.
  *
- * V53 adds a small confidence/topology cleanup before and after temporal fusion. It removes nearby
+ * V53 adds confidence/topology cleanup before and after temporal fusion. It removes nearby
  * background islands such as chair/headrests while preserving a short soft margin around the main
- * portrait, with extra pinhole repair for hijab/scarf edges. The cleanup is run on a <=320 px matte,
- * so its CPU cost is tiny compared with neural inference and it also reduces temporal GPU/readback
- * work compared with keeping a 720 px matte cache.
+ * portrait, with extra pinhole repair for hijab/scarf edges. The cleanup runs at <=384 px long edge,
+ * aligned with the semantic-hair stage, so its CPU cost remains small compared with neural inference.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -114,8 +113,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         }
 
         try {
-            // Producer: MediaCodec + OES + GL scale. Consumer: GPU-first person matte, V53 topology,
-            // optional GPU hair, GLES temporal flow, final V53 topology, then async matte persistence.
             val sequentialResult = runCatching {
                 GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
                     uri = Uri.parse(clip.uri),
@@ -164,7 +161,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         val raw = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val source = ImageDecoder.createSource(context.contentResolver, uri)
             ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-                // MediaPipe BitmapImageBuilder needs CPU-addressable pixels at the input boundary.
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
                 val longEdge = max(info.size.width, info.size.height)
                 if (longEdge > PERSON_ANALYSIS_LONG_EDGE_V47) {
@@ -187,10 +183,8 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
 
-    private val portraitMatte = MediaPipePersonMatteV51(appContext, requireGpu = false)
+    private val portraitMatte: PortraitMatteBackendV50 = SemanticClothPersonMatteV53(appContext)
 
-    // Hair is optional refinement. Never let its CPU fallback slow the hot path: either create the
-    // GPU delegate or skip hair detail entirely on this device.
     private val hair: BeautyHairSegmenterV29? = runCatching {
         BeautyHairSegmenterV29(appContext, requireGpu = true)
     }.getOrNull()
@@ -249,9 +243,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
             }
 
             val stabilized = try {
-                // A second topology pass removes any background island that temporal history tried
-                // to carry over from an earlier frame. Because temporalMatte is already <=320 px,
-                // this is a very small bounded CPU pass.
                 cleanupPersonMatteTopologyV53(temporalMatte)
             } finally {
                 if (!temporalMatte.isRecycled) temporalMatte.recycle()
@@ -291,8 +282,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         val fresh = try {
             gpuHair.segmentSoftMask(source)
         } catch (_: Throwable) {
-            // Hair is optional. If a flaky vendor GPU fails after initialization, disable semantic
-            // contribution for this frame instead of aborting the complete person matte analysis.
             null
         }
         if (fresh != null) {
