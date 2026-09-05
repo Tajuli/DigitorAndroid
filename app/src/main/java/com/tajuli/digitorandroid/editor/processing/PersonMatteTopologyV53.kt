@@ -10,7 +10,7 @@ import kotlin.math.roundToInt
  *
  * SelfieMulticlass can occasionally give a chair/headrest or another nearby background object a
  * weak person score. Temporal flow can then preserve that false island for several frames. This
- * pass intentionally runs on a small (<=320 px long edge) matte and is therefore tiny compared with
+ * pass intentionally runs on a small (<=384 px long edge) matte and is therefore tiny compared with
  * neural inference. It builds a high-confidence person core, erodes one pixel to break weak bridges,
  * keeps the dominant portrait component, then grows a short support margin so soft hijab/scarf,
  * fingers and anti-aliased edges are not clipped. Finally it fills only tiny, strongly-supported
@@ -18,7 +18,7 @@ import kotlin.math.roundToInt
  */
 internal fun cleanupPersonMatteTopologyV53(
     matte: Bitmap,
-    targetLongEdge: Int = 320,
+    targetLongEdge: Int = 384,
 ): Bitmap {
     check(!matte.isRecycled) { "Cannot clean a recycled person matte" }
 
@@ -42,8 +42,6 @@ internal fun cleanupPersonMatteTopologyV53(
     val pixels = IntArray(size)
     working.getPixels(pixels, 0, width, 0, 0, width, height)
 
-    // V53 uses a moderately strong seed. Soft portrait edges are recovered later from the original
-    // alpha, so they do not have to survive this seed threshold themselves.
     val alpha = IntArray(size)
     val strong = BooleanArray(size)
     for (i in 0 until size) {
@@ -52,8 +50,6 @@ internal fun cleanupPersonMatteTopologyV53(
         strong[i] = a >= 72
     }
 
-    // One 3x3 erosion breaks narrow confidence bridges to background objects. This is only the seed
-    // core; the final soft matte is not eroded.
     val eroded = BooleanArray(size)
     for (y in 1 until height - 1) {
         val row = y * width
@@ -118,15 +114,9 @@ internal fun cleanupPersonMatteTopologyV53(
         }
     }
 
-    // If segmentation is extremely weak (e.g. tiny distant person), do not risk deleting it.
     val minimumUsefulCore = max(24, size / 500)
-    if (bestLabel == 0 || bestArea < minimumUsefulCore) {
-        return working
-    }
+    if (bestLabel == 0 || bestArea < minimumUsefulCore) return working
 
-    // Multi-source four-neighbour distance from the dominant core. Radius 5 at <=320 px preserves
-    // soft clothing/hijab boundaries while rejecting the visibly detached chair/headrest seen in
-    // the supplied test clip.
     val distance = ByteArray(size) { 127.toByte() }
     var head = 0
     var tail = 0
@@ -136,7 +126,10 @@ internal fun cleanupPersonMatteTopologyV53(
             queue[tail++] = i
         }
     }
-    val supportRadius = 5
+
+    // 6 px at 384 is the same relative margin as the previous 5 px at 320, while the higher working
+    // resolution better preserves scarf/hijab curvature and matches the 384 px semantic-hair stage.
+    val supportRadius = 6
     while (head < tail) {
         val index = queue[head++]
         val d = distance[index].toInt()
@@ -159,9 +152,6 @@ internal fun cleanupPersonMatteTopologyV53(
         filtered[i] = if (distance[i].toInt() <= supportRadius) alpha[i] else 0
     }
 
-    // Small support-aware hole/rough-edge repair. It can only increase alpha by a limited amount and
-    // only when most neighbours are already convincing foreground. Upper-frame cloth/head-cover
-    // edges get a slightly more permissive rule because hijab/scarf boundaries are the common case.
     val repaired = IntArray(size)
     for (y in 0 until height) {
         val upperPortrait = y < (height * 0.72f).toInt()
