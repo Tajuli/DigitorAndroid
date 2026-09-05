@@ -66,7 +66,10 @@ internal fun decidePersonMemorySampleV51(sample: PersonMemorySampleV51): PersonM
     val heldTarget = max(refined, min(previous, max(alphaSupport, previous * .94f)))
     refined = mixV51(refined, heldTarget, exitHold)
 
-    val outputEvidence = max(refined, current * .86f)
+    // Rejected raw births must not become confidence just because the base model was very certain.
+    // Only already-established or motion-supported fresh foreground may add raw-current evidence.
+    val confidencePermission = max(established, allowedFreshEntry)
+    val outputEvidence = max(refined, current * .86f * confidencePermission)
     val riseRate = (.28f + .30f * reliableFlow + .16f * motionEvidence).coerceIn(.28f, .74f)
     val fallRate = (.075f + .11f * (1f - reliableFlow) + .10f * motionEvidence).coerceIn(.075f, .285f)
     val nextConfidence = if (outputEvidence >= previousConfidence) {
