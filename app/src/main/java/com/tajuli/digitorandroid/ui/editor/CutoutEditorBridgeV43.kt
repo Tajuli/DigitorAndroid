@@ -20,7 +20,7 @@ import kotlinx.coroutines.withContext
 
 private val personCutoutAnalysisInFlightV43 = ConcurrentHashMap.newKeySet<String>()
 
-/** V52 bridge retains historical symbols so existing project/editor code remains source-compatible. */
+/** V54 bridge retains historical symbols so existing project/editor code remains source-compatible. */
 fun EditorViewModelV4.setSelectedCutoutV43(
     settings: ClipCutoutV43,
     status: String = "Cutout updated",
@@ -42,7 +42,7 @@ fun EditorViewModelV4.setSelectedCutoutV43(
         })
     }
     commitProjectV19(
-        label = "cutout-v52",
+        label = "cutout-v54",
         project = snapshot.project.copy(tracks = tracks),
         status = status,
         coalesce = coalesce,
@@ -60,7 +60,7 @@ fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
     val clip = state.value.project.clip(state.value.selectedClipId) ?: return
     val app = getApplication<Application>()
     if (hasPersonCutoutCoverageV43(app.applicationContext, clip)) {
-        setEditorStatusV19("Pro Cutout ready · $label · cached V52 matte")
+        setEditorStatusV19("Pro Cutout ready · $label · cached V54 matte")
         PreviewExportCoordinator.refreshActivePreviews()
     }
 }
@@ -79,7 +79,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
     val quality = settings.analysisQualityV47
     val label = quality.uiLabelV47()
     val analysisKey = buildString {
-        append("v52-accelerator-gpu-memory|")
+        append("v54-safe-base-gpu-memory|")
         append(clip.uri); append('|'); append(clip.sourceInUs); append('|'); append(clip.sourceOutUs)
         append('|'); append(quality.name)
         append('|'); append(settings.hairDetailV44); append('|'); append(settings.temporalStabilityV44)
@@ -97,7 +97,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         )
     }
 
-    setEditorStatusV19("Pro Cutout · $label · starting V52 accelerator/GPU pipeline…")
+    setEditorStatusV19("Pro Cutout · $label · starting V54 crash-safe pipeline…")
     val app = getApplication<Application>()
     val progressStride = when (quality) {
         CutoutAnalysisQualityV47.LOW -> 8
@@ -107,8 +107,6 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
     viewModelScope.launch(Dispatchers.Default) {
         try {
             val result = runCatching {
-                // The power lease outlives Activity screen timeout. MainActivity also keeps the
-                // display awake while this lease is active; manual screen-off still keeps CPU/codec alive.
                 CutoutAnalysisPowerGuardV48.acquire(app.applicationContext).use {
                     PreviewExportCoordinator.acquireAnalysisLease().use {
                         GpuPersonCutoutAnalyzerV47(app.applicationContext).analyzeAndStore(
@@ -137,7 +135,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                     PreviewExportCoordinator.refreshActivePreviews(220L)
                     if (ready) {
                         setEditorStatusV19(
-                            "Pro Cutout ready · $label · ${track.frames.size} V52 refined matte frame(s)",
+                            "Pro Cutout ready · $label · ${track.frames.size} V54 refined matte frame(s)",
                         )
                     } else {
                         setEditorStatusV19("Pro Cutout incomplete · $label · tap Analyze again")
@@ -149,9 +147,6 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                             hasPersonCutoutCoverageV43(app.applicationContext, currentClip)
                     PreviewExportCoordinator.refreshActivePreviews(220L)
                     if (recoveredHigh) {
-                        // Some Android codecs decode every useful source frame but fail while draining
-                        // the final EOS buffer. Dense gap/end coverage plus the matching pending
-                        // generation signature proves this matte is complete enough for preview/export.
                         markPersonCutoutGenerationV47Ready(app.applicationContext, currentClip)
                         setEditorStatusV19(
                             "Pro Cutout ready · $label · recovered complete matte after decoder tail stop",
