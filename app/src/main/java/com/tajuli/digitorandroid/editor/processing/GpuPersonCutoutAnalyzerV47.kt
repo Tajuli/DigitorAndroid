@@ -16,16 +16,17 @@ import kotlin.math.roundToInt
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
 /**
- * V51 stable GPU revision of the adaptive Pro Cutout analyzer.
+ * V51 adaptive accelerated Pro Cutout analyzer.
  *
- * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Video qualities use the MediaCodec + OES
- * + GL decoder path. Base person segmentation now uses MediaPipe SelfieMulticlass on its GPU
- * delegate instead of forcing the PP-MattingV2 graph through vendor NNAPI; this avoids devices that
- * abort the app process on the first NNAPI frame. MediaPipe hair and GLES temporal refinement remain
- * GPU-only in this fast path.
+ * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Video qualities use MediaCodec + OES +
+ * GL decode. Base person segmentation prefers MediaPipe GPU but falls back to the small 256x256 CPU
+ * model when a phone cannot create the MediaPipe GPU delegate. Hair enhancement is GPU-only: when
+ * that delegate is unavailable the optional hair stage is skipped rather than becoming a slow CPU
+ * job. GLES temporal refinement remains accelerated.
  *
- * Final matte readback/PNG persistence is still an intentional CPU/file-I/O boundary because the
- * existing preview/export cache contract is Bitmap/file based.
+ * This avoids both known bad extremes: forcing PP-MattingV2 through vendor NNAPI can native-crash on
+ * the first frame, while requiring MediaPipe GPU makes Pro Cutout unusable on otherwise capable
+ * phones. Final matte readback/PNG persistence remains an intentional CPU/file-I/O boundary.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -40,7 +41,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         } else {
             analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
-        check(completed > 0) { "Could not generate any V51 GPU portrait matte" }
+        check(completed > 0) { "Could not generate any V51 portrait matte" }
         markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
@@ -111,8 +112,8 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         }
 
         try {
-            // Producer: MediaCodec + OES + GL scale. Consumer: MediaPipe GPU person matte +
-            // MediaPipe GPU Hair + GLES temporal flow. Frames transfer directly to the bounded worker.
+            // Producer: MediaCodec + OES + GL scale. Consumer: MediaPipe person matte (GPU preferred,
+            // compact CPU fallback), optional GPU hair, then GLES temporal flow.
             val sequentialResult = runCatching {
                 GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
                     uri = Uri.parse(clip.uri),
@@ -125,12 +126,18 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                 }
             }
 
-            if (sequentialResult.isFailure || sequentialResult.getOrDefault(0) <= 0) {
+            if (sequentialResult.isFailure) {
                 val cause = sequentialResult.exceptionOrNull()
-                error(
-                    "Pro Cutout requires MediaCodec + GPU frame decode on this device; software decode fallback is disabled" +
-                        (cause?.message?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""),
+                val detail = cause?.message?.takeIf { it.isNotBlank() }
+                    ?: cause?.javaClass?.simpleName
+                    ?: "unknown pipeline error"
+                throw IllegalStateException(
+                    "Pro Cutout pipeline failed while processing decoded frames: $detail",
+                    cause,
                 )
+            }
+            if (sequentialResult.getOrDefault(0) <= 0) {
+                error("Pro Cutout could not decode frames through MediaCodec/GL on this device")
             }
 
             val completed = worker.awaitIdle()
@@ -177,8 +184,17 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 
 private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
-    private val portraitMatte = MediaPipePersonMatteV51(appContext, requireGpu = true)
-    private val hair = BeautyHairSegmenterV29(appContext, requireGpu = true)
+
+    // Person matte is small (256x256): prefer GPU, but CPU fallback keeps Cutout usable on phones
+    // whose MediaPipe GPU delegate is unsupported. This is far safer than strict vendor NNAPI.
+    private val portraitMatte = MediaPipePersonMatteV51(appContext, requireGpu = false)
+
+    // Hair is optional refinement. Never let its CPU fallback slow the hot path: either create the
+    // GPU delegate or skip hair detail entirely on this device.
+    private val hair: BeautyHairSegmenterV29? = runCatching {
+        BeautyHairSegmenterV29(appContext, requireGpu = true)
+    }.getOrNull()
+
     private val gpuTemporal = GpuSpatialFlowTemporalMatteStabilizerV47()
     private val matteWriter = AsyncPersonCutoutMaskWriterV48(appContext)
 
@@ -188,8 +204,8 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
 
     fun backendSummary(): String = buildString {
         append(portraitMatte.backendLabel)
-        append(" · Hair GPU-only")
-        append(" · Flow GPU-only")
+        append(if (hair != null) " · Hair GPU" else " · Hair skipped (GPU unavailable)")
+        append(" · Flow GPU")
         append(" · MediaCodec/GL decode")
         append(" · direct frame queue")
     }
@@ -216,7 +232,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                     baseMatte = baseMatte,
                     hairMask = hairMask,
                     sourceTimeUs = sourceTimeUs,
-                    hairStrength = settings.hairDetailV44,
+                    hairStrength = if (hair == null) 0f else settings.hairDetailV44,
                     temporalStrength = settings.temporalStabilityV44,
                 )
             } finally {
@@ -236,7 +252,8 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         quality: CutoutAnalysisQualityV47,
         strength: Float,
     ): Bitmap? {
-        if (strength <= .001f) {
+        val gpuHair = hair
+        if (gpuHair == null || strength <= .001f) {
             cachedHairMask?.recycle()
             cachedHairMask = null
             cachedHairTimeUs = Long.MIN_VALUE
@@ -254,12 +271,11 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         if (!shouldRefresh) return old
 
         val fresh = try {
-            hair.segmentSoftMask(source)
-        } catch (error: Throwable) {
-            throw IllegalStateException(
-                "MediaPipe GPU hair inference failed; CPU fallback is disabled for Pro Cutout",
-                error,
-            )
+            gpuHair.segmentSoftMask(source)
+        } catch (_: Throwable) {
+            // Hair is optional. If a flaky vendor GPU fails after initialization, disable semantic
+            // contribution for this frame instead of aborting the complete person matte analysis.
+            null
         }
         if (fresh != null) {
             if (old != null && old !== fresh && !old.isRecycled) old.recycle()
@@ -289,7 +305,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         )
     } catch (error: Throwable) {
         throw IllegalStateException(
-            "GPU temporal matte refinement failed; CPU fallback is disabled for Pro Cutout",
+            "GPU temporal matte refinement failed on this device",
             error,
         )
     }
@@ -303,7 +319,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         cachedHairMask?.let { if (!it.isRecycled) it.recycle() }
         cachedHairMask = null
         runCatching { gpuTemporal.close() }
-        runCatching { hair.close() }
+        runCatching { hair?.close() }
         runCatching { portraitMatte.close() }
     }
 }
