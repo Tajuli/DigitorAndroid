@@ -3,9 +3,7 @@ package com.tajuli.digitorandroid.editor.processing
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Color
 import android.graphics.ImageDecoder
-import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
@@ -18,13 +16,17 @@ import kotlin.math.roundToInt
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
 /**
- * V50 PP-MattingV2-only revision of the adaptive Pro Cutout analyzer.
+ * V51 strict hardware/GPU revision of the adaptive Pro Cutout analyzer.
  *
- * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Hardware decode overlaps a bounded
- * inference worker and decoded frame ownership moves straight into that queue with no second ARGB
- * copy. PP-MattingV2/STDC1 512 supplies the base soft alpha. MediaPipe HairSegmenter and the
- * existing GPU-first local spatial-flow stabilizer then refine the matte before it is persisted for
- * shared preview/export use.
+ * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. All video qualities now require the
+ * MediaCodec + OES + GL decoder path; the old MediaMetadataRetriever software fallback is removed.
+ * PP-MattingV2 runs through hardware-only NNAPI, MediaPipe hair requires its GPU delegate, and local
+ * spatial-flow temporal refinement requires GLES. If one of those accelerators is unavailable the
+ * operation fails explicitly instead of silently becoming a slow CPU job.
+ *
+ * Final matte readback/PNG persistence is still an intentional CPU/file-I/O boundary because the
+ * existing preview/export cache contract is Bitmap/file based. Neural inference and temporal/hair
+ * compute no longer have a CPU fallback in this analyzer.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -39,7 +41,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         } else {
             analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
-        check(completed > 0) { "Could not generate any V50 portrait matte" }
+        check(completed > 0) { "Could not generate any V51 hardware portrait matte" }
         markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
@@ -76,7 +78,19 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         val settings = clip.resolvedCutoutV43()
         val quality = settings.analysisQualityV47
         val cadence = personCutoutCadenceV47(quality)
-        val targetTimes = personCutoutTargetTimesV47(start, end, quality)
+        val regularTargets = personCutoutTargetTimesV47(start, end, quality)
+
+        // Preserve the playhead-priority intent without invoking MediaMetadataRetriever: insert the
+        // requested time into the same MediaCodec/GL target list for LOW/MEDIUM. HIGH already emits
+        // every decoded source frame and therefore needs no extra target.
+        val targetTimes = if (quality == CutoutAnalysisQualityV47.HIGH || prioritySourceUs == null) {
+            regularTargets
+        } else {
+            buildList {
+                add(prioritySourceUs.coerceIn(start, (end - 1L).coerceAtLeast(start)))
+                addAll(regularTargets)
+            }.distinct().sorted()
+        }
 
         // Important: lazy initialization happens on the inference worker, not this producer thread.
         // MediaPipe GPU delegates and EGL contexts therefore keep create/run/close thread affinity.
@@ -103,21 +117,8 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         }
 
         try {
-            // LOW/MEDIUM retain one playhead-priority frame, but it is ownership-transferred to the
-            // same inference worker. HIGH uses only true decoded source-frame timestamps.
-            val priority = if (quality == CutoutAnalysisQualityV47.HIGH) {
-                null
-            } else {
-                prioritySourceUs?.coerceIn(start, (end - 1L).coerceAtLeast(start))
-            }
-            if (priority != null) {
-                decodeSinglePriorityFrame(clip, priority)?.let { frame ->
-                    worker.enqueueOwned(priority, frame)
-                }
-            }
-
-            // Producer: MediaCodec + OES + GL scale. Consumer: PP-MattingV2 + MediaPipe Hair + GL
-            // temporal flow. Decoder Bitmaps are transferred directly to the bounded worker.
+            // Producer: MediaCodec + OES + GL scale. Consumer: NNAPI PP-MattingV2 + MediaPipe GPU
+            // Hair + GL temporal flow. Decoder Bitmaps are transferred directly to the bounded worker.
             val sequentialResult = runCatching {
                 GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
                     uri = Uri.parse(clip.uri),
@@ -131,26 +132,11 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
             }
 
             if (sequentialResult.isFailure || sequentialResult.getOrDefault(0) <= 0) {
-                if (quality == CutoutAnalysisQualityV47.HIGH) {
-                    val cause = sequentialResult.exceptionOrNull()
-                    error(
-                        "High quality requires every-frame MediaCodec GPU decode on this device" +
-                            (cause?.message?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""),
-                    )
-                }
-
-                // LOW/MEDIUM reliability fallback for unusual vendor codecs. These Bitmaps are also
-                // ownership-transferred, so the fallback avoids the old second ARGB copy.
-                val retriever = MediaMetadataRetriever()
-                try {
-                    retriever.setDataSource(context, Uri.parse(clip.uri))
-                    for (sourceUs in targetTimes) {
-                        val frame = scaledFrameAtTime(retriever, sourceUs) ?: continue
-                        worker.enqueueOwned(sourceUs, frame)
-                    }
-                } finally {
-                    runCatching { retriever.release() }
-                }
+                val cause = sequentialResult.exceptionOrNull()
+                error(
+                    "Pro Cutout requires MediaCodec + GPU frame decode on this device; software decode fallback is disabled" +
+                        (cause?.message?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""),
+                )
             }
 
             val completed = worker.awaitIdle()
@@ -164,59 +150,19 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         }
     }
 
-    private fun decodeSinglePriorityFrame(clip: TimelineClip, sourceUs: Long): Bitmap? {
-        val retriever = MediaMetadataRetriever()
-        return try {
-            retriever.setDataSource(context, Uri.parse(clip.uri))
-            scaledFrameAtTime(retriever, sourceUs)
-        } finally {
-            runCatching { retriever.release() }
-        }
-    }
-
-    private fun scaledFrameAtTime(retriever: MediaMetadataRetriever, sourceUs: Long): Bitmap? {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
-            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
-            if (width > 0 && height > 0) {
-                val longEdge = max(width, height)
-                val scale = if (longEdge <= PERSON_ANALYSIS_LONG_EDGE_V47) 1f
-                else PERSON_ANALYSIS_LONG_EDGE_V47 / longEdge.toFloat()
-                val targetWidth = (width * scale).roundToInt().coerceAtLeast(1)
-                val targetHeight = (height * scale).roundToInt().coerceAtLeast(1)
-                retriever.getScaledFrameAtTime(
-                    sourceUs,
-                    MediaMetadataRetriever.OPTION_CLOSEST,
-                    targetWidth,
-                    targetHeight,
-                )?.let { return ensureArgb(it) }
-            }
-        }
-        val raw = retriever.getFrameAtTime(sourceUs, MediaMetadataRetriever.OPTION_CLOSEST) ?: return null
-        val normalized = ensureArgb(raw)
-        if (normalized !== raw && !raw.isRecycled) raw.recycle()
-        val longEdge = max(normalized.width, normalized.height)
-        if (longEdge <= PERSON_ANALYSIS_LONG_EDGE_V47) return normalized
-        val scale = PERSON_ANALYSIS_LONG_EDGE_V47 / longEdge.toFloat()
-        return Bitmap.createScaledBitmap(
-            normalized,
-            (normalized.width * scale).roundToInt().coerceAtLeast(1),
-            (normalized.height * scale).roundToInt().coerceAtLeast(1),
-            true,
-        ).also { if (it !== normalized) normalized.recycle() }
-    }
-
     private fun ensureArgb(bitmap: Bitmap): Bitmap = if (bitmap.config == Bitmap.Config.ARGB_8888) {
         bitmap
     } else {
         bitmap.copy(Bitmap.Config.ARGB_8888, false)
-            ?: error("Could not convert video frame to ARGB_8888")
+            ?: error("Could not convert image to ARGB_8888")
     }
 
     private fun decodeImage(uri: Uri): Bitmap? = runCatching {
         val raw = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val source = ImageDecoder.createSource(context.contentResolver, uri)
             ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                // The ONNX tensor packer and MediaPipe BitmapImageBuilder need CPU-addressable
+                // pixels. This is a decode/input boundary, not neural/temporal compute.
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
                 val longEdge = max(info.size.width, info.size.height)
                 if (longEdge > PERSON_ANALYSIS_LONG_EDGE_V47) {
@@ -239,9 +185,8 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
-    private val hair = BeautyHairSegmenterV29(appContext)
-    private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
-    private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
+    private val hair = BeautyHairSegmenterV29(appContext, requireGpu = true)
+    private val gpuTemporal = GpuSpatialFlowTemporalMatteStabilizerV47()
     private val matteWriter = AsyncPersonCutoutMaskWriterV48(appContext)
 
     private var cachedHairMask: Bitmap? = null
@@ -250,8 +195,9 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
 
     fun backendSummary(): String = buildString {
         append(portraitMatte.backendLabel)
-        append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
-        append(" · Flow "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
+        append(" · Hair GPU-only")
+        append(" · Flow GPU-only")
+        append(" · MediaCodec/GL decode")
         append(" · direct frame queue")
     }
 
@@ -272,7 +218,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 strength = settings.hairDetailV44,
             )
             val stabilized = try {
-                stabilizeWithGpuOrFallback(
+                stabilizeGpuOnly(
                     source = source,
                     baseMatte = baseMatte,
                     hairMask = hairMask,
@@ -284,8 +230,8 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 baseMatte.recycle()
             }
 
-            // Ownership transfers to the parallel low-priority writers; compression never runs on
-            // the inference worker.
+            // Ownership transfers to the parallel low-priority writers; PNG compression/file I/O is
+            // intentionally kept behind inference so it cannot back-pressure the accelerator thread.
             matteWriter.enqueue(clip.uri, sourceTimeUs, stabilized)
             return true
         } finally {
@@ -316,7 +262,14 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
 
         if (!shouldRefresh) return old
 
-        val fresh = runCatching { hair.segmentSoftMask(source) }.getOrNull()
+        val fresh = try {
+            hair.segmentSoftMask(source)
+        } catch (error: Throwable) {
+            throw IllegalStateException(
+                "MediaPipe GPU hair inference failed; CPU fallback is disabled for Pro Cutout",
+                error,
+            )
+        }
         if (fresh != null) {
             if (old != null && old !== fresh && !old.isRecycled) old.recycle()
             cachedHairMask = fresh
@@ -327,71 +280,27 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         return old
     }
 
-    private fun stabilizeWithGpuOrFallback(
+    private fun stabilizeGpuOnly(
         source: Bitmap,
         baseMatte: Bitmap,
         hairMask: Bitmap?,
         sourceTimeUs: Long,
         hairStrength: Float,
         temporalStrength: Float,
-    ): Bitmap {
-        val gpu = gpuTemporal
-        if (gpu != null) {
-            val result = runCatching {
-                gpu.stabilize(
-                    source = source,
-                    currentMatte = baseMatte,
-                    hairMask = hairMask,
-                    sourceTimeUs = sourceTimeUs,
-                    hairStrength = hairStrength,
-                    temporalStrength = temporalStrength,
-                )
-            }
-            result.getOrNull()?.let { return it }
-            runCatching { gpu.close() }
-            gpuTemporal = null
-        }
-
-        // Compatibility fallback only; normal devices stay on the GL path above.
-        val fused = fuseHairCpu(baseMatte, hairMask, hairStrength)
-        return try {
-            cpuTemporal.stabilize(source, fused, sourceTimeUs, temporalStrength)
-        } finally {
-            fused.recycle()
-        }
-    }
-
-    private fun fuseHairCpu(base: Bitmap, hair: Bitmap?, strength: Float): Bitmap {
-        if (hair == null || strength <= .001f) {
-            return base.copy(Bitmap.Config.ARGB_8888, false)
-                ?: error("Could not copy portrait matte")
-        }
-        val scaledHair = if (hair.width == base.width && hair.height == base.height) {
-            hair.copy(Bitmap.Config.ARGB_8888, false)
-                ?: error("Could not copy hair matte")
-        } else {
-            Bitmap.createScaledBitmap(hair, base.width, base.height, true)
-        }
-        try {
-            val aPixels = IntArray(base.width * base.height)
-            val hPixels = IntArray(aPixels.size)
-            val out = IntArray(aPixels.size)
-            base.getPixels(aPixels, 0, base.width, 0, 0, base.width, base.height)
-            scaledHair.getPixels(hPixels, 0, base.width, 0, 0, base.width, base.height)
-            val s = strength.coerceIn(0f, 1f)
-            for (i in out.indices) {
-                val a = Color.red(aPixels[i]) / 255f
-                val h = Color.red(hPixels[i]) / 255f
-                val uncertainty = (4f * a * (1f - a)).coerceIn(0f, 1f)
-                val contribution = h * s * (.10f + .46f * uncertainty)
-                val fused = max(a, a + (1f - a) * contribution).coerceIn(0f, 1f)
-                val v = (fused * 255f).roundToInt().coerceIn(0, 255)
-                out[i] = Color.argb(255, v, v, v)
-            }
-            return Bitmap.createBitmap(out, base.width, base.height, Bitmap.Config.ARGB_8888)
-        } finally {
-            scaledHair.recycle()
-        }
+    ): Bitmap = try {
+        gpuTemporal.stabilize(
+            source = source,
+            currentMatte = baseMatte,
+            hairMask = hairMask,
+            sourceTimeUs = sourceTimeUs,
+            hairStrength = hairStrength,
+            temporalStrength = temporalStrength,
+        )
+    } catch (error: Throwable) {
+        throw IllegalStateException(
+            "GPU temporal matte refinement failed; CPU fallback is disabled for Pro Cutout",
+            error,
+        )
     }
 
     fun awaitPendingStores() {
@@ -402,9 +311,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         runCatching { matteWriter.close() }
         cachedHairMask?.let { if (!it.isRecycled) it.recycle() }
         cachedHairMask = null
-        runCatching { gpuTemporal?.close() }
-        gpuTemporal = null
-        cpuTemporal.close()
+        runCatching { gpuTemporal.close() }
         runCatching { hair.close() }
         runCatching { portraitMatte.close() }
     }
