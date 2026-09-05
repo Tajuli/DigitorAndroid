@@ -18,7 +18,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 private const val PERSON_ANALYSIS_LONG_EDGE_V44 = 720
-private const val PERSON_CUTOUT_CACHE_DIR_V50 = "person_cutout_masks_v50_ppmattingv2_hair_spatialflow_512"
+private const val PERSON_CUTOUT_CACHE_DIR_V52 = "person_cutout_masks_v52_adaptive_gpu_rgb01"
 
 data class PersonCutoutMaskFrameV43(
     val sourceTimeUs: Long,
@@ -53,7 +53,7 @@ data class PersonCutoutMaskTrackV43(
     }
 }
 
-/** V50 PP-MattingV2 cache. Old MODNet generations are intentionally not discovered here. */
+/** V52 adaptive-GPU cache. V50/V51 mattes are intentionally not discovered here. */
 object PersonCutoutMaskStoreV43 {
     private val indexCache = ConcurrentHashMap<String, PersonCutoutMaskTrackV43>()
 
@@ -71,11 +71,11 @@ object PersonCutoutMaskStoreV43 {
         val temp = File(dir, "$sourceTimeUs.png.tmp")
         temp.outputStream().buffered().use { stream ->
             check(mask.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
-                "Could not encode V50 portrait alpha matte"
+                "Could not encode V52 portrait alpha matte"
             }
         }
         if (target.exists()) target.delete()
-        check(temp.renameTo(target)) { "Could not install V50 portrait alpha matte" }
+        check(temp.renameTo(target)) { "Could not install V52 portrait alpha matte" }
         indexCache.remove(cacheKey(sourceUri))
         return target
     }
@@ -93,7 +93,7 @@ object PersonCutoutMaskStoreV43 {
     }
 
     private fun sourceDir(context: Context, sourceUri: String): File =
-        File(File(context.filesDir, PERSON_CUTOUT_CACHE_DIR_V50), cacheKey(sourceUri))
+        File(File(context.filesDir, PERSON_CUTOUT_CACHE_DIR_V52), cacheKey(sourceUri))
 
     private fun cacheKey(sourceUri: String): String = MessageDigest.getInstance("SHA-256")
         .digest(sourceUri.toByteArray())
@@ -103,8 +103,8 @@ object PersonCutoutMaskStoreV43 {
 
 /**
  * Historical class name retained for callers that still use the compatibility analyzer. The base
- * matte is now PP-MattingV2 only, followed by MediaPipe hair fusion and local spatial-flow temporal
- * stabilization, matching the V50 Pro Cutout direction.
+ * matte is PP-MattingV2, followed by MediaPipe hair fusion and local spatial-flow temporal
+ * stabilization. The main Pro Cutout analyzer uses the adaptive V52 GPU path instead.
  */
 class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -179,7 +179,6 @@ class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
                 val a = Color.red(basePixels[i]) / 255f
                 val h = Color.red(hairPixels[i]) / 255f
                 val uncertain = (1f - abs(a * 2f - 1f)).coerceIn(0f, 1f)
-                // PP-MattingV2 remains authoritative; HairSegmenter only restores boundary detail.
                 val hairContribution = h * s * (.28f + .72f * uncertain)
                 val fused = max(a, (a + (1f - a) * hairContribution).coerceAtMost(1f))
                 val v = (fused * 255f).roundToInt().coerceIn(0, 255)
