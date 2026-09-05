@@ -7,13 +7,13 @@ import java.io.File
 import java.security.MessageDigest
 
 // The mask store currently lives in the V52 adaptive-GPU directory. V53 changes the matte
-// generation algorithm (confidence topology + hijab pinhole repair) but intentionally keeps the
-// physical directory name stable; the generation signature below invalidates V52-ready markers and
-// preparePersonCutoutGenerationV47 clears the directory before the new analysis starts.
+// generation algorithm but intentionally keeps the physical directory name stable; the generation
+// signature below invalidates older ready markers and preparePersonCutoutGenerationV47 clears the
+// per-source directory before the new analysis starts.
 private const val V53_CACHE_DIR_NAME = "person_cutout_masks_v52_adaptive_gpu_rgb01"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-private const val V47_GENERATION_VERSION = "adaptive-v53-gpu-topology-hijab-r1"
+private const val V47_GENERATION_VERSION = "adaptive-v53-cloth384-topology-hijab-r2"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
@@ -21,9 +21,6 @@ internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineCl
         dir.listFiles().orEmpty().forEach { file -> runCatching { file.delete() } }
     }
     dir.mkdirs()
-    // Persist the exact quality/trim/hair/temporal tuple before decode starts. If a vendor codec
-    // fails only while draining EOS after already producing complete dense coverage, the UI can
-    // safely recover that generation instead of discarding hundreds/thousands of valid mattes.
     File(dir, V47_PENDING_MARKER).writeText(personCutoutGenerationSignatureV47(clip))
 }
 
