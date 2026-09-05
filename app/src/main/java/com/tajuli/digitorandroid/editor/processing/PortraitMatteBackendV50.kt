@@ -147,11 +147,12 @@ internal class MediaPipePersonMatteV51(
 /**
  * Raw LiteRT GPU execution path for SelfieMulticlass.
  *
- * This deliberately bypasses MediaPipe Tasks. Google documents this model as NHWC float input
- * [1,256,256,3], normalized to [-1,1], with float output [1,256,256,6]. We first respect LiteRT's
- * compatibility list. If the list has no profile but the phone exposes OpenGL ES 3.1+, we make one
- * direct OpenGL-delegate attempt because the MediaPipe task wrapper can reject otherwise usable GPU
- * stacks. Any clean initialization failure is caught by the caller and falls through to CPU.
+ * This deliberately bypasses MediaPipe Tasks. The official model expects NHWC float input
+ * [1,256,256,3] with RGB values in [0,1], and returns float probabilities [1,256,256,6]. We first
+ * respect LiteRT's compatibility list. If the list has no profile but the phone exposes OpenGL ES
+ * 3.1+, we make one direct OpenGL-delegate attempt because the MediaPipe task wrapper can reject
+ * otherwise usable GPU stacks. Any clean initialization failure is caught by the caller and falls
+ * through to CPU.
  *
  * Create/run/close happen on the same inference worker thread, satisfying GPU delegate EGL affinity.
  */
@@ -284,9 +285,12 @@ private class DirectLiteRtPersonMatteV52(context: Context) : PortraitMatteBacken
         val input = inputBytes.asFloatBuffer()
         input.clear()
         for (pixel in inputPixels) {
-            input.put(Color.red(pixel) / 127.5f - 1f)
-            input.put(Color.green(pixel) / 127.5f - 1f)
-            input.put(Color.blue(pixel) / 127.5f - 1f)
+            // SelfieMulticlass raw TFLite expects RGB float values in [0,1]. Using [-1,1]
+            // drives the model far outside its training preprocessing and can collapse the person
+            // matte to near-zero even though GPU execution itself succeeds.
+            input.put(Color.red(pixel) / 255f)
+            input.put(Color.green(pixel) / 255f)
+            input.put(Color.blue(pixel) / 255f)
         }
         inputBytes.rewind()
         outputBytes.rewind()
