@@ -9,7 +9,6 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
-import android.os.Build
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.roundToInt
@@ -22,43 +21,28 @@ internal interface PortraitMatteBackendV50 : AutoCloseable {
 /**
  * PP-MattingV2/STDC1 512 portrait matte backend used by Pro Cutout.
  *
- * V53 keeps Android NNAPI accelerator-first, but deliberately avoids CPU_DISABLED / FP16 forcing.
- * Those flags are useful for controlled benchmarks but are too aggressive for a general editor:
- * NNAPI behavior is model/driver/device specific and a broken vendor accelerator can terminate the
- * native process before Kotlin/Java gets an exception. The default NNAPI provider still assigns
- * supported graph partitions to the phone accelerator and lets ORT handle unsupported work safely.
+ * V54 deliberately does NOT create an NNAPI execution provider. Real-phone testing showed the
+ * process can die about one second after Analyze, before Java/Kotlin can recover. The failure can
+ * happen while a vendor NNAPI driver creates/compiles the ONNX session, so try/catch and an
+ * inference-time crash sentinel cannot make that path safe inside the editor process.
  *
- * A synchronous crash sentinel is written only while the first NNAPI inference is in flight. If a
- * vendor driver kills the app during that first run, the next process launch detects the stale
- * sentinel and permanently disables NNAPI for Cutout on that install, preventing a crash loop.
- * Clearing app data/reinstalling resets the guard. Normal successful NNAPI runs clear the sentinel.
+ * Until PP-MattingV2 is moved to a safer mobile GPU runtime, ONNX Runtime is used only for the base
+ * matte on CPU. The rest of Pro Cutout remains GPU-first: hardware decode/GL scale, MediaPipe hair,
+ * spatial flow, temporal fusion, person lock and hysteresis. This gives us a stable baseline and
+ * prevents Analyze from intentionally entering the known crash-prone provider path.
  */
 internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBackendV50 {
     private companion object {
         const val MODEL_ASSET = "ppmattingv2_stdc1_human_512.onnx"
         const val MODEL_SIZE = 512
         const val CHANNELS = 3
-        const val PREFS = "digitor_cutout_accelerator_v53"
-        const val KEY_NNAPI_IN_FLIGHT = "nnapi_first_inference_in_flight"
-        const val KEY_NNAPI_DISABLED = "nnapi_disabled_after_native_crash"
     }
 
-    private data class SessionBundle(
-        val options: OrtSession.SessionOptions,
-        val session: OrtSession,
-        val label: String,
-        val usesNnapi: Boolean,
-    )
-
     private val appContext = context.applicationContext
-    private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private val environment = OrtEnvironment.getEnvironment()
-    private val sessionOptions: OrtSession.SessionOptions
+    private val sessionOptions = OrtSession.SessionOptions()
     private val session: OrtSession
     private val inputName: String
-    private val resolvedBackendLabel: String
-    private val usesNnapi: Boolean
-    private var firstAcceleratedInferencePending = false
 
     private val plane = MODEL_SIZE * MODEL_SIZE
     private val inputPixels = IntArray(plane)
@@ -74,26 +58,19 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     private val inputTensor: OnnxTensor
 
     override val backendLabel: String
-        get() = "PP-MattingV2 · $resolvedBackendLabel · 512"
+        get() = "PP-MattingV2 · ORT CPU safe base · 512"
 
     init {
-        // If the previous process died while its first NNAPI run was marked in-flight, treat that as
-        // a native-driver crash. Native SIGSEGV/SIGABRT cannot be recovered by runCatching, so the
-        // only reliable generic protection is to avoid repeating the same provider on next launch.
-        if (prefs.getBoolean(KEY_NNAPI_IN_FLIGHT, false)) {
-            prefs.edit()
-                .putBoolean(KEY_NNAPI_DISABLED, true)
-                .remove(KEY_NNAPI_IN_FLIGHT)
-                .commit()
+        sessionOptions.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+        sessionOptions.setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
+        sessionOptions.setMemoryPatternOptimization(true)
+        runCatching {
+            sessionOptions.setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 6))
         }
+        runCatching { sessionOptions.setInterOpNumThreads(1) }
 
         val modelBytes = appContext.assets.open(MODEL_ASSET).use { it.readBytes() }
-        val bundle = createBestSession(modelBytes)
-        sessionOptions = bundle.options
-        session = bundle.session
-        resolvedBackendLabel = bundle.label
-        usesNnapi = bundle.usesNnapi
-        firstAcceleratedInferencePending = usesNnapi
+        session = environment.createSession(modelBytes, sessionOptions)
         inputName = session.inputNames.firstOrNull()
             ?: error("PP-MattingV2 ONNX did not expose an input tensor")
         inputTensor = OnnxTensor.createTensor(
@@ -101,50 +78,6 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
             inputBuffer,
             longArrayOf(1L, 3L, MODEL_SIZE.toLong(), MODEL_SIZE.toLong()),
         )
-    }
-
-    private fun createBestSession(modelBytes: ByteArray): SessionBundle {
-        val nnapiDisabledForInstall = prefs.getBoolean(KEY_NNAPI_DISABLED, false)
-
-        // Default/empty-flag NNAPI is intentionally used. It is still accelerator-first for supported
-        // subgraphs, but unlike the previous CPU_DISABLED+FP16 configuration it lets ORT/NNAPI choose
-        // safe fallbacks for unsupported operators and avoids forcing fragile vendor paths.
-        if (!nnapiDisabledForInstall && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            val nnapi = OrtSession.SessionOptions()
-            try {
-                configureCommon(nnapi)
-                nnapi.addNnapi()
-                return SessionBundle(
-                    options = nnapi,
-                    session = environment.createSession(modelBytes, nnapi),
-                    label = "NNAPI accelerator · safe flags",
-                    usesNnapi = true,
-                )
-            } catch (_: Throwable) {
-                runCatching { nnapi.close() }
-            }
-        }
-
-        val cpu = OrtSession.SessionOptions()
-        configureCommon(cpu)
-        runCatching { cpu.setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(2, 4)) }
-        runCatching { cpu.setInterOpNumThreads(1) }
-        return SessionBundle(
-            options = cpu,
-            session = environment.createSession(modelBytes, cpu),
-            label = if (nnapiDisabledForInstall) {
-                "ORT CPU fallback · NNAPI disabled after native crash"
-            } else {
-                "ORT CPU fallback"
-            },
-            usesNnapi = false,
-        )
-    }
-
-    private fun configureCommon(options: OrtSession.SessionOptions) {
-        options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-        options.setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
-        options.setMemoryPatternOptimization(true)
     }
 
     override fun infer(source: Bitmap): Bitmap {
@@ -173,33 +106,18 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
             inputBuffer.put(plane * 2 + i, Color.blue(pixel) / 127.5f - 1f)
         }
 
-        val markCrashGuard = firstAcceleratedInferencePending && usesNnapi
-        if (markCrashGuard) {
-            // commit(), not apply(): the marker must be on disk before entering vendor native code.
-            prefs.edit().putBoolean(KEY_NNAPI_IN_FLIGHT, true).commit()
-        }
-
-        try {
-            session.run(mapOf(inputName to inputTensor)).use { result ->
-                val output = result[0] as? OnnxTensor
-                    ?: error("PP-MattingV2 first output is not a tensor")
-                val alpha = output.floatBuffer
-                    ?: error("PP-MattingV2 output is not float/fp16/bf16")
-                check(alpha.remaining() >= plane) {
-                    "PP-MattingV2 alpha output has ${alpha.remaining()} values; expected at least $plane"
-                }
-                for (i in 0 until plane) {
-                    val value = alpha.get(i).coerceIn(0f, 1f)
-                    val v = (value * 255f).roundToInt().coerceIn(0, 255)
-                    alphaPixels[i] = Color.argb(255, v, v, v)
-                }
+        session.run(mapOf(inputName to inputTensor)).use { result ->
+            val output = result[0] as? OnnxTensor
+                ?: error("PP-MattingV2 first output is not a tensor")
+            val alpha = output.floatBuffer
+                ?: error("PP-MattingV2 output is not float/fp16/bf16")
+            check(alpha.remaining() >= plane) {
+                "PP-MattingV2 alpha output has ${alpha.remaining()} values; expected at least $plane"
             }
-        } finally {
-            if (markCrashGuard) {
-                // This line is reached only if native inference returned to Java/Kotlin. A process
-                // death leaves the marker behind and disables NNAPI on the next app launch.
-                prefs.edit().remove(KEY_NNAPI_IN_FLIGHT).commit()
-                firstAcceleratedInferencePending = false
+            for (i in 0 until plane) {
+                val value = alpha.get(i).coerceIn(0f, 1f)
+                val v = (value * 255f).roundToInt().coerceIn(0, 255)
+                alphaPixels[i] = Color.argb(255, v, v, v)
             }
         }
 
