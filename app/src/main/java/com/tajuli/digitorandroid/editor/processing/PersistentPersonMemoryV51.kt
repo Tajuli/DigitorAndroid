@@ -92,10 +92,10 @@ internal fun decidePersonMemorySampleV51(sample: PersonMemorySampleV51): PersonM
     val heldTarget = max(refined, min(previous, max(alphaSupport, previous * .94f)))
     refined = mixV51(refined, heldTarget, exitHold)
 
-    // Confidence rises faster on supported/moving foreground than it falls. That asymmetry is the
-    // hysteresis map: background needs repeated evidence to become foreground, while an established
-    // subject edge survives brief alpha dips without becoming permanently sticky.
-    val outputEvidence = max(refined, current * .86f)
+    // Confidence rises from the accepted/refined output, never from a rejected raw birth. This keeps
+    // a one-frame chair/wall false positive from teaching the hysteresis map that it is foreground.
+    // Once foreground is established, confidence falls more slowly than it rises.
+    val outputEvidence = refined
     val riseRate = (.28f + .30f * reliableFlow + .16f * motionEvidence).coerceIn(.28f, .74f)
     val fallRate = (.075f + .11f * (1f - reliableFlow) + .10f * motionEvidence).coerceIn(.075f, .285f)
     val nextConfidence = if (outputEvidence >= previousConfidence) {
