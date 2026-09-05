@@ -14,6 +14,7 @@ import com.tajuli.digitorandroid.editor.processing.GpuPersonCutoutAnalyzerV47
 import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 import com.tajuli.digitorandroid.editor.processing.markPersonCutoutGenerationV47Ready
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -60,7 +61,7 @@ fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
     val clip = state.value.project.clip(state.value.selectedClipId) ?: return
     val app = getApplication<Application>()
     if (hasPersonCutoutCoverageV43(app.applicationContext, clip)) {
-        setEditorStatusV19("Pro Cutout ready · $label · cached GPU matte")
+        setEditorStatusV19("Pro Cutout ready · $label · cached matte")
         PreviewExportCoordinator.refreshActivePreviews()
     }
 }
@@ -79,7 +80,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
     val quality = settings.analysisQualityV47
     val label = quality.uiLabelV47()
     val analysisKey = buildString {
-        append("v49-near-fully-gpu|")
+        append("v52-adaptive-gpu|")
         append(clip.uri); append('|'); append(clip.sourceInUs); append('|'); append(clip.sourceOutUs)
         append('|'); append(quality.name)
         append('|'); append(settings.hairDetailV44); append('|'); append(settings.temporalStabilityV44)
@@ -97,32 +98,37 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         )
     }
 
-    setEditorStatusV19("Pro Cutout · $label · starting V49 near-fully-GPU pipeline…")
+    setEditorStatusV19("Pro Cutout · $label · starting adaptive GPU pipeline…")
     val app = getApplication<Application>()
     val progressStride = when (quality) {
         CutoutAnalysisQualityV47.LOW -> 8
         CutoutAnalysisQualityV47.MEDIUM -> 24
         CutoutAnalysisQualityV47.HIGH -> 30
     }
+    val backendResolved = AtomicReference<String?>(null)
+
     viewModelScope.launch(Dispatchers.Default) {
         try {
             val result = runCatching {
-                // The power lease outlives Activity screen timeout. MainActivity also keeps the
-                // display awake while this lease is active; manual screen-off still keeps CPU/codec alive.
                 CutoutAnalysisPowerGuardV48.acquire(app.applicationContext).use {
                     PreviewExportCoordinator.acquireAnalysisLease().use {
                         GpuPersonCutoutAnalyzerV47(app.applicationContext).analyzeAndStore(
                             clip = clip,
                             prioritySourceUs = prioritySourceUs,
                             onBackendResolved = { backend ->
+                                backendResolved.set(backend)
                                 viewModelScope.launch(Dispatchers.Main) {
                                     setEditorStatusV19("Pro Cutout · $label · $backend")
                                 }
                             },
                             onAnchorStored = { completed ->
                                 if (completed == 1 || completed % progressStride == 0) {
+                                    val backend = backendResolved.get()
                                     viewModelScope.launch(Dispatchers.Main) {
-                                        setEditorStatusV19("Pro Cutout · $label · $completed refined frame(s)")
+                                        val backendPart = backend?.let { "$it · " }.orEmpty()
+                                        setEditorStatusV19(
+                                            "Pro Cutout · $label · $backendPart$completed refined frame(s)",
+                                        )
                                     }
                                 }
                             },
@@ -134,10 +140,12 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                 result.onSuccess { track ->
                     val currentClip = state.value.project.clip(clip.id) ?: clip
                     val ready = hasPersonCutoutCoverageV43(app.applicationContext, currentClip)
+                    val backend = backendResolved.get()
                     PreviewExportCoordinator.refreshActivePreviews(220L)
                     if (ready) {
+                        val backendPart = backend?.let { " · $it" }.orEmpty()
                         setEditorStatusV19(
-                            "Pro Cutout ready · $label · ${track.frames.size} refined matte frame(s)",
+                            "Pro Cutout ready · $label$backendPart · ${track.frames.size} refined matte frame(s)",
                         )
                     } else {
                         setEditorStatusV19("Pro Cutout incomplete · $label · tap Analyze again")
@@ -149,12 +157,10 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                             hasPersonCutoutCoverageV43(app.applicationContext, currentClip)
                     PreviewExportCoordinator.refreshActivePreviews(220L)
                     if (recoveredHigh) {
-                        // Some Android codecs decode every useful source frame but fail while draining
-                        // the final EOS buffer. Dense gap/end coverage plus the matching pending
-                        // generation signature proves this matte is complete enough for preview/export.
                         markPersonCutoutGenerationV47Ready(app.applicationContext, currentClip)
+                        val backendPart = backendResolved.get()?.let { " · $it" }.orEmpty()
                         setEditorStatusV19(
-                            "Pro Cutout ready · $label · recovered complete matte after decoder tail stop",
+                            "Pro Cutout ready · $label$backendPart · recovered complete matte after decoder tail stop",
                         )
                     } else {
                         val detail = error.message?.takeIf { it.isNotBlank() }
