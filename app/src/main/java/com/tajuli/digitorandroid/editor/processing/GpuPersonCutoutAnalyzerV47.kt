@@ -18,13 +18,13 @@ import kotlin.math.roundToInt
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
 /**
- * V50 PP-MattingV2-only revision of the adaptive Pro Cutout analyzer.
+ * CI804 downstream Cutout pipeline with a crash-safe adaptive GPU person matte.
  *
- * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Hardware decode overlaps a bounded
- * inference worker and decoded frame ownership moves straight into that queue with no second ARGB
- * copy. PP-MattingV2/STDC1 512 supplies the base soft alpha. MediaPipe HairSegmenter and the
- * existing GPU-first local spatial-flow stabilizer then refine the matte before it is persisted for
- * shared preview/export use.
+ * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. The CI804 decode, hair, temporal flow,
+ * matte persistence and preview/export behavior stay intact. Only the base person matte routing is
+ * changed: MediaPipe GPU first, direct LiteRT GPU/OpenGL second, CPU only as the final fallback.
+ * The old NNAPI PP-MattingV2 hot path is not instantiated because some vendor drivers can kill the
+ * process on the first inference instead of returning a catchable exception.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -39,7 +39,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         } else {
             analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
-        check(completed > 0) { "Could not generate any V50 portrait matte" }
+        check(completed > 0) { "Could not generate any person matte" }
         markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
@@ -79,7 +79,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         val targetTimes = personCutoutTargetTimesV47(start, end, quality)
 
         // Important: lazy initialization happens on the inference worker, not this producer thread.
-        // MediaPipe GPU delegates and EGL contexts therefore keep create/run/close thread affinity.
+        // MediaPipe/LiteRT GPU delegates and EGL contexts therefore keep create/run/close affinity.
         val segmenterLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
             GpuPersonCutoutSegmenterV47(context).also {
                 onBackendResolved?.invoke(it.backendSummary())
@@ -116,8 +116,8 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                 }
             }
 
-            // Producer: MediaCodec + OES + GL scale. Consumer: PP-MattingV2 + MediaPipe Hair + GL
-            // temporal flow. Decoder Bitmaps are transferred directly to the bounded worker.
+            // Producer: MediaCodec + OES + GL scale. Consumer: adaptive GPU person matte + existing
+            // CI804 MediaPipe Hair + GL temporal flow. Decoder Bitmaps transfer directly to worker.
             val sequentialResult = runCatching {
                 GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
                     uri = Uri.parse(clip.uri),
@@ -238,7 +238,13 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 
 private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
-    private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
+
+    // Do not instantiate the NNAPI PP-MattingV2 path here. MediaPipe GPU is the preferred path;
+    // Direct LiteRT GPU/OpenGL is used when MediaPipe rejects an otherwise usable phone GPU.
+    private val portraitMatte = MediaPipePersonMatteV51(appContext, requireGpu = false)
+
+    // Preserve CI804 downstream behavior. Hair and temporal already prefer GPU and retain their
+    // compatibility fallbacks, so changing the base matte backend does not disturb that tuning.
     private val hair = BeautyHairSegmenterV29(appContext)
     private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
     private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
