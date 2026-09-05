@@ -7,12 +7,12 @@ import java.io.File
 import java.security.MessageDigest
 
 // Keep the existing PP-MattingV2 cache directory so the mask store and preview/export readers remain
-// source-compatible. The V52 generation signature invalidates old ready markers and Analyze clears
-// old files before writing the accelerator-first, single-GPU-flow person-memory generation.
+// source-compatible. The V54 generation signature invalidates old ready markers and Analyze clears
+// old files before writing the crash-safe CPU-base + GPU-temporal person-memory generation.
 private const val V50_CACHE_DIR_NAME = "person_cutout_masks_v50_ppmattingv2_hair_spatialflow_512"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-private const val V47_GENERATION_VERSION = "adaptive-v52-ppmattingv2-nnapi-gpu-memory-r1"
+private const val V47_GENERATION_VERSION = "adaptive-v54-ppmattingv2-safe-base-gpu-memory-r1"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
