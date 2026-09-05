@@ -34,7 +34,7 @@ import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 private val C50Panel = Color(0xFF0B0B0F)
 private val C50Text = Color.White
 
-/** Compact Edit-tab Pro Cutout workspace. PP-MattingV2 is the only portrait matte backend. */
+/** Compact Edit-tab Pro Cutout workspace with adaptive GPU person matting. */
 @Composable
 fun CutoutWorkspaceV50(
     vm: EditorViewModelV4,
@@ -53,7 +53,7 @@ fun CutoutWorkspaceV50(
     ) {
         Text("Pro Cutout & Chroma Key", fontSize = 12.sp, color = C50Text)
         Text(
-            "PP-MattingV2 portrait matting. Choose analysis quality, then Analyze. Replacement background goes on a lower V track.",
+            "Adaptive person matting uses the fastest supported GPU path and keeps a compatibility fallback. Choose analysis quality, then Analyze.",
             fontSize = 8.sp,
             color = C50Text.copy(alpha = .62f),
         )
@@ -81,7 +81,10 @@ fun CutoutWorkspaceV50(
             val active = status.contains("starting", ignoreCase = true) ||
                 status.contains("matting", ignoreCase = true) ||
                 status.contains("analysis", ignoreCase = true) ||
-                status.contains("refined frame", ignoreCase = true)
+                status.contains("refined frame", ignoreCase = true) ||
+                status.contains("MediaPipe GPU", ignoreCase = true) ||
+                status.contains("Direct LiteRT GPU", ignoreCase = true) ||
+                status.contains("CPU fallback", ignoreCase = true)
             active &&
                 !status.contains("ready", ignoreCase = true) &&
                 !status.contains("failed", ignoreCase = true) &&
@@ -194,7 +197,7 @@ fun CutoutWorkspaceV50(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         when {
-                            analysisBusy -> "Building PP-MattingV2 matte…"
+                            analysisBusy -> "Building accelerated person matte…"
                             personReady -> "Pro matte ready"
                             analysisFailed -> "Analysis failed / incomplete"
                             else -> "Choose quality, then Analyze"
