@@ -3,14 +3,17 @@ package com.tajuli.digitorandroid.editor.processing
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.providers.NNAPIFlags
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.os.Build
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.EnumSet
 import kotlin.math.roundToInt
 
 internal interface PortraitMatteBackendV50 : AutoCloseable {
@@ -21,14 +24,23 @@ internal interface PortraitMatteBackendV50 : AutoCloseable {
 /**
  * PP-MattingV2/STDC1 512 portrait matte backend used by Pro Cutout.
  *
- * Upstream PP-MattingV2 is published by PaddleSeg under Apache-2.0. The fixed 512x512 ONNX export
- * is downloaded and SHA-256 pinned by app/build.gradle.kts; ONNX Runtime Android is MIT licensed.
+ * V51 deliberately requires accelerator-only execution for the expensive ONNX graph. NNAPI's CPU
+ * implementation is disabled and ONNX Runtime is forbidden from assigning unsupported nodes to its
+ * CPU EP. This keeps the cutout hot path on the device's NNAPI accelerator (GPU/NPU/DSP selected by
+ * the Android driver) instead of silently falling back to CPU. Android 10+ is required because
+ * NNAPI CPU_DISABLED is only enforceable from API 29.
+ *
+ * The small Bitmap<->tensor packing boundary remains on CPU because the Java ONNX Runtime API does
+ * not accept an Android GL texture as this model's NCHW input. Model inference itself is strict
+ * hardware-only; if the device cannot execute the complete graph in NNAPI, session creation fails
+ * rather than becoming unexpectedly slow.
  */
 internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBackendV50 {
     private companion object {
         const val MODEL_ASSET = "ppmattingv2_stdc1_human_512.onnx"
         const val MODEL_SIZE = 512
         const val CHANNELS = 3
+        const val DISABLE_CPU_EP_FALLBACK = "session.disable_cpu_ep_fallback"
     }
 
     private val appContext = context.applicationContext
@@ -51,11 +63,33 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     private val inputTensor: OnnxTensor
 
     override val backendLabel: String
-        get() = "PP-MattingV2 · ONNX Runtime CPU · 512"
+        get() = "PP-MattingV2 · NNAPI HW-only · FP16 · 512"
 
     init {
+        check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            "Pro Cutout hardware-only portrait matting requires Android 10 (API 29) or newer"
+        }
+
+        // CPU_DISABLED prevents NNAPI itself from selecting nnapi-reference. The session config
+        // separately prevents ONNX Runtime from sending unsupported graph nodes to the CPU EP.
+        // Together they make accelerator loss explicit instead of turning into a slow CPU fallback.
+        sessionOptions.addNnapi(
+            EnumSet.of(
+                NNAPIFlags.CPU_DISABLED,
+                NNAPIFlags.USE_FP16,
+            ),
+        )
+        sessionOptions.addConfigEntry(DISABLE_CPU_EP_FALLBACK, "1")
+
         val modelBytes = appContext.assets.open(MODEL_ASSET).use { it.readBytes() }
-        session = environment.createSession(modelBytes, sessionOptions)
+        session = try {
+            environment.createSession(modelBytes, sessionOptions)
+        } catch (error: Throwable) {
+            throw IllegalStateException(
+                "This device cannot run the complete PP-MattingV2 graph on an NNAPI hardware accelerator; CPU fallback is disabled",
+                error,
+            )
+        }
         inputName = session.inputNames.firstOrNull()
             ?: error("PP-MattingV2 ONNX did not expose an input tensor")
         inputTensor = OnnxTensor.createTensor(
@@ -68,8 +102,8 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     override fun infer(source: Bitmap): Bitmap {
         check(!source.isRecycled) { "Cannot run PP-MattingV2 on a recycled bitmap" }
 
-        // The fixed Paddle2ONNX export expects NCHW 512x512. Like PaddleSeg deployment, resize to
-        // the model shape and normalize RGB from [0,255] to [-1,1] (mean/std 0.5).
+        // The fixed Paddle2ONNX export expects NCHW 512x512. Resize and pack only once into the
+        // reusable direct tensor buffer; the expensive neural graph then stays on NNAPI hardware.
         inputCanvas.drawBitmap(
             source,
             null,
