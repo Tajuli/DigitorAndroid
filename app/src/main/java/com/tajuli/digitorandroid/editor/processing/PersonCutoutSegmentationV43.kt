@@ -101,14 +101,10 @@ object PersonCutoutMaskStoreV43 {
         .take(32)
 }
 
-/**
- * Historical class name retained for callers that still use the compatibility analyzer. The base
- * matte is now PP-MattingV2 only, followed by MediaPipe hair fusion and local spatial-flow temporal
- * stabilization, matching the V50 Pro Cutout direction.
- */
+/** Historical compatibility analyzer now reuses the same safe adaptive person-matte backend. */
 class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
-    private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
+    private val portraitMatte = MediaPipePersonMatteV51(appContext, requireGpu = false)
     private val hair = BeautyHairSegmenterV29(appContext)
     private val temporal = SpatialFlowTemporalMatteStabilizerV45()
 
@@ -155,14 +151,14 @@ class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
         }.getOrDefault(false)
         if (!hairStored || strength <= .001f) {
             return matte.copy(Bitmap.Config.ARGB_8888, false)
-                ?: error("Could not copy PP-MattingV2 matte")
+                ?: error("Could not copy portrait matte")
         }
         val hairFile = BeautyHairMaskStoreV29.index(appContext, clip).nearest(sourceTimeUs)?.file
             ?: return matte.copy(Bitmap.Config.ARGB_8888, false)
-                ?: error("Could not copy PP-MattingV2 matte")
+                ?: error("Could not copy portrait matte")
         val hairBitmap = BitmapFactory.decodeFile(hairFile.absolutePath)
             ?: return matte.copy(Bitmap.Config.ARGB_8888, false)
-                ?: error("Could not copy PP-MattingV2 matte")
+                ?: error("Could not copy portrait matte")
         val scaledHair = if (hairBitmap.width == matte.width && hairBitmap.height == matte.height) {
             hairBitmap
         } else {
@@ -179,7 +175,6 @@ class PersonCutoutSegmenterV43(context: Context) : AutoCloseable {
                 val a = Color.red(basePixels[i]) / 255f
                 val h = Color.red(hairPixels[i]) / 255f
                 val uncertain = (1f - abs(a * 2f - 1f)).coerceIn(0f, 1f)
-                // PP-MattingV2 remains authoritative; HairSegmenter only restores boundary detail.
                 val hairContribution = h * s * (.28f + .72f * uncertain)
                 val fused = max(a, (a + (1f - a) * hairContribution).coerceAtMost(1f))
                 val v = (fused * 255f).roundToInt().coerceIn(0, 255)
