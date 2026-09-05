@@ -16,17 +16,16 @@ import kotlin.math.roundToInt
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
 /**
- * V51 strict hardware/GPU revision of the adaptive Pro Cutout analyzer.
+ * V51 stable GPU revision of the adaptive Pro Cutout analyzer.
  *
- * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. All video qualities now require the
- * MediaCodec + OES + GL decoder path; the old MediaMetadataRetriever software fallback is removed.
- * PP-MattingV2 runs through hardware-only NNAPI, MediaPipe hair requires its GPU delegate, and local
- * spatial-flow temporal refinement requires GLES. If one of those accelerators is unavailable the
- * operation fails explicitly instead of silently becoming a slow CPU job.
+ * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Video qualities use the MediaCodec + OES
+ * + GL decoder path. Base person segmentation now uses MediaPipe SelfieMulticlass on its GPU
+ * delegate instead of forcing the PP-MattingV2 graph through vendor NNAPI; this avoids devices that
+ * abort the app process on the first NNAPI frame. MediaPipe hair and GLES temporal refinement remain
+ * GPU-only in this fast path.
  *
  * Final matte readback/PNG persistence is still an intentional CPU/file-I/O boundary because the
- * existing preview/export cache contract is Bitmap/file based. Neural inference and temporal/hair
- * compute no longer have a CPU fallback in this analyzer.
+ * existing preview/export cache contract is Bitmap/file based.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -41,7 +40,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         } else {
             analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
-        check(completed > 0) { "Could not generate any V51 hardware portrait matte" }
+        check(completed > 0) { "Could not generate any V51 GPU portrait matte" }
         markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
@@ -80,9 +79,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         val cadence = personCutoutCadenceV47(quality)
         val regularTargets = personCutoutTargetTimesV47(start, end, quality)
 
-        // Preserve the playhead-priority intent without invoking MediaMetadataRetriever: insert the
-        // requested time into the same MediaCodec/GL target list for LOW/MEDIUM. HIGH already emits
-        // every decoded source frame and therefore needs no extra target.
         val targetTimes = if (quality == CutoutAnalysisQualityV47.HIGH || prioritySourceUs == null) {
             regularTargets
         } else {
@@ -92,8 +88,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
             }.distinct().sorted()
         }
 
-        // Important: lazy initialization happens on the inference worker, not this producer thread.
-        // MediaPipe GPU delegates and EGL contexts therefore keep create/run/close thread affinity.
         val segmenterLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
             GpuPersonCutoutSegmenterV47(context).also {
                 onBackendResolved?.invoke(it.backendSummary())
@@ -117,8 +111,8 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         }
 
         try {
-            // Producer: MediaCodec + OES + GL scale. Consumer: NNAPI PP-MattingV2 + MediaPipe GPU
-            // Hair + GL temporal flow. Decoder Bitmaps are transferred directly to the bounded worker.
+            // Producer: MediaCodec + OES + GL scale. Consumer: MediaPipe GPU person matte +
+            // MediaPipe GPU Hair + GLES temporal flow. Frames transfer directly to the bounded worker.
             val sequentialResult = runCatching {
                 GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
                     uri = Uri.parse(clip.uri),
@@ -161,8 +155,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         val raw = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val source = ImageDecoder.createSource(context.contentResolver, uri)
             ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-                // The ONNX tensor packer and MediaPipe BitmapImageBuilder need CPU-addressable
-                // pixels. This is a decode/input boundary, not neural/temporal compute.
+                // MediaPipe BitmapImageBuilder needs CPU-addressable pixels at the input boundary.
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
                 val longEdge = max(info.size.width, info.size.height)
                 if (longEdge > PERSON_ANALYSIS_LONG_EDGE_V47) {
@@ -184,7 +177,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 
 private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
-    private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
+    private val portraitMatte = MediaPipePersonMatteV51(appContext, requireGpu = true)
     private val hair = BeautyHairSegmenterV29(appContext, requireGpu = true)
     private val gpuTemporal = GpuSpatialFlowTemporalMatteStabilizerV47()
     private val matteWriter = AsyncPersonCutoutMaskWriterV48(appContext)
@@ -230,8 +223,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 baseMatte.recycle()
             }
 
-            // Ownership transfers to the parallel low-priority writers; PNG compression/file I/O is
-            // intentionally kept behind inference so it cannot back-pressure the accelerator thread.
             matteWriter.enqueue(clip.uri, sourceTimeUs, stabilized)
             return true
         } finally {
