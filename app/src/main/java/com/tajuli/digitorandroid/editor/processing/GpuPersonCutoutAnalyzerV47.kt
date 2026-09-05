@@ -18,13 +18,13 @@ import kotlin.math.roundToInt
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
 /**
- * V50 PP-MattingV2-only revision of the adaptive Pro Cutout analyzer.
+ * V56 PP-MattingV2 Paddle Lite/OpenCL revision of the adaptive Pro Cutout analyzer.
  *
  * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Hardware decode overlaps a bounded
  * inference worker and decoded frame ownership moves straight into that queue with no second ARGB
- * copy. PP-MattingV2/STDC1 512 supplies the base soft alpha. MediaPipe HairSegmenter and the
- * existing GPU-first local spatial-flow stabilizer then refine the matte before it is persisted for
- * shared preview/export use.
+ * copy. PP-MattingV2/STDC1 512 supplies the base soft alpha through an OpenCL-only model, with the
+ * same network's ARM model as fallback. MediaPipe HairSegmenter and the existing GPU-first local
+ * spatial-flow stabilizer then refine the matte before shared preview/export persistence.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -39,7 +39,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         } else {
             analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
-        check(completed > 0) { "Could not generate any V50 portrait matte" }
+        check(completed > 0) { "Could not generate any V56 PP-MattingV2 portrait matte" }
         markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
@@ -79,7 +79,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         val targetTimes = personCutoutTargetTimesV47(start, end, quality)
 
         // Important: lazy initialization happens on the inference worker, not this producer thread.
-        // MediaPipe GPU delegates and EGL contexts therefore keep create/run/close thread affinity.
+        // Paddle Lite OpenCL and the downstream GL stage keep create/run/close thread affinity.
         val segmenterLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
             GpuPersonCutoutSegmenterV47(context).also {
                 onBackendResolved?.invoke(it.backendSummary())

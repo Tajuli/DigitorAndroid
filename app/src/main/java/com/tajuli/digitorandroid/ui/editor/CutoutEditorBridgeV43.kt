@@ -60,7 +60,7 @@ fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
     val clip = state.value.project.clip(state.value.selectedClipId) ?: return
     val app = getApplication<Application>()
     if (hasPersonCutoutCoverageV43(app.applicationContext, clip)) {
-        setEditorStatusV19("Pro Cutout ready · $label · cached GPU matte")
+        setEditorStatusV19("Pro Cutout ready · $label · cached PP-MattingV2 matte")
         PreviewExportCoordinator.refreshActivePreviews()
     }
 }
@@ -79,7 +79,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
     val quality = settings.analysisQualityV47
     val label = quality.uiLabelV47()
     val analysisKey = buildString {
-        append("v49-near-fully-gpu|")
+        append("v56-ppmattingv2-paddle-opencl|")
         append(clip.uri); append('|'); append(clip.sourceInUs); append('|'); append(clip.sourceOutUs)
         append('|'); append(quality.name)
         append('|'); append(settings.hairDetailV44); append('|'); append(settings.temporalStabilityV44)
@@ -97,7 +97,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         )
     }
 
-    setEditorStatusV19("Pro Cutout · $label · starting V49 near-fully-GPU pipeline…")
+    setEditorStatusV19("Pro Cutout · $label · starting PP-MattingV2 OpenCL pipeline…")
     val app = getApplication<Application>()
     val progressStride = when (quality) {
         CutoutAnalysisQualityV47.LOW -> 8
@@ -105,6 +105,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         CutoutAnalysisQualityV47.HIGH -> 30
     }
     viewModelScope.launch(Dispatchers.Default) {
+        var resolvedBackend: String? = null
         try {
             val result = runCatching {
                 // The power lease outlives Activity screen timeout. MainActivity also keeps the
@@ -115,6 +116,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                             clip = clip,
                             prioritySourceUs = prioritySourceUs,
                             onBackendResolved = { backend ->
+                                resolvedBackend = backend
                                 viewModelScope.launch(Dispatchers.Main) {
                                     setEditorStatusV19("Pro Cutout · $label · $backend")
                                 }
@@ -136,8 +138,10 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                     val ready = hasPersonCutoutCoverageV43(app.applicationContext, currentClip)
                     PreviewExportCoordinator.refreshActivePreviews(220L)
                     if (ready) {
+                        val backendPart = resolvedBackend?.let { " · $it" }.orEmpty()
                         setEditorStatusV19(
-                            "Pro Cutout ready · $label · ${track.frames.size} refined matte frame(s)",
+                            "Pro Cutout ready · $label$backendPart · " +
+                                "${track.frames.size} refined matte frame(s)",
                         )
                     } else {
                         setEditorStatusV19("Pro Cutout incomplete · $label · tap Analyze again")

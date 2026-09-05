@@ -9,7 +9,7 @@ import java.security.MessageDigest
 private const val V50_CACHE_DIR_NAME = "person_cutout_masks_v50_ppmattingv2_hair_spatialflow_512"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-private const val V47_GENERATION_VERSION = "adaptive-v50-ppmattingv2-only-r2"
+private const val V47_GENERATION_VERSION = "adaptive-v56-ppmattingv2-paddle-opencl-r1"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)

@@ -7,6 +7,11 @@
         android:label="Digitor"
         android:supportsRtl="true"
         android:theme="@style/Theme.DigitorAndroid">
+
+        <!-- Expose vendor OpenCL to Paddle Lite on Android 12+ without making it install-required. -->
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <uses-native-library android:name="libvndksupport.so" android:required="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true">

@@ -117,25 +117,174 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
     }
 }
 
-// V50 Pro Cutout uses PP-MattingV2/STDC1 512 from PaddleSeg (Apache-2.0). The ONNX export is
-// downloaded at build time so the ~36 MB model never enters git history. SHA-256 pinning prevents
-// silent model replacement from changing creator output between builds.
-val generatedPpMattingV2Assets = layout.buildDirectory.dir("generated/ppMattingV2Assets")
-val ppMattingV2ModelFile = generatedPpMattingV2Assets.map { it.file("ppmattingv2_stdc1_human_512.onnx") }
-val downloadPpMattingV2Model by tasks.registering {
-    outputs.file(ppMattingV2ModelFile)
+// V56 keeps the exact PP-MattingV2/STDC1 512 network that produced CI804 quality, but converts the
+// official Paddle inference model into two explicit Paddle Lite programs. The OpenCL program has no
+// ARM kernels, so a successful predictor/run is guaranteed to be GPU-backed rather than a silent
+// mixed CPU graph. The separate ARM program is the same network and is used only as the fallback.
+// Large third-party artifacts remain build-generated instead of entering git history.
+val paddleLiteVersionV56 = "v2.12"
+val generatedPaddleLiteRuntimeV56 = layout.buildDirectory.dir("generated/paddleLiteRuntimeV56")
+val paddleLitePredictorJarV56 = generatedPaddleLiteRuntimeV56.map { it.file("java/PaddlePredictor.jar") }
+val paddleLiteJniRootV56 = generatedPaddleLiteRuntimeV56.map { it.dir("jniLibs") }
+val paddleLiteArm64SoV56 = paddleLiteJniRootV56.map { it.file("arm64-v8a/libpaddle_lite_jni.so") }
+val paddleLiteArmV7SoV56 = paddleLiteJniRootV56.map { it.file("armeabi-v7a/libpaddle_lite_jni.so") }
+
+data class PaddleLiteRuntimeSpecV56(
+    val abi: String,
+    val archiveName: String,
+    val archiveSha256: String,
+    val destinationSo: File,
+)
+
+val preparePaddleLiteRuntimeV56 by tasks.registering {
+    outputs.files(paddleLitePredictorJarV56, paddleLiteArm64SoV56, paddleLiteArmV7SoV56)
     doLast {
-        val output = ppMattingV2ModelFile.get().asFile
+        val downloadDir = layout.buildDirectory.dir("downloads/paddleLiteV56").get().asFile
+        val extractionRoot = layout.buildDirectory.dir("tmp/paddleLiteRuntimeV56").get().asFile
+        val runtimeSpecs = listOf(
+            PaddleLiteRuntimeSpecV56(
+                "arm64-v8a",
+                "inference_lite_lib.armv8.clang.with_exception.with_extra.with_cv.opencl.tar.gz",
+                "c1d193033a0365e9542ac00b2a792b40c8749860a4266bda9b6f4608a22f4aff",
+                paddleLiteArm64SoV56.get().asFile,
+            ),
+            PaddleLiteRuntimeSpecV56(
+                "armeabi-v7a",
+                "inference_lite_lib.armv7.clang.with_exception.with_extra.with_cv.opencl.tar.gz",
+                "42bc61b81fb5b0a3336f774b4505246eb204c032a6a2970a82e389ae4057237a",
+                paddleLiteArmV7SoV56.get().asFile,
+            ),
+        )
+        var predictorJarSource: File? = null
+        for ((abi, archiveName, archiveSha256, destinationSo) in runtimeSpecs) {
+            val archive = File(downloadDir, archiveName)
+            downloadGeneratedAssetWithRetry(
+                urls = listOf(
+                    "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/" +
+                        "$paddleLiteVersionV56/$archiveName",
+                ),
+                output = archive,
+                minimumBytes = 3_000_000L,
+                label = "Paddle Lite $paddleLiteVersionV56 OpenCL runtime ($abi)",
+                expectedSha256 = archiveSha256,
+            )
+            logger.lifecycle("Paddle Lite $abi archive SHA-256: ${sha256Of(archive)}")
+
+            val extracted = File(extractionRoot, abi)
+            project.delete(extracted)
+            project.copy {
+                from(tarTree(resources.gzip(archive)))
+                into(extracted)
+            }
+            val nativeLibrary = extracted.walkTopDown().firstOrNull {
+                it.isFile && it.name == "libpaddle_lite_jni.so"
+            } ?: error("Paddle Lite $abi OpenCL archive did not contain libpaddle_lite_jni.so")
+            destinationSo.parentFile.mkdirs()
+            nativeLibrary.copyTo(destinationSo, overwrite = true)
+
+            if (predictorJarSource == null) {
+                predictorJarSource = extracted.walkTopDown().firstOrNull {
+                    it.isFile && it.name == "PaddlePredictor.jar"
+                }
+            }
+        }
+        val jarSource = predictorJarSource
+            ?: error("Paddle Lite OpenCL runtime did not contain PaddlePredictor.jar")
+        val jarOutput = paddleLitePredictorJarV56.get().asFile
+        jarOutput.parentFile.mkdirs()
+        jarSource.copyTo(jarOutput, overwrite = true)
+    }
+}
+
+val generatedPpMattingV2Assets = layout.buildDirectory.dir("generated/ppMattingV2Assets")
+val ppMattingV2OpenClModelV56 = generatedPpMattingV2Assets.map {
+    it.file("ppmattingv2_stdc1_human_512_opencl.nb")
+}
+val ppMattingV2ArmModelV56 = generatedPpMattingV2Assets.map {
+    it.file("ppmattingv2_stdc1_human_512_arm.nb")
+}
+
+val generatePpMattingV2PaddleLiteModelsV56 by tasks.registering {
+    outputs.files(ppMattingV2OpenClModelV56, ppMattingV2ArmModelV56)
+    doLast {
+        val downloadDir = layout.buildDirectory.dir("downloads/paddleLiteV56").get().asFile
+        val modelArchive = File(downloadDir, "ppmattingv2-stdc1-human_512.zip")
+        val optBinary = File(downloadDir, "paddle_lite_opt_linux_$paddleLiteVersionV56")
         downloadGeneratedAssetWithRetry(
             urls = listOf(
-                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2-stdc1-human_512.onnx",
-                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2-stdc1-human_512.onnx?download=true",
+                "https://paddleseg.bj.bcebos.com/matting/models/deploy/ppmattingv2-stdc1-human_512.zip",
             ),
-            output = output,
-            minimumBytes = 30_000_000L,
-            label = "PP-MattingV2 STDC1 ONNX",
-            expectedSha256 = "448d0a5d143426057e6cedbd1711ee8059b4f7057e030f0a33cab3a1ed141567",
+            output = modelArchive,
+            minimumBytes = 20_000_000L,
+            label = "official PP-MattingV2 STDC1 512 Paddle inference model",
+            expectedSha256 = "daff48b08c61958b9a21093791f6aed8eb3939b34b7418e40c18b2348136893d",
         )
+        downloadGeneratedAssetWithRetry(
+            urls = listOf(
+                "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/" +
+                    "$paddleLiteVersionV56/opt_linux",
+            ),
+            output = optBinary,
+            minimumBytes = 20_000_000L,
+            label = "Paddle Lite $paddleLiteVersionV56 model optimizer",
+            expectedSha256 = "22d559c5a6466996cbd78b33ff4f41e03b5e5aadecd787127c05ec8425f36262",
+        )
+        logger.lifecycle("PP-MattingV2 Paddle archive SHA-256: ${sha256Of(modelArchive)}")
+        logger.lifecycle("Paddle Lite optimizer SHA-256: ${sha256Of(optBinary)}")
+        check(optBinary.setExecutable(true) || optBinary.canExecute()) {
+            "Could not make Paddle Lite optimizer executable"
+        }
+
+        val extracted = layout.buildDirectory.dir("tmp/ppMattingV2PaddleV56").get().asFile
+        project.delete(extracted)
+        project.copy {
+            from(zipTree(modelArchive))
+            into(extracted)
+        }
+        val modelFile = extracted.walkTopDown().firstOrNull {
+            it.isFile && it.name == "model.pdmodel"
+        } ?: error("PP-MattingV2 archive did not contain model.pdmodel")
+        val paramsFile = File(modelFile.parentFile, "model.pdiparams")
+        check(paramsFile.isFile) { "PP-MattingV2 archive did not contain model.pdiparams" }
+
+        fun optimize(validTargets: String, output: File, enableFp16: Boolean) {
+            val temporaryBase = File(output.parentFile, output.nameWithoutExtension + ".building")
+            val temporaryModel = File(temporaryBase.absolutePath + ".nb")
+            temporaryBase.delete()
+            temporaryModel.delete()
+            output.parentFile.mkdirs()
+            val command = mutableListOf(
+                optBinary.absolutePath,
+                "--model_file=${modelFile.absolutePath}",
+                "--param_file=${paramsFile.absolutePath}",
+                "--valid_targets=$validTargets",
+                "--optimize_out=${temporaryBase.absolutePath}",
+                "--optimize_out_type=naive_buffer",
+                "--enable_fp16=$enableFp16",
+            )
+            val process = ProcessBuilder(command)
+                .redirectErrorStream(true)
+                .start()
+            val processOutput = process.inputStream.bufferedReader().use { it.readText() }
+            val exitCode = process.waitFor()
+            check(exitCode == 0) {
+                "Paddle Lite optimizer failed for $validTargets (exit $exitCode):\n" +
+                    processOutput.takeLast(16_000)
+            }
+            check(temporaryModel.isFile && temporaryModel.length() > 10_000_000L) {
+                "Paddle Lite optimizer did not produce a valid $validTargets model"
+            }
+            temporaryModel.copyTo(output, overwrite = true)
+            temporaryModel.delete()
+            logger.lifecycle(
+                "PP-MattingV2 $validTargets model: ${output.length()} bytes, " +
+                    "SHA-256 ${sha256Of(output)}",
+            )
+        }
+
+        // GPU and CPU stay as separate programs. The OpenCL model cannot silently execute ARM ops.
+        optimize("opencl", ppMattingV2OpenClModelV56.get().asFile, enableFp16 = true)
+        optimize("arm", ppMattingV2ArmModelV56.get().asFile, enableFp16 = false)
     }
 }
 
@@ -196,12 +345,14 @@ android {
     sourceSets["main"].assets.srcDir(generatedHairModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedFaceSkinModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedPpMattingV2Assets.get().asFile)
+    sourceSets["main"].jniLibs.srcDir(paddleLiteJniRootV56.get().asFile)
 }
 
 tasks.named("preBuild").configure {
     dependsOn(downloadHairSegmenterModel)
     dependsOn(downloadFaceSkinSegmenterModel)
-    dependsOn(downloadPpMattingV2Model)
+    dependsOn(preparePaddleLiteRuntimeV56)
+    dependsOn(generatePpMattingV2PaddleLiteModelsV56)
 }
 
 dependencies {
@@ -231,8 +382,8 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // PP-MattingV2 execution backend. ONNX Runtime Android is MIT licensed.
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
+    // PP-MattingV2 uses the official Paddle Lite v2.12 Java/OpenCL runtime generated above.
+    implementation(files(paddleLitePredictorJarV56))
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
