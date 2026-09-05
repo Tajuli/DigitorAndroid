@@ -16,17 +16,19 @@ import kotlin.math.roundToInt
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
 /**
- * V51 adaptive accelerated Pro Cutout analyzer.
+ * V53 adaptive accelerated Pro Cutout analyzer.
  *
  * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Video qualities use MediaCodec + OES +
- * GL decode. Base person segmentation prefers MediaPipe GPU but falls back to the small 256x256 CPU
- * model when a phone cannot create the MediaPipe GPU delegate. Hair enhancement is GPU-only: when
- * that delegate is unavailable the optional hair stage is skipped rather than becoming a slow CPU
- * job. GLES temporal refinement remains accelerated.
+ * GL decode. Base person segmentation prefers MediaPipe GPU, then direct LiteRT GPU, and finally the
+ * small 256x256 CPU model only when both GPU routes fail. Hair enhancement is GPU-only: when that
+ * delegate is unavailable the optional hair stage is skipped rather than becoming a slow CPU job.
+ * GLES temporal refinement remains accelerated.
  *
- * This avoids both known bad extremes: forcing PP-MattingV2 through vendor NNAPI can native-crash on
- * the first frame, while requiring MediaPipe GPU makes Pro Cutout unusable on otherwise capable
- * phones. Final matte readback/PNG persistence remains an intentional CPU/file-I/O boundary.
+ * V53 adds a small confidence/topology cleanup before and after temporal fusion. It removes nearby
+ * background islands such as chair/headrests while preserving a short soft margin around the main
+ * portrait, with extra pinhole repair for hijab/scarf edges. The cleanup is run on a <=320 px matte,
+ * so its CPU cost is tiny compared with neural inference and it also reduces temporal GPU/readback
+ * work compared with keeping a 720 px matte cache.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -41,7 +43,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         } else {
             analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
-        check(completed > 0) { "Could not generate any V51 portrait matte" }
+        check(completed > 0) { "Could not generate any V53 portrait matte" }
         markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
@@ -112,8 +114,8 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         }
 
         try {
-            // Producer: MediaCodec + OES + GL scale. Consumer: MediaPipe person matte (GPU preferred,
-            // compact CPU fallback), optional GPU hair, then GLES temporal flow.
+            // Producer: MediaCodec + OES + GL scale. Consumer: GPU-first person matte, V53 topology,
+            // optional GPU hair, GLES temporal flow, final V53 topology, then async matte persistence.
             val sequentialResult = runCatching {
                 GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
                     uri = Uri.parse(clip.uri),
@@ -185,8 +187,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
 
-    // Person matte is small (256x256): prefer GPU, but CPU fallback keeps Cutout usable on phones
-    // whose MediaPipe GPU delegate is unsupported. This is far safer than strict vendor NNAPI.
     private val portraitMatte = MediaPipePersonMatteV51(appContext, requireGpu = false)
 
     // Hair is optional refinement. Never let its CPU fallback slow the hot path: either create the
@@ -206,6 +206,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         append(portraitMatte.backendLabel)
         append(if (hair != null) " · Hair GPU" else " · Hair skipped (GPU unavailable)")
         append(" · Flow GPU")
+        append(" · Topology V53")
         append(" · MediaCodec/GL decode")
         append(" · direct frame queue")
     }
@@ -219,14 +220,22 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         }
         try {
             val settings = clip.resolvedCutoutV43()
-            val baseMatte = portraitMatte.infer(source)
+
+            val rawBaseMatte = portraitMatte.infer(source)
+            val baseMatte = try {
+                cleanupPersonMatteTopologyV53(rawBaseMatte)
+            } finally {
+                if (!rawBaseMatte.isRecycled) rawBaseMatte.recycle()
+            }
+
             val hairMask = hairMaskForFrame(
                 source = source,
                 sourceTimeUs = sourceTimeUs,
                 quality = settings.analysisQualityV47,
                 strength = settings.hairDetailV44,
             )
-            val stabilized = try {
+
+            val temporalMatte = try {
                 stabilizeGpuOnly(
                     source = source,
                     baseMatte = baseMatte,
@@ -236,7 +245,16 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                     temporalStrength = settings.temporalStabilityV44,
                 )
             } finally {
-                baseMatte.recycle()
+                if (!baseMatte.isRecycled) baseMatte.recycle()
+            }
+
+            val stabilized = try {
+                // A second topology pass removes any background island that temporal history tried
+                // to carry over from an earlier frame. Because temporalMatte is already <=320 px,
+                // this is a very small bounded CPU pass.
+                cleanupPersonMatteTopologyV53(temporalMatte)
+            } finally {
+                if (!temporalMatte.isRecycled) temporalMatte.recycle()
             }
 
             matteWriter.enqueue(clip.uri, sourceTimeUs, stabilized)
