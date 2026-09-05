@@ -18,13 +18,13 @@ import kotlin.math.roundToInt
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
 /**
- * V51 PP-MattingV2 Pro Cutout analyzer with persistent temporal person memory.
+ * V52 accelerator-first PP-MattingV2 Pro Cutout analyzer.
  *
  * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Hardware decode overlaps a bounded
  * inference worker and decoded frame ownership moves straight into that queue with no second ARGB
- * copy. PP-MattingV2/STDC1 512 supplies the base soft alpha. MediaPipe HairSegmenter and the
- * existing GPU-first local spatial-flow stabilizer refine the matte, then V51 adds motion-warped
- * person lock + confidence hysteresis before the matte is persisted for shared preview/export use.
+ * copy. PP-MattingV2/STDC1 512 uses NNAPI accelerator-first execution. MediaPipe HairSegmenter is
+ * GPU-first, while temporal flow + persistent person lock + confidence hysteresis share one GPU
+ * motion field and one resident state texture before the matte is persisted for preview/export.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -39,7 +39,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         } else {
             analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
-        check(completed > 0) { "Could not generate any V51 portrait matte" }
+        check(completed > 0) { "Could not generate any V52 portrait matte" }
         markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
@@ -116,9 +116,9 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                 }
             }
 
-            // Producer: MediaCodec + OES + GL scale. Consumer: PP-MattingV2 + MediaPipe Hair + GL
-            // temporal flow + V51 motion-warped lock/hysteresis. Decoder Bitmaps are transferred
-            // directly to the bounded worker.
+            // Producer: MediaCodec + OES + GL scale. Consumer: NNAPI PP-MattingV2 + MediaPipe Hair
+            // + one GL flow/state pipeline for temporal alpha, person lock and hysteresis. Decoder
+            // Bitmaps are ownership-transferred directly to the bounded worker.
             val sequentialResult = runCatching {
                 GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
                     uri = Uri.parse(clip.uri),
@@ -243,7 +243,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val hair = BeautyHairSegmenterV29(appContext)
     private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
     private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
-    private val personMemory = PersistentPersonMemoryV51()
     private val matteWriter = AsyncPersonCutoutMaskWriterV48(appContext)
 
     private var cachedHairMask: Bitmap? = null
@@ -254,7 +253,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         append(portraitMatte.backendLabel)
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
         append(" · Flow "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
-        append(" · Person lock/hysteresis V51")
+        append(" · Person lock/hysteresis GPU V52")
         append(" · direct frame queue")
     }
 
@@ -286,20 +285,10 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
             } finally {
                 baseMatte.recycle()
             }
-            val remembered = try {
-                personMemory.refine(
-                    source = source,
-                    currentMatte = stabilized,
-                    sourceTimeUs = sourceTimeUs,
-                    temporalStrength = settings.temporalStabilityV44,
-                )
-            } finally {
-                stabilized.recycle()
-            }
 
-            // Ownership transfers to the parallel low-priority writers; compression never runs on
-            // the inference worker.
-            matteWriter.enqueue(clip.uri, sourceTimeUs, remembered)
+            // V52 GPU state already contains temporal + lock + hysteresis. Transfer that Bitmap
+            // directly to the parallel low-priority writer; no post-GPU full-frame CPU copy.
+            matteWriter.enqueue(clip.uri, sourceTimeUs, stabilized)
             return true
         } finally {
             if (source !== bitmap && !source.isRecycled) source.recycle()
@@ -418,7 +407,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         runCatching { gpuTemporal?.close() }
         gpuTemporal = null
         cpuTemporal.close()
-        personMemory.close()
         runCatching { hair.close() }
         runCatching { portraitMatte.close() }
     }
