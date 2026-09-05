@@ -3,14 +3,17 @@ package com.tajuli.digitorandroid.editor.processing
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.providers.NNAPIFlags
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.os.Build
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.EnumSet
 import kotlin.math.roundToInt
 
 internal interface PortraitMatteBackendV50 : AutoCloseable {
@@ -19,10 +22,18 @@ internal interface PortraitMatteBackendV50 : AutoCloseable {
 }
 
 /**
- * PP-MattingV2/STDC1 512 portrait matte backend used by Pro Cutout.
+ * CI804 PP-MattingV2/STDC1 512 portrait matte with hardware-first execution.
  *
- * Upstream PP-MattingV2 is published by PaddleSeg under Apache-2.0. The fixed 512x512 ONNX export
- * is downloaded and SHA-256 pinned by app/build.gradle.kts; ONNX Runtime Android is MIT licensed.
+ * The model, preprocessing, output alpha and all downstream CI804 cutout/refinement behavior are
+ * intentionally unchanged. Only the ONNX Runtime execution provider changes: Android 10+ first
+ * tries NNAPI with the NNAPI CPU device disabled, so supported PP-MattingV2 nodes are assigned to
+ * a real hardware accelerator (GPU/NPU/DSP chosen by the vendor NNAPI driver). Unsupported nodes
+ * may remain on ORT's CPU EP instead of making session creation fatal. This is deliberately safer
+ * than the earlier strict all-or-nothing NNAPI experiment which disabled ORT CPU-EP fallback and
+ * could crash/fail on vendor drivers.
+ *
+ * If NNAPI session creation itself is unavailable, the exact same PP-MattingV2 model falls back to
+ * the original CI804 CPU session. Therefore backend availability changes speed, not matte quality.
  */
 internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBackendV50 {
     private companion object {
@@ -33,9 +44,10 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
 
     private val appContext = context.applicationContext
     private val environment = OrtEnvironment.getEnvironment()
-    private val sessionOptions = OrtSession.SessionOptions()
+    private val sessionOptions: OrtSession.SessionOptions
     private val session: OrtSession
     private val inputName: String
+    private val usingHardwareAcceleration: Boolean
 
     private val plane = MODEL_SIZE * MODEL_SIZE
     private val inputPixels = IntArray(plane)
@@ -51,11 +63,48 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     private val inputTensor: OnnxTensor
 
     override val backendLabel: String
-        get() = "PP-MattingV2 · ONNX Runtime CPU · 512"
+        get() = if (usingHardwareAcceleration) {
+            "PP-MattingV2 · NNAPI accelerator · 512"
+        } else {
+            "PP-MattingV2 · ONNX Runtime CPU fallback · 512"
+        }
 
     init {
         val modelBytes = appContext.assets.open(MODEL_ASSET).use { it.readBytes() }
-        session = environment.createSession(modelBytes, sessionOptions)
+
+        var resolvedOptions: OrtSession.SessionOptions? = null
+        var resolvedSession: OrtSession? = null
+        var accelerated = false
+
+        // CPU_DISABLED applies to NNAPI's own CPU device on Android 10+. We intentionally do NOT
+        // set session.disable_cpu_ep_fallback: unsupported lightweight graph nodes can stay on ORT
+        // CPU while the supported heavy PP-MattingV2 operators run on vendor hardware. This keeps
+        // the CI804 model/output intact and avoids the fragile all-or-nothing session partition.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val hardwareOptions = OrtSession.SessionOptions()
+            val hardwareSession = runCatching {
+                hardwareOptions.addNnapi(EnumSet.of(NNAPIFlags.CPU_DISABLED))
+                environment.createSession(modelBytes, hardwareOptions)
+            }.getOrNull()
+
+            if (hardwareSession != null) {
+                resolvedOptions = hardwareOptions
+                resolvedSession = hardwareSession
+                accelerated = true
+            } else {
+                runCatching { hardwareOptions.close() }
+            }
+        }
+
+        if (resolvedSession == null) {
+            val cpuOptions = OrtSession.SessionOptions()
+            resolvedOptions = cpuOptions
+            resolvedSession = environment.createSession(modelBytes, cpuOptions)
+        }
+
+        sessionOptions = checkNotNull(resolvedOptions)
+        session = checkNotNull(resolvedSession)
+        usingHardwareAcceleration = accelerated
         inputName = session.inputNames.firstOrNull()
             ?: error("PP-MattingV2 ONNX did not expose an input tensor")
         inputTensor = OnnxTensor.createTensor(
@@ -68,8 +117,7 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     override fun infer(source: Bitmap): Bitmap {
         check(!source.isRecycled) { "Cannot run PP-MattingV2 on a recycled bitmap" }
 
-        // The fixed Paddle2ONNX export expects NCHW 512x512. Like PaddleSeg deployment, resize to
-        // the model shape and normalize RGB from [0,255] to [-1,1] (mean/std 0.5).
+        // Exact CI804 preprocessing: fixed NCHW 512x512 and RGB [0,255] -> [-1,1].
         inputCanvas.drawBitmap(
             source,
             null,
