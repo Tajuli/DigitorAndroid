@@ -20,7 +20,7 @@ import kotlinx.coroutines.withContext
 
 private val personCutoutAnalysisInFlightV43 = ConcurrentHashMap.newKeySet<String>()
 
-/** V51 bridge retains historical symbols so existing project/editor code remains source-compatible. */
+/** V52 bridge retains historical symbols so existing project/editor code remains source-compatible. */
 fun EditorViewModelV4.setSelectedCutoutV43(
     settings: ClipCutoutV43,
     status: String = "Cutout updated",
@@ -42,7 +42,7 @@ fun EditorViewModelV4.setSelectedCutoutV43(
         })
     }
     commitProjectV19(
-        label = "cutout-v51",
+        label = "cutout-v52",
         project = snapshot.project.copy(tracks = tracks),
         status = status,
         coalesce = coalesce,
@@ -60,7 +60,7 @@ fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
     val clip = state.value.project.clip(state.value.selectedClipId) ?: return
     val app = getApplication<Application>()
     if (hasPersonCutoutCoverageV43(app.applicationContext, clip)) {
-        setEditorStatusV19("Pro Cutout ready · $label · cached V51 matte")
+        setEditorStatusV19("Pro Cutout ready · $label · cached V52 matte")
         PreviewExportCoordinator.refreshActivePreviews()
     }
 }
@@ -79,7 +79,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
     val quality = settings.analysisQualityV47
     val label = quality.uiLabelV47()
     val analysisKey = buildString {
-        append("v51-person-memory|")
+        append("v52-accelerator-gpu-memory|")
         append(clip.uri); append('|'); append(clip.sourceInUs); append('|'); append(clip.sourceOutUs)
         append('|'); append(quality.name)
         append('|'); append(settings.hairDetailV44); append('|'); append(settings.temporalStabilityV44)
@@ -97,7 +97,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         )
     }
 
-    setEditorStatusV19("Pro Cutout · $label · starting V51 person-memory pipeline…")
+    setEditorStatusV19("Pro Cutout · $label · starting V52 accelerator/GPU pipeline…")
     val app = getApplication<Application>()
     val progressStride = when (quality) {
         CutoutAnalysisQualityV47.LOW -> 8
@@ -137,7 +137,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                     PreviewExportCoordinator.refreshActivePreviews(220L)
                     if (ready) {
                         setEditorStatusV19(
-                            "Pro Cutout ready · $label · ${track.frames.size} V51 refined matte frame(s)",
+                            "Pro Cutout ready · $label · ${track.frames.size} V52 refined matte frame(s)",
                         )
                     } else {
                         setEditorStatusV19("Pro Cutout incomplete · $label · tap Analyze again")
