@@ -231,6 +231,13 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
+    // V52 fallback: bypass MediaPipe Tasks and run the same TFLite segmentation graph directly on
+    // LiteRT's OpenCL/OpenGL GPU delegate when a phone has a usable GPU but MediaPipe rejects it.
+    val liteRt = "1.4.2"
+    implementation("com.google.ai.edge.litert:litert:$liteRt")
+    implementation("com.google.ai.edge.litert:litert-gpu-api:$liteRt")
+    implementation("com.google.ai.edge.litert:litert-gpu:$liteRt")
+
     // PP-MattingV2 execution backend. ONNX Runtime Android is MIT licensed.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
 
