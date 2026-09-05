@@ -46,6 +46,20 @@ internal class MediaPipePersonMatteV51(
     private companion object {
         const val MODEL_ASSET = "selfie_multiclass_256x256.tflite"
         const val BACKGROUND_CLASS = 0
+
+        fun createSegmenter(context: Context, delegate: Delegate): ImageSegmenter {
+            val baseOptions = BaseOptions.builder()
+                .setModelAssetPath(MODEL_ASSET)
+                .setDelegate(delegate)
+                .build()
+            val options = ImageSegmenter.ImageSegmenterOptions.builder()
+                .setBaseOptions(baseOptions)
+                .setRunningMode(RunningMode.IMAGE)
+                .setOutputCategoryMask(false)
+                .setOutputConfidenceMasks(true)
+                .build()
+            return ImageSegmenter.createFromOptions(context, options)
+        }
     }
 
     private val segmenter: ImageSegmenter
@@ -88,7 +102,6 @@ internal class MediaPipePersonMatteV51(
         val pixels = IntArray(width * height)
         for (i in pixels.indices) {
             val person = (1f - confidence.get().coerceIn(0f, 1f)).coerceIn(0f, 1f)
-            // Preserve a soft matte while suppressing low-confidence background haze.
             val x = ((person - .025f) / .95f).coerceIn(0f, 1f)
             val smooth = x * x * (3f - 2f * x)
             val v = (smooth * 255f).roundToInt().coerceIn(0, 255)
@@ -105,22 +118,6 @@ internal class MediaPipePersonMatteV51(
 
     override fun close() {
         segmenter.close()
-    }
-
-    private companion object Factory {
-        fun createSegmenter(context: Context, delegate: Delegate): ImageSegmenter {
-            val baseOptions = BaseOptions.builder()
-                .setModelAssetPath(MODEL_ASSET)
-                .setDelegate(delegate)
-                .build()
-            val options = ImageSegmenter.ImageSegmenterOptions.builder()
-                .setBaseOptions(baseOptions)
-                .setRunningMode(RunningMode.IMAGE)
-                .setOutputCategoryMask(false)
-                .setOutputConfidenceMasks(true)
-                .build()
-            return ImageSegmenter.createFromOptions(context, options)
-        }
     }
 }
 
