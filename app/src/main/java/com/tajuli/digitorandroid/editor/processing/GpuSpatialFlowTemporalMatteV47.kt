@@ -13,7 +13,6 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.roundToInt
 
 private const val GPU_FLOW_LONG_EDGE_V47 = 192
@@ -22,13 +21,12 @@ private const val GPU_FLOW_RESET_GAP_US_V47 = 1_200_000L
 private const val GPU_FLOW_SCENE_CUT_MAD_V47 = 52f
 
 /**
- * Near-fully-GPU V47 temporal matte stage.
+ * V52 GPU temporal matte stage.
  *
- * The current/previous source, current MODNet matte and optional hair mask are textures. Pass one
- * estimates a local motion field on a small block grid entirely in a fragment shader. Pass two
- * fuses hair only in the uncertain portrait band, warps the previous matte with the local field and
- * applies confidence/disagreement gating. Only the final one-channel-looking RGBA matte is read back
- * for the existing cache contract; the expensive per-pixel block search and matte warp stay on GPU.
+ * One GPU flow pass is shared by temporal smoothing, persistent-person lock and confidence
+ * hysteresis. The history texture packs stabilized alpha in R, person lock in G and temporal
+ * confidence in B, so there is no second CPU optical-flow/person-memory pass. A tiny extraction pass
+ * copies R into grayscale RGB only for the existing PNG cache contract.
  */
 internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
     private val egl = OffscreenEglV47()
@@ -41,12 +39,14 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
 
     private val flowProgram = compileProgram(FULLSCREEN_VERTEX, FLOW_FRAGMENT)
     private val matteProgram = compileProgram(FULLSCREEN_VERTEX, MATTE_FRAGMENT)
+    private val extractProgram = compileProgram(FULLSCREEN_VERTEX, EXTRACT_ALPHA_FRAGMENT)
     private val framebuffer = IntArray(1).also { GLES20.glGenFramebuffers(1, it, 0) }[0]
 
     private var currentSourceTex = createTexture()
     private var previousSourceTex = createTexture()
     private var currentMatteTex = createTexture()
-    private var previousMatteTex = createTexture()
+    private var previousStateTex = createTexture()
+    private var outputStateTex = createTexture()
     private var outputMatteTex = createTexture()
     private var hairTex = createTexture()
     private var flowTex = createTexture()
@@ -85,7 +85,7 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
         if (!reset) {
             renderFlow(source.width, source.height, flowSize.first, flowSize.second)
         }
-        renderMatte(
+        renderState(
             hasPrevious = !reset,
             hasHair = hairMask != null,
             sourceWidth = source.width,
@@ -93,12 +93,12 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             hairStrength = hairStrength,
             temporalStrength = temporalStrength,
         )
-
+        renderAlphaExtract()
         val result = readOutputMatte(currentMatte.width, currentMatte.height)
 
-        // Keep GPU history resident: no full-frame Bitmap copies for temporal state.
+        // All temporal/person memory stays resident in GPU textures.
         currentSourceTex = previousSourceTex.also { previousSourceTex = currentSourceTex }
-        outputMatteTex = previousMatteTex.also { previousMatteTex = outputMatteTex }
+        outputStateTex = previousStateTex.also { previousStateTex = outputStateTex }
         previousTimeUs = sourceTimeUs
         previousSignature = signature
         hasHistory = true
@@ -118,13 +118,12 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             1f / flowWidth.coerceAtLeast(1).toFloat(),
             1f / flowHeight.coerceAtLeast(1).toFloat(),
         )
-        // The source aspect is kept for future tuning and prevents optimizer-specific dead uniforms.
         uniform2f(flowProgram, "uSourceSize", sourceWidth.toFloat(), sourceHeight.toFloat())
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-        checkGl("render V47 flow")
+        checkGl("render V52 flow")
     }
 
-    private fun renderMatte(
+    private fun renderState(
         hasPrevious: Boolean,
         hasHair: Boolean,
         sourceWidth: Int,
@@ -132,12 +131,12 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
         hairStrength: Float,
         temporalStrength: Float,
     ) {
-        attachTexture(outputMatteTex)
+        attachTexture(outputStateTex)
         GLES20.glViewport(0, 0, matteWidth, matteHeight)
         GLES20.glUseProgram(matteProgram)
         bindQuad(matteProgram)
         bindSampler(matteProgram, "uCurrentMatte", currentMatteTex, 0)
-        bindSampler(matteProgram, "uPreviousMatte", previousMatteTex, 1)
+        bindSampler(matteProgram, "uPreviousState", previousStateTex, 1)
         bindSampler(matteProgram, "uFlow", flowTex, 2)
         bindSampler(matteProgram, "uHair", hairTex, 3)
         uniform1f(matteProgram, "uHasPrevious", if (hasPrevious) 1f else 0f)
@@ -152,17 +151,27 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             1f / flowSize.second.coerceAtLeast(1).toFloat(),
         )
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-        checkGl("render V47 matte")
+        checkGl("render V52 temporal/person state")
+    }
+
+    private fun renderAlphaExtract() {
+        attachTexture(outputMatteTex)
+        GLES20.glViewport(0, 0, matteWidth, matteHeight)
+        GLES20.glUseProgram(extractProgram)
+        bindQuad(extractProgram)
+        bindSampler(extractProgram, "uState", outputStateTex, 0)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        checkGl("extract V52 alpha")
     }
 
     private fun readOutputMatte(width: Int, height: Int): Bitmap {
         attachTexture(outputMatteTex)
         val bytes = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder())
         GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, bytes)
-        checkGl("read V47 matte")
+        checkGl("read V52 matte")
         bytes.rewind()
         return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap ->
-            // Output RGB is grayscale and A=255, so RGBA byte order maps safely to ARGB_8888 memory.
+            // Extract pass writes grayscale RGB + A=255, preserving the existing cache contract.
             bitmap.copyPixelsFromBuffer(bytes)
         }
     }
@@ -171,8 +180,10 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
         if (width == matteWidth && height == matteHeight) return
         matteWidth = width.coerceAtLeast(1)
         matteHeight = height.coerceAtLeast(1)
-        allocateTexture(previousMatteTex, matteWidth, matteHeight)
+        allocateTexture(previousStateTex, matteWidth, matteHeight)
+        allocateTexture(outputStateTex, matteWidth, matteHeight)
         allocateTexture(outputMatteTex, matteWidth, matteHeight)
+        hasHistory = false
     }
 
     private fun ensureFlowTexture(cols: Int, rows: Int) {
@@ -192,6 +203,7 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             (height * scale).roundToInt().coerceAtLeast(16)
     }
 
+    /** Small scene-cut signature only: 256 sampled pixels, not a per-pixel processing pass. */
     private fun lumaSignature(bitmap: Bitmap): IntArray {
         val cols = 16
         val rows = 16
@@ -227,7 +239,7 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             0,
         )
         check(GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) == GLES20.GL_FRAMEBUFFER_COMPLETE) {
-            "V47 GPU framebuffer is incomplete"
+            "V52 GPU framebuffer is incomplete"
         }
     }
 
@@ -255,7 +267,7 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
     private fun uploadBitmap(texture: Int, bitmap: Bitmap) {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
         GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
-        checkGl("upload V47 texture")
+        checkGl("upload V52 texture")
     }
 
     private fun allocateTexture(texture: Int, width: Int, height: Int) {
@@ -297,7 +309,7 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
         val log = GLES20.glGetProgramInfoLog(program)
         GLES20.glDeleteShader(vertexShader)
         GLES20.glDeleteShader(fragmentShader)
-        check(status[0] == GLES20.GL_TRUE) { "V47 GPU program link failed: $log" }
+        check(status[0] == GLES20.GL_TRUE) { "V52 GPU program link failed: $log" }
         return program
     }
 
@@ -308,7 +320,7 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
         val status = IntArray(1)
         GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, status, 0)
         val log = GLES20.glGetShaderInfoLog(shader)
-        check(status[0] == GLES20.GL_TRUE) { "V47 GPU shader compile failed: $log" }
+        check(status[0] == GLES20.GL_TRUE) { "V52 GPU shader compile failed: $log" }
         return shader
     }
 
@@ -322,14 +334,16 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             egl.makeCurrent()
             GLES20.glDeleteProgram(flowProgram)
             GLES20.glDeleteProgram(matteProgram)
+            GLES20.glDeleteProgram(extractProgram)
             GLES20.glDeleteFramebuffers(1, intArrayOf(framebuffer), 0)
             GLES20.glDeleteTextures(
-                7,
+                8,
                 intArrayOf(
                     currentSourceTex,
                     previousSourceTex,
                     currentMatteTex,
-                    previousMatteTex,
+                    previousStateTex,
+                    outputStateTex,
                     outputMatteTex,
                     hairTex,
                     flowTex,
@@ -403,7 +417,7 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             precision mediump float;
             varying vec2 vUv;
             uniform sampler2D uCurrentMatte;
-            uniform sampler2D uPreviousMatte;
+            uniform sampler2D uPreviousState;
             uniform sampler2D uFlow;
             uniform sampler2D uHair;
             uniform vec2 uSearchStep;
@@ -412,17 +426,17 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             uniform float uHairStrength;
             uniform float uTemporalStrength;
 
-            float previousSupportAt(vec2 previousUv) {
+            vec3 previousStateSupportAt(vec2 previousUv) {
                 vec2 radius = uSearchStep * 1.75;
-                float support = texture2D(uPreviousMatte, previousUv).r;
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + vec2(radius.x, 0.0), vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv - vec2(radius.x, 0.0), vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + vec2(0.0, radius.y), vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv - vec2(0.0, radius.y), vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + radius, vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv - radius, vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + vec2(radius.x, -radius.y), vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + vec2(-radius.x, radius.y), vec2(0.0), vec2(1.0))).r);
+                vec3 support = texture2D(uPreviousState, previousUv).rgb;
+                support = max(support, texture2D(uPreviousState, clamp(previousUv + vec2(radius.x, 0.0), vec2(0.0), vec2(1.0))).rgb);
+                support = max(support, texture2D(uPreviousState, clamp(previousUv - vec2(radius.x, 0.0), vec2(0.0), vec2(1.0))).rgb);
+                support = max(support, texture2D(uPreviousState, clamp(previousUv + vec2(0.0, radius.y), vec2(0.0), vec2(1.0))).rgb);
+                support = max(support, texture2D(uPreviousState, clamp(previousUv - vec2(0.0, radius.y), vec2(0.0), vec2(1.0))).rgb);
+                support = max(support, texture2D(uPreviousState, clamp(previousUv + radius, vec2(0.0), vec2(1.0))).rgb);
+                support = max(support, texture2D(uPreviousState, clamp(previousUv - radius, vec2(0.0), vec2(1.0))).rgb);
+                support = max(support, texture2D(uPreviousState, clamp(previousUv + vec2(radius.x, -radius.y), vec2(0.0), vec2(1.0))).rgb);
+                support = max(support, texture2D(uPreviousState, clamp(previousUv + vec2(-radius.x, radius.y), vec2(0.0), vec2(1.0))).rgb);
                 return support;
             }
 
@@ -430,8 +444,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 float currentAlpha = texture2D(uCurrentMatte, vUv).r;
                 float uncertainty = clamp(4.0 * currentAlpha * (1.0 - currentAlpha), 0.0, 1.0);
 
-                // Hair is allowed to recover only the uncertain semantic boundary. The deliberately
-                // conservative gain avoids making hijab/cloth behave like synthetic hair strands.
                 if (uHasHair > 0.5 && uHairStrength > 0.001) {
                     float hair = texture2D(uHair, vUv).r;
                     float hairWeight = hair * uHairStrength * (0.10 + 0.46 * uncertainty);
@@ -439,7 +451,9 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 }
 
                 if (uHasPrevious < 0.5 || uTemporalStrength <= 0.001) {
-                    gl_FragColor = vec4(currentAlpha, currentAlpha, currentAlpha, 1.0);
+                    float seedLock = smoothstep(0.58, 0.94, currentAlpha);
+                    float seedConfidence = smoothstep(0.28, 0.88, currentAlpha);
+                    gl_FragColor = vec4(currentAlpha, seedLock, seedConfidence, 1.0);
                     return;
                 }
 
@@ -447,37 +461,86 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 float dx = flow.r * 12.0 - 6.0;
                 float dy = flow.g * 12.0 - 6.0;
                 vec2 previousUv = clamp(vUv + vec2(dx * uSearchStep.x, dy * uSearchStep.y), vec2(0.0), vec2(1.0));
-                float previousAlpha = texture2D(uPreviousMatte, previousUv).r;
+                vec3 previousState = texture2D(uPreviousState, previousUv).rgb;
+                vec3 previousSupport = previousStateSupportAt(previousUv);
+                float previousAlpha = previousState.r;
+                float previousLock = previousState.g;
+                float previousConfidence = previousState.b;
+                float alphaSupport = previousSupport.r;
+                float lockSupport = max(previousLock, previousSupport.g);
 
-                // MODNet can occasionally classify a stationary object touching the subject (for
-                // example a chair back beside a shoulder) as certain foreground for one/few anchors.
-                // The old path returned immediately for alpha >= .99, so that false positive bypassed
-                // every temporal check and 12-fps interpolation made the chair flash into the result.
-                // Reject only *new*, well-matched, near-zero-motion foreground that has no nearby
-                // support in the previous stabilized matte. Genuine moving hands/hair/cloth retain
-                // their flow-warped support or non-zero motion and therefore pass this gate.
-                float previousSupport = previousSupportAt(previousUv);
                 float motionBlocks = length(vec2(dx, dy));
                 float staticMatch = 1.0 - smoothstep(0.35, 1.65, motionBlocks);
                 float reliableFlow = smoothstep(0.12, 0.42, flow.b);
+
+                // First reject isolated PP-MattingV2 foreground births that have no warped support.
                 float unsupportedBirth = smoothstep(0.52, 0.90, currentAlpha) *
-                    (1.0 - smoothstep(0.08, 0.44, previousSupport));
-                float birthGuard = clamp(unsupportedBirth * staticMatch * reliableFlow, 0.0, 1.0);
-                float guardedTarget = min(currentAlpha, previousSupport + 0.055);
-                currentAlpha = mix(currentAlpha, guardedTarget, birthGuard * 0.97);
+                    (1.0 - smoothstep(0.08, 0.44, alphaSupport));
+                float oldBirthGuard = clamp(unsupportedBirth * staticMatch * reliableFlow, 0.0, 1.0);
+                float guardedTarget = min(currentAlpha, alphaSupport + 0.055);
+                currentAlpha = mix(currentAlpha, guardedTarget, oldBirthGuard * 0.97);
 
-                if (currentAlpha <= 0.01 || currentAlpha >= 0.99) {
-                    gl_FragColor = vec4(currentAlpha, currentAlpha, currentAlpha, 1.0);
-                    return;
-                }
-
+                // Existing motion-aware temporal alpha blend.
                 float disagreement = abs(currentAlpha - previousAlpha);
                 float agreement = clamp(1.0 - disagreement / 0.34, 0.0, 1.0);
                 float occlusion = 1.0 - smoothstep(0.20, 0.55, disagreement);
                 float edgeUncertainty = clamp(4.0 * currentAlpha * (1.0 - currentAlpha), 0.0, 1.0);
                 float weight = uTemporalStrength * 0.74 * edgeUncertainty * flow.b * (0.22 + 0.78 * agreement) * occlusion;
                 weight = clamp(weight, 0.0, 0.74);
-                float alpha = mix(currentAlpha, previousAlpha, weight);
+                float refined = mix(currentAlpha, previousAlpha, weight);
+
+                // V51/V52 persistent person lock + hysteresis, now on the SAME GPU flow field.
+                float established = max(
+                    smoothstep(0.18, 0.70, lockSupport),
+                    smoothstep(0.20, 0.78, previousConfidence)
+                );
+                float motionEvidence = smoothstep(0.35, 1.85, motionBlocks);
+                float staticness = 1.0 - motionEvidence;
+                float strongFreshEvidence = smoothstep(0.94, 0.995, refined);
+                float movingFreshEvidence = motionEvidence * reliableFlow * smoothstep(0.70, 0.94, refined);
+                float allowedFreshEntry = max(strongFreshEvidence, movingFreshEvidence);
+                float unsupported = (1.0 - established) * (1.0 - smoothstep(0.08, 0.46, alphaSupport));
+                float birthGuard = clamp(unsupported * staticness * reliableFlow * (1.0 - allowedFreshEntry), 0.0, 1.0);
+                float birthGuardStrength = 0.76 + 0.22 * uTemporalStrength;
+                float birthTarget = min(refined, alphaSupport + 0.045);
+                refined = mix(refined, birthTarget, birthGuard * birthGuardStrength);
+
+                // Established foreground survives brief model dips. Fast motion reduces hold to avoid trails.
+                float currentDrop = smoothstep(0.10, 0.56, previousAlpha - refined);
+                float motionDamping = 1.0 - 0.58 * smoothstep(1.35, 4.8, motionBlocks);
+                float exitHold = clamp(
+                    established * reliableFlow * currentDrop * motionDamping * (0.46 + 0.54 * uTemporalStrength),
+                    0.0,
+                    0.82
+                );
+                float heldTarget = max(refined, min(previousAlpha, max(alphaSupport, previousAlpha * 0.94)));
+                refined = mix(refined, heldTarget, exitHold);
+
+                float outputEvidence = max(refined, currentAlpha * 0.86);
+                float riseRate = clamp(0.28 + 0.30 * reliableFlow + 0.16 * motionEvidence, 0.28, 0.74);
+                float fallRate = clamp(0.075 + 0.11 * (1.0 - reliableFlow) + 0.10 * motionEvidence, 0.075, 0.285);
+                float nextConfidence = outputEvidence >= previousConfidence
+                    ? previousConfidence + (outputEvidence - previousConfidence) * riseRate
+                    : previousConfidence + (outputEvidence - previousConfidence) * fallRate;
+                nextConfidence = clamp(nextConfidence, 0.0, 1.0);
+
+                float strongBackground = 1.0 - smoothstep(0.05, 0.30, refined);
+                float retainedLock = previousLock * (0.995 - 0.025 * strongBackground);
+                float lockAcquireEvidence = smoothstep(0.64, 0.92, refined);
+                float newLockPermission = max(established, max(movingFreshEvidence, strongFreshEvidence * 0.45));
+                float acquiredLock = lockAcquireEvidence * newLockPermission;
+                float nextLock = clamp(max(retainedLock, acquiredLock), 0.0, 1.0);
+
+                gl_FragColor = vec4(clamp(refined, 0.0, 1.0), nextLock, nextConfidence, 1.0);
+            }
+        """
+
+        const val EXTRACT_ALPHA_FRAGMENT = """
+            precision mediump float;
+            varying vec2 vUv;
+            uniform sampler2D uState;
+            void main() {
+                float alpha = texture2D(uState, vUv).r;
                 gl_FragColor = vec4(alpha, alpha, alpha, 1.0);
             }
         """
@@ -492,9 +555,9 @@ private class OffscreenEglV47 : AutoCloseable {
 
     init {
         display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
-        check(display != EGL14.EGL_NO_DISPLAY) { "Could not get EGL display for V47 cutout" }
+        check(display != EGL14.EGL_NO_DISPLAY) { "Could not get EGL display for V52 cutout" }
         val version = IntArray(2)
-        check(EGL14.eglInitialize(display, version, 0, version, 1)) { "Could not initialize EGL for V47 cutout" }
+        check(EGL14.eglInitialize(display, version, 0, version, 1)) { "Could not initialize EGL for V52 cutout" }
         val configs = arrayOfNulls<EGLConfig>(1)
         val count = IntArray(1)
         val attrs = intArrayOf(
@@ -507,9 +570,9 @@ private class OffscreenEglV47 : AutoCloseable {
             EGL14.EGL_NONE,
         )
         check(EGL14.eglChooseConfig(display, attrs, 0, configs, 0, 1, count, 0) && count[0] > 0) {
-            "Could not choose EGL config for V47 cutout"
+            "Could not choose EGL config for V52 cutout"
         }
-        val config = configs[0] ?: error("Missing EGL config for V47 cutout")
+        val config = configs[0] ?: error("Missing EGL config for V52 cutout")
         context = EGL14.eglCreateContext(
             display,
             config,
@@ -517,19 +580,19 @@ private class OffscreenEglV47 : AutoCloseable {
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE),
             0,
         )
-        check(context != EGL14.EGL_NO_CONTEXT) { "Could not create EGL context for V47 cutout" }
+        check(context != EGL14.EGL_NO_CONTEXT) { "Could not create EGL context for V52 cutout" }
         surface = EGL14.eglCreatePbufferSurface(
             display,
             config,
             intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE),
             0,
         )
-        check(surface != EGL14.EGL_NO_SURFACE) { "Could not create EGL pbuffer for V47 cutout" }
+        check(surface != EGL14.EGL_NO_SURFACE) { "Could not create EGL pbuffer for V52 cutout" }
         makeCurrent()
     }
 
     fun makeCurrent() {
-        check(EGL14.eglMakeCurrent(display, surface, surface, context)) { "Could not bind V47 EGL context" }
+        check(EGL14.eglMakeCurrent(display, surface, surface, context)) { "Could not bind V52 EGL context" }
     }
 
     override fun close() {
