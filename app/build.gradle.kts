@@ -117,9 +117,8 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
     }
 }
 
-// V50 Pro Cutout uses PP-MattingV2/STDC1 512 from PaddleSeg (Apache-2.0). The ONNX export is
-// downloaded at build time so the ~36 MB model never enters git history. SHA-256 pinning prevents
-// silent model replacement from changing creator output between builds.
+// Kept for CI804 compatibility/history; the main Analyze hot path no longer instantiates the ONNX
+// NNAPI backend because some vendor drivers can terminate the app on the first inference.
 val generatedPpMattingV2Assets = layout.buildDirectory.dir("generated/ppMattingV2Assets")
 val ppMattingV2ModelFile = generatedPpMattingV2Assets.map { it.file("ppmattingv2_stdc1_human_512.onnx") }
 val downloadPpMattingV2Model by tasks.registering {
@@ -231,7 +230,14 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // PP-MattingV2 execution backend. ONNX Runtime Android is MIT licensed.
+    // MediaPipe-independent GPU fallback for phones whose GPU is usable through LiteRT/OpenGL but
+    // rejected by the MediaPipe Tasks GPU wrapper.
+    val liteRt = "1.4.2"
+    implementation("com.google.ai.edge.litert:litert:$liteRt")
+    implementation("com.google.ai.edge.litert:litert-gpu-api:$liteRt")
+    implementation("com.google.ai.edge.litert:litert-gpu:$liteRt")
+
+    // Retained for compatibility with the CI804 source tree; not used by the main Analyze hot path.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
 
     testImplementation("junit:junit:4.13.2")
