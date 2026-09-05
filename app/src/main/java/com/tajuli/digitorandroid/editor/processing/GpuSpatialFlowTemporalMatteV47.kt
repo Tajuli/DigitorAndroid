@@ -96,7 +96,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
         renderAlphaExtract()
         val result = readOutputMatte(currentMatte.width, currentMatte.height)
 
-        // All temporal/person memory stays resident in GPU textures.
         currentSourceTex = previousSourceTex.also { previousSourceTex = currentSourceTex }
         outputStateTex = previousStateTex.also { previousStateTex = outputStateTex }
         previousTimeUs = sourceTimeUs
@@ -171,7 +170,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
         checkGl("read V52 matte")
         bytes.rewind()
         return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap ->
-            // Extract pass writes grayscale RGB + A=255, preserving the existing cache contract.
             bitmap.copyPixelsFromBuffer(bytes)
         }
     }
@@ -203,7 +201,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             (height * scale).roundToInt().coerceAtLeast(16)
     }
 
-    /** Small scene-cut signature only: 256 sampled pixels, not a per-pixel processing pass. */
     private fun lumaSignature(bitmap: Bitmap): IntArray {
         val cols = 16
         val rows = 16
@@ -473,14 +470,12 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 float staticMatch = 1.0 - smoothstep(0.35, 1.65, motionBlocks);
                 float reliableFlow = smoothstep(0.12, 0.42, flow.b);
 
-                // First reject isolated PP-MattingV2 foreground births that have no warped support.
                 float unsupportedBirth = smoothstep(0.52, 0.90, currentAlpha) *
                     (1.0 - smoothstep(0.08, 0.44, alphaSupport));
                 float oldBirthGuard = clamp(unsupportedBirth * staticMatch * reliableFlow, 0.0, 1.0);
                 float guardedTarget = min(currentAlpha, alphaSupport + 0.055);
                 currentAlpha = mix(currentAlpha, guardedTarget, oldBirthGuard * 0.97);
 
-                // Existing motion-aware temporal alpha blend.
                 float disagreement = abs(currentAlpha - previousAlpha);
                 float agreement = clamp(1.0 - disagreement / 0.34, 0.0, 1.0);
                 float occlusion = 1.0 - smoothstep(0.20, 0.55, disagreement);
@@ -489,7 +484,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 weight = clamp(weight, 0.0, 0.74);
                 float refined = mix(currentAlpha, previousAlpha, weight);
 
-                // V51/V52 persistent person lock + hysteresis, now on the SAME GPU flow field.
                 float established = max(
                     smoothstep(0.18, 0.70, lockSupport),
                     smoothstep(0.20, 0.78, previousConfidence)
@@ -505,7 +499,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 float birthTarget = min(refined, alphaSupport + 0.045);
                 refined = mix(refined, birthTarget, birthGuard * birthGuardStrength);
 
-                // Established foreground survives brief model dips. Fast motion reduces hold to avoid trails.
                 float currentDrop = smoothstep(0.10, 0.56, previousAlpha - refined);
                 float motionDamping = 1.0 - 0.58 * smoothstep(1.35, 4.8, motionBlocks);
                 float exitHold = clamp(
@@ -516,7 +509,8 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 float heldTarget = max(refined, min(previousAlpha, max(alphaSupport, previousAlpha * 0.94)));
                 refined = mix(refined, heldTarget, exitHold);
 
-                float outputEvidence = max(refined, currentAlpha * 0.86);
+                float confidencePermission = max(established, allowedFreshEntry);
+                float outputEvidence = max(refined, currentAlpha * 0.86 * confidencePermission);
                 float riseRate = clamp(0.28 + 0.30 * reliableFlow + 0.16 * motionEvidence, 0.28, 0.74);
                 float fallRate = clamp(0.075 + 0.11 * (1.0 - reliableFlow) + 0.10 * motionEvidence, 0.075, 0.285);
                 float nextConfidence = outputEvidence >= previousConfidence
@@ -547,7 +541,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
     }
 }
 
-/** Minimal ES2 pbuffer context dedicated to analysis; preview/export GL contexts remain untouched. */
 private class OffscreenEglV47 : AutoCloseable {
     private val display: EGLDisplay
     private val context: EGLContext
