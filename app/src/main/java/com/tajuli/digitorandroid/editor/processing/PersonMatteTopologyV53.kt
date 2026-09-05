@@ -169,8 +169,12 @@ internal fun cleanupPersonMatteTopologyV53(
         val cap = if (upperPortrait) 24 else 16
         for (x in 0 until width) {
             val index = y * width + x
+            if (distance[index].toInt() > supportRadius) {
+                repaired[index] = 0
+                continue
+            }
             val current = filtered[index]
-            if (current <= 0 || current >= 245) {
+            if (current >= 245) {
                 repaired[index] = current
                 continue
             }
