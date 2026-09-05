@@ -111,11 +111,14 @@ object BeautyHairMaskStoreV29 {
 }
 
 /**
- * Dedicated semantic hair segmenter. V47 asks MediaPipe for GPU execution first and falls back to
- * CPU only on devices/drivers where the GPU delegate cannot be created. Cutout analysis can consume
- * [segmentSoftMask] directly, avoiding the old encode-PNG/decode-PNG round trip for every anchor.
+ * Dedicated semantic hair segmenter. Callers can opt into strict GPU execution. Pro Cutout V51
+ * does so to avoid a silent MediaPipe CPU fallback in the analysis hot path, while older beauty
+ * tools retain the compatibility fallback by using the default requireGpu=false.
  */
-class BeautyHairSegmenterV29(context: Context) : AutoCloseable {
+class BeautyHairSegmenterV29(
+    context: Context,
+    requireGpu: Boolean = false,
+) : AutoCloseable {
     private val segmenter: ImageSegmenter
     val usingGpuDelegate: Boolean
 
@@ -125,6 +128,11 @@ class BeautyHairSegmenterV29(context: Context) : AutoCloseable {
         if (gpu.isSuccess) {
             segmenter = gpu.getOrThrow()
             usingGpuDelegate = true
+        } else if (requireGpu) {
+            throw IllegalStateException(
+                "MediaPipe GPU delegate is required for Pro Cutout; CPU fallback is disabled",
+                gpu.exceptionOrNull(),
+            )
         } else {
             segmenter = createSegmenter(app, Delegate.CPU)
             usingGpuDelegate = false
