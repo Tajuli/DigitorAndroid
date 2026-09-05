@@ -11,6 +11,12 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.os.Build
+import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.framework.image.ByteBufferExtractor
+import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.core.Delegate
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.EnumSet
@@ -22,18 +28,109 @@ internal interface PortraitMatteBackendV50 : AutoCloseable {
 }
 
 /**
- * PP-MattingV2/STDC1 512 portrait matte backend used by Pro Cutout.
+ * Stable V51 fast-path portrait matte for Pro Cutout.
+ *
+ * The 256x256 MediaPipe SelfieMulticlass model predicts background, hair, body-skin, face-skin,
+ * clothes and accessories. Person alpha is therefore simply 1 - background confidence. The neural
+ * graph runs on MediaPipe's GPU delegate; only the small confidence-buffer -> Bitmap conversion is
+ * CPU-side before the existing GLES temporal/hair refinement stage.
+ *
+ * Unlike the NNAPI PP-MattingV2 path below, this backend does not enter vendor NNAPI drivers that can
+ * process-abort on some phones during the first frame. Pro Cutout uses requireGpu=true so it either
+ * gets the MediaPipe GPU delegate or fails cleanly with a Kotlin exception that the editor can show.
+ */
+internal class MediaPipePersonMatteV51(
+    context: Context,
+    requireGpu: Boolean = true,
+) : PortraitMatteBackendV50 {
+    private companion object {
+        const val MODEL_ASSET = "selfie_multiclass_256x256.tflite"
+        const val BACKGROUND_CLASS = 0
+    }
+
+    private val segmenter: ImageSegmenter
+    private val usingGpuDelegate: Boolean
+
+    override val backendLabel: String
+        get() = "SelfieMulticlass · MediaPipe ${if (usingGpuDelegate) "GPU" else "CPU fallback"} · 256"
+
+    init {
+        val app = context.applicationContext
+        val gpu = runCatching { createSegmenter(app, Delegate.GPU) }
+        if (gpu.isSuccess) {
+            segmenter = gpu.getOrThrow()
+            usingGpuDelegate = true
+        } else if (requireGpu) {
+            throw IllegalStateException(
+                "MediaPipe GPU person matte is unavailable on this device",
+                gpu.exceptionOrNull(),
+            )
+        } else {
+            segmenter = createSegmenter(app, Delegate.CPU)
+            usingGpuDelegate = false
+        }
+    }
+
+    override fun infer(source: Bitmap): Bitmap {
+        check(!source.isRecycled) { "Cannot run person matte on a recycled bitmap" }
+        val result = segmenter.segment(BitmapImageBuilder(source).build())
+        val masks = result.confidenceMasks().orElse(emptyList())
+        val background = masks.getOrNull(BACKGROUND_CLASS)
+            ?: error("SelfieMulticlass did not return the background confidence mask")
+        val width = background.width.coerceAtLeast(1)
+        val height = background.height.coerceAtLeast(1)
+        val confidence = ByteBufferExtractor.extract(background).asFloatBuffer()
+        confidence.rewind()
+        check(confidence.remaining() >= width * height) {
+            "SelfieMulticlass background mask is incomplete"
+        }
+
+        val pixels = IntArray(width * height)
+        for (i in pixels.indices) {
+            val person = (1f - confidence.get().coerceIn(0f, 1f)).coerceIn(0f, 1f)
+            // Preserve a soft matte while suppressing low-confidence background haze.
+            val x = ((person - .025f) / .95f).coerceIn(0f, 1f)
+            val smooth = x * x * (3f - 2f * x)
+            val v = (smooth * 255f).roundToInt().coerceIn(0, 255)
+            pixels[i] = Color.argb(255, v, v, v)
+        }
+
+        val modelMask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        modelMask.setPixels(pixels, 0, width, 0, 0, width, height)
+        if (width == source.width && height == source.height) return modelMask
+        return Bitmap.createScaledBitmap(modelMask, source.width, source.height, true).also {
+            modelMask.recycle()
+        }
+    }
+
+    override fun close() {
+        segmenter.close()
+    }
+
+    private companion object Factory {
+        fun createSegmenter(context: Context, delegate: Delegate): ImageSegmenter {
+            val baseOptions = BaseOptions.builder()
+                .setModelAssetPath(MODEL_ASSET)
+                .setDelegate(delegate)
+                .build()
+            val options = ImageSegmenter.ImageSegmenterOptions.builder()
+                .setBaseOptions(baseOptions)
+                .setRunningMode(RunningMode.IMAGE)
+                .setOutputCategoryMask(false)
+                .setOutputConfidenceMasks(true)
+                .build()
+            return ImageSegmenter.createFromOptions(context, options)
+        }
+    }
+}
+
+/**
+ * PP-MattingV2/STDC1 512 portrait matte backend retained for compatibility experiments.
  *
  * V51 deliberately requires accelerator-only execution for the expensive ONNX graph. NNAPI's CPU
  * implementation is disabled and ONNX Runtime is forbidden from assigning unsupported nodes to its
- * CPU EP. This keeps the cutout hot path on the device's NNAPI accelerator (GPU/NPU/DSP selected by
- * the Android driver) instead of silently falling back to CPU. Android 10+ is required because
- * NNAPI CPU_DISABLED is only enforceable from API 29.
- *
- * The small Bitmap<->tensor packing boundary remains on CPU because the Java ONNX Runtime API does
- * not accept an Android GL texture as this model's NCHW input. Model inference itself is strict
- * hardware-only; if the device cannot execute the complete graph in NNAPI, session creation fails
- * rather than becoming unexpectedly slow.
+ * CPU EP. This path is NOT used by the main Analyze flow because several vendor NNAPI drivers can
+ * terminate the app process instead of returning a catchable error on unsupported graphs.
  */
 internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBackendV50 {
     private companion object {
@@ -67,12 +164,8 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
 
     init {
         check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            "Pro Cutout hardware-only portrait matting requires Android 10 (API 29) or newer"
+            "PP-MattingV2 hardware-only portrait matting requires Android 10 (API 29) or newer"
         }
-
-        // CPU_DISABLED prevents NNAPI itself from selecting nnapi-reference. The session config
-        // separately prevents ONNX Runtime from sending unsupported graph nodes to the CPU EP.
-        // Together they make accelerator loss explicit instead of turning into a slow CPU fallback.
         sessionOptions.addNnapi(
             EnumSet.of(
                 NNAPIFlags.CPU_DISABLED,
@@ -86,7 +179,7 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
             environment.createSession(modelBytes, sessionOptions)
         } catch (error: Throwable) {
             throw IllegalStateException(
-                "This device cannot run the complete PP-MattingV2 graph on an NNAPI hardware accelerator; CPU fallback is disabled",
+                "This device cannot run the complete PP-MattingV2 graph on an NNAPI hardware accelerator",
                 error,
             )
         }
@@ -101,9 +194,6 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
 
     override fun infer(source: Bitmap): Bitmap {
         check(!source.isRecycled) { "Cannot run PP-MattingV2 on a recycled bitmap" }
-
-        // The fixed Paddle2ONNX export expects NCHW 512x512. Resize and pack only once into the
-        // reusable direct tensor buffer; the expensive neural graph then stays on NNAPI hardware.
         inputCanvas.drawBitmap(
             source,
             null,
