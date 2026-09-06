@@ -1,6 +1,3 @@
-import java.security.MessageDigest
-import java.util.zip.ZipFile
-
 // Direct PP-MattingV2 GPU backend for ARM Android devices. This intentionally avoids NNAPI:
 // Paddle Lite's OpenCL runtime talks to Mali/Adreno OpenCL drivers directly.
 def generatedRoot = file("${buildDir}/generated/ppmattingOpenCl")
@@ -66,9 +63,10 @@ tasks.register("preparePpMattingOpenClModel") {
         }
 
         // Find the exported Paddle inference directory instead of depending on archive nesting.
-        File pdModel = paddleModelDir.traverse(type: groovy.io.FileType.FILES).find { f ->
-            f.name.endsWith(".pdmodel") || f.name == "__model__"
-        }
+        File pdModel = fileTree(paddleModelDir).matching {
+            include "**/*.pdmodel"
+            include "**/__model__"
+        }.files.find { true }
         if (pdModel == null) {
             throw new GradleException("PP-MattingV2 inference archive did not contain a Paddle model")
         }
@@ -104,15 +102,14 @@ tasks.register("preparePaddleLiteOpenClRuntime") {
             into runtimeExtractDir
         }
 
-        File header = runtimeExtractDir.traverse(type: groovy.io.FileType.FILES).find { it.name == "paddle_api.h" }
-        File shared = runtimeExtractDir.traverse(type: groovy.io.FileType.FILES).find { it.name == "libpaddle_light_api_shared.so" }
+        File header = fileTree(runtimeExtractDir).matching { include "**/paddle_api.h" }.files.find { true }
+        File shared = fileTree(runtimeExtractDir).matching { include "**/libpaddle_light_api_shared.so" }.files.find { true }
         if (header == null || shared == null) {
             throw new GradleException("Paddle Lite OpenCL archive layout unsupported: paddle_api.h=${header}, shared=${shared}")
         }
 
         delete(paddleLiteRoot)
         File includeRoot = header.parentFile
-        // Release packages may put paddle_api.h directly under cxx/include; copy that whole include tree.
         copy {
             from includeRoot
             into new File(paddleLiteRoot, "cxx/include")
@@ -151,7 +148,7 @@ android {
 // Native configure/build and APK packaging need the generated model/runtime first.
 tasks.matching { task ->
     def n = task.name.toLowerCase(Locale.ROOT)
-    n.contains("cmake") || n == "prebuild" || n.contains("merge") && n.contains("native")
+    n.contains("cmake") || n == "prebuild" || (n.contains("merge") && n.contains("native"))
 }.configureEach {
     dependsOn(prepareGpu)
 }
