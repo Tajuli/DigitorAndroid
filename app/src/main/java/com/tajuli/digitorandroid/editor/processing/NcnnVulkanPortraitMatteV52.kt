@@ -25,11 +25,13 @@ internal object NcnnVulkanNativeV52 {
 }
 
 /**
- * PP-MattingV2/STDC1 512 using ncnn's Vulkan compute backend.
+ * PP-MattingV2/STDC1 using ncnn Vulkan with a 256x256 runtime tensor.
  *
- * This deliberately does not use NNAPI or Paddle Lite. The pinned PP-MattingV2 ONNX model is
- * converted to ncnn during the Android build, then ncnn dispatches the neural graph through Vulkan
- * to the phone GPU. This is the primary Z60 / Mali-G57 path.
+ * The model weights are still the official 512 PP-MattingV2/STDC1 weights converted to ncnn at
+ * build time. We intentionally keep conversion at 512 because pnnx rejects this fixed ONNX export
+ * when forced to inputshape=256. ncnn itself is spatially driven by the Mat supplied at runtime, so
+ * the Vulkan path feeds 256x256 directly and expects a 256x256 alpha output. This cuts the dominant
+ * per-frame neural pixel workload by about 4x without replacing PP-MattingV2 with another model.
  */
 internal class NcnnVulkanPortraitMatteV52 private constructor(
     private var handle: Long,
@@ -38,7 +40,7 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
     internal companion object {
         const val PARAM_ASSET = "ppmattingv2_stdc1_human_512_vulkan.ncnn.param"
         const val BIN_ASSET = "ppmattingv2_stdc1_human_512_vulkan.ncnn.bin"
-        const val MODEL_SIZE = 512
+        const val MODEL_SIZE = 256
         const val PLANE = MODEL_SIZE * MODEL_SIZE
         const val INPUT_COUNT = PLANE * 3
 
@@ -47,7 +49,7 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
             assetName: String,
             minimumBytes: Long,
         ): File {
-            val directory = File(context.codeCacheDir, "ppmatting-ncnn-v52").apply { mkdirs() }
+            val directory = File(context.codeCacheDir, "ppmatting-ncnn-v52-runtime256").apply { mkdirs() }
             val target = File(directory, assetName)
             if (!target.isFile || target.length() < minimumBytes) {
                 val temp = File(directory, "$assetName.tmp")
@@ -96,7 +98,7 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
         get() = buildString {
             append("Matting: GPU (ncnn Vulkan)")
             if (lastMs >= 0.0) append(" · ").append("%.1f".format(lastMs)).append(" ms")
-            append(" · 512")
+            append(" · PP-MattingV2 256")
             append(" · ").append(gpuName)
             append(" · CPU op fallback possible")
             if (Build.MODEL.isNotBlank() && !gpuName.contains(Build.MODEL, ignoreCase = true)) {
