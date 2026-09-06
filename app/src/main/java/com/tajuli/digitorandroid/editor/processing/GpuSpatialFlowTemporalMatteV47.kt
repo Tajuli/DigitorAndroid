@@ -24,11 +24,12 @@ private const val GPU_FLOW_SCENE_CUT_MAD_V47 = 52f
 /**
  * Near-fully-GPU V47 temporal matte stage.
  *
- * The current/previous source, current MODNet matte and optional hair mask are textures. Pass one
- * estimates a local motion field on a small block grid entirely in a fragment shader. Pass two
- * fuses hair only in the uncertain portrait band, warps the previous matte with the local field and
- * applies confidence/disagreement gating. Only the final one-channel-looking RGBA matte is read back
- * for the existing cache contract; the expensive per-pixel block search and matte warp stay on GPU.
+ * The current/previous source, current PP-MattingV2 matte and optional hair mask are textures. Pass
+ * one estimates a local motion field on a small block grid entirely in a fragment shader. Pass two
+ * fuses hair only in the uncertain portrait band and uses the flow-warped previous matte only as a
+ * small edge-stability hint. The current PP-MattingV2 alpha remains authoritative, so a bad or
+ * ambiguous block match can never punch large holes into confident foreground/background regions.
+ * Only the final grayscale RGBA matte is read back for the existing cache contract.
  */
 internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
     private val egl = OffscreenEglV47()
@@ -412,26 +413,11 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             uniform float uHairStrength;
             uniform float uTemporalStrength;
 
-            float previousSupportAt(vec2 previousUv) {
-                vec2 radius = uSearchStep * 1.75;
-                float support = texture2D(uPreviousMatte, previousUv).r;
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + vec2(radius.x, 0.0), vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv - vec2(radius.x, 0.0), vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + vec2(0.0, radius.y), vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv - vec2(0.0, radius.y), vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + radius, vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv - radius, vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + vec2(radius.x, -radius.y), vec2(0.0), vec2(1.0))).r);
-                support = max(support, texture2D(uPreviousMatte, clamp(previousUv + vec2(-radius.x, radius.y), vec2(0.0), vec2(1.0))).r);
-                return support;
-            }
-
             void main() {
                 float currentAlpha = texture2D(uCurrentMatte, vUv).r;
                 float uncertainty = clamp(4.0 * currentAlpha * (1.0 - currentAlpha), 0.0, 1.0);
 
-                // Hair is allowed to recover only the uncertain semantic boundary. The deliberately
-                // conservative gain avoids making hijab/cloth behave like synthetic hair strands.
+                // Hair may recover only the uncertain PP-MattingV2 boundary. It never removes alpha.
                 if (uHasHair > 0.5 && uHairStrength > 0.001) {
                     float hair = texture2D(uHair, vUv).r;
                     float hairWeight = hair * uHairStrength * (0.10 + 0.46 * uncertainty);
@@ -443,41 +429,42 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                     return;
                 }
 
-                vec3 flow = texture2D(uFlow, vUv).rgb;
-                float dx = flow.r * 12.0 - 6.0;
-                float dy = flow.g * 12.0 - 6.0;
-                vec2 previousUv = clamp(vUv + vec2(dx * uSearchStep.x, dy * uSearchStep.y), vec2(0.0), vec2(1.0));
-                float previousAlpha = texture2D(uPreviousMatte, previousUv).r;
-
-                // MODNet can occasionally classify a stationary object touching the subject (for
-                // example a chair back beside a shoulder) as certain foreground for one/few anchors.
-                // The old path returned immediately for alpha >= .99, so that false positive bypassed
-                // every temporal check and 12-fps interpolation made the chair flash into the result.
-                // Reject only *new*, well-matched, near-zero-motion foreground that has no nearby
-                // support in the previous stabilized matte. Genuine moving hands/hair/cloth retain
-                // their flow-warped support or non-zero motion and therefore pass this gate.
-                float previousSupport = previousSupportAt(previousUv);
-                float motionBlocks = length(vec2(dx, dy));
-                float staticMatch = 1.0 - smoothstep(0.35, 1.65, motionBlocks);
-                float reliableFlow = smoothstep(0.12, 0.42, flow.b);
-                float unsupportedBirth = smoothstep(0.52, 0.90, currentAlpha) *
-                    (1.0 - smoothstep(0.08, 0.44, previousSupport));
-                float birthGuard = clamp(unsupportedBirth * staticMatch * reliableFlow, 0.0, 1.0);
-                float guardedTarget = min(currentAlpha, previousSupport + 0.055);
-                currentAlpha = mix(currentAlpha, guardedTarget, birthGuard * 0.97);
-
-                if (currentAlpha <= 0.01 || currentAlpha >= 0.99) {
+                // The previous V47 shader contained an aggressive "unsupported foreground birth"
+                // gate. On textureless/low-detail regions a block-flow match can be ambiguous while
+                // still reporting high confidence; that gate then drove valid current foreground
+                // toward a wrongly warped previous background. The visible result was exactly the
+                // horizontal/rectangular transparency corruption seen in the target-phone export.
+                // PP-MattingV2 is now authoritative: flow can smooth only uncertain edges.
+                if (currentAlpha <= 0.03 || currentAlpha >= 0.97) {
                     gl_FragColor = vec4(currentAlpha, currentAlpha, currentAlpha, 1.0);
                     return;
                 }
 
+                vec3 flow = texture2D(uFlow, vUv).rgb;
+                float dx = flow.r * 12.0 - 6.0;
+                float dy = flow.g * 12.0 - 6.0;
+                vec2 previousUv = clamp(
+                    vUv + vec2(dx * uSearchStep.x, dy * uSearchStep.y),
+                    vec2(0.0),
+                    vec2(1.0)
+                );
+                float previousAlpha = texture2D(uPreviousMatte, previousUv).r;
+
                 float disagreement = abs(currentAlpha - previousAlpha);
-                float agreement = clamp(1.0 - disagreement / 0.34, 0.0, 1.0);
-                float occlusion = 1.0 - smoothstep(0.20, 0.55, disagreement);
+                float agreement = clamp(1.0 - disagreement / 0.28, 0.0, 1.0);
+                float occlusion = 1.0 - smoothstep(0.16, 0.36, disagreement);
                 float edgeUncertainty = clamp(4.0 * currentAlpha * (1.0 - currentAlpha), 0.0, 1.0);
-                float weight = uTemporalStrength * 0.74 * edgeUncertainty * flow.b * (0.22 + 0.78 * agreement) * occlusion;
-                weight = clamp(weight, 0.0, 0.74);
-                float alpha = mix(currentAlpha, previousAlpha, weight);
+                float reliableFlow = smoothstep(0.22, 0.55, flow.b);
+
+                // Keep the temporal hint deliberately weak. Even a bad block vector is limited to a
+                // few alpha points relative to this frame's PP-MattingV2 result, so corruption cannot
+                // accumulate through the resident previous-matte history.
+                float weight = uTemporalStrength * 0.34 * edgeUncertainty * reliableFlow * agreement * occlusion;
+                weight = clamp(weight, 0.0, 0.30);
+                float candidate = mix(currentAlpha, previousAlpha, weight);
+                float maxCorrection = mix(0.018, 0.075, edgeUncertainty);
+                float alpha = clamp(candidate, currentAlpha - maxCorrection, currentAlpha + maxCorrection);
+                alpha = clamp(alpha, 0.0, 1.0);
                 gl_FragColor = vec4(alpha, alpha, alpha, 1.0);
             }
         """
