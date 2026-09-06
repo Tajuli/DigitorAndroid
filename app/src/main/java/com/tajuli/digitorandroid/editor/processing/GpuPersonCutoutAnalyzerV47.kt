@@ -23,7 +23,7 @@ private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
  * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Hardware decode overlaps a bounded
  * inference worker and decoded frame ownership moves straight into that queue with no second ARGB
  * copy. PP-MattingV2/STDC1 512 supplies the base soft alpha through an OpenCL-only model, with the
- * same network's ARM model as fallback. MediaPipe HairSegmenter and the existing GPU-first local
+ * an OpenCL FP32 program. MediaPipe HairSegmenter and the existing GPU-first local
  * spatial-flow stabilizer then refine the matte before shared preview/export persistence.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {

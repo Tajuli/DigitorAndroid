@@ -279,7 +279,7 @@ val generatePpMattingV2PaddleLiteModelsV56 by tasks.registering {
         }
 
         // GPU-only program: no ARM target is generated or packaged in PR #57.
-        optimize("opencl", ppMattingV2OpenClModelV56.get().asFile, enableFp16 = true)
+        optimize("opencl", ppMattingV2OpenClModelV56.get().asFile, enableFp16 = false)
     }
 }
 

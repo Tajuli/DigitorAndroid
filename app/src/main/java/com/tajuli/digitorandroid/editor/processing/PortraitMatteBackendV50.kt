@@ -99,7 +99,7 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
     private val predictor: ReleasablePaddlePredictorV57
     private val inputTensor: Tensor
 
-    val backendLabel: String = "PP-MattingV2 · Paddle Lite OpenCL GPU · FP16 · 512"
+    val backendLabel: String = "PP-MattingV2 · Paddle Lite OpenCL GPU · FP32 · 512"
 
     init {
         check(modelFile.isFile && modelFile.length() > 10_000_000L) {
