@@ -28,10 +28,10 @@ internal object NcnnVulkanNativeV52 {
 /**
  * PP-MattingV2/STDC1 using ncnn Vulkan.
  *
- * The native library is compiled against the exact fixed graph packaged in the APK. Production
- * phone CI uses a genuine PaddleSeg-exported 256x256 graph; ordinary/local builds can still use the
- * proven 512 graph. Kotlin asks the native engine for its compiled size and allocates all input /
- * alpha buffers to that exact profile, so a 512 graph can never accidentally receive 256 tensors.
+ * The native library is compiled against the exact fixed graph packaged in the APK. Phone CI now
+ * uses a genuine PaddleSeg-exported 384x384 graph while ordinary/local builds can still use the
+ * proven 512 graph. Kotlin asks native for the compiled size and allocates preprocessing/output
+ * buffers from that exact profile, so graph and runtime tensor sizes cannot drift apart.
  */
 internal class NcnnVulkanPortraitMatteV52 private constructor(
     private var handle: Long,
@@ -47,7 +47,10 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
             assetName: String,
             minimumBytes: Long,
         ): File {
-            val directory = File(context.codeCacheDir, "ppmatting-ncnn-v55-fixed-profile").apply { mkdirs() }
+            // New cache namespace is intentional: the packaged Vulkan graph changed from true-256
+            // to true-384 while retaining the same asset filenames. Never reuse a stale 256 model
+            // from codeCache after an APK update.
+            val directory = File(context.codeCacheDir, "ppmatting-ncnn-v56-fixed384-profile").apply { mkdirs() }
             val target = File(directory, assetName)
             if (!target.isFile || target.length() < minimumBytes) {
                 val temp = File(directory, "$assetName.tmp")
@@ -78,7 +81,7 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
             check(engine != 0L) { "ncnn could not create the PP-MattingV2 Vulkan engine" }
 
             val size = NcnnVulkanNativeV52.modelSize(engine)
-            if (size != 256 && size != 512) {
+            if (size != 256 && size != 384 && size != 512) {
                 NcnnVulkanNativeV52.destroy(engine)
                 error("Unsupported compiled PP-MattingV2 graph size: $size")
             }
