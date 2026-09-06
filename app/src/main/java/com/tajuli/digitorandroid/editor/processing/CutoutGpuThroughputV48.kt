@@ -12,10 +12,16 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * Bounded producer/consumer helpers used by V49 Cutout.
  *
- * The GPU fast path transfers decoder Bitmap ownership directly into the inference queue. V48 made
- * a second full ARGB copy for every decoded frame before inference; at 720p High mode that extra
- * memory bandwidth was large enough to starve the GPU on mid-range phones. Decode can now stay up
- * to three frames ahead while the model is busy, with no duplicate frame copy in the hot path.
+ * PP-MattingV2 runs on the same mobile GPU that the MediaCodec/OES analysis decoder and temporal
+ * GL stage use. On some low/mid-range vendor drivers, letting OES readback race several frames
+ * ahead while Paddle Lite OpenCL is executing can return visually corrupted analysis frames even
+ * though no GL/OpenCL API call reports an error. Those bad source frames then produce corrupted
+ * mattes that leak large strips of the original background into preview/export.
+ *
+ * V58 therefore keeps direct Bitmap ownership transfer, but makes the inference hand-off a strict
+ * GPU barrier: decode/readback of the next selected frame cannot start until PP-MattingV2 + hair +
+ * temporal refinement for the current frame has finished. Neural inference is still OpenCL GPU;
+ * this only removes unsafe cross-context overlap on the device GPU.
  */
 internal class AsyncCutoutInferenceWorkerV48(
     private val process: (sourceTimeUs: Long, bitmap: Bitmap) -> Boolean,
@@ -24,14 +30,17 @@ internal class AsyncCutoutInferenceWorkerV48(
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "DigitorCutoutGpuInferV49").apply { priority = Thread.NORM_PRIORITY + 1 }
     }
-    private val slots = Semaphore(3)
+    private val slots = Semaphore(1)
     private val failure = AtomicReference<Throwable?>(null)
     private val completed = AtomicInteger(0)
     @Volatile private var closed = false
 
     /**
      * Takes ownership of [owned]. The bitmap is always recycled after GPU inference finishes.
-     * Callers must not touch or recycle it after this method returns successfully.
+     *
+     * This call intentionally does not return until the inference task is complete. The decoder's
+     * onFrame callback therefore becomes a synchronization point between OES/GL readback and
+     * Paddle Lite OpenCL instead of allowing both GPU contexts to overlap and corrupt later mattes.
      */
     fun enqueueOwned(sourceTimeUs: Long, owned: Bitmap) {
         failure.get()?.let {
@@ -42,9 +51,10 @@ internal class AsyncCutoutInferenceWorkerV48(
             if (!owned.isRecycled) owned.recycle()
             "V49 Cutout inference worker is closed"
         }
+
         slots.acquire()
         try {
-            executor.execute {
+            executor.submit {
                 try {
                     if (failure.get() == null && process(sourceTimeUs, owned)) {
                         val done = completed.incrementAndGet()
@@ -54,13 +64,11 @@ internal class AsyncCutoutInferenceWorkerV48(
                     failure.compareAndSet(null, error)
                 } finally {
                     if (!owned.isRecycled) owned.recycle()
-                    slots.release()
                 }
-            }
-        } catch (error: Throwable) {
+            }.get()
+            failure.get()?.let { throw it }
+        } finally {
             slots.release()
-            if (!owned.isRecycled) owned.recycle()
-            throw error
         }
     }
 
@@ -172,6 +180,6 @@ internal class AsyncPersonCutoutMaskWriterV48(
 internal fun hairSemanticRefreshIntervalUsV48(quality: CutoutAnalysisQualityV47): Long =
     when (quality) {
         CutoutAnalysisQualityV47.LOW -> 250_000L      // 4 fps
-        CutoutAnalysisQualityV47.MEDIUM -> 250_000L   // 4 fps hair over 12 fps MODNet
-        CutoutAnalysisQualityV47.HIGH -> 125_000L     // 8 fps hair over every-frame MODNet
+        CutoutAnalysisQualityV47.MEDIUM -> 250_000L   // 4 fps hair over 12 fps PP-MattingV2
+        CutoutAnalysisQualityV47.HIGH -> 125_000L     // 8 fps hair over every-frame PP-MattingV2
     }
