@@ -1,0 +1,157 @@
+import java.security.MessageDigest
+import java.util.zip.ZipFile
+
+// Direct PP-MattingV2 GPU backend for ARM Android devices. This intentionally avoids NNAPI:
+// Paddle Lite's OpenCL runtime talks to Mali/Adreno OpenCL drivers directly.
+def generatedRoot = file("${buildDir}/generated/ppmattingOpenCl")
+def downloadsDir = file("${generatedRoot}/downloads")
+def paddleModelDir = file("${generatedRoot}/paddleModel")
+def optimizedAssetsDir = file("${generatedRoot}/assets")
+def paddleLiteRoot = file("${generatedRoot}/paddleLite")
+def runtimeExtractDir = file("${generatedRoot}/runtimeExtract")
+def optTool = file("${generatedRoot}/tools/opt_linux_x86")
+
+def modelZip = file("${downloadsDir}/ppmattingv2-stdc1-human_512.zip")
+def runtimeTar = file("${downloadsDir}/paddle-lite-opencl-armv8.tar.gz")
+
+def modelUrl = "https://paddleseg.bj.bcebos.com/matting/models/deploy/ppmattingv2-stdc1-human_512.zip"
+def optUrl = "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/v2.14-rc/opt_linux_x86"
+def runtimeUrl = "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/v2.14-rc/inference_lite_lib.armv8.clang.with_exception.with_extra.with_cv.opencl.tar.gz"
+
+def downloadWithRetry = { String source, File target, long minimumBytes ->
+    if (target.isFile() && target.length() > minimumBytes) return
+    target.parentFile.mkdirs()
+    File tmp = new File(target.parentFile, target.name + ".download")
+    Throwable last = null
+    for (int attempt = 1; attempt <= 5; attempt++) {
+        try {
+            if (tmp.exists()) tmp.delete()
+            def connection = new URL(source).openConnection()
+            connection.setConnectTimeout(30000)
+            connection.setReadTimeout(240000)
+            connection.setRequestProperty("User-Agent", "DigitorAndroid-build/1.0")
+            connection.getInputStream().withCloseable { input ->
+                tmp.withOutputStream { out -> out << input }
+            }
+            if (tmp.length() <= minimumBytes) {
+                throw new GradleException("Downloaded ${target.name} is unexpectedly small (${tmp.length()} bytes)")
+            }
+            if (target.exists()) target.delete()
+            if (!tmp.renameTo(target)) {
+                target.bytes = tmp.bytes
+                tmp.delete()
+            }
+            return
+        } catch (Throwable error) {
+            last = error
+            if (attempt < 5) sleep(Math.min(20000L, 2000L * (1L << (attempt - 1))))
+        }
+    }
+    throw new GradleException("Could not download ${source}", last)
+}
+
+tasks.register("preparePpMattingOpenClModel") {
+    outputs.file(new File(optimizedAssetsDir, "ppmattingv2_stdc1_human_512_opencl.nb"))
+    doLast {
+        downloadsDir.mkdirs()
+        downloadWithRetry(modelUrl, modelZip, 1_000_000L)
+        downloadWithRetry(optUrl, optTool, 5_000_000L)
+        optTool.setExecutable(true)
+
+        delete(paddleModelDir)
+        paddleModelDir.mkdirs()
+        copy {
+            from zipTree(modelZip)
+            into paddleModelDir
+        }
+
+        // Find the exported Paddle inference directory instead of depending on archive nesting.
+        File pdModel = paddleModelDir.traverse(type: groovy.io.FileType.FILES).find { f ->
+            f.name.endsWith(".pdmodel") || f.name == "__model__"
+        }
+        if (pdModel == null) {
+            throw new GradleException("PP-MattingV2 inference archive did not contain a Paddle model")
+        }
+        File inferenceDir = pdModel.parentFile
+
+        optimizedAssetsDir.mkdirs()
+        File outputBase = new File(optimizedAssetsDir, "ppmattingv2_stdc1_human_512_opencl")
+        File outputNb = new File(outputBase.absolutePath + ".nb")
+        if (outputNb.exists()) outputNb.delete()
+
+        exec {
+            commandLine optTool.absolutePath,
+                    "--model_dir=${inferenceDir.absolutePath}",
+                    "--valid_targets=opencl,arm",
+                    "--optimize_out=${outputBase.absolutePath}"
+        }
+        if (!outputNb.isFile() || outputNb.length() < 1_000_000L) {
+            throw new GradleException("Paddle Lite opt did not create ${outputNb}")
+        }
+    }
+}
+
+tasks.register("preparePaddleLiteOpenClRuntime") {
+    outputs.file(new File(paddleLiteRoot, "cxx/include/paddle_api.h"))
+    outputs.file(new File(paddleLiteRoot, "cxx/libs/arm64-v8a/libpaddle_light_api_shared.so"))
+    doLast {
+        downloadsDir.mkdirs()
+        downloadWithRetry(runtimeUrl, runtimeTar, 1_000_000L)
+        delete(runtimeExtractDir)
+        runtimeExtractDir.mkdirs()
+        copy {
+            from tarTree(resources.gzip(runtimeTar))
+            into runtimeExtractDir
+        }
+
+        File header = runtimeExtractDir.traverse(type: groovy.io.FileType.FILES).find { it.name == "paddle_api.h" }
+        File shared = runtimeExtractDir.traverse(type: groovy.io.FileType.FILES).find { it.name == "libpaddle_light_api_shared.so" }
+        if (header == null || shared == null) {
+            throw new GradleException("Paddle Lite OpenCL archive layout unsupported: paddle_api.h=${header}, shared=${shared}")
+        }
+
+        delete(paddleLiteRoot)
+        File includeRoot = header.parentFile
+        // Release packages may put paddle_api.h directly under cxx/include; copy that whole include tree.
+        copy {
+            from includeRoot
+            into new File(paddleLiteRoot, "cxx/include")
+        }
+        File targetLibDir = new File(paddleLiteRoot, "cxx/libs/arm64-v8a")
+        targetLibDir.mkdirs()
+        copy {
+            from shared
+            into targetLibDir
+        }
+    }
+}
+
+def prepareGpu = tasks.register("preparePpMattingOpenClGpu") {
+    dependsOn("preparePpMattingOpenClModel", "preparePaddleLiteOpenClRuntime")
+}
+
+android {
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                arguments "-DPADDLE_LITE_ROOT=${paddleLiteRoot.absolutePath}"
+                cppFlags "-std=c++17 -O3 -ffast-math"
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
+            version "3.22.1"
+        }
+    }
+    sourceSets.main.assets.srcDir(optimizedAssetsDir)
+}
+
+// Native configure/build and APK packaging need the generated model/runtime first.
+tasks.matching { task ->
+    def n = task.name.toLowerCase(Locale.ROOT)
+    n.contains("cmake") || n == "prebuild" || n.contains("merge") && n.contains("native")
+}.configureEach {
+    dependsOn(prepareGpu)
+}
