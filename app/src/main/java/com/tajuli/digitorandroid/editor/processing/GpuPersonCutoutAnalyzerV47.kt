@@ -12,27 +12,18 @@ import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
-private const val SEMANTIC_SCENE_CUT_MAD_V54 = 46f
-
-private fun ppMattingDetailRefreshIntervalUsV54(quality: CutoutAnalysisQualityV47): Long =
-    when (quality) {
-        CutoutAnalysisQualityV47.LOW -> 1_000_000L
-        CutoutAnalysisQualityV47.MEDIUM -> 750_000L
-        CutoutAnalysisQualityV47.HIGH -> 500_000L
-    }
 
 /**
- * Dual-neural hybrid Pro Cutout analyzer.
+ * Per-frame PP-MattingV2 Pro Cutout analyzer.
  *
- * Every analyzed frame gets a fresh lightweight neural person semantic mask. PP-MattingV2 remains
- * the high-detail alpha source, but it is refreshed periodically and immediately on scene cuts.
- * GPU temporal flow fuses the fresh per-frame semantics with the previous high-detail matte so body
- * motion is never flow-only while expensive 512x512 PP-MattingV2 is no longer required every frame.
+ * Every analyzed frame receives a fresh PP-MattingV2 neural matte. The primary Vulkan backend now
+ * runs the converted PP-MattingV2 graph with a 256x256 runtime tensor for much lower GPU work while
+ * retaining the original PP-MattingV2 weights. GPU temporal flow and hair segmentation are used
+ * only to refine the fresh matte; SelfieMulticlass is deliberately not part of the cutout path.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -47,7 +38,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         } else {
             analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
-        check(completed > 0) { "Could not generate any dual-neural portrait matte" }
+        check(completed > 0) { "Could not generate any per-frame PP-MattingV2 portrait matte" }
         markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
@@ -239,7 +230,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
-    private val personSemantic = FastPersonSemanticSegmenterV54(appContext)
     private val hair = BeautyHairSegmenterV29(appContext)
     private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
     private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
@@ -248,15 +238,10 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private var cachedHairMask: Bitmap? = null
     private var cachedHairTimeUs: Long = Long.MIN_VALUE
     private var cachedHairQuality: CutoutAnalysisQualityV47? = null
-    private var lastPpMattingUs: Long = Long.MIN_VALUE
-    private var previousFrameUs: Long = Long.MIN_VALUE
-    private var previousSignature: IntArray? = null
 
     fun backendSummary(): String = buildString {
         append(portraitMatte.backendLabel)
-        append(" · Per-frame neural person ")
-        append(if (personSemantic.usingGpuDelegate) "GPU" else "CPU")
-        append(" · PP detail refresh")
+        append(" · Fresh PP-MattingV2 every analyzed frame")
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
         append(" · Temporal refine "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
         append(" · CPU scheduler")
@@ -272,14 +257,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         try {
             val settings = clip.resolvedCutoutV43()
             val quality = settings.analysisQualityV47
-            val signature = lumaSignatureV54(source)
-            val discontinuity = previousFrameUs != Long.MIN_VALUE &&
-                (sourceTimeUs <= previousFrameUs || sourceTimeUs - previousFrameUs > 1_200_000L)
-            val sceneCut = previousSignature != null && isSceneCutV54(previousSignature, signature)
-            previousFrameUs = sourceTimeUs
-            previousSignature = signature
-
-            val semanticMask = runCatching { personSemantic.segmentSoftPersonMask(source) }.getOrNull()
             val hairMask = hairMaskForFrame(
                 source = source,
                 sourceTimeUs = sourceTimeUs,
@@ -287,17 +264,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 strength = settings.hairDetailV44,
             )
 
-            val refreshIntervalUs = ppMattingDetailRefreshIntervalUsV54(quality)
-            val ppDue = semanticMask == null || sceneCut || discontinuity ||
-                lastPpMattingUs == Long.MIN_VALUE || sourceTimeUs <= lastPpMattingUs ||
-                sourceTimeUs - lastPpMattingUs >= refreshIntervalUs
-
-            val baseMatte = if (ppDue) {
-                portraitMatte.infer(source).also { lastPpMattingUs = sourceTimeUs }
-            } else {
-                semanticMask ?: portraitMatte.infer(source).also { lastPpMattingUs = sourceTimeUs }
-            }
-
+            val baseMatte = portraitMatte.infer(source)
             val stabilized = try {
                 stabilizeWithGpuOrFallback(
                     source = source,
@@ -305,14 +272,10 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                     hairMask = hairMask,
                     sourceTimeUs = sourceTimeUs,
                     hairStrength = settings.hairDetailV44,
-                    temporalStrength = if (ppDue) settings.temporalStabilityV44 else
-                        max(settings.temporalStabilityV44, .84f),
+                    temporalStrength = settings.temporalStabilityV44,
                 )
             } finally {
-                if (!baseMatte.isRecycled) baseMatte.recycle()
-                if (semanticMask != null && semanticMask !== baseMatte && !semanticMask.isRecycled) {
-                    semanticMask.recycle()
-                }
+                baseMatte.recycle()
             }
 
             matteWriter.enqueue(clip.uri, sourceTimeUs, stabilized)
@@ -320,31 +283,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         } finally {
             if (source !== bitmap && !source.isRecycled) source.recycle()
         }
-    }
-
-    private fun lumaSignatureV54(bitmap: Bitmap): IntArray {
-        val cols = 12
-        val rows = 12
-        val out = IntArray(cols * rows)
-        for (gy in 0 until rows) {
-            val y = ((gy + .5f) * bitmap.height / rows).toInt().coerceIn(0, bitmap.height - 1)
-            for (gx in 0 until cols) {
-                val x = ((gx + .5f) * bitmap.width / cols).toInt().coerceIn(0, bitmap.width - 1)
-                val p = bitmap.getPixel(x, y)
-                val r = (p ushr 16) and 0xFF
-                val g = (p ushr 8) and 0xFF
-                val b = p and 0xFF
-                out[gy * cols + gx] = (77 * r + 150 * g + 29 * b) shr 8
-            }
-        }
-        return out
-    }
-
-    private fun isSceneCutV54(previous: IntArray?, current: IntArray): Boolean {
-        if (previous == null || previous.size != current.size) return true
-        var sum = 0L
-        for (i in current.indices) sum += abs(current[i] - previous[i])
-        return sum.toFloat() / current.size.coerceAtLeast(1) >= SEMANTIC_SCENE_CUT_MAD_V54
     }
 
     private fun hairMaskForFrame(
@@ -458,7 +396,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         runCatching { gpuTemporal?.close() }
         gpuTemporal = null
         cpuTemporal.close()
-        runCatching { personSemantic.close() }
         runCatching { hair.close() }
         runCatching { portraitMatte.close() }
     }
