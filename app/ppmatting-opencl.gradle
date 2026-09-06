@@ -62,7 +62,6 @@ tasks.register("preparePpMattingOpenClModel") {
             into paddleModelDir
         }
 
-        // Find the exported Paddle inference directory instead of depending on archive nesting.
         File pdModel = fileTree(paddleModelDir).matching {
             include "**/*.pdmodel"
             include "**/__model__"
@@ -93,7 +92,7 @@ tasks.register("preparePpMattingOpenClModel") {
 
 tasks.register("preparePaddleLiteOpenClRuntime") {
     outputs.file(new File(paddleLiteRoot, "cxx/include/paddle_api.h"))
-    outputs.file(new File(paddleLiteRoot, "cxx/libs/arm64-v8a/libpaddle_light_api_shared.so"))
+    outputs.file(new File(paddleLiteRoot, "cxx/libs/arm64-v8a/libpaddle_api_light_bundled.a"))
     doLast {
         downloadsDir.mkdirs()
         downloadWithRetry(runtimeUrl, runtimeTar, 1_000_000L)
@@ -105,9 +104,9 @@ tasks.register("preparePaddleLiteOpenClRuntime") {
         }
 
         File header = fileTree(runtimeExtractDir).matching { include "**/paddle_api.h" }.files.find { true }
-        File shared = fileTree(runtimeExtractDir).matching { include "**/libpaddle_light_api_shared.so" }.files.find { true }
-        if (header == null || shared == null) {
-            throw new GradleException("Paddle Lite OpenCL archive layout unsupported: paddle_api.h=${header}, shared=${shared}")
+        File staticLib = fileTree(runtimeExtractDir).matching { include "**/libpaddle_api_light_bundled.a" }.files.find { true }
+        if (header == null || staticLib == null) {
+            throw new GradleException("Paddle Lite OpenCL archive layout unsupported: paddle_api.h=${header}, static=${staticLib}")
         }
 
         delete(paddleLiteRoot)
@@ -119,7 +118,7 @@ tasks.register("preparePaddleLiteOpenClRuntime") {
         File targetLibDir = new File(paddleLiteRoot, "cxx/libs/arm64-v8a")
         targetLibDir.mkdirs()
         copy {
-            from shared
+            from staticLib
             into targetLibDir
         }
     }
@@ -147,7 +146,6 @@ android {
     sourceSets.main.assets.srcDir(optimizedAssetsDir)
 }
 
-// Native configure/build and APK packaging need the generated model/runtime first.
 tasks.matching { task ->
     def n = task.name.toLowerCase(Locale.ROOT)
     n.contains("cmake") || n == "prebuild" || (n.contains("merge") && n.contains("native"))
