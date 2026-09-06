@@ -1,0 +1,242 @@
+name: Apply PR57 V62 subject-aware matte guard
+
+on:
+  push:
+    branches:
+      - perf/ppmattingv2-gpu-128-v57
+    paths:
+      - .github/workflows/ppmatting-v62-subject-guard.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/ppmattingv2-gpu-128-v57
+          fetch-depth: 0
+
+      - name: Apply V62 subject-aware guards
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path_str, old, new):
+              path = Path(path_str)
+              text = path.read_text()
+              if old not in text:
+                  raise SystemExit(f"Expected patch anchor not found in {path_str}: {old[:120]!r}")
+              path.write_text(text.replace(old, new, 1))
+
+          portrait = "app/src/main/java/com/tajuli/digitorandroid/editor/processing/PortraitMatteBackendV50.kt"
+          analyzer = "app/src/main/java/com/tajuli/digitorandroid/editor/processing/GpuPersonCutoutAnalyzerV47.kt"
+
+          replace_once(
+              portrait,
+              "        if (hasWideBandAlphaArtifactV61(alpha)) return false\n        val grid = FloatArray(GUARD_SIDE_V60 * GUARD_SIDE_V60)",
+              "        if (hasWideBandAlphaArtifactV61(alpha)) return false\n        // V62 measures catastrophic boundaries relative to foreground support, not the entire\n        // 512-wide tensor. A stripe can erase most of a centered subject while covering far less\n        // than V61's 58% whole-frame threshold.\n        if (hasSubjectBandAlphaArtifactV62(alpha)) return false\n        val grid = FloatArray(GUARD_SIDE_V60 * GUARD_SIDE_V60)",
+          )
+
+          portrait_helper_anchor = "    private fun isTemporallyPlausibleV60(\n"
+          portrait_helpers = r'''    /**
+     * Detects a row/column discontinuity relative to the alpha support on that line. This catches
+     * subject-local OpenCL tile corruption that V61's full-frame 58% coverage guard deliberately
+     * missed. Normal silhouette boundaries affect only a small fraction of supported pixels.
+     */
+    private fun hasSubjectBandAlphaArtifactV62(alpha: FloatArray): Boolean {
+        if (alpha.size < plane) return true
+        val minRowSupport = (MODEL_SIZE * .10f).roundToInt().coerceAtLeast(24)
+        val minColumnSupport = minRowSupport
+
+        for (y in 3 until MODEL_SIZE - 3) {
+            val previous = (y - 1) * MODEL_SIZE
+            val current = y * MODEL_SIZE
+            var support = 0
+            var severe = 0
+            var deltaSum = 0f
+            for (x in 0 until MODEL_SIZE) {
+                val rawA = alpha[previous + x]
+                val rawB = alpha[current + x]
+                if (!rawA.isFinite() || !rawB.isFinite()) return true
+                val a = rawA.coerceIn(0f, 1f)
+                val b = rawB.coerceIn(0f, 1f)
+                if (maxOf(a, b) >= .18f) {
+                    val delta = abs(a - b)
+                    support++
+                    deltaSum += delta
+                    if (delta >= .48f) severe++
+                }
+            }
+            if (support >= minRowSupport) {
+                val severeRate = severe / support.toFloat()
+                val meanDelta = deltaSum / support.toFloat()
+                if (severeRate >= .38f && meanDelta >= .20f) return true
+            }
+        }
+
+        for (x in 3 until MODEL_SIZE - 3) {
+            var support = 0
+            var severe = 0
+            var deltaSum = 0f
+            for (y in 0 until MODEL_SIZE) {
+                val rawA = alpha[y * MODEL_SIZE + x - 1]
+                val rawB = alpha[y * MODEL_SIZE + x]
+                if (!rawA.isFinite() || !rawB.isFinite()) return true
+                val a = rawA.coerceIn(0f, 1f)
+                val b = rawB.coerceIn(0f, 1f)
+                if (maxOf(a, b) >= .18f) {
+                    val delta = abs(a - b)
+                    support++
+                    deltaSum += delta
+                    if (delta >= .48f) severe++
+                }
+            }
+            if (support >= minColumnSupport) {
+                val severeRate = severe / support.toFloat()
+                val meanDelta = deltaSum / support.toFloat()
+                if (severeRate >= .38f && meanDelta >= .20f) return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Full-resolution temporal guard for thin subject-local alpha flips. The existing 48x48 V60
+     * temporal check can step over a one/few-row stripe. Only apply this while the source itself is
+     * similar; real cuts and large motion continue through the existing source-delta gate.
+     */
+    private fun hasSubjectTemporalAlphaArtifactV62(
+        previous: FloatArray,
+        current: FloatArray,
+    ): Boolean {
+        if (previous.size < plane || current.size < plane) return true
+        val minRowSupport = (MODEL_SIZE * .08f).roundToInt().coerceAtLeast(20)
+        val minColumnSupport = minRowSupport
+
+        for (y in 2 until MODEL_SIZE - 2) {
+            var support = 0
+            var flips = 0
+            val row = y * MODEL_SIZE
+            for (x in 0 until MODEL_SIZE) {
+                val oldRaw = previous[row + x]
+                val nowRaw = current[row + x]
+                if (!oldRaw.isFinite() || !nowRaw.isFinite()) return true
+                val old = oldRaw.coerceIn(0f, 1f)
+                val now = nowRaw.coerceIn(0f, 1f)
+                if (maxOf(old, now) >= .18f) support++
+                if ((old >= .70f && now <= .24f) || (old <= .08f && now >= .62f)) flips++
+            }
+            if (support >= minRowSupport && flips >= maxOf(10, (support * .18f).roundToInt())) {
+                return true
+            }
+        }
+
+        for (x in 2 until MODEL_SIZE - 2) {
+            var support = 0
+            var flips = 0
+            for (y in 0 until MODEL_SIZE) {
+                val index = y * MODEL_SIZE + x
+                val oldRaw = previous[index]
+                val nowRaw = current[index]
+                if (!oldRaw.isFinite() || !nowRaw.isFinite()) return true
+                val old = oldRaw.coerceIn(0f, 1f)
+                val now = nowRaw.coerceIn(0f, 1f)
+                if (maxOf(old, now) >= .18f) support++
+                if ((old >= .70f && now <= .24f) || (old <= .08f && now >= .62f)) flips++
+            }
+            if (support >= minColumnSupport && flips >= maxOf(10, (support * .18f).roundToInt())) {
+                return true
+            }
+        }
+        return false
+    }
+
+'''
+          replace_once(portrait, portrait_helper_anchor, portrait_helpers + portrait_helper_anchor)
+
+          replace_once(
+              portrait,
+              "        val sourceDelta = meanAbsDeltaV60(previousSource, currentSource)\n        if (sourceDelta >= .14f) return true\n\n        var alphaDelta = 0f",
+              "        val sourceDelta = meanAbsDeltaV60(previousSource, currentSource)\n        if (sourceDelta >= .14f) return true\n        if (hasSubjectTemporalAlphaArtifactV62(previousAlpha, currentAlpha)) return false\n\n        var alphaDelta = 0f",
+          )
+
+          replace_once(
+              analyzer,
+              "        if (hasWideBandMatteArtifactV61(refined)) return false\n\n        val stepX = (base.width / 48).coerceAtLeast(1)",
+              "        if (hasWideBandMatteArtifactV61(refined)) return false\n        // V62 compares the refinement directly with the authoritative PP-MattingV2 base. Hair and\n        // bounded temporal flow must never erase confident foreground or create strong foreground\n        // out of confident background, even when the bad region is narrower than half the frame.\n        if (hasSubjectAlignedRefinedArtifactV62(base, refined)) return false\n\n        val stepX = (base.width / 48).coerceAtLeast(1)",
+          )
+
+          analyzer_helper_anchor = "    private fun fuseHairCpu(base: Bitmap, hair: Bitmap?, strength: Float): Bitmap {\n"
+          analyzer_helper = r'''    /**
+     * Subject-relative V62 refinement guard. V61 required a corrupted edge to span most of the
+     * whole frame, but the target subject occupies only a fraction of the image. Large alpha loss
+     * inside confident PP-MattingV2 foreground is impossible for the bounded flow/hair stage and is
+     * therefore a reliable corruption signal. On rejection the caller resets the GPU temporal
+     * context and stores the clean base matte for this anchor.
+     */
+    private fun hasSubjectAlignedRefinedArtifactV62(base: Bitmap, refined: Bitmap): Boolean {
+        if (base.width != refined.width || base.height != refined.height) return true
+        val width = base.width
+        val height = base.height
+        if (width <= 0 || height <= 0) return true
+        val basePixels = IntArray(width * height)
+        val refinedPixels = IntArray(basePixels.size)
+        base.getPixels(basePixels, 0, width, 0, 0, width, height)
+        refined.getPixels(refinedPixels, 0, width, 0, 0, width, height)
+
+        val minRowForeground = (width * .08f).roundToInt().coerceAtLeast(12)
+        val minColumnForeground = (height * .08f).roundToInt().coerceAtLeast(12)
+
+        for (y in 2 until height - 2) {
+            val row = y * width
+            var baseForeground = 0
+            var lostForeground = 0
+            var leakedBackground = 0
+            for (x in 0 until width) {
+                val b = Color.red(basePixels[row + x])
+                val r = Color.red(refinedPixels[row + x])
+                if (b >= 140) baseForeground++
+                if (b >= 176 && r <= 64) lostForeground++
+                if (b <= 13 && r >= 128) leakedBackground++
+            }
+            if (baseForeground >= minRowForeground &&
+                lostForeground >= maxOf(8, (baseForeground * .12f).roundToInt())
+            ) return true
+            if (leakedBackground >= maxOf(12, (width * .06f).roundToInt())) return true
+        }
+
+        for (x in 2 until width - 2) {
+            var baseForeground = 0
+            var lostForeground = 0
+            var leakedBackground = 0
+            for (y in 0 until height) {
+                val index = y * width + x
+                val b = Color.red(basePixels[index])
+                val r = Color.red(refinedPixels[index])
+                if (b >= 140) baseForeground++
+                if (b >= 176 && r <= 64) lostForeground++
+                if (b <= 13 && r >= 128) leakedBackground++
+            }
+            if (baseForeground >= minColumnForeground &&
+                lostForeground >= maxOf(8, (baseForeground * .12f).roundToInt())
+            ) return true
+            if (leakedBackground >= maxOf(12, (height * .06f).roundToInt())) return true
+        }
+        return false
+    }
+
+'''
+          replace_once(analyzer, analyzer_helper_anchor, analyzer_helper + analyzer_helper_anchor)
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/tajuli/digitorandroid/editor/processing/PortraitMatteBackendV50.kt
+          git add app/src/main/java/com/tajuli/digitorandroid/editor/processing/GpuPersonCutoutAnalyzerV47.kt
+          git rm .github/workflows/ppmatting-v62-subject-guard.yml
+          git commit -m "Guard subject-local cutout stripe corruption"
+          git push origin HEAD:perf/ppmattingv2-gpu-128-v57
