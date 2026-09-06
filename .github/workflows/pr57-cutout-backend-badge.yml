@@ -27,77 +27,72 @@ jobs:
           from pathlib import Path
 
           path = Path('app/src/main/java/com/tajuli/digitorandroid/ui/editor/CutoutWorkspaceV50.kt')
-          text = path.read_text()
+          lines = path.read_text().splitlines()
 
-          old_status = '''        val analysisFailed = analysisStatus?.contains("failed", ignoreCase = true) == true ||
-              analysisStatus?.contains("incomplete", ignoreCase = true) == true
+          if not any('val backendBadgeV57' in line for line in lines):
+              start = next(i for i, line in enumerate(lines) if 'val analysisFailed =' in line)
+              end = start
+              while end < len(lines) and 'incomplete' not in lines[end]:
+                  end += 1
+              if end >= len(lines):
+                  raise SystemExit('analysisFailed block end not found')
+              indent = lines[start][:len(lines[start]) - len(lines[start].lstrip())]
+              block = [
+                  f'{indent}val backendBadgeV57 = when {{',
+                  f'{indent}    analysisStatus?.contains("CPU", ignoreCase = true) == true ||',
+                  f'{indent}        analysisStatus?.contains("ARM", ignoreCase = true) == true -> "CUTOUT: CPU"',
+                  f'{indent}    analysisFailed -> "CUTOUT: GPU ERROR"',
+                  f'{indent}    analysisStatus?.contains("OpenCL", ignoreCase = true) == true ||',
+                  f'{indent}        analysisStatus?.contains("GPU", ignoreCase = true) == true ||',
+                  f'{indent}        analysisStatus?.contains("refined frame", ignoreCase = true) == true ||',
+                  f'{indent}        personReady -> "CUTOUT: GPU"',
+                  f'{indent}    analysisBusy -> "CUTOUT: CHECKING"',
+                  f'{indent}    else -> "CUTOUT: NOT RUN"',
+                  f'{indent}}}',
+              ]
+              lines[end + 1:end + 1] = [''] + block
 
-          Row(
-          '''
-          new_status = '''        val analysisFailed = analysisStatus?.contains("failed", ignoreCase = true) == true ||
-              analysisStatus?.contains("incomplete", ignoreCase = true) == true
-          val backendBadgeV57 = when {
-              analysisStatus?.contains("CPU", ignoreCase = true) == true ||
-                  analysisStatus?.contains("ARM", ignoreCase = true) == true -> "CUTOUT: CPU"
-              analysisFailed -> "CUTOUT: GPU ERROR"
-              analysisStatus?.contains("OpenCL", ignoreCase = true) == true ||
-                  analysisStatus?.contains("GPU", ignoreCase = true) == true ||
-                  analysisStatus?.contains("refined frame", ignoreCase = true) == true ||
-                  personReady -> "CUTOUT: GPU"
-              analysisBusy -> "CUTOUT: CHECKING"
-              else -> "CUTOUT: NOT RUN"
-          }
+          if not any('"Neural matte backend"' in line for line in lines):
+              person = next(i for i, line in enumerate(lines) if 'CutoutModeV43.PERSON -> {' in line)
+              indent = lines[person][:len(lines[person]) - len(lines[person].lstrip())] + '    '
+              block = [
+                  f'{indent}Row(',
+                  f'{indent}    Modifier.fillMaxWidth(),',
+                  f'{indent}    verticalAlignment = Alignment.CenterVertically,',
+                  f'{indent}) {{',
+                  f'{indent}    Text(',
+                  f'{indent}        "Neural matte backend",',
+                  f'{indent}        fontSize = 8.sp,',
+                  f'{indent}        color = C50Text.copy(alpha = .62f),',
+                  f'{indent}    )',
+                  f'{indent}    Spacer(Modifier.weight(1f))',
+                  f'{indent}    Box(',
+                  f'{indent}        Modifier',
+                  f'{indent}            .background(',
+                  f'{indent}                Color.White.copy(alpha = if (backendBadgeV57 == "CUTOUT: GPU") .16f else .08f),',
+                  f'{indent}                RoundedCornerShape(999.dp),',
+                  f'{indent}            )',
+                  f'{indent}            .padding(horizontal = 9.dp, vertical = 4.dp),',
+                  f'{indent}    ) {{',
+                  f'{indent}        Text(backendBadgeV57, fontSize = 8.sp, color = C50Text)',
+                  f'{indent}    }}',
+                  f'{indent}}}',
+                  f'{indent}Text(',
+                  f'{indent}    when (backendBadgeV57) {{',
+                  f'{indent}        "CUTOUT: GPU" -> "PP-MattingV2 512 inference verified on GPU."',
+                  f'{indent}        "CUTOUT: CPU" -> "PP-MattingV2 inference is running on CPU."',
+                  f'{indent}        "CUTOUT: CHECKING" -> "Verifying PP-MattingV2 GPU execution…"',
+                  f'{indent}        "CUTOUT: GPU ERROR" -> "GPU backend failed; check the analysis message below."',
+                  f'{indent}        else -> "Analyze to verify whether PP-MattingV2 runs on GPU."',
+                  f'{indent}    }},',
+                  f'{indent}    fontSize = 7.sp,',
+                  f'{indent}    color = C50Text.copy(alpha = .55f),',
+                  f'{indent})',
+                  '',
+              ]
+              lines[person + 1:person + 1] = block
 
-          Row(
-          '''
-          if old_status not in text:
-              raise SystemExit('analysis status anchor not found')
-          text = text.replace(old_status, new_status, 1)
-
-          old_person = '''            CutoutModeV43.PERSON -> {
-                  Text("Analysis quality", fontSize = 9.sp, color = C50Text)
-          '''
-          new_person = '''            CutoutModeV43.PERSON -> {
-                  Row(
-                      Modifier.fillMaxWidth(),
-                      verticalAlignment = Alignment.CenterVertically,
-                  ) {
-                      Text(
-                          "Neural matte backend",
-                          fontSize = 8.sp,
-                          color = C50Text.copy(alpha = .62f),
-                      )
-                      Spacer(Modifier.weight(1f))
-                      Box(
-                          Modifier
-                              .background(
-                                  Color.White.copy(alpha = if (backendBadgeV57 == "CUTOUT: GPU") .16f else .08f),
-                                  RoundedCornerShape(999.dp),
-                              )
-                              .padding(horizontal = 9.dp, vertical = 4.dp),
-                      ) {
-                          Text(backendBadgeV57, fontSize = 8.sp, color = C50Text)
-                      }
-                  }
-                  Text(
-                      when (backendBadgeV57) {
-                          "CUTOUT: GPU" -> "PP-MattingV2 512 inference verified on GPU."
-                          "CUTOUT: CPU" -> "PP-MattingV2 inference is running on CPU."
-                          "CUTOUT: CHECKING" -> "Verifying PP-MattingV2 GPU execution…"
-                          "CUTOUT: GPU ERROR" -> "GPU backend failed; check the analysis message below."
-                          else -> "Analyze to verify whether PP-MattingV2 runs on GPU."
-                      },
-                      fontSize = 7.sp,
-                      color = C50Text.copy(alpha = .55f),
-                  )
-
-                  Text("Analysis quality", fontSize = 9.sp, color = C50Text)
-          '''
-          if old_person not in text:
-              raise SystemExit('person-mode UI anchor not found')
-          text = text.replace(old_person, new_person, 1)
-
-          path.write_text(text)
+          path.write_text('\n'.join(lines) + '\n')
           PY
 
           git diff --check
