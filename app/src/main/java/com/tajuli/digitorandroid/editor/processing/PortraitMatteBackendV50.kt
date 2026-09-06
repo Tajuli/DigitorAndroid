@@ -221,6 +221,10 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
         // V60's 48x48 grid can step over a one/few-pixel driver stripe. Scan every
         // native 512 alpha row/column first, then retain the broader sampled checks below.
         if (hasWideBandAlphaArtifactV61(alpha)) return false
+        // V62 measures catastrophic boundaries relative to foreground support, not the entire
+        // 512-wide tensor. A stripe can erase most of a centered subject while covering far less
+        // than V61's 58% whole-frame threshold.
+        if (hasSubjectBandAlphaArtifactV62(alpha)) return false
         val grid = FloatArray(GUARD_SIDE_V60 * GUARD_SIDE_V60)
         for (gy in 0 until GUARD_SIDE_V60) {
             val y = ((gy + .5f) * MODEL_SIZE / GUARD_SIDE_V60).toInt().coerceIn(0, MODEL_SIZE - 1)
@@ -302,6 +306,119 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
         return false
     }
 
+    /**
+     * Detects a row/column discontinuity relative to the alpha support on that line. This catches
+     * subject-local OpenCL tile corruption that V61's full-frame 58% coverage guard deliberately
+     * missed. Normal silhouette boundaries affect only a small fraction of supported pixels.
+     */
+    private fun hasSubjectBandAlphaArtifactV62(alpha: FloatArray): Boolean {
+        if (alpha.size < plane) return true
+        val minRowSupport = (MODEL_SIZE * .10f).roundToInt().coerceAtLeast(24)
+        val minColumnSupport = minRowSupport
+
+        for (y in 3 until MODEL_SIZE - 3) {
+            val previous = (y - 1) * MODEL_SIZE
+            val current = y * MODEL_SIZE
+            var support = 0
+            var severe = 0
+            var deltaSum = 0f
+            for (x in 0 until MODEL_SIZE) {
+                val rawA = alpha[previous + x]
+                val rawB = alpha[current + x]
+                if (!rawA.isFinite() || !rawB.isFinite()) return true
+                val a = rawA.coerceIn(0f, 1f)
+                val b = rawB.coerceIn(0f, 1f)
+                if (maxOf(a, b) >= .18f) {
+                    val delta = abs(a - b)
+                    support++
+                    deltaSum += delta
+                    if (delta >= .48f) severe++
+                }
+            }
+            if (support >= minRowSupport) {
+                val severeRate = severe / support.toFloat()
+                val meanDelta = deltaSum / support.toFloat()
+                if (severeRate >= .38f && meanDelta >= .20f) return true
+            }
+        }
+
+        for (x in 3 until MODEL_SIZE - 3) {
+            var support = 0
+            var severe = 0
+            var deltaSum = 0f
+            for (y in 0 until MODEL_SIZE) {
+                val rawA = alpha[y * MODEL_SIZE + x - 1]
+                val rawB = alpha[y * MODEL_SIZE + x]
+                if (!rawA.isFinite() || !rawB.isFinite()) return true
+                val a = rawA.coerceIn(0f, 1f)
+                val b = rawB.coerceIn(0f, 1f)
+                if (maxOf(a, b) >= .18f) {
+                    val delta = abs(a - b)
+                    support++
+                    deltaSum += delta
+                    if (delta >= .48f) severe++
+                }
+            }
+            if (support >= minColumnSupport) {
+                val severeRate = severe / support.toFloat()
+                val meanDelta = deltaSum / support.toFloat()
+                if (severeRate >= .38f && meanDelta >= .20f) return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Full-resolution temporal guard for thin subject-local alpha flips. The existing 48x48 V60
+     * temporal check can step over a one/few-row stripe. Only apply this while the source itself is
+     * similar; real cuts and large motion continue through the existing source-delta gate.
+     */
+    private fun hasSubjectTemporalAlphaArtifactV62(
+        previous: FloatArray,
+        current: FloatArray,
+    ): Boolean {
+        if (previous.size < plane || current.size < plane) return true
+        val minRowSupport = (MODEL_SIZE * .08f).roundToInt().coerceAtLeast(20)
+        val minColumnSupport = minRowSupport
+
+        for (y in 2 until MODEL_SIZE - 2) {
+            var support = 0
+            var flips = 0
+            val row = y * MODEL_SIZE
+            for (x in 0 until MODEL_SIZE) {
+                val oldRaw = previous[row + x]
+                val nowRaw = current[row + x]
+                if (!oldRaw.isFinite() || !nowRaw.isFinite()) return true
+                val old = oldRaw.coerceIn(0f, 1f)
+                val now = nowRaw.coerceIn(0f, 1f)
+                if (maxOf(old, now) >= .18f) support++
+                if ((old >= .70f && now <= .24f) || (old <= .08f && now >= .62f)) flips++
+            }
+            if (support >= minRowSupport && flips >= maxOf(10, (support * .18f).roundToInt())) {
+                return true
+            }
+        }
+
+        for (x in 2 until MODEL_SIZE - 2) {
+            var support = 0
+            var flips = 0
+            for (y in 0 until MODEL_SIZE) {
+                val index = y * MODEL_SIZE + x
+                val oldRaw = previous[index]
+                val nowRaw = current[index]
+                if (!oldRaw.isFinite() || !nowRaw.isFinite()) return true
+                val old = oldRaw.coerceIn(0f, 1f)
+                val now = nowRaw.coerceIn(0f, 1f)
+                if (maxOf(old, now) >= .18f) support++
+                if ((old >= .70f && now <= .24f) || (old <= .08f && now >= .62f)) flips++
+            }
+            if (support >= minColumnSupport && flips >= maxOf(10, (support * .18f).roundToInt())) {
+                return true
+            }
+        }
+        return false
+    }
+
     private fun isTemporallyPlausibleV60(
         previousAlpha: FloatArray?,
         previousSource: FloatArray?,
@@ -311,6 +428,7 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
         if (previousAlpha == null || previousSource == null) return true
         val sourceDelta = meanAbsDeltaV60(previousSource, currentSource)
         if (sourceDelta >= .14f) return true
+        if (hasSubjectTemporalAlphaArtifactV62(previousAlpha, currentAlpha)) return false
 
         var alphaDelta = 0f
         var severeFlips = 0

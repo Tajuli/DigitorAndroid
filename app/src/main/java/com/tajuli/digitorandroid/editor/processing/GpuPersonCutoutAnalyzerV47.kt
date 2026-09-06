@@ -485,6 +485,10 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         // V59's 48x48 comparison can miss a one/few-pixel horizontal stripe. Reject
         // catastrophic full-width/full-height band boundaries at native matte resolution first.
         if (hasWideBandMatteArtifactV61(refined)) return false
+        // V62 compares refinement directly with the authoritative PP-MattingV2 base. Hair and
+        // bounded temporal flow must never erase confident foreground or create strong foreground
+        // out of confident background, even when the bad region is narrower than half the frame.
+        if (hasSubjectAlignedRefinedArtifactV62(base, refined)) return false
 
         val stepX = (base.width / 48).coerceAtLeast(1)
         val stepY = (base.height / 48).coerceAtLeast(1)
@@ -560,6 +564,64 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 if (delta >= 128) severe++
             }
             if (severe >= columnCoverage && deltaSum.toFloat() / height >= 56f) return true
+        }
+        return false
+    }
+
+    /**
+     * Subject-relative V62 refinement guard. V61 required a corrupted edge to span most of the
+     * whole frame, but the target subject occupies only a fraction of the image. Large alpha loss
+     * inside confident PP-MattingV2 foreground is impossible for the bounded flow/hair stage and is
+     * therefore a reliable corruption signal. On rejection the caller resets the GPU temporal
+     * context and stores the clean base matte for this anchor.
+     */
+    private fun hasSubjectAlignedRefinedArtifactV62(base: Bitmap, refined: Bitmap): Boolean {
+        if (base.width != refined.width || base.height != refined.height) return true
+        val width = base.width
+        val height = base.height
+        if (width <= 0 || height <= 0) return true
+        val basePixels = IntArray(width * height)
+        val refinedPixels = IntArray(basePixels.size)
+        base.getPixels(basePixels, 0, width, 0, 0, width, height)
+        refined.getPixels(refinedPixels, 0, width, 0, 0, width, height)
+
+        val minRowForeground = (width * .08f).roundToInt().coerceAtLeast(12)
+        val minColumnForeground = (height * .08f).roundToInt().coerceAtLeast(12)
+
+        for (y in 2 until height - 2) {
+            val row = y * width
+            var baseForeground = 0
+            var lostForeground = 0
+            var leakedBackground = 0
+            for (x in 0 until width) {
+                val b = Color.red(basePixels[row + x])
+                val r = Color.red(refinedPixels[row + x])
+                if (b >= 140) baseForeground++
+                if (b >= 176 && r <= 64) lostForeground++
+                if (b <= 13 && r >= 128) leakedBackground++
+            }
+            if (baseForeground >= minRowForeground &&
+                lostForeground >= maxOf(8, (baseForeground * .12f).roundToInt())
+            ) return true
+            if (leakedBackground >= maxOf(12, (width * .06f).roundToInt())) return true
+        }
+
+        for (x in 2 until width - 2) {
+            var baseForeground = 0
+            var lostForeground = 0
+            var leakedBackground = 0
+            for (y in 0 until height) {
+                val index = y * width + x
+                val b = Color.red(basePixels[index])
+                val r = Color.red(refinedPixels[index])
+                if (b >= 140) baseForeground++
+                if (b >= 176 && r <= 64) lostForeground++
+                if (b <= 13 && r >= 128) leakedBackground++
+            }
+            if (baseForeground >= minColumnForeground &&
+                lostForeground >= maxOf(8, (baseForeground * .12f).roundToInt())
+            ) return true
+            if (leakedBackground >= maxOf(12, (height * .06f).roundToInt())) return true
         }
         return false
     }
