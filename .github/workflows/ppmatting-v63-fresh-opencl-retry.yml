@@ -1,0 +1,55 @@
+name: Apply PR57 V63 fresh OpenCL retry
+
+on:
+  push:
+    branches: [perf/ppmattingv2-gpu-128-v57]
+    paths:
+      - .github/workflows/ppmatting-v63-fresh-opencl-retry.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/ppmattingv2-gpu-128-v57
+          fetch-depth: 0
+      - name: Patch V63 GPU recovery
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('app/src/main/java/com/tajuli/digitorandroid/editor/processing/PortraitMatteBackendV50.kt')
+          s = p.read_text()
+          old = '    private val predictor: ReleasablePaddlePredictorV57\n    private val inputTensor: Tensor\n'
+          new = '    private val modelFilePathV63 = modelFile.absolutePath\n    private val predictor: ReleasablePaddlePredictorV57\n    private val inputTensor: Tensor\n'
+          assert old in s
+          s = s.replace(old, new, 1)
+          old = '            val retry = runAlphaV60()\n'
+          new = '''            // V63: a second run on the same OpenCL predictor can repeat stale/corrupt\n            // driver state. Retry on an independently-created OpenCL predictor/context instead.\n            // This is still PP-MattingV2 512 GPU-only; no ARM/CPU neural fallback is introduced.\n            val retry = runAlphaFreshOpenClV63()\n'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          marker = '    private fun writeAlphaBitmapV60(alpha: FloatArray) {\n'
+          assert marker in s
+          fresh = '''    private fun runAlphaFreshOpenClV63(): FloatArray {\n        val config = MobileConfig().apply {\n            setModelFromFile(modelFilePathV63)\n            setThreads(1)\n            setPowerMode(PowerMode.LITE_POWER_NO_BIND)\n        }\n        val freshPredictor = ReleasablePaddlePredictorV57(config)\n        try {\n            val freshInput = freshPredictor.getInput(0)\n                ?: error("Fresh Paddle Lite OpenCL retry could not create input tensor")\n            check(freshInput.resize(longArrayOf(1L, 3L, MODEL_SIZE.toLong(), MODEL_SIZE.toLong()))) {\n                "Fresh Paddle Lite OpenCL retry rejected 1x3x512x512 input"\n            }\n            check(freshInput.setData(inputData)) {\n                "Fresh Paddle Lite OpenCL retry rejected PP-MattingV2 input"\n            }\n            check(freshPredictor.run()) { "Fresh Paddle Lite PP-MattingV2 OpenCL retry failed" }\n            val output = freshPredictor.getOutput(0)\n            validateOutput(output)\n            val raw = output.getFloatData()\n            check(raw.size >= plane) {\n                "Fresh PP-MattingV2 alpha output has ${raw.size} values; expected at least $plane"\n            }\n            return FloatArray(plane) { index -> raw[index] }\n        } finally {\n            runCatching { freshPredictor.close() }\n        }\n    }\n\n'''
+          s = s.replace(marker, fresh + marker, 1)
+          p.write_text(s)
+
+          g = Path('app/src/main/java/com/tajuli/digitorandroid/editor/processing/PersonCutoutGenerationV47.kt')
+          t = g.read_text()
+          old = 'adaptive-v62-ppmattingv2-opencl-fp32-subject-band-guard-r4'
+          new = 'adaptive-v63-ppmattingv2-opencl-fp32-fresh-context-retry-r5'
+          assert old in t
+          t = t.replace(old, new, 1)
+          t = t.replace('// V62 invalidates V61 generations.', '// V63 invalidates V62 generations. Suspicious GPU output is now retried on a fresh OpenCL predictor/context rather than the same potentially poisoned driver state.')
+          g.write_text(t)
+      - name: Remove one-shot workflow and commit
+        run: |
+          rm .github/workflows/ppmatting-v63-fresh-opencl-retry.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/java/com/tajuli/digitorandroid/editor/processing/PortraitMatteBackendV50.kt app/src/main/java/com/tajuli/digitorandroid/editor/processing/PersonCutoutGenerationV47.kt .github/workflows/ppmatting-v63-fresh-opencl-retry.yml
+          git commit -m "Fix PP-MattingV2 OpenCL corruption with fresh-context retry"
+          git push origin HEAD:perf/ppmattingv2-gpu-128-v57
