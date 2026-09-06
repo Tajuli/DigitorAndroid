@@ -143,11 +143,12 @@ internal class FastPersonSemanticSegmenterV54(context: Context) : AutoCloseable 
         if (bestScore <= 0f || bestArea < minComponentArea || bestPixels.isEmpty()) return null
 
         val smallGate = buildDilatedGate(width, height, bestPixels)
-        val fullGate = try {
+        val fullGate = if (smallGate.width == bitmap.width && smallGate.height == bitmap.height) {
+            smallGate.copy(Bitmap.Config.ARGB_8888, false) ?: smallGate
+        } else {
             Bitmap.createScaledBitmap(smallGate, bitmap.width, bitmap.height, true)
-        } finally {
-            smallGate.recycle()
         }
+        if (fullGate !== smallGate && !smallGate.isRecycled) smallGate.recycle()
 
         val scaleX = bitmap.width.toFloat() / width.toFloat()
         val scaleY = bitmap.height.toFloat() / height.toFloat()
