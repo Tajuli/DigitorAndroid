@@ -33,6 +33,10 @@ import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 
 private val C50Panel = Color(0xFF0B0B0F)
 private val C50Text = Color.White
+private val C50GpuBadge = Color(0xFF123D35)
+private val C50CpuBadge = Color(0xFF4B3415)
+private val C50FailedBadge = Color(0xFF4A1F24)
+private val C50IdleBadge = Color(0xFF29292F)
 
 /** Compact Edit-tab Pro Cutout workspace. PP-MattingV2 is the only portrait matte backend. */
 @Composable
@@ -143,6 +147,43 @@ fun CutoutWorkspaceV50(
             }
 
             CutoutModeV43.PERSON -> {
+                val cpuBackend = analysisStatus?.contains("CPU", ignoreCase = true) == true ||
+                    analysisStatus?.contains("ARM", ignoreCase = true) == true
+                val gpuBackend = analysisStatus?.contains("OpenCL", ignoreCase = true) == true ||
+                    analysisStatus?.contains("GPU", ignoreCase = true) == true
+                val badgeText: String
+                val badgeColor: Color
+                when {
+                    analysisFailed -> {
+                        badgeText = "CUTOUT: GPU FAILED"
+                        badgeColor = C50FailedBadge
+                    }
+                    cpuBackend -> {
+                        badgeText = "CUTOUT: CPU"
+                        badgeColor = C50CpuBadge
+                    }
+                    gpuBackend || personReady -> {
+                        badgeText = "CUTOUT: GPU"
+                        badgeColor = C50GpuBadge
+                    }
+                    analysisBusy -> {
+                        badgeText = "CUTOUT: CHECKING GPU"
+                        badgeColor = C50IdleBadge
+                    }
+                    else -> {
+                        badgeText = "CUTOUT: NOT ANALYZED"
+                        badgeColor = C50IdleBadge
+                    }
+                }
+
+                Box(
+                    Modifier
+                        .background(badgeColor, RoundedCornerShape(50.dp))
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                ) {
+                    Text(badgeText, fontSize = 8.sp, color = C50Text)
+                }
+
                 Text("Analysis quality", fontSize = 9.sp, color = C50Text)
                 Row(
                     Modifier.fillMaxWidth(),
