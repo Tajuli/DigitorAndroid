@@ -1,7 +1,9 @@
 #include <jni.h>
 #include <android/log.h>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <string>
 #include <vector>
