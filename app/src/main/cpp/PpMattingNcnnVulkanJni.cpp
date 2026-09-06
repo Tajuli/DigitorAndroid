@@ -18,7 +18,9 @@
 namespace {
 constexpr const char* kTag = "PpMattingNcnnVk";
 constexpr int kModelSize = PPMATTING_MODEL_SIZE;
-static_assert(kModelSize == 256 || kModelSize == 512, "PP-MattingV2 model size must be 256 or 512");
+static_assert(
+        kModelSize == 256 || kModelSize == 384 || kModelSize == 512,
+        "PP-MattingV2 model size must be 256, 384 or 512");
 constexpr int kPlane = kModelSize * kModelSize;
 constexpr int kInputCount = kPlane * 3;
 
@@ -163,9 +165,13 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngin
 
     engine->net.opt.use_vulkan_compute = true;
     engine->net.opt.num_threads = std::max(1, static_cast<int>(threads));
+    engine->net.opt.use_packing_layout = true;
+    engine->net.opt.use_subgroup_ops = true;
+    engine->net.opt.use_shader_local_memory = true;
     engine->net.opt.use_fp16_packed = gpuInfo.support_fp16_packed();
     engine->net.opt.use_fp16_storage = gpuInfo.support_fp16_storage();
     engine->net.opt.use_fp16_arithmetic = gpuInfo.support_fp16_arithmetic();
+    engine->net.opt.use_fp16_uniform = gpuInfo.support_fp16_uniform();
     engine->net.set_vulkan_device(vkdev);
 
     engine->blobAllocator = vkdev->acquire_blob_allocator();
