@@ -24,22 +24,12 @@ internal interface PortraitMatteBackendV50 : AutoCloseable {
 /**
  * PP-MattingV2/STDC1 512 portrait matte backend used by Pro Cutout.
  *
- * Upstream PP-MattingV2 is published by PaddleSeg under Apache-2.0. The fixed 512x512 ONNX export
- * is downloaded and SHA-256 pinned by app/build.gradle.kts; ONNX Runtime Android is MIT licensed.
+ * Primary backend on ARM devices is Paddle Lite OpenCL. The optimized .nb model is built with
+ * valid_targets=opencl,arm and the native runtime checks IsOpenCLBackendValid before creating a
+ * predictor. This is the direct Mali/Adreno path and avoids Android NNAPI entirely.
  *
- * Backend order on Android 10+:
- * 1) NNAPI with NNAPI's CPU device disabled, so NNAPI partitions are sent to vendor hardware
- *    accelerators (GPU/NPU/DSP where the device driver supports them). Unsupported ORT nodes may
- *    still remain on ORT CPU, so the UI deliberately reports this as hardware/mixed rather than
- *    claiming that every model op ran on the GPU.
- * 2) XNNPACK CPU.
- * 3) Default ORT CPU.
- *
- * NNAPI provider registration can terminate the whole Android process inside native vendor/ORT
- * code on some devices; that is not catchable with Kotlin try/catch. Devices matching the observed
- * Symphony Z60 / UNISOC T606 family are therefore kept on the original, proven ORT CPU backend.
- * This is intentionally conservative until a direct Mali GPU backend replaces NNAPI for this class
- * of device.
+ * ONNX Runtime is retained as a reliability fallback. On known unsafe UNISOC NNAPI firmware the
+ * fallback stays on CPU; other devices may still use NNAPI if direct OpenCL is unavailable.
  */
 internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBackendV50 {
     private companion object {
@@ -58,10 +48,14 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     }
 
     private val appContext = context.applicationContext
+    private var openClBackend: PaddleLiteOpenClPortraitMatteV51? =
+        PaddleLiteOpenClPortraitMatteV51.tryCreate(appContext)
     private val environment = OrtEnvironment.getEnvironment()
     private val modelBytes = appContext.assets.open(MODEL_ASSET).use { it.readBytes() }
 
-    private var backend = createBestBackend().also { PortraitMatteRuntimeStatusV50.update(it.label) }
+    private var backend = createBestFallbackBackend().also {
+        PortraitMatteRuntimeStatusV50.update(openClBackend?.backendLabel ?: it.label)
+    }
     private var inputName: String = backend.session.inputNames.firstOrNull()
         ?: error("PP-MattingV2 ONNX did not expose an input tensor")
 
@@ -83,12 +77,16 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     )
 
     override val backendLabel: String
-        get() = backend.label
+        get() = openClBackend?.backendLabel ?: backend.label
 
-    private fun createBestBackend(): BackendSession {
+    private fun createBestFallbackBackend(): BackendSession {
+        // If direct OpenCL is already available, do not register NNAPI at all. The CPU session is
+        // initialized only as a warm reliability fallback if the OpenCL predictor later throws.
+        if (openClBackend != null) {
+            return createOrtCpuBackend("OpenCL primary; CPU fallback ready")
+        }
+
         unsafeNnapiDeviceReason()?.let { reason ->
-            // Do not even call addNnapi() on these devices. A native SIGSEGV/SIGABRT during
-            // provider registration cannot be recovered by runCatching/try-catch.
             return createOrtCpuBackend("NNAPI disabled for device safety · $reason")
         }
 
@@ -99,11 +97,6 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         return createOrtCpuBackend()
     }
 
-    /**
-     * The first observed fatal regression was Symphony Z60 / UNISOC T606. Match both the exact
-     * device and common UNISOC/Spreadtrum SoC identifiers so the same native NNAPI path is not
-     * attempted on closely related firmware where a process-level crash would be unrecoverable.
-     */
     private fun unsafeNnapiDeviceReason(): String? {
         val identity = buildList {
             add(Build.MANUFACTURER)
@@ -194,11 +187,6 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         }
     }
 
-    /**
-     * Some vendor NNAPI drivers accept a graph at session creation but fail when the first real
-     * frame executes. Java-visible failures can fall back to CPU. Native fatal signals cannot, so
-     * known-unsafe devices are excluded before provider registration in createBestBackend().
-     */
     private fun switchFromNnapiToCpuFallback() {
         if (backend.kind != BackendSession.Kind.NNAPI) return
         val old = backend
@@ -210,11 +198,22 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         runCatching { old.options.close() }
     }
 
+    private fun disableOpenClAfterFailure() {
+        val old = openClBackend ?: return
+        openClBackend = null
+        runCatching { old.close() }
+        PortraitMatteRuntimeStatusV50.update(backend.label + " · OpenCL runtime fallback")
+    }
+
     override fun infer(source: Bitmap): Bitmap {
         check(!source.isRecycled) { "Cannot run PP-MattingV2 on a recycled bitmap" }
 
-        // The fixed Paddle2ONNX export expects NCHW 512x512. Like PaddleSeg deployment, resize to
-        // the model shape and normalize RGB from [0,255] to [-1,1] (mean/std 0.5).
+        openClBackend?.let { gpu ->
+            val result = runCatching { gpu.infer(source) }
+            result.getOrNull()?.let { return it }
+            disableOpenClAfterFailure()
+        }
+
         inputCanvas.drawBitmap(
             source,
             null,
@@ -246,6 +245,7 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
             firstRun.getOrThrow()
         }
 
+        PortraitMatteRuntimeStatusV50.update(backend.label)
         alphaSquare.setPixels(
             alphaPixels,
             0,
@@ -283,6 +283,8 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     }
 
     override fun close() {
+        openClBackend?.let { runCatching { it.close() } }
+        openClBackend = null
         runCatching { inputTensor.close() }
         runCatching { backend.session.close() }
         runCatching { backend.options.close() }
