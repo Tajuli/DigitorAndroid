@@ -16,6 +16,14 @@
 # use the same schema as debug/non-minified builds.
 -keep class com.tajuli.digitorandroid.editor.model.** { *; }
 
-# Gson and Kotlin generic/reflection metadata used by persisted collections.
+# MediaPipe Tasks uses generated protobuf-lite messages whose private backing fields are resolved by
+# generated/runtime schema code at runtime. R8 renaming/stripping those fields breaks HairSegmenter
+# with errors such as "Field hostEnvironment_ ... MediaPipeLoggingProto$SystemInfo not found".
+# Keep MediaPipe's generated proto classes/members intact while still allowing the rest of the app
+# and dependencies to be minified/shrunk.
+-keep class com.google.mediapipe.proto.** { *; }
+-keep class com.google.mediapipe.tasks.**.proto.** { *; }
+
+# Gson, protobuf-lite and Kotlin generic/reflection metadata used by persisted collections/runtime.
 -keepattributes Signature
--keepattributes RuntimeVisibleAnnotations,RuntimeInvisibleAnnotations,AnnotationDefault
+-keepattributes RuntimeVisibleAnnotations,RuntimeInvisibleAnnotations,AnnotationDefault,InnerClasses,EnclosingMethod
