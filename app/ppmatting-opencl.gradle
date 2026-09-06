@@ -3,10 +3,9 @@
 // Paddle Lite OpenCL was process-fatal on the target Symphony Z60 / UNISOC T606 firmware.
 // This build therefore converts PP-MattingV2 to ncnn and runs the neural graph through Vulkan.
 //
-// DIGITOR_PPMATTING_TRUE_256=1 switches the ncnn conversion source to a *real fixed-shape 256
-// ONNX export* produced from PaddleSeg itself. This is intentionally different from forcing pnnx
-// to reinterpret the fixed 512 ONNX as 256 or feeding a 512 ncnn graph with a 256 tensor; both
-// approaches retain 512-specific shape constants and are unsafe for matte quality.
+// DIGITOR_PPMATTING_TRUE_384=1 switches the primary Vulkan source to a genuine fixed-shape
+// 384x384 PaddleSeg export. Local builds without that env var keep the proven 512 graph. The 512
+// ONNX also stays packaged as the lazy ORT CPU reliability fallback for phone builds.
 
 import java.security.MessageDigest
 
@@ -21,17 +20,17 @@ def ncnnRuntimeRoot = file("${generatedRoot}/ncnnRuntime")
 def optimizedAssetsDir = file("${generatedRoot}/assets")
 
 def fallback512Onnx = file("${buildDir}/generated/ppMattingV2Assets/ppmattingv2_stdc1_human_512.onnx")
-def true256Onnx = file("${buildDir}/generated/ppMattingV2True256/ppmattingv2_stdc1_human_256.onnx")
-def useTrue256 = (System.getenv("DIGITOR_PPMATTING_TRUE_256") ?: "0").trim() == "1"
-def modelSize = useTrue256 ? 256 : 512
-def sourceOnnx = useTrue256 ? true256Onnx : fallback512Onnx
+def true384Onnx = file("${buildDir}/generated/ppMattingV2True384/ppmattingv2_stdc1_human_384.onnx")
+def useTrue384 = (System.getenv("DIGITOR_PPMATTING_TRUE_384") ?: "0").trim() == "1"
+def modelSize = useTrue384 ? 384 : 512
+def sourceOnnx = useTrue384 ? true384Onnx : fallback512Onnx
 
 def outputParam = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.ncnn.param")
 def outputBin = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.ncnn.bin")
 def outputProfile = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.profile")
 
-// 20260526 reproducibly SIGFPEs on the genuine Paddle2ONNX fixed-256 graph. Use the newer pnnx
-// release for true-256 conversion while keeping the already-tested Android ncnn Vulkan runtime.
+// Use the newer pnnx converter for genuine fixed-resolution Paddle2ONNX graphs while keeping the
+// already-tested 20260526 Android ncnn Vulkan runtime on the target device.
 def pnnxZip = file("${downloadsDir}/pnnx-20260704-linux.zip")
 def ncnnZip = file("${downloadsDir}/ncnn-20260526-android-vulkan.zip")
 
@@ -174,15 +173,15 @@ tasks.register("prepareNcnnVulkanRuntime") {
 
 tasks.register("preparePpMattingNcnnModel") {
     // Keep the official 512 ONNX available as the lazy ORT reliability fallback even when the
-    // primary Vulkan graph is true-256.
+    // primary Vulkan graph is true-384.
     dependsOn("downloadPpMattingV2Model", "preparePnnxForPpMatting")
     inputs.file(sourceOnnx)
     outputs.files(outputParam, outputBin, outputProfile)
     doLast {
-        if (useTrue256 && (!true256Onnx.isFile() || true256Onnx.length() < 30_000_000L)) {
+        if (useTrue384 && (!true384Onnx.isFile() || true384Onnx.length() < 30_000_000L)) {
             throw new GradleException(
-                "DIGITOR_PPMATTING_TRUE_256=1 but the fixed 256 ONNX export is missing: ${true256Onnx}. " +
-                "Run tools/ppmattingv2/export_true_256.sh before Gradle."
+                "DIGITOR_PPMATTING_TRUE_384=1 but the fixed 384 ONNX export is missing: ${true384Onnx}. " +
+                "Run tools/ppmattingv2/export_true_384.sh before Gradle."
             )
         }
         if (!sourceOnnx.isFile() || sourceOnnx.length() < 30_000_000L) {
@@ -199,9 +198,9 @@ tasks.register("preparePpMattingNcnnModel") {
             pnnxTool.absolutePath,
             sourceOnnx.absolutePath,
         ]
-        // Genuine true-256 ONNX already carries complete static shapes. Do not re-specialize it.
-        // The legacy 512 ONNX keeps its proven explicit input shape for local/non-true256 builds.
-        if (!useTrue256) {
+        // Genuine true-384 ONNX already carries complete static shapes. Do not re-specialize it.
+        // The fallback 512 ONNX keeps its proven explicit shape for local/non-true384 builds.
+        if (!useTrue384) {
             pnnxArgs.add("inputshape=[1,3,512,512]")
         }
         pnnxArgs.addAll([
