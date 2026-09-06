@@ -11,6 +11,7 @@ import com.baidu.paddle.lite.PaddlePredictor
 import com.baidu.paddle.lite.PowerMode
 import com.baidu.paddle.lite.Tensor
 import java.io.File
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 internal interface PortraitMatteBackendV50 : AutoCloseable {
@@ -19,18 +20,20 @@ internal interface PortraitMatteBackendV50 : AutoCloseable {
 }
 
 /**
- * PP-MattingV2/STDC1 512 GPU-only backend used by Pro Cutout V57.
+ * PP-MattingV2/STDC1 512 GPU-only backend used by Pro Cutout V57+.
  *
  * The bundled model is generated with Paddle Lite `valid_targets=opencl` only. That is important:
  * there are no ARM kernels in this program, so Paddle Lite cannot silently execute unsupported
  * graph nodes on the CPU. Predictor creation plus a real 512x512 warm-up inference must succeed
  * before the UI is allowed to report GPU.
  *
- * V57 intentionally uses the native Paddle inference graph instead of the ONNX -> TFLite conversion
- * used by the previous revision. The converted TFLite model was only CPU-validated at build time and
- * could be a valid TFLite model while still containing a graph the LiteRT GPU delegate could not
- * fully execute. PP-MattingV2 is a Paddle model, so keeping it in Paddle Lite removes that conversion
- * mismatch and lets the optimizer select an OpenCL-only kernel program ahead of time.
+ * V60 additionally guards the OpenCL *base* matte itself. A small number of mobile OpenCL drivers
+ * can occasionally return a completed tensor containing a tile/stripe-corrupted alpha even though
+ * predictor.run() succeeds. The older V59 guard lived after hair/temporal refinement, so a corrupt
+ * PP-MattingV2 base could still be treated as authoritative. V60 checks spatial banding plus
+ * source-aware temporal consistency, retries suspicious GPU inference once, and only if both GPU
+ * results remain implausible holds the last accepted base matte for that single anchor. There is no
+ * CPU neural fallback; every attempted PP-MattingV2 inference remains Paddle Lite OpenCL GPU.
  */
 internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBackendV50 {
     private companion object {
@@ -86,6 +89,7 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
     private companion object {
         const val MODEL_SIZE = 512
         const val CHANNELS = 3
+        const val GUARD_SIDE_V60 = 48
     }
 
     private val plane = MODEL_SIZE * MODEL_SIZE
@@ -98,6 +102,12 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
     private val filterPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val predictor: ReleasablePaddlePredictorV57
     private val inputTensor: Tensor
+
+    // Last fully accepted 512x512 base alpha and a tiny source-luma signature. Keeping this state
+    // inside the single-threaded predictor avoids locks and lets a one-frame OpenCL anomaly be
+    // replaced without changing Cutout cadence/settings or introducing CPU neural inference.
+    private var previousAcceptedAlphaV60: FloatArray? = null
+    private var previousSourceSignatureV60: FloatArray? = null
 
     val backendLabel: String = "PP-MattingV2 · Paddle Lite OpenCL GPU · FP32 · 512"
 
@@ -147,22 +157,52 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
             MODEL_SIZE,
         )
         fillPpMattingV2InputV56(inputPixels, inputData)
-        check(inputTensor.setData(inputData)) { "Paddle Lite rejected PP-MattingV2 input" }
-        check(predictor.run()) { "Paddle Lite PP-MattingV2 OpenCL inference failed" }
 
-        val outputTensor = predictor.getOutput(0)
-        validateOutput(outputTensor)
-        val alpha = outputTensor.getFloatData()
-        check(alpha.size >= plane) {
-            "PP-MattingV2 alpha output has ${alpha.size} values; expected at least $plane"
-        }
-        for (i in 0 until plane) {
-            val value = alpha[i].coerceIn(0f, 1f)
-            val v = (value * 255f).roundToInt().coerceIn(0, 255)
-            alphaPixels[i] = Color.argb(255, v, v, v)
-        }
-        alphaSquare.setPixels(alphaPixels, 0, MODEL_SIZE, 0, 0, MODEL_SIZE, MODEL_SIZE)
+        val sourceSignature = sourceSignatureV60(inputPixels)
+        val first = runAlphaV60()
+        val previousAlpha = previousAcceptedAlphaV60
+        val previousSource = previousSourceSignatureV60
+        val firstSane = isIntrinsicAlphaSaneV60(first) &&
+            isTemporallyPlausibleV60(previousAlpha, previousSource, first, sourceSignature)
 
+        val selected: FloatArray
+        val acceptedCurrent: Boolean
+        if (firstSane) {
+            selected = first
+            acceptedCurrent = true
+        } else {
+            // A retry is deliberately rare: normal frames pay for one OpenCL run, while a suspicious
+            // frame gets one same-input rerun to distinguish a transient GPU tensor fault from motion.
+            val retry = runAlphaV60()
+            val retrySane = isIntrinsicAlphaSaneV60(retry) &&
+                isTemporallyPlausibleV60(previousAlpha, previousSource, retry, sourceSignature)
+            when {
+                retrySane -> {
+                    selected = retry
+                    acceptedCurrent = true
+                }
+                previousAlpha != null && previousSource != null &&
+                    meanAbsDeltaV60(previousSource, sourceSignature) <= .18f -> {
+                    // Both GPU attempts are implausible while the decoded source is still related to
+                    // the previous frame. Hold one known-clean alpha instead of persisting a stripe.
+                    selected = previousAlpha
+                    acceptedCurrent = false
+                }
+                isIntrinsicAlphaSaneV60(retry) -> {
+                    // Large source change/scene cut: do not freeze an old subject into a new scene.
+                    selected = retry
+                    acceptedCurrent = true
+                }
+                else -> error("PP-MattingV2 OpenCL produced two spatially corrupted alpha tensors")
+            }
+        }
+
+        if (acceptedCurrent) {
+            previousAcceptedAlphaV60 = selected.copyOf()
+            previousSourceSignatureV60 = sourceSignature
+        }
+
+        writeAlphaBitmapV60(selected)
         return Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888).also { output ->
             Canvas(output).drawBitmap(
                 alphaSquare,
@@ -171,6 +211,140 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
                 filterPaint,
             )
         }
+    }
+
+    private fun runAlphaV60(): FloatArray {
+        check(inputTensor.setData(inputData)) { "Paddle Lite rejected PP-MattingV2 input" }
+        check(predictor.run()) { "Paddle Lite PP-MattingV2 OpenCL inference failed" }
+        val outputTensor = predictor.getOutput(0)
+        validateOutput(outputTensor)
+        val raw = outputTensor.getFloatData()
+        check(raw.size >= plane) {
+            "PP-MattingV2 alpha output has ${raw.size} values; expected at least $plane"
+        }
+        return FloatArray(plane) { index -> raw[index] }
+    }
+
+    private fun writeAlphaBitmapV60(alpha: FloatArray) {
+        check(alpha.size >= plane)
+        for (i in 0 until plane) {
+            val value = alpha[i]
+            check(value.isFinite()) { "PP-MattingV2 alpha contained a non-finite value" }
+            val v = (value.coerceIn(0f, 1f) * 255f).roundToInt().coerceIn(0, 255)
+            alphaPixels[i] = Color.argb(255, v, v, v)
+        }
+        alphaSquare.setPixels(alphaPixels, 0, MODEL_SIZE, 0, 0, MODEL_SIZE, MODEL_SIZE)
+    }
+
+    /**
+     * Detect the large horizontal/vertical bands seen on affected vendor OpenCL drivers without
+     * rejecting normal human silhouettes. We sample a 48x48 grid and look for a boundary where a
+     * large fraction of the full row/column flips by a large alpha amount at once.
+     */
+    private fun isIntrinsicAlphaSaneV60(alpha: FloatArray): Boolean {
+        if (alpha.size < plane) return false
+        val grid = FloatArray(GUARD_SIDE_V60 * GUARD_SIDE_V60)
+        for (gy in 0 until GUARD_SIDE_V60) {
+            val y = ((gy + .5f) * MODEL_SIZE / GUARD_SIDE_V60).toInt().coerceIn(0, MODEL_SIZE - 1)
+            for (gx in 0 until GUARD_SIDE_V60) {
+                val x = ((gx + .5f) * MODEL_SIZE / GUARD_SIDE_V60).toInt().coerceIn(0, MODEL_SIZE - 1)
+                val value = alpha[y * MODEL_SIZE + x]
+                if (!value.isFinite()) return false
+                grid[gy * GUARD_SIDE_V60 + gx] = value.coerceIn(0f, 1f)
+            }
+        }
+
+        for (gy in 1 until GUARD_SIDE_V60) {
+            var severe = 0
+            var meanDelta = 0f
+            for (gx in 0 until GUARD_SIDE_V60) {
+                val a = grid[(gy - 1) * GUARD_SIDE_V60 + gx]
+                val b = grid[gy * GUARD_SIDE_V60 + gx]
+                val delta = abs(a - b)
+                meanDelta += delta
+                if (delta >= .62f) severe++
+            }
+            meanDelta /= GUARD_SIDE_V60.toFloat()
+            if (severe >= (GUARD_SIDE_V60 * .46f).toInt() && meanDelta >= .30f) return false
+        }
+        for (gx in 1 until GUARD_SIDE_V60) {
+            var severe = 0
+            var meanDelta = 0f
+            for (gy in 0 until GUARD_SIDE_V60) {
+                val a = grid[gy * GUARD_SIDE_V60 + gx - 1]
+                val b = grid[gy * GUARD_SIDE_V60 + gx]
+                val delta = abs(a - b)
+                meanDelta += delta
+                if (delta >= .62f) severe++
+            }
+            meanDelta /= GUARD_SIDE_V60.toFloat()
+            if (severe >= (GUARD_SIDE_V60 * .46f).toInt() && meanDelta >= .30f) return false
+        }
+        return true
+    }
+
+    private fun isTemporallyPlausibleV60(
+        previousAlpha: FloatArray?,
+        previousSource: FloatArray?,
+        currentAlpha: FloatArray,
+        currentSource: FloatArray,
+    ): Boolean {
+        if (previousAlpha == null || previousSource == null) return true
+        val sourceDelta = meanAbsDeltaV60(previousSource, currentSource)
+        // A genuine cut/large camera move is allowed to change the matte abruptly.
+        if (sourceDelta >= .16f) return true
+
+        var alphaDelta = 0f
+        var severeFlips = 0
+        var samples = 0
+        for (gy in 0 until GUARD_SIDE_V60) {
+            val y = ((gy + .5f) * MODEL_SIZE / GUARD_SIDE_V60).toInt().coerceIn(0, MODEL_SIZE - 1)
+            for (gx in 0 until GUARD_SIDE_V60) {
+                val x = ((gx + .5f) * MODEL_SIZE / GUARD_SIDE_V60).toInt().coerceIn(0, MODEL_SIZE - 1)
+                val index = y * MODEL_SIZE + x
+                val old = previousAlpha[index].coerceIn(0f, 1f)
+                val now = currentAlpha[index]
+                if (!now.isFinite()) return false
+                val current = now.coerceIn(0f, 1f)
+                alphaDelta += abs(old - current)
+                if ((old <= .06f && current >= .72f) || (old >= .86f && current <= .22f)) {
+                    severeFlips++
+                }
+                samples++
+            }
+        }
+        if (samples == 0) return false
+        val meanAlphaDelta = alphaDelta / samples.toFloat()
+        val flipRate = severeFlips / samples.toFloat()
+        return when {
+            sourceDelta < .045f -> meanAlphaDelta <= .15f && flipRate <= .075f
+            sourceDelta < .09f -> meanAlphaDelta <= .22f && flipRate <= .13f
+            else -> meanAlphaDelta <= .30f && flipRate <= .20f
+        }
+    }
+
+    private fun sourceSignatureV60(pixels: IntArray): FloatArray {
+        val signature = FloatArray(GUARD_SIDE_V60 * GUARD_SIDE_V60)
+        for (gy in 0 until GUARD_SIDE_V60) {
+            val y = ((gy + .5f) * MODEL_SIZE / GUARD_SIDE_V60).toInt().coerceIn(0, MODEL_SIZE - 1)
+            for (gx in 0 until GUARD_SIDE_V60) {
+                val x = ((gx + .5f) * MODEL_SIZE / GUARD_SIDE_V60).toInt().coerceIn(0, MODEL_SIZE - 1)
+                val pixel = pixels[y * MODEL_SIZE + x]
+                val r = ((pixel ushr 16) and 0xff) / 255f
+                val g = ((pixel ushr 8) and 0xff) / 255f
+                val b = (pixel and 0xff) / 255f
+                signature[gy * GUARD_SIDE_V60 + gx] = .2126f * r + .7152f * g + .0722f * b
+            }
+        }
+        return signature
+    }
+
+    private fun meanAbsDeltaV60(a: FloatArray, b: FloatArray): Float {
+        val count = minOf(a.size, b.size)
+        if (count <= 0) return 1f
+        var total = 0f
+        for (i in 0 until count) total += abs(a[i] - b[i])
+        return total / count.toFloat()
     }
 
     private fun validateOutput(output: Tensor?) {
@@ -183,6 +357,8 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
     }
 
     override fun close() {
+        previousAcceptedAlphaV60 = null
+        previousSourceSignatureV60 = null
         runCatching { predictor.close() }
         if (!inputSquare.isRecycled) inputSquare.recycle()
         if (!alphaSquare.isRecycled) alphaSquare.recycle()
