@@ -20,6 +20,11 @@ import kotlin.math.roundToInt
  * The .nb model is optimized with valid_targets=opencl,arm, so OpenCL is the first target and ARM
  * remains available only for operators that cannot execute through the OpenCL backend. Using the
  * prebuilt Paddle JNI module avoids linking Paddle's legacy shared C++ ELF into Digitor itself.
+ *
+ * IMPORTANT: some UNISOC/Spreadtrum Android builds can terminate the whole process from native
+ * Paddle Lite code while the predictor/OpenCL runtime is being initialized. A Kotlin try/catch
+ * cannot recover from SIGSEGV/SIGABRT, so known unsafe UNISOC devices are rejected before any
+ * Paddle predictor object is created. PpMattingV2PortraitMatteV50 then uses its ONNX CPU fallback.
  */
 internal class PaddleLiteOpenClPortraitMatteV51 private constructor(
     private var predictor: PaddlePredictor?,
@@ -30,6 +35,38 @@ internal class PaddleLiteOpenClPortraitMatteV51 private constructor(
         const val MODEL_SIZE = 512
         const val PLANE = MODEL_SIZE * MODEL_SIZE
         const val INPUT_COUNT = PLANE * 3
+
+        private fun unsafeNativeRuntimeReason(): String? {
+            val identity = buildList {
+                add(Build.MANUFACTURER)
+                add(Build.BRAND)
+                add(Build.MODEL)
+                add(Build.DEVICE)
+                add(Build.PRODUCT)
+                add(Build.BOARD)
+                add(Build.HARDWARE)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    add(Build.SOC_MANUFACTURER)
+                    add(Build.SOC_MODEL)
+                }
+            }.joinToString("|") { it.orEmpty() }.lowercase()
+
+            val exactZ60 = "symphony" in identity && "z60" in identity
+            val t606 = "t606" in identity
+            val unisocFamily =
+                "unisoc" in identity ||
+                    "spreadtrum" in identity ||
+                    "sprd" in identity ||
+                    "ums9230" in identity ||
+                    "ums512" in identity
+
+            return when {
+                exactZ60 -> "Symphony Z60"
+                t606 -> "UNISOC T606"
+                unisocFamily -> "UNISOC/Spreadtrum"
+                else -> null
+            }
+        }
 
         private fun materializeModel(context: Context): File {
             val target = File(context.codeCacheDir, MODEL_ASSET)
@@ -46,6 +83,10 @@ internal class PaddleLiteOpenClPortraitMatteV51 private constructor(
         fun tryCreate(context: Context): PaddleLiteOpenClPortraitMatteV51? {
             // The bundled Paddle Lite OpenCL JNI publish is ARM64 for the Z60/Mali-G57 target.
             if (Build.SUPPORTED_ABIS.none { it == "arm64-v8a" }) return null
+
+            // Do this check before constructing MobileConfig/PaddlePredictor. Native Paddle Lite
+            // crashes on affected UNISOC firmware are process-fatal and cannot be caught below.
+            if (unsafeNativeRuntimeReason() != null) return null
 
             return runCatching {
                 val appContext = context.applicationContext
