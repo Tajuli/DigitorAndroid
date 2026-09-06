@@ -20,10 +20,9 @@ private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 /**
  * Per-frame PP-MattingV2 Pro Cutout analyzer.
  *
- * Every analyzed frame receives a fresh PP-MattingV2 neural matte. For the true-256 Vulkan path,
- * a lightweight person localizer is used only to choose a tracked square ROI; its segmentation
- * pixels never enter the final alpha. PP-MattingV2 therefore sees a much larger subject and less
- * chair/vase/background while hair + temporal stages remain refinement-only.
+ * Every analyzed frame receives a fresh PP-MattingV2 neural matte. A lightweight person localizer
+ * is used only to keep the 256 model focused on the tracked human ROI and to veto obvious distant
+ * background; PP-MattingV2 remains responsible for the actual soft alpha/edge detail.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -242,8 +241,9 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
 
     fun backendSummary(): String = buildString {
         append(portraitMatte.backendLabel)
-        append(" · Person ROI only (").append(roiMatte.localizerBackendLabel).append(")")
-        append(" · PP-MattingV2 alpha only")
+        append(" · Tight person ROI (").append(roiMatte.localizerBackendLabel).append(")")
+        append(" · Coarse background veto only")
+        append(" · PP-MattingV2 edge alpha")
         append(" · Fresh neural matte every analyzed frame")
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
         append(" · Temporal refine "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
