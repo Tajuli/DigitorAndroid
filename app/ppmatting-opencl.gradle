@@ -1,11 +1,15 @@
 // Direct PP-MattingV2 GPU backend for ARM Android devices. This intentionally avoids NNAPI:
-// Paddle Lite's OpenCL runtime talks to Mali/Adreno OpenCL drivers directly.
+// Paddle Lite's OpenCL publish includes a self-contained Java/JNI runtime, so Digitor does not
+// link the legacy Paddle shared C++ ELF with the app's modern Android linker.
 def generatedRoot = file("${buildDir}/generated/ppmattingOpenCl")
 def downloadsDir = file("${generatedRoot}/downloads")
 def paddleModelDir = file("${generatedRoot}/paddleModel")
 def optimizedAssetsDir = file("${generatedRoot}/assets")
-def paddleLiteRoot = file("${generatedRoot}/paddleLite")
 def runtimeExtractDir = file("${generatedRoot}/runtimeExtract")
+def paddleJavaDir = file("${generatedRoot}/java")
+def generatedJniLibsDir = file("${generatedRoot}/jniLibs")
+def paddlePredictorJar = file("${paddleJavaDir}/PaddlePredictor.jar")
+def paddleJniSo = file("${generatedJniLibsDir}/arm64-v8a/libpaddle_lite_jni.so")
 def optTool = file("${generatedRoot}/tools/opt_linux_x86")
 
 def modelZip = file("${downloadsDir}/ppmattingv2-stdc1-human_512.zip")
@@ -91,8 +95,8 @@ tasks.register("preparePpMattingOpenClModel") {
 }
 
 tasks.register("preparePaddleLiteOpenClRuntime") {
-    outputs.file(new File(paddleLiteRoot, "cxx/include/paddle_api.h"))
-    outputs.file(new File(paddleLiteRoot, "cxx/libs/arm64-v8a/libpaddle_light_api_shared.so"))
+    outputs.file(paddlePredictorJar)
+    outputs.file(paddleJniSo)
     doLast {
         downloadsDir.mkdirs()
         downloadWithRetry(runtimeUrl, runtimeTar, 1_000_000L)
@@ -103,23 +107,35 @@ tasks.register("preparePaddleLiteOpenClRuntime") {
             into runtimeExtractDir
         }
 
-        File header = fileTree(runtimeExtractDir).matching { include "**/paddle_api.h" }.files.find { true }
-        File shared = fileTree(runtimeExtractDir).matching { include "**/libpaddle_light_api_shared.so" }.files.find { true }
-        if (header == null || shared == null) {
-            throw new GradleException("Paddle Lite OpenCL archive layout unsupported: paddle_api.h=${header}, shared=${shared}")
+        // Paddle Lite's official Android publish creates both of these artifacts. The JNI module
+        // is self-contained (it links Paddle Lite internally when Paddle itself is built), which
+        // avoids the malformed libpaddle_light_api_shared.so symbol table that modern lld rejects.
+        File predictorJar = fileTree(runtimeExtractDir).matching {
+            include "**/PaddlePredictor.jar"
+        }.files.find { true }
+        File jniRuntime = fileTree(runtimeExtractDir).matching {
+            include "**/libpaddle_lite_jni.so"
+        }.files.find { true }
+        if (predictorJar == null || jniRuntime == null) {
+            throw new GradleException(
+                "Paddle Lite OpenCL archive missing Java publish artifacts: " +
+                    "PaddlePredictor.jar=${predictorJar}, libpaddle_lite_jni.so=${jniRuntime}"
+            )
         }
 
-        delete(paddleLiteRoot)
-        File includeRoot = header.parentFile
+        delete(paddleJavaDir)
+        paddleJavaDir.mkdirs()
         copy {
-            from includeRoot
-            into new File(paddleLiteRoot, "cxx/include")
+            from predictorJar
+            into paddleJavaDir
         }
-        File targetLibDir = new File(paddleLiteRoot, "cxx/libs/arm64-v8a")
-        targetLibDir.mkdirs()
+
+        delete(generatedJniLibsDir)
+        File targetJniDir = new File(generatedJniLibsDir, "arm64-v8a")
+        targetJniDir.mkdirs()
         copy {
-            from shared
-            into targetLibDir
+            from jniRuntime
+            into targetJniDir
         }
     }
 }
@@ -129,30 +145,16 @@ def prepareGpu = tasks.register("preparePpMattingOpenClGpu") {
 }
 
 android {
-    // Paddle Lite v2.14 OpenCL prebuilt was produced with an older Android toolchain. NDK 28's
-    // lld rejects its legacy ELF symbol table, so pin the native bridge to the compatible NDK 25 LTS.
-    ndkVersion "25.2.9519653"
-
-    defaultConfig {
-        externalNativeBuild {
-            cmake {
-                arguments "-DPADDLE_LITE_ROOT=${paddleLiteRoot.absolutePath}"
-                cppFlags "-std=c++17 -O3 -ffast-math"
-            }
-        }
-    }
-    externalNativeBuild {
-        cmake {
-            path file("src/main/cpp/CMakeLists.txt")
-            version "3.22.1"
-        }
-    }
     sourceSets.main.assets.srcDir(optimizedAssetsDir)
+    sourceSets.main.jniLibs.srcDir(generatedJniLibsDir)
 }
 
-tasks.matching { task ->
-    def n = task.name.toLowerCase(Locale.ROOT)
-    n.contains("cmake") || n == "prebuild" || (n.contains("merge") && n.contains("native"))
-}.configureEach {
+dependencies {
+    implementation files(paddlePredictorJar)
+}
+
+// preBuild is upstream of Kotlin/Java compilation and APK packaging. This guarantees the generated
+// jar, JNI runtime and optimized .nb model exist before any variant consumes them.
+tasks.matching { task -> task.name.equalsIgnoreCase("preBuild") }.configureEach {
     dependsOn(prepareGpu)
 }
