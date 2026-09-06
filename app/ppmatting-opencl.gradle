@@ -77,12 +77,14 @@ tasks.register("preparePpMattingOpenClModel") {
         File outputNb = new File(outputBase.absolutePath + ".nb")
         if (outputNb.exists()) outputNb.delete()
 
-        exec {
+        def execResult = providers.exec {
             commandLine optTool.absolutePath,
                     "--model_dir=${inferenceDir.absolutePath}",
                     "--valid_targets=opencl,arm",
                     "--optimize_out=${outputBase.absolutePath}"
-        }
+        }.result.get()
+        execResult.assertNormalExitValue()
+
         if (!outputNb.isFile() || outputNb.length() < 1_000_000L) {
             throw new GradleException("Paddle Lite opt did not create ${outputNb}")
         }
