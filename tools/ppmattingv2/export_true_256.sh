@@ -60,35 +60,25 @@ paddle2onnx \
   --save_file "${RAW_ONNX}"
 popd >/dev/null
 
-# pnnx 20260526 can SIGFPE on Paddle2ONNX's raw shape/Resize plumbing even though ONNX checker
-# accepts the model. Simplify/constant-fold the *already genuine fixed-256* graph first. This does
-# not change the requested input resolution or weights; it only removes converter-hostile dynamic
-# shape arithmetic before ncnn conversion.
-python -m pip install --disable-pip-version-check --quiet 'onnxsim==0.4.36'
-python - "${RAW_ONNX}" "${OUTPUT_ONNX}" <<'PY'
+# onnxsim/onnxruntime SIGFPEs on this Paddle2ONNX PP-MattingV2 graph in GitHub's Ubuntu runner.
+# Use OnnxSlim instead. It performs graph/shape simplification without pulling onnxruntime as a
+# mandatory runtime dependency, while preserving the genuine fixed [1,3,256,256] input.
+python -m pip install --disable-pip-version-check --quiet 'onnxslim==0.1.96'
+onnxslim "${RAW_ONNX}" "${OUTPUT_ONNX}"
+
+python - "${OUTPUT_ONNX}" <<'PY'
 import os
 import sys
 import onnx
-from onnxsim import simplify
 
-src, dst = sys.argv[1:3]
-model = onnx.load(src)
+path = sys.argv[1]
+model = onnx.load(path)
 onnx.checker.check_model(model)
-input_name = model.graph.input[0].name
-model_simp, ok = simplify(
-    model,
-    overwrite_input_shapes={input_name: [1, 3, 256, 256]},
-    perform_optimization=True,
-)
-if not ok:
-    raise SystemExit("onnxsim validation failed for PP-MattingV2 true-256")
-onnx.checker.check_model(model_simp)
-dims = [d.dim_value for d in model_simp.graph.input[0].type.tensor_type.shape.dim]
+dims = [d.dim_value for d in model.graph.input[0].type.tensor_type.shape.dim]
 if dims != [1, 3, 256, 256]:
-    raise SystemExit(f"Simplified model lost fixed [1,3,256,256] input: {dims}")
-onnx.save(model_simp, dst)
-if os.path.getsize(dst) < 5_000_000:
-    raise SystemExit(f"Simplified ONNX is unexpectedly small: {os.path.getsize(dst)} bytes")
-print(f"Validated+simplified true PP-MattingV2 256 ONNX: {dst} ({os.path.getsize(dst)} bytes)")
+    raise SystemExit(f"Slimmed model lost fixed [1,3,256,256] input: {dims}")
+if os.path.getsize(path) < 5_000_000:
+    raise SystemExit(f"Slimmed ONNX is unexpectedly small: {os.path.getsize(path)} bytes")
+print(f"Validated+slimmed true PP-MattingV2 256 ONNX: {path} ({os.path.getsize(path)} bytes)")
 PY
 rm -f "${RAW_ONNX}"
