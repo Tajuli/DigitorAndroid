@@ -13,7 +13,7 @@
 
 namespace {
 constexpr const char* kTag = "PpMattingNcnnVk";
-constexpr int kModelSize = 512;
+constexpr int kModelSize = 256;
 constexpr int kPlane = kModelSize * kModelSize;
 constexpr int kInputCount = kPlane * 3;
 
@@ -187,10 +187,11 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngin
     __android_log_print(
             ANDROID_LOG_INFO,
             kTag,
-            "PP-MattingV2 Vulkan ready on %s (input=%d output=%d fp16-storage=%d fp16-arithmetic=%d)",
+            "PP-MattingV2 Vulkan ready on %s (input=%d output=%d size=%d fp16-storage=%d fp16-arithmetic=%d)",
             engine->gpuName.c_str(),
             engine->inputIndex,
             engine->outputIndex,
+            kModelSize,
             gpuInfo.support_fp16_storage() ? 1 : 0,
             gpuInfo.support_fp16_arithmetic() ? 1 : 0);
 
@@ -206,7 +207,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
         return nullptr;
     }
     if (env->GetArrayLength(inputArray) != kInputCount) {
-        ThrowJava(env, "java/lang/IllegalArgumentException", "PP-MattingV2 input must contain 3x512x512 floats");
+        ThrowJava(env, "java/lang/IllegalArgumentException", "PP-MattingV2 fast input must contain 3x256x256 floats");
         return nullptr;
     }
 
@@ -240,7 +241,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
         ThrowJava(
                 env,
                 "java/lang/IllegalStateException",
-                "ncnn PP-MattingV2 output is not a 512x512 fp32 alpha matte");
+                "ncnn PP-MattingV2 output is not a 256x256 fp32 alpha matte");
         return nullptr;
     }
 
