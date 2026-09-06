@@ -94,18 +94,6 @@ fun CutoutWorkspaceV50(
         val analysisFailed = analysisStatus?.contains("failed", ignoreCase = true) == true ||
             analysisStatus?.contains("incomplete", ignoreCase = true) == true
 
-        val backendBadgeV57 = when {
-            analysisStatus?.contains("CPU", ignoreCase = true) == true ||
-                analysisStatus?.contains("ARM", ignoreCase = true) == true -> "CUTOUT: CPU"
-            analysisFailed -> "CUTOUT: GPU ERROR"
-            analysisStatus?.contains("OpenCL", ignoreCase = true) == true ||
-                analysisStatus?.contains("GPU", ignoreCase = true) == true ||
-                analysisStatus?.contains("refined frame", ignoreCase = true) == true ||
-                personReady -> "CUTOUT: GPU"
-            analysisBusy -> "CUTOUT: CHECKING"
-            else -> "CUTOUT: NOT RUN"
-        }
-
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -159,39 +147,6 @@ fun CutoutWorkspaceV50(
             }
 
             CutoutModeV43.PERSON -> {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        "Neural matte backend",
-                        fontSize = 8.sp,
-                        color = C50Text.copy(alpha = .62f),
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Box(
-                        Modifier
-                            .background(
-                                Color.White.copy(alpha = if (backendBadgeV57 == "CUTOUT: GPU") .16f else .08f),
-                                RoundedCornerShape(999.dp),
-                            )
-                            .padding(horizontal = 9.dp, vertical = 4.dp),
-                    ) {
-                        Text(backendBadgeV57, fontSize = 8.sp, color = C50Text)
-                    }
-                }
-                Text(
-                    when (backendBadgeV57) {
-                        "CUTOUT: GPU" -> "PP-MattingV2 512 inference verified on GPU."
-                        "CUTOUT: CPU" -> "PP-MattingV2 inference is running on CPU."
-                        "CUTOUT: CHECKING" -> "Verifying PP-MattingV2 GPU execution…"
-                        "CUTOUT: GPU ERROR" -> "GPU backend failed; check the analysis message below."
-                        else -> "Analyze to verify whether PP-MattingV2 runs on GPU."
-                    },
-                    fontSize = 7.sp,
-                    color = C50Text.copy(alpha = .55f),
-                )
-
                 val cpuBackend = analysisStatus?.contains("CPU", ignoreCase = true) == true ||
                     analysisStatus?.contains("ARM", ignoreCase = true) == true
                 val gpuBackend = analysisStatus?.contains("OpenCL", ignoreCase = true) == true ||
