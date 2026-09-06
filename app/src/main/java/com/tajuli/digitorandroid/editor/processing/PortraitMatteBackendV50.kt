@@ -35,8 +35,11 @@ internal interface PortraitMatteBackendV50 : AutoCloseable {
  * 2) XNNPACK CPU.
  * 3) Default ORT CPU.
  *
- * Android 9 and older skip the hardware-only NNAPI attempt because CPU_DISABLED is only effective
- * from API 29; this avoids accidentally selecting the slow NNAPI reference CPU backend.
+ * NNAPI provider registration can terminate the whole Android process inside native vendor/ORT
+ * code on some devices; that is not catchable with Kotlin try/catch. Devices matching the observed
+ * Symphony Z60 / UNISOC T606 family are therefore kept on the original, proven ORT CPU backend.
+ * This is intentionally conservative until a direct Mali GPU backend replaces NNAPI for this class
+ * of device.
  */
 internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBackendV50 {
     private companion object {
@@ -83,11 +86,54 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         get() = backend.label
 
     private fun createBestBackend(): BackendSession {
+        unsafeNnapiDeviceReason()?.let { reason ->
+            // Do not even call addNnapi() on these devices. A native SIGSEGV/SIGABRT during
+            // provider registration cannot be recovered by runCatching/try-catch.
+            return createOrtCpuBackend("NNAPI disabled for device safety · $reason")
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             createNnapiBackend()?.let { return it }
         }
         createXnnpackBackend()?.let { return it }
         return createOrtCpuBackend()
+    }
+
+    /**
+     * The first observed fatal regression was Symphony Z60 / UNISOC T606. Match both the exact
+     * device and common UNISOC/Spreadtrum SoC identifiers so the same native NNAPI path is not
+     * attempted on closely related firmware where a process-level crash would be unrecoverable.
+     */
+    private fun unsafeNnapiDeviceReason(): String? {
+        val identity = buildList {
+            add(Build.MANUFACTURER)
+            add(Build.BRAND)
+            add(Build.MODEL)
+            add(Build.DEVICE)
+            add(Build.PRODUCT)
+            add(Build.BOARD)
+            add(Build.HARDWARE)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(Build.SOC_MANUFACTURER)
+                add(Build.SOC_MODEL)
+            }
+        }.joinToString("|") { it.orEmpty() }.lowercase()
+
+        val exactZ60 = "symphony" in identity && "z60" in identity
+        val t606 = "t606" in identity
+        val unisocFamily =
+            "unisoc" in identity ||
+                "spreadtrum" in identity ||
+                "sprd" in identity ||
+                "ums9230" in identity ||
+                "ums512" in identity
+
+        return when {
+            exactZ60 -> "Symphony Z60"
+            t606 -> "UNISOC T606"
+            unisocFamily -> "UNISOC/Spreadtrum"
+            else -> null
+        }
     }
 
     private fun createNnapiBackend(): BackendSession? {
@@ -130,13 +176,16 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         }
     }
 
-    private fun createOrtCpuBackend(): BackendSession {
+    private fun createOrtCpuBackend(reason: String? = null): BackendSession {
         val options = OrtSession.SessionOptions()
         return try {
             BackendSession(
                 session = environment.createSession(modelBytes, options),
                 options = options,
-                label = "Matting: CPU (ONNX Runtime) · 512",
+                label = buildString {
+                    append("Matting: CPU (ONNX Runtime) · 512")
+                    if (!reason.isNullOrBlank()) append(" · ").append(reason)
+                },
                 kind = BackendSession.Kind.ORT_CPU,
             )
         } catch (error: Throwable) {
@@ -147,7 +196,8 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
 
     /**
      * Some vendor NNAPI drivers accept a graph at session creation but fail when the first real
-     * frame executes. If that happens, recreate the session on XNNPACK/ORT CPU and retry once.
+     * frame executes. Java-visible failures can fall back to CPU. Native fatal signals cannot, so
+     * known-unsafe devices are excluded before provider registration in createBestBackend().
      */
     private fun switchFromNnapiToCpuFallback() {
         if (backend.kind != BackendSession.Kind.NNAPI) return
