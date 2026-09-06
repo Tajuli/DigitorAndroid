@@ -27,7 +27,7 @@ internal interface PortraitMatteBackendV50 : AutoCloseable {
  * graph nodes on the CPU. Predictor creation plus a real 512x512 warm-up inference must succeed
  * before the UI is allowed to report GPU.
  *
- * V60 additionally guards the OpenCL *base* matte itself. A small number of mobile OpenCL drivers
+ * V61 strengthens the OpenCL *base* matte guard after V60. A small number of mobile OpenCL drivers
  * can occasionally return a completed tensor containing a tile/stripe-corrupted alpha even though
  * predictor.run() succeeds. The older V59 guard lived after hair/temporal refinement, so a corrupt
  * PP-MattingV2 base could still be treated as authoritative. V60 checks spatial banding plus
@@ -147,7 +147,7 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
         val first = runAlphaV60()
         val previousAlpha = previousAcceptedAlphaV60
         val previousSource = previousSourceSignatureV60
-        val firstSane = isIntrinsicAlphaSaneV60(first) &&
+        val firstSane = isIntrinsicAlphaSaneV61(first) &&
             isTemporallyPlausibleV60(previousAlpha, previousSource, first, sourceSignature)
 
         val selected: FloatArray
@@ -157,7 +157,7 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
             acceptedCurrent = true
         } else {
             val retry = runAlphaV60()
-            val retrySane = isIntrinsicAlphaSaneV60(retry) &&
+            val retrySane = isIntrinsicAlphaSaneV61(retry) &&
                 isTemporallyPlausibleV60(previousAlpha, previousSource, retry, sourceSignature)
             when {
                 retrySane -> {
@@ -171,7 +171,7 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
                     selected = previousAlpha
                     acceptedCurrent = false
                 }
-                isIntrinsicAlphaSaneV60(retry) -> {
+                isIntrinsicAlphaSaneV61(retry) -> {
                     // Large motion/cut: prefer the current source's retry rather than freezing a
                     // previous subject merely because temporal difference is high.
                     selected = retry
@@ -216,8 +216,11 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
     }
 
     /** Reject full-width/full-height tile or stripe discontinuities while allowing silhouette edges. */
-    private fun isIntrinsicAlphaSaneV60(alpha: FloatArray): Boolean {
+    private fun isIntrinsicAlphaSaneV61(alpha: FloatArray): Boolean {
         if (alpha.size < plane) return false
+        // V60's 48x48 grid can step over a one/few-pixel driver stripe. Scan every
+        // native 512 alpha row/column first, then retain the broader sampled checks below.
+        if (hasWideBandAlphaArtifactV61(alpha)) return false
         val grid = FloatArray(GUARD_SIDE_V60 * GUARD_SIDE_V60)
         for (gy in 0 until GUARD_SIDE_V60) {
             val y = ((gy + .5f) * MODEL_SIZE / GUARD_SIDE_V60).toInt().coerceIn(0, MODEL_SIZE - 1)
@@ -258,6 +261,45 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
             if (severe >= (GUARD_SIDE_V60 * .46f).toInt() && meanDelta >= .30f) return false
         }
         return true
+    }
+
+
+    /** Detect thin full-width/full-height OpenCL tile bands that a sparse grid can miss. */
+    private fun hasWideBandAlphaArtifactV61(alpha: FloatArray): Boolean {
+        if (alpha.size < plane) return true
+        val rowCoverage = (MODEL_SIZE * .58f).roundToInt().coerceAtLeast(1)
+        val columnCoverage = rowCoverage
+
+        for (y in 1 until MODEL_SIZE) {
+            val previous = (y - 1) * MODEL_SIZE
+            val current = y * MODEL_SIZE
+            var severe = 0
+            var deltaSum = 0f
+            for (x in 0 until MODEL_SIZE) {
+                val a = alpha[previous + x]
+                val b = alpha[current + x]
+                if (!a.isFinite() || !b.isFinite()) return true
+                val delta = abs(a.coerceIn(0f, 1f) - b.coerceIn(0f, 1f))
+                deltaSum += delta
+                if (delta >= .50f) severe++
+            }
+            if (severe >= rowCoverage && deltaSum / MODEL_SIZE.toFloat() >= .22f) return true
+        }
+
+        for (x in 1 until MODEL_SIZE) {
+            var severe = 0
+            var deltaSum = 0f
+            for (y in 0 until MODEL_SIZE) {
+                val a = alpha[y * MODEL_SIZE + x - 1]
+                val b = alpha[y * MODEL_SIZE + x]
+                if (!a.isFinite() || !b.isFinite()) return true
+                val delta = abs(a.coerceIn(0f, 1f) - b.coerceIn(0f, 1f))
+                deltaSum += delta
+                if (delta >= .50f) severe++
+            }
+            if (severe >= columnCoverage && deltaSum / MODEL_SIZE.toFloat() >= .22f) return true
+        }
+        return false
     }
 
     private fun isTemporallyPlausibleV60(

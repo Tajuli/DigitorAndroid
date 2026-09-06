@@ -112,6 +112,9 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                 }
             }
 
+            // V61 verifies the decoded OES frame itself before PP-MattingV2. A corrupt
+            // decoder/readback band otherwise looks like a legitimate scene change to the V60 matte guard.
+            val sourceFrameGuardV61 = SequentialSourceFrameGuardV61()
             val sequentialResult = runCatching {
                 GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
                     uri = Uri.parse(clip.uri),
@@ -120,9 +123,12 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                     targetTimesUs = targetTimes,
                     emitEveryFrame = cadence.everyDecodedFrame,
                 ) { sourceUs, bitmap ->
-                    // enqueueOwned is synchronous in V58. This prevents MediaCodec/OES GL work for
-                    // the next selected frame from racing the current Paddle OpenCL inference.
-                    worker.enqueueOwned(sourceUs, bitmap)
+                    // V61 catches transient OES/readback bands and independently re-decodes only
+                    // that timestamp before the still-GPU PP-MattingV2 neural inference.
+                    val verified = sourceFrameGuardV61.select(bitmap) {
+                        decodeSinglePriorityFrame(clip, sourceUs)
+                    }
+                    worker.enqueueOwned(sourceUs, verified)
                 }
             }
 
@@ -228,6 +234,115 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         if (normalized !== raw && !raw.isRecycled) raw.recycle()
         normalized
     }.getOrNull()
+}
+
+/**
+ * Detects transient wide horizontal/vertical corruption in the MediaCodec/OES analysis Bitmap.
+ * A flagged timestamp is re-decoded once through MediaMetadataRetriever; PP-MattingV2 inference
+ * remains OpenCL GPU. Only small-band changes are considered suspicious; broad row+column changes
+ * are treated as legitimate scene cuts.
+ */
+private class SequentialSourceFrameGuardV61 {
+    private data class Profile(val rows: FloatArray, val columns: FloatArray)
+
+    private var previous: Profile? = null
+    private var scratch = IntArray(0)
+
+    fun select(candidate: Bitmap, safeDecode: () -> Bitmap?): Bitmap {
+        val candidateProfile = profile(candidate)
+        val old = previous
+        if (old == null || old.rows.size != candidateProfile.rows.size ||
+            old.columns.size != candidateProfile.columns.size
+        ) {
+            previous = candidateProfile
+            return candidate
+        }
+
+        if (!looksLikeTransientBand(old, candidateProfile)) {
+            previous = candidateProfile
+            return candidate
+        }
+
+        val safe = runCatching { safeDecode() }.getOrNull()
+        if (safe != null) {
+            previous = profile(safe)
+            if (!candidate.isRecycled) candidate.recycle()
+            return safe
+        }
+
+        // Do not promote the suspect profile to history if independent decode is unavailable.
+        return candidate
+    }
+
+    private fun looksLikeTransientBand(previous: Profile, current: Profile): Boolean {
+        var strongRows = 0
+        var strongColumns = 0
+        var maxRowDelta = 0f
+        var maxColumnDelta = 0f
+
+        for (i in current.rows.indices) {
+            val delta = abs(previous.rows[i] - current.rows[i])
+            if (delta >= .22f) strongRows++
+            if (delta > maxRowDelta) maxRowDelta = delta
+        }
+        for (i in current.columns.indices) {
+            val delta = abs(previous.columns[i] - current.columns[i])
+            if (delta >= .22f) strongColumns++
+            if (delta > maxColumnDelta) maxColumnDelta = delta
+        }
+
+        val rowFraction = strongRows / current.rows.size.coerceAtLeast(1).toFloat()
+        val columnFraction = strongColumns / current.columns.size.coerceAtLeast(1).toFloat()
+        if (rowFraction >= .55f && columnFraction >= .55f) return false
+
+        val horizontalBand = maxRowDelta >= .30f && strongRows > 0 && rowFraction <= .42f
+        val verticalBand = maxColumnDelta >= .30f && strongColumns > 0 && columnFraction <= .42f
+        return horizontalBand || verticalBand
+    }
+
+    private fun profile(bitmap: Bitmap): Profile {
+        val width = bitmap.width.coerceAtLeast(1)
+        val height = bitmap.height.coerceAtLeast(1)
+        val required = width * height
+        if (scratch.size < required) scratch = IntArray(required)
+        bitmap.getPixels(scratch, 0, width, 0, 0, width, height)
+
+        val rows = FloatArray(height)
+        val columns = FloatArray(width)
+        val xStep = (width / 48).coerceAtLeast(1)
+        val yStep = (height / 48).coerceAtLeast(1)
+
+        for (y in 0 until height) {
+            var total = 0f
+            var count = 0
+            var x = xStep / 2
+            while (x < width) {
+                total += luma(scratch[y * width + x])
+                count++
+                x += xStep
+            }
+            rows[y] = total / count.coerceAtLeast(1).toFloat()
+        }
+        for (x in 0 until width) {
+            var total = 0f
+            var count = 0
+            var y = yStep / 2
+            while (y < height) {
+                total += luma(scratch[y * width + x])
+                count++
+                y += yStep
+            }
+            columns[x] = total / count.coerceAtLeast(1).toFloat()
+        }
+        return Profile(rows, columns)
+    }
+
+    private fun luma(pixel: Int): Float {
+        val r = ((pixel ushr 16) and 0xff) / 255f
+        val g = ((pixel ushr 8) and 0xff) / 255f
+        val b = (pixel and 0xff) / 255f
+        return .2126f * r + .7152f * g + .0722f * b
+    }
 }
 
 private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
@@ -367,6 +482,9 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private fun isRefinedMatteSaneV59(base: Bitmap, refined: Bitmap): Boolean {
         if (base.width != refined.width || base.height != refined.height) return false
         if (base.width <= 0 || base.height <= 0) return false
+        // V59's 48x48 comparison can miss a one/few-pixel horizontal stripe. Reject
+        // catastrophic full-width/full-height band boundaries at native matte resolution first.
+        if (hasWideBandMatteArtifactV61(refined)) return false
 
         val stepX = (base.width / 48).coerceAtLeast(1)
         val stepY = (base.height / 48).coerceAtLeast(1)
@@ -405,6 +523,45 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
             leakRate <= .035f &&
             lossRate <= .06f &&
             refinedFgRate <= baseFgRate * 1.35f + .07f
+    }
+
+
+    private fun hasWideBandMatteArtifactV61(matte: Bitmap): Boolean {
+        val width = matte.width
+        val height = matte.height
+        if (width <= 1 || height <= 1) return false
+        val pixels = IntArray(width * height)
+        matte.getPixels(pixels, 0, width, 0, 0, width, height)
+        val rowCoverage = (width * .58f).roundToInt().coerceAtLeast(1)
+        val columnCoverage = (height * .58f).roundToInt().coerceAtLeast(1)
+
+        for (y in 1 until height) {
+            val previous = (y - 1) * width
+            val current = y * width
+            var severe = 0
+            var deltaSum = 0
+            for (x in 0 until width) {
+                val a = Color.red(pixels[previous + x])
+                val b = Color.red(pixels[current + x])
+                val delta = abs(a - b)
+                deltaSum += delta
+                if (delta >= 128) severe++
+            }
+            if (severe >= rowCoverage && deltaSum.toFloat() / width >= 56f) return true
+        }
+        for (x in 1 until width) {
+            var severe = 0
+            var deltaSum = 0
+            for (y in 0 until height) {
+                val a = Color.red(pixels[y * width + x - 1])
+                val b = Color.red(pixels[y * width + x])
+                val delta = abs(a - b)
+                deltaSum += delta
+                if (delta >= 128) severe++
+            }
+            if (severe >= columnCoverage && deltaSum.toFloat() / height >= 56f) return true
+        }
+        return false
     }
 
     private fun fuseHairCpu(base: Bitmap, hair: Bitmap?, strength: Float): Bitmap {
