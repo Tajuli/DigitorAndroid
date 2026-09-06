@@ -13,7 +13,7 @@
 
 namespace {
 constexpr const char* kTag = "PpMattingNcnnVk";
-constexpr int kModelSize = 256;
+constexpr int kModelSize = 512;
 constexpr int kPlane = kModelSize * kModelSize;
 constexpr int kInputCount = kPlane * 3;
 
@@ -103,14 +103,11 @@ void WarmUp(Engine* engine) {
         __android_log_print(
                 ANDROID_LOG_INFO,
                 kTag,
-                "PP-MattingV2 256 Vulkan warm-up complete on %s in %.1f ms (out=%dx%dx%d)",
+                "Vulkan warm-up complete on %s in %.1f ms",
                 engine->gpuName.c_str(),
-                warmupMs,
-                output.w,
-                output.h,
-                output.c);
+                warmupMs);
     } else {
-        __android_log_print(ANDROID_LOG_WARN, kTag, "PP-MattingV2 256 Vulkan warm-up failed with status=%d", status);
+        __android_log_print(ANDROID_LOG_WARN, kTag, "Vulkan warm-up failed with status=%d", status);
     }
     engine->lastInferenceMs = -1.0;
 }
@@ -150,13 +147,9 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngin
 
     engine->net.opt.use_vulkan_compute = true;
     engine->net.opt.num_threads = std::max(1, static_cast<int>(threads));
-    engine->net.opt.use_packing_layout = true;
-    engine->net.opt.use_subgroup_ops = true;
-    engine->net.opt.use_shader_local_memory = true;
     engine->net.opt.use_fp16_packed = gpuInfo.support_fp16_packed();
     engine->net.opt.use_fp16_storage = gpuInfo.support_fp16_storage();
     engine->net.opt.use_fp16_arithmetic = gpuInfo.support_fp16_arithmetic();
-    engine->net.opt.use_fp16_uniform = gpuInfo.support_fp16_uniform();
     engine->net.set_vulkan_device(vkdev);
 
     engine->blobAllocator = vkdev->acquire_blob_allocator();
@@ -184,7 +177,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngin
     __android_log_print(
             ANDROID_LOG_INFO,
             kTag,
-            "PP-MattingV2 Vulkan ready on %s (runtime=256 input=%d output=%d fp16-storage=%d fp16-arithmetic=%d)",
+            "PP-MattingV2 Vulkan ready on %s (input=%d output=%d fp16-storage=%d fp16-arithmetic=%d)",
             engine->gpuName.c_str(),
             engine->inputIndex,
             engine->outputIndex,
@@ -203,7 +196,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
         return nullptr;
     }
     if (env->GetArrayLength(inputArray) != kInputCount) {
-        ThrowJava(env, "java/lang/IllegalArgumentException", "PP-MattingV2 input must contain 3x256x256 floats");
+        ThrowJava(env, "java/lang/IllegalArgumentException", "PP-MattingV2 input must contain 3x512x512 floats");
         return nullptr;
     }
 
@@ -218,15 +211,15 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
     env->ReleaseFloatArrayElements(inputArray, inputData, JNI_ABORT);
 
     if (status != 0 || output.empty()) {
-        __android_log_print(ANDROID_LOG_ERROR, kTag, "256 extract failed with status=%d", status);
-        ThrowJava(env, "java/lang/RuntimeException", "ncnn Vulkan PP-MattingV2 256 inference failed");
+        __android_log_print(ANDROID_LOG_ERROR, kTag, "extract failed with status=%d", status);
+        ThrowJava(env, "java/lang/RuntimeException", "ncnn Vulkan PP-MattingV2 inference failed");
         return nullptr;
     }
     if (output.elembits() != 32 || output.total() < static_cast<size_t>(kPlane)) {
         __android_log_print(
                 ANDROID_LOG_ERROR,
                 kTag,
-                "Unexpected 256 output: bits=%d total=%zu dims=%d w=%d h=%d c=%d",
+                "Unexpected output: bits=%d total=%zu dims=%d w=%d h=%d c=%d",
                 output.elembits(),
                 output.total(),
                 output.dims,
@@ -236,7 +229,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
         ThrowJava(
                 env,
                 "java/lang/IllegalStateException",
-                "ncnn PP-MattingV2 output is smaller than a 256x256 fp32 alpha matte");
+                "ncnn PP-MattingV2 output is not a 512x512 fp32 alpha matte");
         return nullptr;
     }
 
