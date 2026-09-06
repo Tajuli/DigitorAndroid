@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -41,6 +40,7 @@ fun CutoutWorkspaceV50(
     modifier: Modifier = Modifier,
 ) {
     val state by vm.state.collectAsState()
+    val backendLabel by CutoutBackendStatusV50.label.collectAsState()
     val clip = state.project.clip(state.selectedClipId)
     val isVisualClip = clip != null && state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO
 
@@ -79,6 +79,7 @@ fun CutoutWorkspaceV50(
         }
         val analysisBusy = analysisStatus?.let { status ->
             val active = status.contains("starting", ignoreCase = true) ||
+                status.contains("selecting", ignoreCase = true) ||
                 status.contains("matting", ignoreCase = true) ||
                 status.contains("analysis", ignoreCase = true) ||
                 status.contains("refined frame", ignoreCase = true)
@@ -143,6 +144,8 @@ fun CutoutWorkspaceV50(
             }
 
             CutoutModeV43.PERSON -> {
+                BackendIndicatorV50(backendLabel)
+
                 Text("Analysis quality", fontSize = 9.sp, color = C50Text)
                 Row(
                     Modifier.fillMaxWidth(),
@@ -302,6 +305,39 @@ fun CutoutWorkspaceV50(
                 CutoutSliderV50("Spill", settings.spillSuppression, 0f..1f) {
                     vm.setSelectedCutoutV43(settings.copy(spillSuppression = it), status = "Spill suppression updated")
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BackendIndicatorV50(backendLabel: String?) {
+    val classification = when {
+        backendLabel == null -> "Processing: not measured yet"
+        backendLabel.contains("Hardware", ignoreCase = true) ||
+            backendLabel.contains("NNAPI", ignoreCase = true) -> "Processing: HARDWARE · NNAPI GPU/NPU"
+        backendLabel.contains("XNNPACK", ignoreCase = true) -> "Processing: CPU · XNNPACK"
+        else -> "Processing: CPU · ONNX Runtime"
+    }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = .07f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(classification, fontSize = 9.sp, color = C50Text)
+            Text(
+                backendLabel ?: "Tap Analyze to detect the PP-MattingV2 execution backend on this device.",
+                fontSize = 7.sp,
+                color = C50Text.copy(alpha = .62f),
+            )
+            if (backendLabel?.contains("NNAPI", ignoreCase = true) == true) {
+                Text(
+                    "NNAPI chooses the vendor accelerator; on supported devices this may be Mali GPU, NPU/DSP, with unsupported ORT ops still able to use CPU.",
+                    fontSize = 7.sp,
+                    color = C50Text.copy(alpha = .54f),
+                )
             }
         }
     }
