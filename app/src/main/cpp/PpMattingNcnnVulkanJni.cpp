@@ -11,9 +11,14 @@
 #include <gpu.h>
 #include <net.h>
 
+#ifndef PPMATTING_MODEL_SIZE
+#define PPMATTING_MODEL_SIZE 512
+#endif
+
 namespace {
 constexpr const char* kTag = "PpMattingNcnnVk";
-constexpr int kModelSize = 512;
+constexpr int kModelSize = PPMATTING_MODEL_SIZE;
+static_assert(kModelSize == 256 || kModelSize == 512, "PP-MattingV2 model size must be 256 or 512");
 constexpr int kPlane = kModelSize * kModelSize;
 constexpr int kInputCount = kPlane * 3;
 
@@ -103,11 +108,22 @@ void WarmUp(Engine* engine) {
         __android_log_print(
                 ANDROID_LOG_INFO,
                 kTag,
-                "Vulkan warm-up complete on %s in %.1f ms",
+                "PP-MattingV2 %dx%d Vulkan warm-up complete on %s in %.1f ms (out=%dx%dx%d)",
+                kModelSize,
+                kModelSize,
                 engine->gpuName.c_str(),
-                warmupMs);
+                warmupMs,
+                output.w,
+                output.h,
+                output.c);
     } else {
-        __android_log_print(ANDROID_LOG_WARN, kTag, "Vulkan warm-up failed with status=%d", status);
+        __android_log_print(
+                ANDROID_LOG_WARN,
+                kTag,
+                "PP-MattingV2 %dx%d Vulkan warm-up failed with status=%d",
+                kModelSize,
+                kModelSize,
+                status);
     }
     engine->lastInferenceMs = -1.0;
 }
@@ -177,7 +193,9 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngin
     __android_log_print(
             ANDROID_LOG_INFO,
             kTag,
-            "PP-MattingV2 Vulkan ready on %s (input=%d output=%d fp16-storage=%d fp16-arithmetic=%d)",
+            "PP-MattingV2 fixed %dx%d Vulkan ready on %s (input=%d output=%d fp16-storage=%d fp16-arithmetic=%d)",
+            kModelSize,
+            kModelSize,
             engine->gpuName.c_str(),
             engine->inputIndex,
             engine->outputIndex,
@@ -188,6 +206,12 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngin
     return reinterpret_cast<jlong>(engine.release());
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_modelSize(
+        JNIEnv*, jobject, jlong) {
+    return kModelSize;
+}
+
 extern "C" JNIEXPORT jfloatArray JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
         JNIEnv* env, jobject, jlong handle, jfloatArray inputArray) {
@@ -196,7 +220,10 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
         return nullptr;
     }
     if (env->GetArrayLength(inputArray) != kInputCount) {
-        ThrowJava(env, "java/lang/IllegalArgumentException", "PP-MattingV2 input must contain 3x512x512 floats");
+        ThrowJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "PP-MattingV2 input tensor size does not match the compiled fixed graph");
         return nullptr;
     }
 
@@ -219,7 +246,8 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
         __android_log_print(
                 ANDROID_LOG_ERROR,
                 kTag,
-                "Unexpected output: bits=%d total=%zu dims=%d w=%d h=%d c=%d",
+                "Unexpected output for fixed %d graph: bits=%d total=%zu dims=%d w=%d h=%d c=%d",
+                kModelSize,
                 output.elembits(),
                 output.total(),
                 output.dims,
@@ -229,7 +257,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
         ThrowJava(
                 env,
                 "java/lang/IllegalStateException",
-                "ncnn PP-MattingV2 output is not a 512x512 fp32 alpha matte");
+                "ncnn PP-MattingV2 output does not match the compiled fixed graph");
         return nullptr;
     }
 
