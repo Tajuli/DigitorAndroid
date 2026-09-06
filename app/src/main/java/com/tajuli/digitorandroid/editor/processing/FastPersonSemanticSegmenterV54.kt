@@ -2,7 +2,7 @@ package com.tajuli.digitorandroid.editor.processing
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Color
+import android.graphics.RectF
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.ByteBufferExtractor
 import com.google.mediapipe.tasks.core.BaseOptions
@@ -10,18 +10,16 @@ import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import kotlin.math.max
-import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 private const val PERSON_SEMANTIC_MODEL_ASSET_V54 = "selfie_multiclass_256x256.tflite"
-private const val PERSON_SEMANTIC_LONG_EDGE_V54 = 384
 
 /**
- * Lightweight per-frame neural person guide used between expensive PP-MattingV2 detail refreshes.
+ * Lightweight person *localizer* for PP-MattingV2 ROI selection.
  *
- * The already-packaged MediaPipe SelfieMulticlass model runs on every analyzed frame and treats
- * categories 1..5 (hair/body/face/clothes/accessories) as person. A tiny separable-like blur turns
- * the category mask into a soft guide so the temporal matte stage can preserve PP-MattingV2 hair
- * and edge detail instead of replacing it with a hard segmentation contour.
+ * Important: its segmentation result is never used as the final cutout matte. We only find the
+ * largest plausible person component and return one bounding box. PP-MattingV2 remains solely
+ * responsible for alpha/matting quality inside that ROI.
  */
 internal class FastPersonSemanticSegmenterV54(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -40,7 +38,8 @@ internal class FastPersonSemanticSegmenterV54(context: Context) : AutoCloseable 
         }
     }
 
-    fun segmentSoftPersonMask(bitmap: Bitmap): Bitmap? {
+    /** Returns one person bounding box in source-bitmap coordinates, or null when not confident. */
+    fun detectPersonBounds(bitmap: Bitmap): RectF? {
         val result = runCatching { segmenter.segment(BitmapImageBuilder(bitmap).build()) }
             .getOrElse { error ->
                 if (!usingGpuDelegate) throw error
@@ -53,50 +52,108 @@ internal class FastPersonSemanticSegmenterV54(context: Context) : AutoCloseable 
         val mpMask = result.categoryMask().orElse(null) ?: return null
         val width = mpMask.width.coerceAtLeast(1)
         val height = mpMask.height.coerceAtLeast(1)
+        val count = width * height
         val categories = ByteBufferExtractor.extract(mpMask)
         categories.rewind()
-        if (categories.remaining() < width * height) return null
+        if (categories.remaining() < count) return null
 
-        val alpha = IntArray(width * height)
-        for (i in alpha.indices) {
-            // Official SelfieMulticlass labels: 0 background; 1..5 are person-related classes.
-            alpha[i] = if ((categories.get().toInt() and 0xFF) == 0) 0 else 255
-        }
+        val labels = ByteArray(count)
+        categories.get(labels)
+        val visited = BooleanArray(count)
+        val queue = IntArray(count)
 
-        val soft1 = blur(alpha, width, height)
-        val soft2 = blur(soft1, width, height)
-        val pixels = IntArray(alpha.size) { index ->
-            val value = soft2[index].coerceIn(0, 255)
-            Color.argb(255, value, value, value)
-        }
-        val full = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        full.setPixels(pixels, 0, width, 0, 0, width, height)
+        val frameCx = (width - 1) * .5f
+        val frameCy = (height - 1) * .5f
+        val frameDiag = sqrt((width * width + height * height).toFloat()).coerceAtLeast(1f)
+        val minComponentArea = max(32, (count * .004f).toInt())
 
-        val longEdge = max(width, height)
-        if (longEdge <= PERSON_SEMANTIC_LONG_EDGE_V54) return full
-        val scale = PERSON_SEMANTIC_LONG_EDGE_V54.toFloat() / longEdge.toFloat()
-        return Bitmap.createScaledBitmap(
-            full,
-            (width * scale).roundToInt().coerceAtLeast(1),
-            (height * scale).roundToInt().coerceAtLeast(1),
-            true,
-        ).also { full.recycle() }
-    }
+        var bestScore = -1f
+        var bestArea = 0
+        var bestLeft = 0
+        var bestTop = 0
+        var bestRight = 0
+        var bestBottom = 0
 
-    private fun blur(source: IntArray, width: Int, height: Int): IntArray {
-        val out = IntArray(source.size)
-        for (y in 0 until height) {
-            for (x in 0 until width) {
-                var sum = source[y * width + x] * 4
-                var weight = 4
-                if (x > 0) { sum += source[y * width + x - 1]; weight++ }
-                if (x + 1 < width) { sum += source[y * width + x + 1]; weight++ }
-                if (y > 0) { sum += source[(y - 1) * width + x]; weight++ }
-                if (y + 1 < height) { sum += source[(y + 1) * width + x]; weight++ }
-                out[y * width + x] = sum / weight
+        for (start in 0 until count) {
+            if (visited[start]) continue
+            visited[start] = true
+            if ((labels[start].toInt() and 0xFF) == 0) continue
+
+            var head = 0
+            var tail = 0
+            queue[tail++] = start
+            var area = 0
+            var minX = width
+            var minY = height
+            var maxX = -1
+            var maxY = -1
+            var sumX = 0L
+            var sumY = 0L
+
+            while (head < tail) {
+                val index = queue[head++]
+                val y = index / width
+                val x = index - y * width
+                area++
+                sumX += x
+                sumY += y
+                if (x < minX) minX = x
+                if (x > maxX) maxX = x
+                if (y < minY) minY = y
+                if (y > maxY) maxY = y
+
+                if (x > 0) enqueuePerson(index - 1, labels, visited, queue, tail).also { tail = it }
+                if (x + 1 < width) enqueuePerson(index + 1, labels, visited, queue, tail).also { tail = it }
+                if (y > 0) enqueuePerson(index - width, labels, visited, queue, tail).also { tail = it }
+                if (y + 1 < height) enqueuePerson(index + width, labels, visited, queue, tail).also { tail = it }
+            }
+
+            if (area < minComponentArea || maxX < minX || maxY < minY) continue
+            val boxW = maxX - minX + 1
+            val boxH = maxY - minY + 1
+            // Reject tiny furniture/flower false positives even if they happen to be isolated.
+            if (boxW < width * .05f || boxH < height * .10f) continue
+
+            val cx = sumX.toFloat() / area.toFloat()
+            val cy = sumY.toFloat() / area.toFloat()
+            val centerDistance = sqrt((cx - frameCx) * (cx - frameCx) + (cy - frameCy) * (cy - frameCy))
+            val centerBonus = 1f + .30f * (1f - (centerDistance / frameDiag).coerceIn(0f, 1f))
+            val verticalBonus = 1f + .12f * (boxH.toFloat() / height.toFloat()).coerceIn(0f, 1f)
+            val score = area.toFloat() * centerBonus * verticalBonus
+
+            if (score > bestScore) {
+                bestScore = score
+                bestArea = area
+                bestLeft = minX
+                bestTop = minY
+                bestRight = maxX + 1
+                bestBottom = maxY + 1
             }
         }
-        return out
+
+        if (bestScore <= 0f || bestArea < minComponentArea) return null
+        val scaleX = bitmap.width.toFloat() / width.toFloat()
+        val scaleY = bitmap.height.toFloat() / height.toFloat()
+        return RectF(
+            bestLeft * scaleX,
+            bestTop * scaleY,
+            bestRight * scaleX,
+            bestBottom * scaleY,
+        )
+    }
+
+    private fun enqueuePerson(
+        index: Int,
+        labels: ByteArray,
+        visited: BooleanArray,
+        queue: IntArray,
+        tail: Int,
+    ): Int {
+        if (visited[index]) return tail
+        visited[index] = true
+        if ((labels[index].toInt() and 0xFF) == 0) return tail
+        queue[tail] = index
+        return tail + 1
     }
 
     override fun close() {
