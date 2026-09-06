@@ -7,7 +7,10 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+#ifdef DIGITOR_PADDLE_OPENCL
 #include "paddle_api.h"
+#endif
 
 namespace {
 constexpr const char* kTag = "PpMattingOpenCL";
@@ -15,10 +18,12 @@ constexpr int kModelSize = 512;
 constexpr int kPlane = kModelSize * kModelSize;
 constexpr int kInputCount = kPlane * 3;
 
+#ifdef DIGITOR_PADDLE_OPENCL
 struct Engine {
     std::shared_ptr<paddle::lite_api::PaddlePredictor> predictor;
     double lastInferenceMs = 0.0;
 };
+#endif
 
 std::string JStringToString(JNIEnv* env, jstring value) {
     if (value == nullptr) return {};
@@ -37,16 +42,21 @@ void ThrowJava(JNIEnv* env, const char* type, const std::string& message) {
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_PaddleLiteOpenClNativeV51_isOpenClAvailable(
         JNIEnv*, jobject) {
+#ifdef DIGITOR_PADDLE_OPENCL
     try {
         return ::IsOpenCLBackendValid(false) ? JNI_TRUE : JNI_FALSE;
     } catch (...) {
         return JNI_FALSE;
     }
+#else
+    return JNI_FALSE;
+#endif
 }
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_PaddleLiteOpenClNativeV51_create(
         JNIEnv* env, jobject, jstring modelPath, jint threads) {
+#ifdef DIGITOR_PADDLE_OPENCL
     try {
         if (!::IsOpenCLBackendValid(false)) return 0;
 
@@ -67,11 +77,18 @@ Java_com_tajuli_digitorandroid_editor_processing_PaddleLiteOpenClNativeV51_creat
         __android_log_print(ANDROID_LOG_ERROR, kTag, "create failed with native exception");
         return 0;
     }
+#else
+    (void)env;
+    (void)modelPath;
+    (void)threads;
+    return 0;
+#endif
 }
 
 extern "C" JNIEXPORT jfloatArray JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_PaddleLiteOpenClNativeV51_run(
         JNIEnv* env, jobject, jlong handle, jfloatArray inputArray) {
+#ifdef DIGITOR_PADDLE_OPENCL
     if (handle == 0 || inputArray == nullptr) {
         ThrowJava(env, "java/lang/IllegalStateException", "Paddle Lite OpenCL engine is not initialized");
         return nullptr;
@@ -115,17 +132,32 @@ Java_com_tajuli_digitorandroid_editor_processing_PaddleLiteOpenClNativeV51_run(
         ThrowJava(env, "java/lang/RuntimeException", "Paddle Lite OpenCL inference failed with native exception");
         return nullptr;
     }
+#else
+    (void)handle;
+    (void)inputArray;
+    ThrowJava(env, "java/lang/IllegalStateException", "Paddle Lite OpenCL is available only in arm64 phone builds");
+    return nullptr;
+#endif
 }
 
 extern "C" JNIEXPORT jdouble JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_PaddleLiteOpenClNativeV51_lastInferenceMs(
         JNIEnv*, jobject, jlong handle) {
+#ifdef DIGITOR_PADDLE_OPENCL
     if (handle == 0) return -1.0;
     return reinterpret_cast<Engine*>(handle)->lastInferenceMs;
+#else
+    (void)handle;
+    return -1.0;
+#endif
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_PaddleLiteOpenClNativeV51_destroy(
         JNIEnv*, jobject, jlong handle) {
+#ifdef DIGITOR_PADDLE_OPENCL
     if (handle != 0) delete reinterpret_cast<Engine*>(handle);
+#else
+    (void)handle;
+#endif
 }
