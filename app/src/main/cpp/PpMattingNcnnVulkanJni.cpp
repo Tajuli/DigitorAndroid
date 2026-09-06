@@ -13,7 +13,7 @@
 
 namespace {
 constexpr const char* kTag = "PpMattingNcnnVk";
-constexpr int kModelSize = 256;
+constexpr int kModelSize = 512;
 constexpr int kPlane = kModelSize * kModelSize;
 constexpr int kInputCount = kPlane * 3;
 
@@ -21,8 +21,6 @@ std::once_flag gGpuInitOnce;
 int gGpuInitResult = -1;
 
 bool EnsureVulkanRuntime() {
-    // ncnn Android prebuilts are compiled with -fno-exceptions. Keep this bridge exception-free
-    // as well and rely on ncnn's explicit integer return codes.
     std::call_once(gGpuInitOnce, []() {
         gGpuInitResult = ncnn::create_gpu_instance();
         if (gGpuInitResult == 0 && ncnn::get_gpu_count() <= 0) {
@@ -96,9 +94,6 @@ int RunInference(Engine* engine, const ncnn::Mat& input, ncnn::Mat& output, doub
 }
 
 void WarmUp(Engine* engine) {
-    // The first Vulkan extraction may include shader/pipeline creation and driver-side setup.
-    // Prime that once during engine creation so per-frame Analyze latency reflects steady-state GPU
-    // execution instead of charging the first video frame for compilation/allocation work.
     std::vector<float> zeros(kInputCount, 0.0f);
     ncnn::Mat input(kModelSize, kModelSize, 3, zeros.data(), sizeof(float));
     ncnn::Mat output;
@@ -150,9 +145,6 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngin
     const char* deviceName = gpuInfo.device_name();
     engine->gpuName = (deviceName != nullptr && deviceName[0] != '\0') ? deviceName : "Vulkan GPU";
 
-    // PP-MattingV2 inference is dispatched to Vulkan. Use every fp16 capability exposed by the
-    // Mali driver and retain CPU execution only where an individual converted layer has no Vulkan
-    // kernel. The ncnn model itself is already converted with fp16 weights.
     engine->net.opt.use_vulkan_compute = true;
     engine->net.opt.num_threads = std::max(1, static_cast<int>(threads));
     engine->net.opt.use_fp16_packed = gpuInfo.support_fp16_packed();
@@ -160,8 +152,6 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngin
     engine->net.opt.use_fp16_arithmetic = gpuInfo.support_fp16_arithmetic();
     engine->net.set_vulkan_device(vkdev);
 
-    // Reuse Vulkan memory pools across all frames. Without this, every fresh Extractor can churn
-    // staging/blob allocations and force avoidable driver synchronization on low-end Mali GPUs.
     engine->blobAllocator = vkdev->acquire_blob_allocator();
     engine->workspaceAllocator = vkdev->acquire_blob_allocator();
     engine->stagingAllocator = vkdev->acquire_staging_allocator();
@@ -187,11 +177,10 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngin
     __android_log_print(
             ANDROID_LOG_INFO,
             kTag,
-            "PP-MattingV2 Vulkan ready on %s (input=%d output=%d size=%d fp16-storage=%d fp16-arithmetic=%d)",
+            "PP-MattingV2 Vulkan ready on %s (input=%d output=%d fp16-storage=%d fp16-arithmetic=%d)",
             engine->gpuName.c_str(),
             engine->inputIndex,
             engine->outputIndex,
-            kModelSize,
             gpuInfo.support_fp16_storage() ? 1 : 0,
             gpuInfo.support_fp16_arithmetic() ? 1 : 0);
 
@@ -207,7 +196,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
         return nullptr;
     }
     if (env->GetArrayLength(inputArray) != kInputCount) {
-        ThrowJava(env, "java/lang/IllegalArgumentException", "PP-MattingV2 fast input must contain 3x256x256 floats");
+        ThrowJava(env, "java/lang/IllegalArgumentException", "PP-MattingV2 input must contain 3x512x512 floats");
         return nullptr;
     }
 
@@ -215,7 +204,6 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
     jfloat* inputData = env->GetFloatArrayElements(inputArray, nullptr);
     if (inputData == nullptr) return nullptr;
 
-    // ncnn's 3-D Mat is planar CHW, exactly matching the FloatArray prepared by Kotlin.
     ncnn::Mat input(kModelSize, kModelSize, 3, static_cast<void*>(inputData), sizeof(float));
     ncnn::Mat output;
     const int status = RunInference(engine, input, output, &engine->lastInferenceMs);
@@ -241,7 +229,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
         ThrowJava(
                 env,
                 "java/lang/IllegalStateException",
-                "ncnn PP-MattingV2 output is not a 256x256 fp32 alpha matte");
+                "ncnn PP-MattingV2 output is not a 512x512 fp32 alpha matte");
         return nullptr;
     }
 
@@ -271,6 +259,4 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_destroy(
         JNIEnv*, jobject, jlong handle) {
     if (handle != 0) delete reinterpret_cast<Engine*>(handle);
-    // Keep ncnn's process-wide Vulkan instance alive. Repeated create/destroy during editor use is
-    // safer and faster than tearing the GPU driver down between Analyze operations.
 }
