@@ -10,9 +10,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # Phone APKs from this job package a genuine fixed-shape PP-MattingV2 256 graph. The 512 ONNX
+      # Phone APKs from this job package a genuine fixed-shape PP-MattingV2 384 graph. The 512 ONNX
       # remains packaged only as the lazy CPU reliability fallback.
-      DIGITOR_PPMATTING_TRUE_256: '1'
+      DIGITOR_PPMATTING_TRUE_384: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -20,7 +20,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Export genuine fixed PP-MattingV2 256 graph
+      - name: Export genuine fixed PP-MattingV2 384 graph
         shell: bash
         run: |
           set -euo pipefail
@@ -41,19 +41,19 @@ jobs:
             -o "$PADDLESEG_DIR/Matting/pretrained_models/ppmattingv2-stdc1-human_512.pdparams" \
             https://paddleseg.bj.bcebos.com/matting/models/ppmattingv2-stdc1-human_512.pdparams
 
-          TRUE256_ONNX="$GITHUB_WORKSPACE/app/build/generated/ppMattingV2True256/ppmattingv2_stdc1_human_256.onnx"
+          TRUE384_ONNX="$GITHUB_WORKSPACE/app/build/generated/ppMattingV2True384/ppmattingv2_stdc1_human_384.onnx"
           PADDLESEG_DIR="$PADDLESEG_DIR" \
-          OUTPUT_ONNX="$TRUE256_ONNX" \
-            bash "$GITHUB_WORKSPACE/tools/ppmattingv2/export_true_256.sh"
+          OUTPUT_ONNX="$TRUE384_ONNX" \
+            bash "$GITHUB_WORKSPACE/tools/ppmattingv2/export_true_384.sh"
 
-          python - "$TRUE256_ONNX" <<'PY'
+          python - "$TRUE384_ONNX" <<'PY'
           import os, sys, onnx
           p = sys.argv[1]
           m = onnx.load(p)
           onnx.checker.check_model(m)
           dims = [d.dim_value for d in m.graph.input[0].type.tensor_type.shape.dim]
-          assert dims == [1, 3, 256, 256], dims
-          print(f"True-256 ONNX ready: {os.path.getsize(p) / 1024 / 1024:.1f} MiB, input={dims}")
+          assert dims == [1, 3, 384, 384], dims
+          print(f"True-384 ONNX ready: {os.path.getsize(p) / 1024 / 1024:.1f} MiB, input={dims}")
           PY
 
       - uses: actions/setup-java@v4
