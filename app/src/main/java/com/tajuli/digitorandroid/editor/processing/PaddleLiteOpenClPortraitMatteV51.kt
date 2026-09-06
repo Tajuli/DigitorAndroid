@@ -38,16 +38,15 @@ internal object PaddleLiteOpenClNativeV51 {
  * path avoids Android NNAPI entirely and is intended for Mali-G series devices such as Mali-G57.
  */
 internal class PaddleLiteOpenClPortraitMatteV51 private constructor(
-    private val context: Context,
     private var handle: Long,
 ) : PortraitMatteBackendV50 {
-    private companion object {
+    internal companion object {
         const val MODEL_ASSET = "ppmattingv2_stdc1_human_512_opencl.nb"
         const val MODEL_SIZE = 512
         const val PLANE = MODEL_SIZE * MODEL_SIZE
         const val INPUT_COUNT = PLANE * 3
 
-        fun materializeModel(context: Context): File {
+        private fun materializeModel(context: Context): File {
             val target = File(context.codeCacheDir, MODEL_ASSET)
             val expected = context.assets.open(MODEL_ASSET).use { it.available().toLong() }
             if (!target.isFile || target.length() != expected) {
@@ -57,6 +56,19 @@ internal class PaddleLiteOpenClPortraitMatteV51 private constructor(
                 }
             }
             return target
+        }
+
+        fun tryCreate(context: Context): PaddleLiteOpenClPortraitMatteV51? {
+            // The bundled Paddle Lite OpenCL binary is arm64 for the Z60/Mali-G57 target.
+            if (Build.SUPPORTED_ABIS.none { it == "arm64-v8a" }) return null
+            if (!PaddleLiteOpenClNativeV51.available()) return null
+            return runCatching {
+                val appContext = context.applicationContext
+                val model = materializeModel(appContext)
+                val handle = PaddleLiteOpenClNativeV51.createEngine(model.absolutePath, 2)
+                check(handle != 0L) { "Paddle Lite could not create the OpenCL predictor" }
+                PaddleLiteOpenClPortraitMatteV51(handle)
+            }.getOrNull()
         }
     }
 
@@ -113,19 +125,5 @@ internal class PaddleLiteOpenClPortraitMatteV51 private constructor(
         PaddleLiteOpenClNativeV51.release(old)
         if (!inputSquare.isRecycled) inputSquare.recycle()
         if (!alphaSquare.isRecycled) alphaSquare.recycle()
-    }
-
-    internal companion object Factory {
-        fun tryCreate(context: Context): PaddleLiteOpenClPortraitMatteV51? {
-            // The bundled Paddle Lite OpenCL binary is arm64 for the Z60/Mali-G57 target.
-            if (Build.SUPPORTED_ABIS.none { it == "arm64-v8a" }) return null
-            if (!PaddleLiteOpenClNativeV51.available()) return null
-            return runCatching {
-                val model = materializeModel(context.applicationContext)
-                val handle = PaddleLiteOpenClNativeV51.createEngine(model.absolutePath, 2)
-                check(handle != 0L) { "Paddle Lite could not create the OpenCL predictor" }
-                PaddleLiteOpenClPortraitMatteV51(context.applicationContext, handle)
-            }.getOrNull()
-        }
     }
 }
