@@ -143,31 +143,35 @@ internal class PersonRoiMatteV55(
     }
 
     private fun applyBackgroundVeto(matte: Bitmap, fullGate: Bitmap, roi: Rect): Bitmap {
-        val gateCrop = Bitmap.createBitmap(fullGate, roi.left, roi.top, roi.width(), roi.height())
-        val gate = if (gateCrop.width == matte.width && gateCrop.height == matte.height) {
-            gateCrop
-        } else {
-            Bitmap.createScaledBitmap(gateCrop, matte.width, matte.height, true).also { gateCrop.recycle() }
+        check(matte.width == roi.width() && matte.height == roi.height()) {
+            "PP-MattingV2 ROI matte size does not match source ROI"
+        }
+        check(fullGate.width >= roi.right && fullGate.height >= roi.bottom) {
+            "Person gate does not match analyzed frame coordinates"
         }
 
-        try {
-            val count = matte.width * matte.height
-            val mattePixels = IntArray(count)
-            val gatePixels = IntArray(count)
-            val out = IntArray(count)
-            matte.getPixels(mattePixels, 0, matte.width, 0, 0, matte.width, matte.height)
-            gate.getPixels(gatePixels, 0, matte.width, 0, 0, matte.width, matte.height)
+        val count = matte.width * matte.height
+        val mattePixels = IntArray(count)
+        val gatePixels = IntArray(count)
+        val out = IntArray(count)
+        matte.getPixels(mattePixels, 0, matte.width, 0, 0, matte.width, matte.height)
+        fullGate.getPixels(
+            gatePixels,
+            0,
+            matte.width,
+            roi.left,
+            roi.top,
+            matte.width,
+            matte.height,
+        )
 
-            for (i in 0 until count) {
-                val alpha = Color.red(mattePixels[i])
-                val allow = Color.red(gatePixels[i])
-                val value = (alpha * allow + 127) / 255
-                out[i] = Color.argb(255, value, value, value)
-            }
-            return Bitmap.createBitmap(out, matte.width, matte.height, Bitmap.Config.ARGB_8888)
-        } finally {
-            if (!gate.isRecycled) gate.recycle()
+        for (i in 0 until count) {
+            val alpha = Color.red(mattePixels[i])
+            val allow = Color.red(gatePixels[i])
+            val value = (alpha * allow + 127) / 255
+            out[i] = Color.argb(255, value, value, value)
         }
+        return Bitmap.createBitmap(out, matte.width, matte.height, Bitmap.Config.ARGB_8888)
     }
 
     private fun intersectionOverUnion(a: RectF, b: RectF): Float {
