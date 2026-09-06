@@ -124,7 +124,10 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                             onAnchorStored = { completed ->
                                 if (completed == 1 || completed % progressStride == 0) {
                                     viewModelScope.launch(Dispatchers.Main) {
-                                        setEditorStatusV19("Pro Cutout · $label · $completed refined frame(s)")
+                                        val backendPart = resolvedBackend?.let { " · $it" }.orEmpty()
+                                        setEditorStatusV19(
+                                            "Pro Cutout · $label$backendPart · $completed refined frame(s)",
+                                        )
                                     }
                                 }
                             },
