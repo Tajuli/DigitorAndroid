@@ -20,6 +20,8 @@ import kotlinx.coroutines.withContext
 
 private val personCutoutAnalysisInFlightV43 = ConcurrentHashMap.newKeySet<String>()
 
+internal fun isPersonCutoutAnalysisRunningV43(): Boolean = personCutoutAnalysisInFlightV43.isNotEmpty()
+
 /** V49 bridge retains historical symbols so existing project/editor code remains source-compatible. */
 fun EditorViewModelV4.setSelectedCutoutV43(
     settings: ClipCutoutV43,

@@ -84,6 +84,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.util.UnstableApi
 import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
+import com.tajuli.digitorandroid.editor.model.CutoutModeV43
+import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
@@ -102,6 +104,7 @@ import com.tajuli.digitorandroid.editor.preview.MultitrackAudioPreviewEngine
 import com.tajuli.digitorandroid.editor.processing.ExportProgress
 import com.tajuli.digitorandroid.editor.processing.ExportQuality
 import com.tajuli.digitorandroid.editor.processing.ProcessingRouter
+import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 import com.tajuli.digitorandroid.editor.render.Media3CompositionBuilder
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -294,6 +297,21 @@ fun DigitorEditorScreenV7(
 
     fun startExport(destination: Uri) {
         if (state.project.durationUs <= 0L) { exportStatus = "Timeline is empty"; return }
+        if (isPersonCutoutAnalysisRunningV43()) {
+            exportStatus = "Wait for Pro Cutout analysis to finish before Export"
+            return
+        }
+        val incompleteCutout = state.project.tracks
+            .filter { it.kind == TrackKind.VIDEO }
+            .flatMap { it.clips }
+            .firstOrNull { clip ->
+                clip.resolvedCutoutV43().mode == CutoutModeV43.PERSON &&
+                    !hasPersonCutoutCoverageV43(appContext, clip)
+            }
+        if (incompleteCutout != null) {
+            exportStatus = "Pro Cutout matte incomplete · Analyze the clip before Export"
+            return
+        }
         val exportProject = state.project
         val exportCursorUs = cursorUs
         val exportQualitySnapshot = exportQuality
@@ -398,7 +416,13 @@ fun DigitorEditorScreenV7(
                 onLoadProject = { stopForEdit(); vm.loadProject() },
                 onHome = { stopForEdit(); onHome() },
                 onImport = ::launchImport,
-                onExport = { showExportDialog = true },
+                onExport = {
+                    if (isPersonCutoutAnalysisRunningV43()) {
+                        exportStatus = "Wait for Pro Cutout analysis to finish before Export"
+                    } else {
+                        showExportDialog = true
+                    }
+                },
             )
             ProjectActionsBarV7(
                 canUndo = state.canUndo,

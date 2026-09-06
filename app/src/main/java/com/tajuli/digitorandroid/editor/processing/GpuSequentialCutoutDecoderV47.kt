@@ -275,7 +275,8 @@ private class OesFrameReaderV47(
         )
         GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uRotation"), rotationDegrees.toFloat())
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-        checkGlV47("render sequential decode")
+        GLES20.glFinish()
+        checkGlV47("render sequential decode + finish")
 
         readbackBytes.clear()
         GLES20.glReadPixels(

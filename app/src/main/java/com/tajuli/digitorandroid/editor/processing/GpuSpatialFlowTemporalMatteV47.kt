@@ -153,7 +153,8 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             1f / flowSize.second.coerceAtLeast(1).toFloat(),
         )
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-        checkGl("render V47 matte")
+        GLES20.glFinish()
+        checkGl("render V47 matte + finish")
     }
 
     private fun readOutputMatte(width: Int, height: Int): Bitmap {
