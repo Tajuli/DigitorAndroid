@@ -147,10 +147,21 @@ fun CutoutWorkspaceV50(
             }
 
             CutoutModeV43.PERSON -> {
-                val cpuBackend = analysisStatus?.contains("CPU", ignoreCase = true) == true ||
-                    analysisStatus?.contains("ARM", ignoreCase = true) == true
-                val gpuBackend = analysisStatus?.contains("OpenCL", ignoreCase = true) == true ||
-                    analysisStatus?.contains("GPU", ignoreCase = true) == true
+                // Only claim GPU after the PP-MattingV2 backend has actually resolved.
+                // The initial "starting ... OpenCL pipeline" status is not proof of GPU execution.
+                val baseGpuBackend = analysisStatus?.contains(
+                    "PP-MattingV2 · Paddle Lite OpenCL GPU",
+                    ignoreCase = true,
+                ) == true
+                val baseCpuBackend = analysisStatus?.contains(
+                    "PP-MattingV2 · Paddle Lite ARM CPU",
+                    ignoreCase = true,
+                ) == true || analysisStatus?.contains(
+                    "PP-MattingV2 · CPU",
+                    ignoreCase = true,
+                ) == true
+                val helperCpuFallback = baseGpuBackend &&
+                    analysisStatus?.contains("CPU fallback", ignoreCase = true) == true
                 val badgeText: String
                 val badgeColor: Color
                 when {
@@ -158,11 +169,15 @@ fun CutoutWorkspaceV50(
                         badgeText = "CUTOUT: GPU FAILED"
                         badgeColor = C50FailedBadge
                     }
-                    cpuBackend -> {
+                    baseCpuBackend -> {
                         badgeText = "CUTOUT: CPU"
                         badgeColor = C50CpuBadge
                     }
-                    gpuBackend || personReady -> {
+                    baseGpuBackend && helperCpuFallback -> {
+                        badgeText = "CUTOUT: GPU + CPU"
+                        badgeColor = C50CpuBadge
+                    }
+                    baseGpuBackend || personReady -> {
                         badgeText = "CUTOUT: GPU"
                         badgeColor = C50GpuBadge
                     }
