@@ -9,9 +9,10 @@ import java.security.MessageDigest
 private const val V50_CACHE_DIR_NAME = "person_cutout_masks_v50_ppmattingv2_hair_spatialflow_512"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-// V59 intentionally invalidates every pre-guard generation so stripe-corrupted or partial mattes
-// from older APKs can never be reused by preview/export after installing this build.
-private const val V47_GENERATION_VERSION = "adaptive-v59-ppmattingv2-opencl-fp32-safe-flow-artifact-guard-r1"
+// V60 invalidates V59 generations because the new guard protects the PP-MattingV2 OpenCL base
+// tensor itself, before hair/temporal refinement. Older cached anchors may already contain a bad
+// base matte that the post-refinement V59 guard could not identify.
+private const val V47_GENERATION_VERSION = "adaptive-v60-ppmattingv2-opencl-fp32-base-retry-hold-safe-flow-r1"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
