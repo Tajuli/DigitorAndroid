@@ -19,6 +19,7 @@ import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskFrameV43
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
+import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 
 /**
  * Shared GPU alpha stage for V44 Pro Cutout and Chroma Key.
@@ -126,6 +127,16 @@ internal class CutoutEffectV43 private constructor(
         }
 
         private fun personBracket(clip: TimelineClip, sourceUs: Long): MaskBracket {
+            // Do not interpolate sparse masks while Analyze is still writing the generation.
+            // Preview stays visually stable on the original frame; export must wait for completion.
+            if (!hasPersonCutoutCoverageV43(appContext, clip)) {
+                if (!preview) {
+                    throw VideoFrameProcessingException(
+                        IllegalStateException("Pro Cutout analysis is incomplete; finish Analyze before export"),
+                    )
+                }
+                return MaskBracket.empty()
+            }
             val frames = PersonCutoutMaskStoreV43.index(appContext, clip).frames
             if (frames.isEmpty()) return MaskBracket.empty()
             if (frames.size == 1) return MaskBracket(frames[0], frames[0], 0f)

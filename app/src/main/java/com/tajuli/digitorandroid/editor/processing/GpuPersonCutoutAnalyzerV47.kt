@@ -12,6 +12,7 @@ import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -338,7 +339,18 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                     temporalStrength = temporalStrength,
                 )
             }
-            result.getOrNull()?.let { return it }
+            result.getOrNull()?.let { refined ->
+                if (isRefinedMatteSaneV59(baseMatte, refined)) return refined
+
+                // Some mobile GPU drivers can return a framebuffer with tile/stripe-corrupted
+                // alpha without reporting a GL error. Do not persist it or feed it into temporal
+                // history. Keep the current PP-MattingV2 matte authoritative for this anchor.
+                if (!refined.isRecycled) refined.recycle()
+                runCatching { gpu.close() }
+                gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
+                return baseMatte.copy(Bitmap.Config.ARGB_8888, false)
+                    ?: error("Could not preserve clean PP-MattingV2 matte after GPU flow anomaly")
+            }
             runCatching { gpu.close() }
             gpuTemporal = null
         }
@@ -349,6 +361,50 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         } finally {
             fused.recycle()
         }
+    }
+
+    /** Reject catastrophic stripe/tile alpha changes while allowing normal edge refinement. */
+    private fun isRefinedMatteSaneV59(base: Bitmap, refined: Bitmap): Boolean {
+        if (base.width != refined.width || base.height != refined.height) return false
+        if (base.width <= 0 || base.height <= 0) return false
+
+        val stepX = (base.width / 48).coerceAtLeast(1)
+        val stepY = (base.height / 48).coerceAtLeast(1)
+        var samples = 0
+        var absDelta = 0f
+        var leakedBackground = 0
+        var lostForeground = 0
+        var baseForeground = 0
+        var refinedForeground = 0
+
+        var y = stepY / 2
+        while (y < base.height) {
+            var x = stepX / 2
+            while (x < base.width) {
+                val b = Color.red(base.getPixel(x, y)) / 255f
+                val r = Color.red(refined.getPixel(x, y)) / 255f
+                absDelta += abs(b - r)
+                if (b <= .05f && r >= .35f) leakedBackground++
+                if (b >= .85f && r <= .35f) lostForeground++
+                if (b >= .50f) baseForeground++
+                if (r >= .50f) refinedForeground++
+                samples++
+                x += stepX
+            }
+            y += stepY
+        }
+        if (samples == 0) return false
+
+        val n = samples.toFloat()
+        val meanAbs = absDelta / n
+        val leakRate = leakedBackground / n
+        val lossRate = lostForeground / n
+        val baseFgRate = baseForeground / n
+        val refinedFgRate = refinedForeground / n
+        return meanAbs <= .13f &&
+            leakRate <= .035f &&
+            lossRate <= .06f &&
+            refinedFgRate <= baseFgRate * 1.35f + .07f
     }
 
     private fun fuseHairCpu(base: Bitmap, hair: Bitmap?, strength: Float): Bitmap {
