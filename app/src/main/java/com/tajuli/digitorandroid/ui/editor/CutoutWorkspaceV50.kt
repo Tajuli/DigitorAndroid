@@ -314,6 +314,7 @@ fun CutoutWorkspaceV50(
 private fun BackendIndicatorV50(backendLabel: String?) {
     val classification = when {
         backendLabel == null -> "Processing: not measured yet"
+        backendLabel.contains("Paddle Lite OpenCL", ignoreCase = true) -> "Processing: GPU · PP-MattingV2 OpenCL"
         backendLabel.contains("Hardware", ignoreCase = true) ||
             backendLabel.contains("NNAPI", ignoreCase = true) -> "Processing: HARDWARE · NNAPI GPU/NPU"
         backendLabel.contains("XNNPACK", ignoreCase = true) -> "Processing: CPU · XNNPACK"
@@ -332,8 +333,13 @@ private fun BackendIndicatorV50(backendLabel: String?) {
                 fontSize = 7.sp,
                 color = C50Text.copy(alpha = .62f),
             )
-            if (backendLabel?.contains("NNAPI", ignoreCase = true) == true) {
-                Text(
+            when {
+                backendLabel?.contains("Paddle Lite OpenCL", ignoreCase = true) == true -> Text(
+                    "Direct OpenCL: PP-MattingV2 inference is assigned to the mobile GPU; ARM is retained only for unsupported operators.",
+                    fontSize = 7.sp,
+                    color = C50Text.copy(alpha = .54f),
+                )
+                backendLabel?.contains("NNAPI", ignoreCase = true) == true -> Text(
                     "NNAPI chooses the vendor accelerator; on supported devices this may be Mali GPU, NPU/DSP, with unsupported ORT ops still able to use CPU.",
                     fontSize = 7.sp,
                     color = C50Text.copy(alpha = .54f),
