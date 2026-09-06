@@ -117,10 +117,9 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
     }
 }
 
-// V56 keeps the exact PP-MattingV2/STDC1 512 network that produced CI804 quality, but converts the
-// official Paddle inference model into two explicit Paddle Lite programs. The OpenCL program has no
-// ARM kernels, so a successful predictor/run is guaranteed to be GPU-backed rather than a silent
-// mixed CPU graph. The separate ARM program is the same network and is used only as the fallback.
+// V57 keeps the exact PP-MattingV2/STDC1 512 network that produced CI804 quality and converts the
+// official Paddle inference model into one OpenCL-only Paddle Lite program. The generated model has
+// no ARM kernels, so a successful predictor/run is GPU-backed rather than a silent mixed CPU graph.
 // Large third-party artifacts remain build-generated instead of entering git history.
 val paddleLiteVersionV56 = "v2.12"
 val generatedPaddleLiteRuntimeV56 = layout.buildDirectory.dir("generated/paddleLiteRuntimeV56")
@@ -200,12 +199,9 @@ val generatedPpMattingV2Assets = layout.buildDirectory.dir("generated/ppMattingV
 val ppMattingV2OpenClModelV56 = generatedPpMattingV2Assets.map {
     it.file("ppmattingv2_stdc1_human_512_opencl.nb")
 }
-val ppMattingV2ArmModelV56 = generatedPpMattingV2Assets.map {
-    it.file("ppmattingv2_stdc1_human_512_arm.nb")
-}
 
 val generatePpMattingV2PaddleLiteModelsV56 by tasks.registering {
-    outputs.files(ppMattingV2OpenClModelV56, ppMattingV2ArmModelV56)
+    outputs.file(ppMattingV2OpenClModelV56)
     doLast {
         val downloadDir = layout.buildDirectory.dir("downloads/paddleLiteV56").get().asFile
         val modelArchive = File(downloadDir, "ppmattingv2-stdc1-human_512.zip")
@@ -282,9 +278,8 @@ val generatePpMattingV2PaddleLiteModelsV56 by tasks.registering {
             )
         }
 
-        // GPU and CPU stay as separate programs. The OpenCL model cannot silently execute ARM ops.
+        // GPU-only program: no ARM target is generated or packaged in PR #57.
         optimize("opencl", ppMattingV2OpenClModelV56.get().asFile, enableFp16 = true)
-        optimize("arm", ppMattingV2ArmModelV56.get().asFile, enableFp16 = false)
     }
 }
 
