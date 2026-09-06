@@ -18,6 +18,7 @@ internal object NcnnVulkanNativeV52 {
 
     external fun isVulkanAvailable(): Boolean
     external fun createEngine(paramPath: String, binPath: String, threads: Int): Long
+    external fun modelSize(handle: Long): Int
     external fun run(handle: Long, input: FloatArray): FloatArray
     external fun lastInferenceMs(handle: Long): Double
     external fun gpuName(handle: Long): String
@@ -25,29 +26,28 @@ internal object NcnnVulkanNativeV52 {
 }
 
 /**
- * PP-MattingV2/STDC1 512 using ncnn's Vulkan compute backend.
+ * PP-MattingV2/STDC1 using ncnn Vulkan.
  *
- * The current exported graph is fixed to 512. Feeding a 256 tensor into that converted graph can
- * produce shape/stride corruption rather than a valid matte, so keep runtime input/output at 512
- * until a real 256 PP-MattingV2 export is available.
+ * The native library is compiled against the exact fixed graph packaged in the APK. Production
+ * phone CI uses a genuine PaddleSeg-exported 256x256 graph; ordinary/local builds can still use the
+ * proven 512 graph. Kotlin asks the native engine for its compiled size and allocates all input /
+ * alpha buffers to that exact profile, so a 512 graph can never accidentally receive 256 tensors.
  */
 internal class NcnnVulkanPortraitMatteV52 private constructor(
     private var handle: Long,
     private val gpuName: String,
+    private val modelSize: Int,
 ) : PortraitMatteBackendV50 {
     internal companion object {
-        const val PARAM_ASSET = "ppmattingv2_stdc1_human_512_vulkan.ncnn.param"
-        const val BIN_ASSET = "ppmattingv2_stdc1_human_512_vulkan.ncnn.bin"
-        const val MODEL_SIZE = 512
-        const val PLANE = MODEL_SIZE * MODEL_SIZE
-        const val INPUT_COUNT = PLANE * 3
+        const val PARAM_ASSET = "ppmattingv2_stdc1_human_vulkan.ncnn.param"
+        const val BIN_ASSET = "ppmattingv2_stdc1_human_vulkan.ncnn.bin"
 
         private fun materializeAsset(
             context: Context,
             assetName: String,
             minimumBytes: Long,
         ): File {
-            val directory = File(context.codeCacheDir, "ppmatting-ncnn-v52").apply { mkdirs() }
+            val directory = File(context.codeCacheDir, "ppmatting-ncnn-v55-fixed-profile").apply { mkdirs() }
             val target = File(directory, assetName)
             if (!target.isFile || target.length() < minimumBytes) {
                 val temp = File(directory, "$assetName.tmp")
@@ -76,27 +76,35 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
             val bin = materializeAsset(appContext, BIN_ASSET, 5_000_000L)
             val engine = NcnnVulkanNativeV52.createEngine(param.absolutePath, bin.absolutePath, 2)
             check(engine != 0L) { "ncnn could not create the PP-MattingV2 Vulkan engine" }
+
+            val size = NcnnVulkanNativeV52.modelSize(engine)
+            if (size != 256 && size != 512) {
+                NcnnVulkanNativeV52.destroy(engine)
+                error("Unsupported compiled PP-MattingV2 graph size: $size")
+            }
             val gpu = runCatching { NcnnVulkanNativeV52.gpuName(engine) }
                 .getOrDefault("Vulkan GPU")
                 .ifBlank { "Vulkan GPU" }
-            NcnnVulkanPortraitMatteV52(engine, gpu)
+            NcnnVulkanPortraitMatteV52(engine, gpu, size)
         }.getOrNull()
     }
 
-    private val inputSquare = Bitmap.createBitmap(MODEL_SIZE, MODEL_SIZE, Bitmap.Config.ARGB_8888)
-    private val alphaSquare = Bitmap.createBitmap(MODEL_SIZE, MODEL_SIZE, Bitmap.Config.ARGB_8888)
+    private val plane = modelSize * modelSize
+    private val inputCount = plane * 3
+    private val inputSquare = Bitmap.createBitmap(modelSize, modelSize, Bitmap.Config.ARGB_8888)
+    private val alphaSquare = Bitmap.createBitmap(modelSize, modelSize, Bitmap.Config.ARGB_8888)
     private val inputCanvas = Canvas(inputSquare)
     private val filterPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val pixels = IntArray(PLANE)
-    private val alphaPixels = IntArray(PLANE)
-    private val input = FloatArray(INPUT_COUNT)
+    private val pixels = IntArray(plane)
+    private val alphaPixels = IntArray(plane)
+    private val input = FloatArray(inputCount)
     private var lastMs: Double = -1.0
 
     override val backendLabel: String
         get() = buildString {
             append("Matting: GPU (ncnn Vulkan)")
             if (lastMs >= 0.0) append(" · ").append("%.1f".format(lastMs)).append(" ms")
-            append(" · 512")
+            append(" · PP-MattingV2 ").append(modelSize).append(" fixed")
             append(" · ").append(gpuName)
             append(" · CPU op fallback possible")
             if (Build.MODEL.isNotBlank() && !gpuName.contains(Build.MODEL, ignoreCase = true)) {
@@ -109,25 +117,27 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
         check(activeHandle != 0L) { "ncnn Vulkan PP-MattingV2 backend is closed" }
         check(!source.isRecycled) { "Cannot run PP-MattingV2 on a recycled bitmap" }
 
-        inputCanvas.drawBitmap(source, null, Rect(0, 0, MODEL_SIZE, MODEL_SIZE), filterPaint)
-        inputSquare.getPixels(pixels, 0, MODEL_SIZE, 0, 0, MODEL_SIZE, MODEL_SIZE)
-        for (i in 0 until PLANE) {
+        inputCanvas.drawBitmap(source, null, Rect(0, 0, modelSize, modelSize), filterPaint)
+        inputSquare.getPixels(pixels, 0, modelSize, 0, 0, modelSize, modelSize)
+        for (i in 0 until plane) {
             val pixel = pixels[i]
             input[i] = Color.red(pixel) / 127.5f - 1f
-            input[PLANE + i] = Color.green(pixel) / 127.5f - 1f
-            input[PLANE * 2 + i] = Color.blue(pixel) / 127.5f - 1f
+            input[plane + i] = Color.green(pixel) / 127.5f - 1f
+            input[plane * 2 + i] = Color.blue(pixel) / 127.5f - 1f
         }
 
         val alpha = NcnnVulkanNativeV52.run(activeHandle, input)
-        check(alpha.size >= PLANE) { "PP-MattingV2 Vulkan output has ${alpha.size} values" }
+        check(alpha.size >= plane) {
+            "PP-MattingV2 $modelSize Vulkan output has ${alpha.size} values; expected at least $plane"
+        }
         lastMs = NcnnVulkanNativeV52.lastInferenceMs(activeHandle)
 
-        for (i in 0 until PLANE) {
+        for (i in 0 until plane) {
             val value = alpha[i].coerceIn(0f, 1f)
             val v = (value * 255f).roundToInt().coerceIn(0, 255)
             alphaPixels[i] = Color.argb(255, v, v, v)
         }
-        alphaSquare.setPixels(alphaPixels, 0, MODEL_SIZE, 0, 0, MODEL_SIZE, MODEL_SIZE)
+        alphaSquare.setPixels(alphaPixels, 0, modelSize, 0, 0, modelSize, modelSize)
 
         PortraitMatteRuntimeStatusV50.update(backendLabel)
         return Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888).also { output ->
