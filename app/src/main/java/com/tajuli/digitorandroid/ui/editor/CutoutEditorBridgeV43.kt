@@ -60,7 +60,7 @@ fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
     val clip = state.value.project.clip(state.value.selectedClipId) ?: return
     val app = getApplication<Application>()
     if (hasPersonCutoutCoverageV43(app.applicationContext, clip)) {
-        setEditorStatusV19("Pro Cutout ready · $label · cached GPU matte")
+        setEditorStatusV19("Pro Cutout ready · $label · cached matte")
         PreviewExportCoordinator.refreshActivePreviews()
     }
 }
@@ -79,7 +79,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
     val quality = settings.analysisQualityV47
     val label = quality.uiLabelV47()
     val analysisKey = buildString {
-        append("v49-near-fully-gpu|")
+        append("v50-nnapi-auto|")
         append(clip.uri); append('|'); append(clip.sourceInUs); append('|'); append(clip.sourceOutUs)
         append('|'); append(quality.name)
         append('|'); append(settings.hairDetailV44); append('|'); append(settings.temporalStabilityV44)
@@ -97,7 +97,8 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
         )
     }
 
-    setEditorStatusV19("Pro Cutout · $label · starting V49 near-fully-GPU pipeline…")
+    CutoutBackendStatusV50.clear()
+    setEditorStatusV19("Pro Cutout · $label · selecting matting backend…")
     val app = getApplication<Application>()
     val progressStride = when (quality) {
         CutoutAnalysisQualityV47.LOW -> 8
@@ -115,6 +116,7 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                             clip = clip,
                             prioritySourceUs = prioritySourceUs,
                             onBackendResolved = { backend ->
+                                CutoutBackendStatusV50.update(backend)
                                 viewModelScope.launch(Dispatchers.Main) {
                                     setEditorStatusV19("Pro Cutout · $label · $backend")
                                 }
