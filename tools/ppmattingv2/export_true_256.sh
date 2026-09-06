@@ -24,6 +24,7 @@ DEFAULT_CHECKPOINT="${PADDLESEG_DIR}/Matting/pretrained_models/ppmattingv2-stdc1
 PPMATTING_CHECKPOINT="${PPMATTING_CHECKPOINT:-${DEFAULT_CHECKPOINT}}"
 WORK_DIR="${PADDLESEG_DIR}/Matting/output/digitor_true256_export"
 CONFIG_DST="${PADDLESEG_DIR}/Matting/configs/ppmattingv2/digitor-ppmattingv2-stdc1-human_256.yml"
+RAW_ONNX="${OUTPUT_ONNX%.onnx}.raw.onnx"
 
 if [[ ! -f "${PADDLESEG_DIR}/Matting/tools/export.py" ]]; then
   echo "PaddleSeg Matting checkout not found at ${PADDLESEG_DIR}" >&2
@@ -42,6 +43,7 @@ mkdir -p "$(dirname "${OUTPUT_ONNX}")"
 cp "${PPMATTING_CONFIG}" "${CONFIG_DST}"
 rm -rf "${WORK_DIR}"
 mkdir -p "${WORK_DIR}"
+rm -f "${RAW_ONNX}" "${OUTPUT_ONNX}"
 
 pushd "${PADDLESEG_DIR}/Matting" >/dev/null
 python tools/export.py \
@@ -55,22 +57,38 @@ paddle2onnx \
   --model_filename model.pdmodel \
   --params_filename model.pdiparams \
   --opset_version 11 \
-  --save_file "${OUTPUT_ONNX}"
+  --save_file "${RAW_ONNX}"
 popd >/dev/null
 
-python - "${OUTPUT_ONNX}" <<'PY'
+# pnnx 20260526 can SIGFPE on Paddle2ONNX's raw shape/Resize plumbing even though ONNX checker
+# accepts the model. Simplify/constant-fold the *already genuine fixed-256* graph first. This does
+# not change the requested input resolution or weights; it only removes converter-hostile dynamic
+# shape arithmetic before ncnn conversion.
+python -m pip install --disable-pip-version-check --quiet 'onnxsim==0.4.36'
+python - "${RAW_ONNX}" "${OUTPUT_ONNX}" <<'PY'
 import os
 import sys
 import onnx
+from onnxsim import simplify
 
-path = sys.argv[1]
-model = onnx.load(path)
+src, dst = sys.argv[1:3]
+model = onnx.load(src)
 onnx.checker.check_model(model)
-input_tensor = model.graph.input[0]
-dims = [d.dim_value for d in input_tensor.type.tensor_type.shape.dim]
+input_name = model.graph.input[0].name
+model_simp, ok = simplify(
+    model,
+    overwrite_input_shapes={input_name: [1, 3, 256, 256]},
+    perform_optimization=True,
+)
+if not ok:
+    raise SystemExit("onnxsim validation failed for PP-MattingV2 true-256")
+onnx.checker.check_model(model_simp)
+dims = [d.dim_value for d in model_simp.graph.input[0].type.tensor_type.shape.dim]
 if dims != [1, 3, 256, 256]:
-    raise SystemExit(f"Expected fixed [1,3,256,256] input, got {dims}")
-if os.path.getsize(path) < 5_000_000:
-    raise SystemExit(f"Generated ONNX is unexpectedly small: {os.path.getsize(path)} bytes")
-print(f"Validated true PP-MattingV2 256 ONNX: {path} ({os.path.getsize(path)} bytes)")
+    raise SystemExit(f"Simplified model lost fixed [1,3,256,256] input: {dims}")
+onnx.save(model_simp, dst)
+if os.path.getsize(dst) < 5_000_000:
+    raise SystemExit(f"Simplified ONNX is unexpectedly small: {os.path.getsize(dst)} bytes")
+print(f"Validated+simplified true PP-MattingV2 256 ONNX: {dst} ({os.path.getsize(dst)} bytes)")
 PY
+rm -f "${RAW_ONNX}"
