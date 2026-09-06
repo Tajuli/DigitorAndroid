@@ -17,20 +17,13 @@ import kotlin.math.roundToInt
 
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
-private fun hybridSemanticRefreshIntervalUsV53(quality: CutoutAnalysisQualityV47): Long =
-    when (quality) {
-        CutoutAnalysisQualityV47.LOW -> 1_000_000L
-        CutoutAnalysisQualityV47.MEDIUM -> 750_000L
-        CutoutAnalysisQualityV47.HIGH -> 500_000L
-    }
-
 /**
- * Hybrid Pro Cutout analyzer.
+ * Per-frame neural Pro Cutout analyzer.
  *
- * Decode/scheduling stays lightweight on CPU. PP-MattingV2 creates high-quality semantic anchors
- * on the GPU; between anchors a GPU local-flow propagator warps the previous stabilized matte to
- * the current decoded frame. Hair refinement remains GPU-first. Scene cuts/timestamp resets force
- * an immediate PP-Matting refresh, so propagation is never allowed to carry semantics across a cut.
+ * Decode/scheduling stays lightweight on CPU, while every analyzed frame receives a fresh
+ * PP-MattingV2 neural matte on the GPU. GPU temporal flow is retained only as a refinement stage;
+ * it no longer replaces neural inference between semantic anchors. LOW/MEDIUM keep their selected
+ * analysis cadence, while HIGH runs neural inference for every decoded source frame.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -45,7 +38,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         } else {
             analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
-        check(completed > 0) { "Could not generate any V53 hybrid portrait matte" }
+        check(completed > 0) { "Could not generate any per-frame PP-MattingV2 portrait matte" }
         markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
@@ -239,21 +232,18 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
     private val hair = BeautyHairSegmenterV29(appContext)
     private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
-    private var gpuPropagator = runCatching { HybridGpuMattePropagatorV53() }.getOrNull()
     private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
     private val matteWriter = AsyncPersonCutoutMaskWriterV48(appContext)
 
     private var cachedHairMask: Bitmap? = null
     private var cachedHairTimeUs: Long = Long.MIN_VALUE
     private var cachedHairQuality: CutoutAnalysisQualityV47? = null
-    private var lastSemanticAnchorUs: Long = Long.MIN_VALUE
 
     fun backendSummary(): String = buildString {
         append(portraitMatte.backendLabel)
-        append(" · Hybrid anchors + ")
-        append(if (gpuPropagator != null) "Flow GPU propagation" else "per-frame semantic fallback")
+        append(" · Neural matte every analyzed frame")
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
-        append(" · Anchor refine "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
+        append(" · Temporal refine "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
         append(" · CPU scheduler")
     }
 
@@ -274,28 +264,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 strength = settings.hairDetailV44,
             )
 
-            val refreshIntervalUs = hybridSemanticRefreshIntervalUsV53(quality)
-            val semanticDue =
-                gpuPropagator == null ||
-                    lastSemanticAnchorUs == Long.MIN_VALUE ||
-                    sourceTimeUs <= lastSemanticAnchorUs ||
-                    sourceTimeUs - lastSemanticAnchorUs >= refreshIntervalUs
-
-            if (!semanticDue) {
-                val propagated = runCatching {
-                    gpuPropagator?.propagate(
-                        source = source,
-                        sourceTimeUs = sourceTimeUs,
-                        hairMask = hairMask,
-                        hairStrength = settings.hairDetailV44,
-                    )
-                }.getOrNull()
-                if (propagated != null) {
-                    matteWriter.enqueue(clip.uri, sourceTimeUs, propagated)
-                    return true
-                }
-            }
-
             val baseMatte = portraitMatte.infer(source)
             val stabilized = try {
                 stabilizeWithGpuOrFallback(
@@ -308,16 +276,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 )
             } finally {
                 baseMatte.recycle()
-            }
-
-            lastSemanticAnchorUs = sourceTimeUs
-            val propagator = gpuPropagator
-            if (propagator != null) {
-                val seeded = runCatching { propagator.seed(source, stabilized, sourceTimeUs) }
-                if (seeded.isFailure) {
-                    runCatching { propagator.close() }
-                    gpuPropagator = null
-                }
             }
 
             matteWriter.enqueue(clip.uri, sourceTimeUs, stabilized)
@@ -435,8 +393,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         runCatching { matteWriter.close() }
         cachedHairMask?.let { if (!it.isRecycled) it.recycle() }
         cachedHairMask = null
-        runCatching { gpuPropagator?.close() }
-        gpuPropagator = null
         runCatching { gpuTemporal?.close() }
         gpuTemporal = null
         cpuTemporal.close()
