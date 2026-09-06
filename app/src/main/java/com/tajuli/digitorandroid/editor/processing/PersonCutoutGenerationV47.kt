@@ -12,7 +12,7 @@ private const val V47_PENDING_MARKER = ".v47_gpu_pending"
 // V60 invalidates V59 generations because the new guard protects the PP-MattingV2 OpenCL base
 // tensor itself, before hair/temporal refinement. Older cached anchors may already contain a bad
 // base matte that the post-refinement V59 guard could not identify.
-private const val V47_GENERATION_VERSION = "adaptive-v60-ppmattingv2-opencl-fp32-base-retry-hold-safe-flow-r1"
+private const val V47_GENERATION_VERSION = "adaptive-v60-ppmattingv2-opencl-fp32-base-retry-hold-safe-flow-r2"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
