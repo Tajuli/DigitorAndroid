@@ -1,0 +1,123 @@
+name: Finalize PR57 matte safety
+
+on:
+  push:
+    branches:
+      - perf/ppmattingv2-gpu-128-v57
+    paths:
+      - .github/workflows/pr57-final-matte-safety.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr57-final-matte-safety
+  cancel-in-progress: true
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/ppmattingv2-gpu-128-v57
+          fetch-depth: 0
+
+      - name: Harden GL readback and block incomplete Cutout export
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          # 1) Finish the temporal matte GL pass before readback. glReadPixels should synchronize by
+          # spec, but the target vendor driver has already shown cross-context corruption without an
+          # API error; an explicit finish makes the hand-off deterministic.
+          p = Path('app/src/main/java/com/tajuli/digitorandroid/editor/processing/GpuSpatialFlowTemporalMatteV47.kt')
+          s = p.read_text()
+          old = '''        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)\n        checkGl("render V47 matte")\n'''
+          new = '''        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)\n        GLES20.glFinish()\n        checkGl("render V47 matte + finish")\n'''
+          if 'render V47 matte + finish' not in s:
+              assert old in s, 'temporal matte render snippet not found'
+              s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # 2) Do the same for MediaCodec OES -> 2D analysis-frame readback. This closes the other
+          # GL context before Paddle Lite OpenCL consumes the resulting Bitmap.
+          p = Path('app/src/main/java/com/tajuli/digitorandroid/editor/processing/GpuSequentialCutoutDecoderV47.kt')
+          s = p.read_text()
+          old = '''        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)\n        checkGlV47("render sequential decode")\n\n        readbackBytes.clear()\n'''
+          new = '''        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)\n        GLES20.glFinish()\n        checkGlV47("render sequential decode + finish")\n\n        readbackBytes.clear()\n'''
+          if 'render sequential decode + finish' not in s:
+              assert old in s, 'decoder render snippet not found'
+              s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # 3) Expose a tiny read-only in-flight check so Export cannot snapshot a half-built matte.
+          p = Path('app/src/main/java/com/tajuli/digitorandroid/ui/editor/CutoutEditorBridgeV43.kt')
+          s = p.read_text()
+          anchor = 'private val personCutoutAnalysisInFlightV43 = ConcurrentHashMap.newKeySet<String>()\n'
+          insertion = anchor + '\ninternal fun isPersonCutoutAnalysisRunningV43(): Boolean = personCutoutAnalysisInFlightV43.isNotEmpty()\n'
+          if 'isPersonCutoutAnalysisRunningV43' not in s:
+              assert anchor in s, 'cutout in-flight set not found'
+              s = s.replace(anchor, insertion, 1)
+          p.write_text(s)
+
+          # 4) Refuse export while analysis is running or while any Pro Cutout clip lacks ready
+          # coverage. This prevents an otherwise valid export from baking missing/partial mattes.
+          p = Path('app/src/main/java/com/tajuli/digitorandroid/ui/editor/DigitorEditorScreenV7.kt')
+          s = p.read_text()
+          imports_anchor = 'import com.tajuli.digitorandroid.editor.model.PreviewTransformClock\n'
+          imports = '''import com.tajuli.digitorandroid.editor.model.PreviewTransformClock\nimport com.tajuli.digitorandroid.editor.model.CutoutModeV43\nimport com.tajuli.digitorandroid.editor.model.resolvedCutoutV43\n'''
+          if 'import com.tajuli.digitorandroid.editor.model.CutoutModeV43' not in s:
+              assert imports_anchor in s, 'model import anchor not found'
+              s = s.replace(imports_anchor, imports, 1)
+          proc_anchor = 'import com.tajuli.digitorandroid.editor.processing.ProcessingRouter\n'
+          proc_imports = proc_anchor + 'import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43\n'
+          if 'import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43' not in s:
+              assert proc_anchor in s, 'processing import anchor not found'
+              s = s.replace(proc_anchor, proc_imports, 1)
+
+          old = '''    fun startExport(destination: Uri) {\n        if (state.project.durationUs <= 0L) { exportStatus = "Timeline is empty"; return }\n        val exportProject = state.project\n'''
+          new = '''    fun startExport(destination: Uri) {\n        if (state.project.durationUs <= 0L) { exportStatus = "Timeline is empty"; return }\n        if (isPersonCutoutAnalysisRunningV43()) {\n            exportStatus = "Wait for Pro Cutout analysis to finish before Export"\n            return\n        }\n        val incompleteCutout = state.project.tracks\n            .filter { it.kind == TrackKind.VIDEO }\n            .flatMap { it.clips }\n            .firstOrNull { clip ->\n                clip.resolvedCutoutV43().mode == CutoutModeV43.PERSON &&\n                    !hasPersonCutoutCoverageV43(appContext, clip)\n            }\n        if (incompleteCutout != null) {\n            exportStatus = "Pro Cutout matte incomplete · Analyze the clip before Export"\n            return\n        }\n        val exportProject = state.project\n'''
+          if 'Wait for Pro Cutout analysis to finish before Export' not in s:
+              assert old in s, 'startExport anchor not found'
+              s = s.replace(old, new, 1)
+
+          old = '                onExport = { showExportDialog = true },\n'
+          new = '''                onExport = {\n                    if (isPersonCutoutAnalysisRunningV43()) {\n                        exportStatus = "Wait for Pro Cutout analysis to finish before Export"\n                    } else {\n                        showExportDialog = true\n                    }\n                },\n'''
+          if s.count('Wait for Pro Cutout analysis to finish before Export') < 2:
+              assert old in s, 'top bar export anchor not found'
+              s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # 5) Force regeneration after the new GL synchronization/export-safety contract.
+          p = Path('app/src/main/java/com/tajuli/digitorandroid/editor/processing/PersonCutoutGenerationV47.kt')
+          s = p.read_text()
+          old = 'adaptive-v58-ppmattingv2-paddle-opencl-gpu-only-safe-flow-r4'
+          new = 'adaptive-v59-ppmattingv2-paddle-opencl-gpu-only-glsync-r5'
+          if new not in s:
+              assert old in s, 'generation signature r4 not found'
+              s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+
+          git diff --check
+          git diff
+
+      - name: Commit final safety patch and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/pr57-final-matte-safety.yml
+          git add \
+            app/src/main/java/com/tajuli/digitorandroid/editor/processing/GpuSpatialFlowTemporalMatteV47.kt \
+            app/src/main/java/com/tajuli/digitorandroid/editor/processing/GpuSequentialCutoutDecoderV47.kt \
+            app/src/main/java/com/tajuli/digitorandroid/editor/processing/PersonCutoutGenerationV47.kt \
+            app/src/main/java/com/tajuli/digitorandroid/ui/editor/CutoutEditorBridgeV43.kt \
+            app/src/main/java/com/tajuli/digitorandroid/ui/editor/DigitorEditorScreenV7.kt
+          git commit -m 'Harden PR57 matte readback and export safety'
+          git pull --rebase origin perf/ppmattingv2-gpu-128-v57
+          git push origin HEAD:perf/ppmattingv2-gpu-128-v57
