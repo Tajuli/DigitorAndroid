@@ -13,6 +13,7 @@
              Paddle Lite's Mali OpenCL runtime may dlopen libOpenCL.so and its libGLES_mali.so
              driver dependency. Keep both optional so installation remains compatible on non-Mali
              devices while allowing the Symphony/UniSOC Mali path to enter the vendor namespace.
+             A real 512x512 Paddle Lite warm-up still has to succeed before Cutout reports GPU.
         -->
         <uses-native-library android:name="libOpenCL.so" android:required="false" />
         <uses-native-library android:name="libGLES_mali.so" android:required="false" />
