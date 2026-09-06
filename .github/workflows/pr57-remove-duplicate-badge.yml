@@ -1,0 +1,69 @@
+name: Remove duplicate PR57 Cutout badge
+
+on:
+  push:
+    branches:
+      - perf/ppmattingv2-gpu-128-v57
+    paths:
+      - .github/workflows/pr57-remove-duplicate-badge.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/ppmattingv2-gpu-128-v57
+          fetch-depth: 0
+
+      - name: Keep the single backend-aware badge implementation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('app/src/main/java/com/tajuli/digitorandroid/ui/editor/CutoutWorkspaceV50.kt')
+          lines = path.read_text().splitlines()
+
+          # Remove the extra derived backendBadgeV57 block, preserving the earlier badgeText/badgeColor implementation.
+          starts = [i for i, line in enumerate(lines) if 'val backendBadgeV57 = when {' in line]
+          if starts:
+              start = starts[0]
+              end = start + 1
+              while end < len(lines) and lines[end].strip() != '}':
+                  end += 1
+              if end >= len(lines):
+                  raise SystemExit('backendBadgeV57 block end not found')
+              del lines[start:end + 1]
+              if start < len(lines) and lines[start].strip() == '':
+                  del lines[start]
+
+          # The duplicate visual block sits directly before the original cpuBackend/gpuBackend badge logic.
+          person = next(i for i, line in enumerate(lines) if 'CutoutModeV43.PERSON -> {' in line)
+          cpu = next(i for i in range(person + 1, len(lines)) if 'val cpuBackend =' in lines[i])
+          if any('"Neural matte backend"' in line for line in lines[person + 1:cpu]):
+              del lines[person + 1:cpu]
+
+          path.write_text('\n'.join(lines) + '\n')
+          PY
+
+          git diff --check
+          test "$(grep -c 'badgeText = \"CUTOUT:' app/src/main/java/com/tajuli/digitorandroid/ui/editor/CutoutWorkspaceV50.kt)" -ge 4
+          ! grep -q 'backendBadgeV57' app/src/main/java/com/tajuli/digitorandroid/ui/editor/CutoutWorkspaceV50.kt
+          ! grep -q 'Neural matte backend' app/src/main/java/com/tajuli/digitorandroid/ui/editor/CutoutWorkspaceV50.kt
+
+      - name: Commit cleanup and remove one-time workflow
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/src/main/java/com/tajuli/digitorandroid/ui/editor/CutoutWorkspaceV50.kt
+          git rm .github/workflows/pr57-remove-duplicate-badge.yml
+          git commit -m 'Keep single Cutout GPU CPU badge'
+          git pull --rebase origin perf/ppmattingv2-gpu-128-v57
+          git push origin HEAD:perf/ppmattingv2-gpu-128-v57
