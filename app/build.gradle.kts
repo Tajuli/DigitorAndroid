@@ -8,6 +8,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+apply(from = "ppmatting-opencl.gradle")
+
 fun sha256Of(file: File): String {
     val digest = MessageDigest.getInstance("SHA-256")
     file.inputStream().buffered().use { input ->
@@ -119,7 +121,8 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
 
 // V50 Pro Cutout uses PP-MattingV2/STDC1 512 from PaddleSeg (Apache-2.0). The ONNX export is
 // downloaded at build time so the ~36 MB model never enters git history. SHA-256 pinning prevents
-// silent model replacement from changing creator output between builds.
+// silent model replacement from changing creator output between builds. It remains the CPU fallback
+// if the direct Paddle Lite OpenCL path is unavailable at runtime.
 val generatedPpMattingV2Assets = layout.buildDirectory.dir("generated/ppMattingV2Assets")
 val ppMattingV2ModelFile = generatedPpMattingV2Assets.map { it.file("ppmattingv2_stdc1_human_512.onnx") }
 val downloadPpMattingV2Model by tasks.registering {
@@ -231,7 +234,8 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // PP-MattingV2 execution backend. ONNX Runtime Android is MIT licensed.
+    // CPU fallback for PP-MattingV2. Direct Mali/Adreno GPU execution is provided by the
+    // Paddle Lite OpenCL native backend configured above.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
 
     testImplementation("junit:junit:4.13.2")
