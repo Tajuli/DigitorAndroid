@@ -9,10 +9,10 @@ import java.security.MessageDigest
 private const val V50_CACHE_DIR_NAME = "person_cutout_masks_v50_ppmattingv2_hair_spatialflow_512"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-// V60 invalidates V59 generations because the new guard protects the PP-MattingV2 OpenCL base
-// tensor itself, before hair/temporal refinement. Older cached anchors may already contain a bad
-// base matte that the post-refinement V59 guard could not identify.
-private const val V47_GENERATION_VERSION = "adaptive-v60-ppmattingv2-opencl-fp32-base-retry-hold-safe-flow-r2"
+// V61 invalidates V60 generations because the source OES/readback frame is now checked before
+// PP-MattingV2 and both base/refined mattes use native-row/native-column band guards. A V60 cache
+// can already contain a thin stripe or a matte produced from a transiently corrupted decode frame.
+private const val V47_GENERATION_VERSION = "adaptive-v61-ppmattingv2-opencl-fp32-source-redecode-full-band-guard-r3"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
