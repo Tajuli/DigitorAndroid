@@ -30,13 +30,15 @@ def outputParam = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.ncn
 def outputBin = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.ncnn.bin")
 def outputProfile = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.profile")
 
-def pnnxZip = file("${downloadsDir}/pnnx-20260526-linux.zip")
+// 20260526 reproducibly SIGFPEs on the genuine Paddle2ONNX fixed-256 graph. Use the newer pnnx
+// release for true-256 conversion while keeping the already-tested Android ncnn Vulkan runtime.
+def pnnxZip = file("${downloadsDir}/pnnx-20260704-linux.zip")
 def ncnnZip = file("${downloadsDir}/ncnn-20260526-android-vulkan.zip")
 
-def pnnxUrl = "https://github.com/pnnx/pnnx/releases/download/20260526/pnnx-20260526-linux.zip"
+def pnnxUrl = "https://github.com/pnnx/pnnx/releases/download/20260704/pnnx-20260704-linux.zip"
 def ncnnUrl = "https://github.com/Tencent/ncnn/releases/download/20260526/ncnn-20260526-android-vulkan.zip"
 
-def pnnxSha256 = "dde08ce2e2e1744a4ddce576910b451a860663af91d2aeed0d21ebee4fa69955"
+def pnnxSha256 = "685ee1d718068809bdbbc7a9417fa4e2e98a9f2164e8ad9fad73f63377464066"
 def ncnnSha256 = "26909c92eed35afed4a966b5e9e503fcb0a529691ea3f910ec2c94a4fff52804"
 
 def sha256Of = { File source ->
@@ -197,10 +199,8 @@ tasks.register("preparePpMattingNcnnModel") {
             pnnxTool.absolutePath,
             sourceOnnx.absolutePath,
         ]
-        // A genuine Paddle fixed-256 export already carries complete static shapes. Passing a second
-        // inputshape override makes pnnx 20260526 re-specialize shape constants and can SIGFPE. Let
-        // pnnx consume the graph's own fixed shape. The legacy 512 ONNX keeps its proven explicit
-        // shape argument for backward-compatible local builds.
+        // Genuine true-256 ONNX already carries complete static shapes. Do not re-specialize it.
+        // The legacy 512 ONNX keeps its proven explicit input shape for local/non-true256 builds.
         if (!useTrue256) {
             pnnxArgs.add("inputshape=[1,3,512,512]")
         }
@@ -229,8 +229,8 @@ tasks.register("preparePpMattingNcnnModel") {
         if (!outputBin.isFile() || outputBin.length() < 5_000_000L) {
             throw new GradleException("pnnx did not create a valid ${outputBin}")
         }
-        outputProfile.text = "PP-MattingV2 STDC1 fixed ${modelSize}x${modelSize}\nsource=${sourceOnnx.name}\n"
-        logger.lifecycle("PP-MattingV2 Vulkan profile: fixed ${modelSize}x${modelSize} from ${sourceOnnx.name}")
+        outputProfile.text = "PP-MattingV2 STDC1 fixed ${modelSize}x${modelSize}\nsource=${sourceOnnx.name}\npnnx=20260704\n"
+        logger.lifecycle("PP-MattingV2 Vulkan profile: fixed ${modelSize}x${modelSize} from ${sourceOnnx.name} via pnnx 20260704")
     }
 }
 
