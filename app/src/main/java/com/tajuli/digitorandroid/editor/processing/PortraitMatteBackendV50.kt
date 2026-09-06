@@ -19,67 +19,61 @@ internal interface PortraitMatteBackendV50 : AutoCloseable {
 }
 
 /**
- * Adaptive PP-MattingV2/STDC1 512 backend used by Pro Cutout V56.
+ * PP-MattingV2/STDC1 512 GPU-only backend used by Pro Cutout V57.
  *
- * The OpenCL model was optimized with `valid_targets=opencl` only. It cannot silently schedule an
- * unsupported node on ARM: predictor creation plus a warm-up inference must succeed before the UI
- * reports GPU. If OpenCL is unavailable or later fails, the same PP-MattingV2 network is reopened
- * from an ARM-only model. This keeps CI804 matte quality on both paths without SelfieMulticlass.
+ * The bundled model is generated with Paddle Lite `valid_targets=opencl` only. That is important:
+ * there are no ARM kernels in this program, so Paddle Lite cannot silently execute unsupported
+ * graph nodes on the CPU. Predictor creation plus a real 512x512 warm-up inference must succeed
+ * before the UI is allowed to report GPU.
+ *
+ * V57 intentionally uses the native Paddle inference graph instead of the ONNX -> TFLite conversion
+ * used by the previous revision. The converted TFLite model was only CPU-validated at build time and
+ * could be a valid TFLite model while still containing a graph the LiteRT GPU delegate could not
+ * fully execute. PP-MattingV2 is a Paddle model, so keeping it in Paddle Lite removes that conversion
+ * mismatch and lets the optimizer select an OpenCL-only kernel program ahead of time.
  */
 internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBackendV50 {
     private companion object {
         const val OPENCL_MODEL_ASSET = "ppmattingv2_stdc1_human_512_opencl.nb"
-        const val ARM_MODEL_ASSET = "ppmattingv2_stdc1_human_512_arm.nb"
     }
 
     private val appContext = context.applicationContext
-    private var engine: PaddleLitePpMattingV56
+    private val engine: PaddleLitePpMattingV57 = createWarmedEngine()
 
-    override var backendLabel: String
-        private set
+    override val backendLabel: String
+        get() = engine.backendLabel
 
-    init {
-        val gpu = runCatching { createWarmedEngine(OPENCL_MODEL_ASSET, usingGpu = true) }
-        engine = gpu.getOrElse {
-            createWarmedEngine(ARM_MODEL_ASSET, usingGpu = false)
+    override fun infer(source: Bitmap): Bitmap = try {
+        engine.infer(source)
+    } catch (error: Throwable) {
+        throw IllegalStateException(
+            "PP-MattingV2 512 Paddle Lite OpenCL GPU inference failed" +
+                (error.message?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""),
+            error,
+        )
+    }
+
+    private fun createWarmedEngine(): PaddleLitePpMattingV57 {
+        val modelFile = materializePaddleModelV57(appContext, OPENCL_MODEL_ASSET)
+        val candidate = try {
+            PaddleLitePpMattingV57(modelFile)
+        } catch (error: Throwable) {
+            throw IllegalStateException(
+                "PP-MattingV2 512 Paddle Lite OpenCL GPU could not create the predictor" +
+                    (error.message?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""),
+                error,
+            )
         }
-        backendLabel = engine.backendLabel
-    }
-
-    override fun infer(source: Bitmap): Bitmap {
-        val active = engine
-        return try {
-            active.infer(source)
-        } catch (gpuFailure: Throwable) {
-            if (!active.usingGpu) throw gpuFailure
-            runCatching { active.close() }
-            val cpu = createEngine(ARM_MODEL_ASSET, usingGpu = false)
-            try {
-                cpu.warmUp()
-                engine = cpu
-                backendLabel = cpu.backendLabel + " · recovered after OpenCL failure"
-                cpu.infer(source)
-            } catch (cpuFailure: Throwable) {
-                runCatching { cpu.close() }
-                cpuFailure.addSuppressed(gpuFailure)
-                throw cpuFailure
-            }
-        }
-    }
-
-    private fun createEngine(assetName: String, usingGpu: Boolean): PaddleLitePpMattingV56 {
-        val modelFile = materializePaddleModelV56(appContext, assetName)
-        return PaddleLitePpMattingV56(modelFile, usingGpu)
-    }
-
-    private fun createWarmedEngine(assetName: String, usingGpu: Boolean): PaddleLitePpMattingV56 {
-        val candidate = createEngine(assetName, usingGpu)
         return try {
             candidate.warmUp()
             candidate
         } catch (error: Throwable) {
             runCatching { candidate.close() }
-            throw error
+            throw IllegalStateException(
+                "PP-MattingV2 512 Paddle Lite OpenCL GPU warm-up failed" +
+                    (error.message?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""),
+                error,
+            )
         }
     }
 
@@ -88,10 +82,7 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     }
 }
 
-private class PaddleLitePpMattingV56(
-    modelFile: File,
-    val usingGpu: Boolean,
-) : AutoCloseable {
+private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
     private companion object {
         const val MODEL_SIZE = 512
         const val CHANNELS = 3
@@ -105,25 +96,23 @@ private class PaddleLitePpMattingV56(
     private val alphaSquare = Bitmap.createBitmap(MODEL_SIZE, MODEL_SIZE, Bitmap.Config.ARGB_8888)
     private val inputCanvas = Canvas(inputSquare)
     private val filterPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val predictor: ReleasablePaddlePredictorV56
+    private val predictor: ReleasablePaddlePredictorV57
     private val inputTensor: Tensor
 
-    val backendLabel: String = if (usingGpu) {
-        "PP-MattingV2 · Paddle Lite OpenCL GPU · FP16 · 512"
-    } else {
-        "PP-MattingV2 · Paddle Lite ARM CPU fallback · FP32 · 512"
-    }
+    val backendLabel: String = "PP-MattingV2 · Paddle Lite OpenCL GPU · FP16 · 512"
 
     init {
         check(modelFile.isFile && modelFile.length() > 10_000_000L) {
-            "PP-MattingV2 Paddle Lite model is missing or incomplete: ${modelFile.name}"
+            "PP-MattingV2 Paddle Lite OpenCL model is missing or incomplete: ${modelFile.name}"
         }
         val config = MobileConfig().apply {
             setModelFromFile(modelFile.absolutePath)
-            setThreads(if (usingGpu) 1 else Runtime.getRuntime().availableProcessors().coerceIn(1, 4))
-            setPowerMode(if (usingGpu) PowerMode.LITE_POWER_NO_BIND else PowerMode.LITE_POWER_HIGH)
+            // The .nb program itself was optimized for OpenCL only. One host thread is sufficient;
+            // neural kernels execute through Paddle Lite's OpenCL backend on the device GPU.
+            setThreads(1)
+            setPowerMode(PowerMode.LITE_POWER_NO_BIND)
         }
-        predictor = ReleasablePaddlePredictorV56(config)
+        predictor = ReleasablePaddlePredictorV57(config)
         inputTensor = predictor.getInput(0)
             ?: error("Paddle Lite could not create the PP-MattingV2 input tensor")
         check(inputTensor.resize(longArrayOf(1L, 3L, MODEL_SIZE.toLong(), MODEL_SIZE.toLong()))) {
@@ -132,11 +121,11 @@ private class PaddleLitePpMattingV56(
     }
 
     fun warmUp() {
-        // Zero is normalized mid-grey. A real run validates model load, every selected kernel and
-        // the OpenCL device before the UI is allowed to claim that the backend is GPU.
+        // A successful predictor object alone does not prove OpenCL execution. Run the full graph
+        // once before advertising GPU so unsupported drivers/devices fail immediately and honestly.
         inputData.fill(0f)
         check(inputTensor.setData(inputData)) { "Paddle Lite rejected PP-MattingV2 warm-up input" }
-        check(predictor.run()) { "Paddle Lite PP-MattingV2 warm-up inference failed" }
+        check(predictor.run()) { "Paddle Lite PP-MattingV2 OpenCL warm-up inference failed" }
         validateOutput(predictor.getOutput(0))
     }
 
@@ -159,7 +148,7 @@ private class PaddleLitePpMattingV56(
         )
         fillPpMattingV2InputV56(inputPixels, inputData)
         check(inputTensor.setData(inputData)) { "Paddle Lite rejected PP-MattingV2 input" }
-        check(predictor.run()) { "Paddle Lite PP-MattingV2 inference failed" }
+        check(predictor.run()) { "Paddle Lite PP-MattingV2 OpenCL inference failed" }
 
         val outputTensor = predictor.getOutput(0)
         validateOutput(outputTensor)
@@ -201,7 +190,7 @@ private class PaddleLitePpMattingV56(
 }
 
 /** Makes Paddle Lite's protected native release deterministic instead of waiting for finalization. */
-private class ReleasablePaddlePredictorV56(config: MobileConfig) :
+private class ReleasablePaddlePredictorV57(config: MobileConfig) :
     PaddlePredictor(config), AutoCloseable {
     override fun close() {
         clear()
@@ -219,11 +208,11 @@ internal fun fillPpMattingV2InputV56(pixels: IntArray, destination: FloatArray) 
     }
 }
 
-private val paddleModelInstallLockV56 = Any()
+private val paddleModelInstallLockV57 = Any()
 
-private fun materializePaddleModelV56(context: Context, assetName: String): File =
-    synchronized(paddleModelInstallLockV56) {
-        val modelDir = File(context.noBackupFilesDir, "ppmattingv2_paddle_lite_v56")
+private fun materializePaddleModelV57(context: Context, assetName: String): File =
+    synchronized(paddleModelInstallLockV57) {
+        val modelDir = File(context.noBackupFilesDir, "ppmattingv2_paddle_lite_v57")
         val target = File(modelDir, assetName)
         if (target.isFile && target.length() > 10_000_000L) return@synchronized target
 
@@ -233,8 +222,8 @@ private fun materializePaddleModelV56(context: Context, assetName: String): File
         context.assets.open(assetName).buffered().use { input ->
             temporary.outputStream().buffered().use { output -> input.copyTo(output, 1024 * 1024) }
         }
-        check(temporary.length() > 10_000_000L) { "Bundled PP-MattingV2 model is incomplete" }
+        check(temporary.length() > 10_000_000L) { "Bundled PP-MattingV2 OpenCL model is incomplete" }
         if (target.exists()) target.delete()
-        check(temporary.renameTo(target)) { "Could not install PP-MattingV2 Paddle Lite model" }
+        check(temporary.renameTo(target)) { "Could not install PP-MattingV2 Paddle Lite OpenCL model" }
         target
     }
