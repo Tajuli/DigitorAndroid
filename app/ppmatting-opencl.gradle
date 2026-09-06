@@ -4,10 +4,6 @@
 // This build therefore converts the already-pinned PP-MattingV2 ONNX model to ncnn and runs the
 // network through ncnn's Vulkan compute backend. Vulkan talks to the Mali GPU directly and avoids
 // both NNAPI and the Paddle Lite runtime that crashed the device.
-//
-// Fast profile: keep the same PP-MattingV2/STDC1 network and fp16 weights, but specialize the
-// fully-convolutional graph to 256x256 instead of 512x512. That cuts spatial neural work to 1/4
-// while the existing hair/temporal refinement restores edge detail at source resolution.
 
 import java.security.MessageDigest
 
@@ -150,8 +146,6 @@ tasks.register("prepareNcnnVulkanRuntime") {
             throw new GradleException("ncnn Android Vulkan archive did not contain arm64-v8a ncnnConfig.cmake")
         }
 
-        // Normalize the release's top-level directory so CMake has a stable path independent of
-        // the archive layout: ncnnRuntime/<abi>/lib/cmake/ncnn/ncnnConfig.cmake.
         File detectedRoot = arm64Config.parentFile.parentFile.parentFile.parentFile.parentFile
         delete(ncnnRuntimeRoot)
         ncnnRuntimeRoot.mkdirs()
@@ -182,7 +176,7 @@ tasks.register("preparePpMattingNcnnModel") {
             workingDir generatedRoot
             commandLine pnnxTool.absolutePath,
                     sourceOnnx.absolutePath,
-                    "inputshape=[1,3,256,256]",
+                    "inputshape=[1,3,512,512]",
                     "fp16=1",
                     "ncnnparam=${outputParam.absolutePath}",
                     "ncnnbin=${outputBin.absolutePath}",
@@ -208,8 +202,6 @@ def prepareGpu = tasks.register("preparePpMattingNcnnVulkanGpu") {
 }
 
 android {
-    // ncnn 20260526 Android Vulkan prebuilts are produced with NDK r29. Matching the toolchain
-    // avoids ABI/linker surprises and still supports the app's Android 24 minimum.
     ndkVersion "29.0.14206865"
 
     defaultConfig {
@@ -230,8 +222,6 @@ android {
     sourceSets.main.assets.srcDir(optimizedAssetsDir)
 }
 
-// The generated ncnn package must exist before CMake configure/build, and the converted model must
-// exist before Android packages the main assets.
 tasks.matching { task ->
     def n = task.name.toLowerCase(Locale.ROOT)
     n.contains("cmake") || n == "prebuild" || (n.contains("merge") && n.contains("native"))
