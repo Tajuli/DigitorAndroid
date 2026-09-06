@@ -24,7 +24,6 @@ DEFAULT_CHECKPOINT="${PADDLESEG_DIR}/Matting/pretrained_models/ppmattingv2-stdc1
 PPMATTING_CHECKPOINT="${PPMATTING_CHECKPOINT:-${DEFAULT_CHECKPOINT}}"
 WORK_DIR="${PADDLESEG_DIR}/Matting/output/digitor_true256_export"
 CONFIG_DST="${PADDLESEG_DIR}/Matting/configs/ppmattingv2/digitor-ppmattingv2-stdc1-human_256.yml"
-RAW_ONNX="${OUTPUT_ONNX%.onnx}.raw.onnx"
 
 if [[ ! -f "${PADDLESEG_DIR}/Matting/tools/export.py" ]]; then
   echo "PaddleSeg Matting checkout not found at ${PADDLESEG_DIR}" >&2
@@ -43,7 +42,7 @@ mkdir -p "$(dirname "${OUTPUT_ONNX}")"
 cp "${PPMATTING_CONFIG}" "${CONFIG_DST}"
 rm -rf "${WORK_DIR}"
 mkdir -p "${WORK_DIR}"
-rm -f "${RAW_ONNX}" "${OUTPUT_ONNX}"
+rm -f "${OUTPUT_ONNX}"
 
 pushd "${PADDLESEG_DIR}/Matting" >/dev/null
 python tools/export.py \
@@ -52,19 +51,16 @@ python tools/export.py \
   --save_dir "${WORK_DIR}" \
   --input_shape 1 3 256 256
 
+# Keep the genuine Paddle2ONNX fixed-256 graph untouched. Both onnxsim and OnnxSlim execute
+# optimizer/evaluator code that SIGFPEs on this valid graph on GitHub's Ubuntu runner. The current
+# pnnx converter is responsible for consuming the checked static ONNX directly.
 paddle2onnx \
   --model_dir "${WORK_DIR}" \
   --model_filename model.pdmodel \
   --params_filename model.pdiparams \
   --opset_version 11 \
-  --save_file "${RAW_ONNX}"
+  --save_file "${OUTPUT_ONNX}"
 popd >/dev/null
-
-# onnxsim/onnxruntime SIGFPEs on this Paddle2ONNX PP-MattingV2 graph in GitHub's Ubuntu runner.
-# Use OnnxSlim instead. It performs graph/shape simplification without pulling onnxruntime as a
-# mandatory runtime dependency, while preserving the genuine fixed [1,3,256,256] input.
-python -m pip install --disable-pip-version-check --quiet 'onnxslim==0.1.96'
-onnxslim "${RAW_ONNX}" "${OUTPUT_ONNX}"
 
 python - "${OUTPUT_ONNX}" <<'PY'
 import os
@@ -76,9 +72,8 @@ model = onnx.load(path)
 onnx.checker.check_model(model)
 dims = [d.dim_value for d in model.graph.input[0].type.tensor_type.shape.dim]
 if dims != [1, 3, 256, 256]:
-    raise SystemExit(f"Slimmed model lost fixed [1,3,256,256] input: {dims}")
+    raise SystemExit(f"Expected fixed [1,3,256,256] input, got {dims}")
 if os.path.getsize(path) < 5_000_000:
-    raise SystemExit(f"Slimmed ONNX is unexpectedly small: {os.path.getsize(path)} bytes")
-print(f"Validated+slimmed true PP-MattingV2 256 ONNX: {path} ({os.path.getsize(path)} bytes)")
+    raise SystemExit(f"Generated ONNX is unexpectedly small: {os.path.getsize(path)} bytes")
+print(f"Validated true PP-MattingV2 256 ONNX: {path} ({os.path.getsize(path)} bytes)")
 PY
-rm -f "${RAW_ONNX}"
