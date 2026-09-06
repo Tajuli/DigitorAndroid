@@ -100,6 +100,7 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
     private val alphaSquare = Bitmap.createBitmap(MODEL_SIZE, MODEL_SIZE, Bitmap.Config.ARGB_8888)
     private val inputCanvas = Canvas(inputSquare)
     private val filterPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val modelFilePathV63 = modelFile.absolutePath
     private val predictor: ReleasablePaddlePredictorV57
     private val inputTensor: Tensor
 
@@ -156,7 +157,10 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
             selected = first
             acceptedCurrent = true
         } else {
-            val retry = runAlphaV60()
+            // V63: a second run on the same OpenCL predictor can repeat stale/corrupt
+            // driver state. Retry on an independently-created OpenCL predictor/context instead.
+            // This is still PP-MattingV2 512 GPU-only; no ARM/CPU neural fallback is introduced.
+            val retry = runAlphaFreshOpenClV63()
             val retrySane = isIntrinsicAlphaSaneV61(retry) &&
                 isTemporallyPlausibleV60(previousAlpha, previousSource, retry, sourceSignature)
             when {
@@ -202,6 +206,35 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
             "PP-MattingV2 alpha output has ${raw.size} values; expected at least $plane"
         }
         return FloatArray(plane) { index -> raw[index] }
+    }
+
+    private fun runAlphaFreshOpenClV63(): FloatArray {
+        val config = MobileConfig().apply {
+            setModelFromFile(modelFilePathV63)
+            setThreads(1)
+            setPowerMode(PowerMode.LITE_POWER_NO_BIND)
+        }
+        val freshPredictor = ReleasablePaddlePredictorV57(config)
+        try {
+            val freshInput = freshPredictor.getInput(0)
+                ?: error("Fresh Paddle Lite OpenCL retry could not create input tensor")
+            check(freshInput.resize(longArrayOf(1L, 3L, MODEL_SIZE.toLong(), MODEL_SIZE.toLong()))) {
+                "Fresh Paddle Lite OpenCL retry rejected 1x3x512x512 input"
+            }
+            check(freshInput.setData(inputData)) {
+                "Fresh Paddle Lite OpenCL retry rejected PP-MattingV2 input"
+            }
+            check(freshPredictor.run()) { "Fresh Paddle Lite PP-MattingV2 OpenCL retry failed" }
+            val output = freshPredictor.getOutput(0)
+            validateOutput(output)
+            val raw = output.getFloatData()
+            check(raw.size >= plane) {
+                "Fresh PP-MattingV2 alpha output has ${raw.size} values; expected at least $plane"
+            }
+            return FloatArray(plane) { index -> raw[index] }
+        } finally {
+            runCatching { freshPredictor.close() }
+        }
     }
 
     private fun writeAlphaBitmapV60(alpha: FloatArray) {

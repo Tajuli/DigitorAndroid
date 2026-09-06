@@ -9,11 +9,11 @@ import java.security.MessageDigest
 private const val V50_CACHE_DIR_NAME = "person_cutout_masks_v50_ppmattingv2_hair_spatialflow_512"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-// V62 invalidates V61 generations. The latest target-phone export showed that a catastrophic stripe
+// V63 invalidates V62 generations. Suspicious GPU output is now retried on a fresh OpenCL predictor/context rather than the same potentially poisoned driver state. The latest target-phone export showed that a catastrophic stripe
 // can erase most of the subject while still covering far less than 58% of the whole frame, so V61's
 // full-frame band threshold can miss it. V62 adds subject-relative native-resolution base/temporal
 // alpha guards plus a refined-vs-authoritative-base guard before any matte is persisted.
-private const val V47_GENERATION_VERSION = "adaptive-v62-ppmattingv2-opencl-fp32-subject-band-guard-r4"
+private const val V47_GENERATION_VERSION = "adaptive-v63-ppmattingv2-opencl-fp32-fresh-context-retry-r5"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
