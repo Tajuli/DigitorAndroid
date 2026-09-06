@@ -92,7 +92,7 @@ tasks.register("preparePpMattingOpenClModel") {
 
 tasks.register("preparePaddleLiteOpenClRuntime") {
     outputs.file(new File(paddleLiteRoot, "cxx/include/paddle_api.h"))
-    outputs.file(new File(paddleLiteRoot, "cxx/libs/arm64-v8a/libpaddle_api_light_bundled.a"))
+    outputs.file(new File(paddleLiteRoot, "cxx/libs/arm64-v8a/libpaddle_light_api_shared.so"))
     doLast {
         downloadsDir.mkdirs()
         downloadWithRetry(runtimeUrl, runtimeTar, 1_000_000L)
@@ -104,9 +104,9 @@ tasks.register("preparePaddleLiteOpenClRuntime") {
         }
 
         File header = fileTree(runtimeExtractDir).matching { include "**/paddle_api.h" }.files.find { true }
-        File staticLib = fileTree(runtimeExtractDir).matching { include "**/libpaddle_api_light_bundled.a" }.files.find { true }
-        if (header == null || staticLib == null) {
-            throw new GradleException("Paddle Lite OpenCL archive layout unsupported: paddle_api.h=${header}, static=${staticLib}")
+        File shared = fileTree(runtimeExtractDir).matching { include "**/libpaddle_light_api_shared.so" }.files.find { true }
+        if (header == null || shared == null) {
+            throw new GradleException("Paddle Lite OpenCL archive layout unsupported: paddle_api.h=${header}, shared=${shared}")
         }
 
         delete(paddleLiteRoot)
@@ -118,7 +118,7 @@ tasks.register("preparePaddleLiteOpenClRuntime") {
         File targetLibDir = new File(paddleLiteRoot, "cxx/libs/arm64-v8a")
         targetLibDir.mkdirs()
         copy {
-            from staticLib
+            from shared
             into targetLibDir
         }
     }
@@ -129,6 +129,10 @@ def prepareGpu = tasks.register("preparePpMattingOpenClGpu") {
 }
 
 android {
+    // Paddle Lite v2.14 OpenCL prebuilt was produced with an older Android toolchain. NDK 28's
+    // lld rejects its legacy ELF symbol table, so pin the native bridge to the compatible NDK 25 LTS.
+    ndkVersion "25.2.9519653"
+
     defaultConfig {
         externalNativeBuild {
             cmake {
