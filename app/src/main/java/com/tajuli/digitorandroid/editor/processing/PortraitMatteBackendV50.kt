@@ -58,7 +58,7 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     private val environment = OrtEnvironment.getEnvironment()
     private val modelBytes = appContext.assets.open(MODEL_ASSET).use { it.readBytes() }
 
-    private var backend = createBestBackend()
+    private var backend = createBestBackend().also { PortraitMatteRuntimeStatusV50.update(it.label) }
     private var inputName: String = backend.session.inputNames.firstOrNull()
         ?: error("PP-MattingV2 ONNX did not expose an input tensor")
 
@@ -155,6 +155,7 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         backend = createXnnpackBackend() ?: createOrtCpuBackend()
         inputName = backend.session.inputNames.firstOrNull()
             ?: error("PP-MattingV2 fallback session did not expose an input tensor")
+        PortraitMatteRuntimeStatusV50.update(backend.label)
         runCatching { old.session.close() }
         runCatching { old.options.close() }
     }
