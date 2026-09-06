@@ -1,9 +1,12 @@
 // PP-MattingV2 GPU backend for Android.
 //
 // Paddle Lite OpenCL was process-fatal on the target Symphony Z60 / UNISOC T606 firmware.
-// This build therefore converts the already-pinned PP-MattingV2 ONNX model to ncnn and runs the
-// network through ncnn's Vulkan compute backend. Vulkan talks to the Mali GPU directly and avoids
-// both NNAPI and the Paddle Lite runtime that crashed the device.
+// This build therefore converts PP-MattingV2 to ncnn and runs the neural graph through Vulkan.
+//
+// DIGITOR_PPMATTING_TRUE_256=1 switches the ncnn conversion source to a *real fixed-shape 256
+// ONNX export* produced from PaddleSeg itself. This is intentionally different from forcing pnnx
+// to reinterpret the fixed 512 ONNX as 256 or feeding a 512 ncnn graph with a 256 tensor; both
+// approaches retain 512-specific shape constants and are unsafe for matte quality.
 
 import java.security.MessageDigest
 
@@ -17,9 +20,15 @@ def ncnnExtractDir = file("${generatedRoot}/ncnnExtract")
 def ncnnRuntimeRoot = file("${generatedRoot}/ncnnRuntime")
 def optimizedAssetsDir = file("${generatedRoot}/assets")
 
-def sourceOnnx = file("${buildDir}/generated/ppMattingV2Assets/ppmattingv2_stdc1_human_512.onnx")
-def outputParam = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_512_vulkan.ncnn.param")
-def outputBin = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_512_vulkan.ncnn.bin")
+def fallback512Onnx = file("${buildDir}/generated/ppMattingV2Assets/ppmattingv2_stdc1_human_512.onnx")
+def true256Onnx = file("${buildDir}/generated/ppMattingV2True256/ppmattingv2_stdc1_human_256.onnx")
+def useTrue256 = (System.getenv("DIGITOR_PPMATTING_TRUE_256") ?: "0").trim() == "1"
+def modelSize = useTrue256 ? 256 : 512
+def sourceOnnx = useTrue256 ? true256Onnx : fallback512Onnx
+
+def outputParam = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.ncnn.param")
+def outputBin = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.ncnn.bin")
+def outputProfile = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.profile")
 
 def pnnxZip = file("${downloadsDir}/pnnx-20260526-linux.zip")
 def ncnnZip = file("${downloadsDir}/ncnn-20260526-android-vulkan.zip")
@@ -162,16 +171,23 @@ tasks.register("prepareNcnnVulkanRuntime") {
 }
 
 tasks.register("preparePpMattingNcnnModel") {
+    // Keep the official 512 ONNX available as the lazy ORT reliability fallback even when the
+    // primary Vulkan graph is true-256.
     dependsOn("downloadPpMattingV2Model", "preparePnnxForPpMatting")
-    outputs.files(outputParam, outputBin)
+    inputs.file(sourceOnnx)
+    outputs.files(outputParam, outputBin, outputProfile)
     doLast {
+        if (useTrue256 && (!true256Onnx.isFile() || true256Onnx.length() < 30_000_000L)) {
+            throw new GradleException(
+                "DIGITOR_PPMATTING_TRUE_256=1 but the fixed 256 ONNX export is missing: ${true256Onnx}. " +
+                "Run tools/ppmattingv2/export_true_256.sh before Gradle."
+            )
+        }
         if (!sourceOnnx.isFile() || sourceOnnx.length() < 30_000_000L) {
-            throw new GradleException("Pinned PP-MattingV2 ONNX model is missing: ${sourceOnnx}")
+            throw new GradleException("PP-MattingV2 ${modelSize} ONNX model is missing: ${sourceOnnx}")
         }
 
-        // pnnx creates a source-adjacent *.pnnxsim.onnx helper by default. The source directory is
-        // also an Android asset source for the ONNX fallback, so delete that conversion-only copy
-        // before packaging. CI #979 accidentally shipped it and added ~32 MB compressed to the APK.
+        // pnnx creates a source-adjacent *.pnnxsim.onnx helper by default. Never package it.
         fileTree(sourceOnnx.parentFile).matching { include "*.pnnxsim.onnx" }.files.each { it.delete() }
 
         delete(optimizedAssetsDir)
@@ -181,7 +197,7 @@ tasks.register("preparePpMattingNcnnModel") {
             workingDir generatedRoot
             commandLine pnnxTool.absolutePath,
                     sourceOnnx.absolutePath,
-                    "inputshape=[1,3,512,512]",
+                    "inputshape=[1,3,${modelSize},${modelSize}]",
                     "fp16=1",
                     "ncnnparam=${outputParam.absolutePath}",
                     "ncnnbin=${outputBin.absolutePath}",
@@ -193,7 +209,6 @@ tasks.register("preparePpMattingNcnnModel") {
         }.result.get()
         execResult.assertNormalExitValue()
 
-        // pnnx writes this helper after conversion, so remove it again after successful execution.
         fileTree(sourceOnnx.parentFile).matching { include "*.pnnxsim.onnx" }.files.each { it.delete() }
 
         if (!outputParam.isFile() || outputParam.length() < 1_000L) {
@@ -202,6 +217,8 @@ tasks.register("preparePpMattingNcnnModel") {
         if (!outputBin.isFile() || outputBin.length() < 5_000_000L) {
             throw new GradleException("pnnx did not create a valid ${outputBin}")
         }
+        outputProfile.text = "PP-MattingV2 STDC1 fixed ${modelSize}x${modelSize}\nsource=${sourceOnnx.name}\n"
+        logger.lifecycle("PP-MattingV2 Vulkan profile: fixed ${modelSize}x${modelSize} from ${sourceOnnx.name}")
     }
 }
 
@@ -215,7 +232,8 @@ android {
     defaultConfig {
         externalNativeBuild {
             cmake {
-                arguments "-DNCNN_ANDROID_ROOT=${ncnnRuntimeRoot.absolutePath}"
+                arguments "-DNCNN_ANDROID_ROOT=${ncnnRuntimeRoot.absolutePath}",
+                        "-DPPMATTING_MODEL_SIZE=${modelSize}"
                 cppFlags "-std=c++17 -O3 -ffast-math"
             }
         }
