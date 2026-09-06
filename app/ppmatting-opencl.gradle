@@ -32,49 +32,54 @@ def ncnnSha256 = "26909c92eed35afed4a966b5e9e503fcb0a529691ea3f910ec2c94a4fff528
 
 def sha256Of = { File source ->
     MessageDigest digest = MessageDigest.getInstance("SHA-256")
-    source.withInputStream { raw ->
-        raw.withStream { input ->
-            byte[] buffer = new byte[1024 * 1024]
-            int read
-            while ((read = input.read(buffer)) > 0) {
-                digest.update(buffer, 0, read)
-            }
+    source.withInputStream { input ->
+        byte[] buffer = new byte[1024 * 1024]
+        int read
+        while ((read = input.read(buffer)) > 0) {
+            digest.update(buffer, 0, read)
         }
     }
     digest.digest().collect { String.format("%02x", it & 0xff) }.join("")
 }
 
-def downloadWithRetry = { String source, File target, long minimumBytes, String expectedSha256 ->
-    if (target.isFile() && target.length() > minimumBytes) {
-        if (expectedSha256 == null || sha256Of(target).equalsIgnoreCase(expectedSha256)) return
-        target.delete()
+// Keep this closure dynamically typed. Gradle 9/Groovy can emit invalid verifier metadata for a
+// script closure that mixes primitive long and reference parameters ("Bad local variable type").
+def downloadWithRetry = { source, target, minimumBytes, expectedSha256 ->
+    long minBytes = (minimumBytes as Number).longValue()
+    File targetFile = target as File
+    String sourceUrl = source.toString()
+    String expected = expectedSha256 == null ? null : expectedSha256.toString()
+
+    if (targetFile.isFile() && targetFile.length() > minBytes) {
+        if (expected == null || sha256Of(targetFile).equalsIgnoreCase(expected)) return
+        targetFile.delete()
     }
 
-    target.parentFile.mkdirs()
-    File tmp = new File(target.parentFile, target.name + ".download")
+    targetFile.parentFile.mkdirs()
+    File tmp = new File(targetFile.parentFile, targetFile.name + ".download")
     Throwable last = null
     for (int attempt = 1; attempt <= 5; attempt++) {
         try {
             if (tmp.exists()) tmp.delete()
-            def connection = new URL(source).openConnection()
+            def connection = new URL(sourceUrl).openConnection()
             connection.setConnectTimeout(30000)
             connection.setReadTimeout(240000)
             connection.setRequestProperty("User-Agent", "DigitorAndroid-build/1.0")
             connection.getInputStream().withCloseable { input ->
                 tmp.withOutputStream { out -> out << input }
             }
-            if (tmp.length() <= minimumBytes) {
-                throw new GradleException("Downloaded ${target.name} is unexpectedly small (${tmp.length()} bytes)")
+            if (tmp.length() <= minBytes) {
+                throw new GradleException("Downloaded ${targetFile.name} is unexpectedly small (${tmp.length()} bytes)")
             }
-            if (expectedSha256 != null) {
+            if (expected != null) {
                 String actual = sha256Of(tmp)
-                if (!actual.equalsIgnoreCase(expectedSha256)) {
-                    throw new GradleException("${target.name} SHA-256 mismatch: expected ${expectedSha256}, got ${actual}")
+                if (!actual.equalsIgnoreCase(expected)) {
+                    throw new GradleException("${targetFile.name} SHA-256 mismatch: expected ${expected}, got ${actual}")
                 }
             }
-            if (target.exists()) target.delete()
-            if (!tmp.renameTo(target)) {
-                target.bytes = tmp.bytes
+            if (targetFile.exists()) targetFile.delete()
+            if (!tmp.renameTo(targetFile)) {
+                targetFile.bytes = tmp.bytes
                 tmp.delete()
             }
             return
@@ -86,7 +91,7 @@ def downloadWithRetry = { String source, File target, long minimumBytes, String 
             }
         }
     }
-    throw new GradleException("Could not download ${source}", last)
+    throw new GradleException("Could not download ${sourceUrl}", last)
 }
 
 tasks.register("preparePnnxForPpMatting") {
