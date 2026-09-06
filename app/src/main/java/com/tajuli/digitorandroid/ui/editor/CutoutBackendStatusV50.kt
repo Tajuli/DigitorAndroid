@@ -1,23 +1,17 @@
 package com.tajuli.digitorandroid.ui.editor
 
-import kotlinx.coroutines.flow.MutableStateFlow
+import com.tajuli.digitorandroid.editor.processing.PortraitMatteRuntimeStatusV50
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 
-/**
- * Runtime status for the portrait matting backend used by Pro Cutout.
- * Kept separate from the general editor status so progress updates do not hide whether
- * PP-MattingV2 is running through NNAPI hardware acceleration or a CPU backend.
- */
+/** UI-facing proxy for the live PP-MattingV2 backend state owned by the processing layer. */
 internal object CutoutBackendStatusV50 {
-    private val _label = MutableStateFlow<String?>(null)
-    val label: StateFlow<String?> = _label.asStateFlow()
+    val label: StateFlow<String?> = PortraitMatteRuntimeStatusV50.label
 
     fun update(value: String) {
-        _label.value = value
+        PortraitMatteRuntimeStatusV50.update(value)
     }
 
     fun clear() {
-        _label.value = null
+        PortraitMatteRuntimeStatusV50.update(null)
     }
 }
