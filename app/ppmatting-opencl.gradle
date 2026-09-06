@@ -4,6 +4,10 @@
 // This build therefore converts the already-pinned PP-MattingV2 ONNX model to ncnn and runs the
 // network through ncnn's Vulkan compute backend. Vulkan talks to the Mali GPU directly and avoids
 // both NNAPI and the Paddle Lite runtime that crashed the device.
+//
+// Fast profile: keep the same PP-MattingV2/STDC1 network and fp16 weights, but specialize the
+// fully-convolutional graph to 256x256 instead of 512x512. That cuts spatial neural work to 1/4
+// while the existing hair/temporal refinement restores edge detail at source resolution.
 
 import java.security.MessageDigest
 
@@ -178,7 +182,7 @@ tasks.register("preparePpMattingNcnnModel") {
             workingDir generatedRoot
             commandLine pnnxTool.absolutePath,
                     sourceOnnx.absolutePath,
-                    "inputshape=[1,3,512,512]",
+                    "inputshape=[1,3,256,256]",
                     "fp16=1",
                     "ncnnparam=${outputParam.absolutePath}",
                     "ncnnbin=${outputBin.absolutePath}",
