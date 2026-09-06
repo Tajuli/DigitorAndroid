@@ -169,6 +169,11 @@ tasks.register("preparePpMattingNcnnModel") {
             throw new GradleException("Pinned PP-MattingV2 ONNX model is missing: ${sourceOnnx}")
         }
 
+        // pnnx creates a source-adjacent *.pnnxsim.onnx helper by default. The source directory is
+        // also an Android asset source for the ONNX fallback, so delete that conversion-only copy
+        // before packaging. CI #979 accidentally shipped it and added ~32 MB compressed to the APK.
+        fileTree(sourceOnnx.parentFile).matching { include "*.pnnxsim.onnx" }.files.each { it.delete() }
+
         delete(optimizedAssetsDir)
         optimizedAssetsDir.mkdirs()
 
@@ -187,6 +192,9 @@ tasks.register("preparePpMattingNcnnModel") {
                     "ncnnpy=${new File(generatedRoot, 'ppmatting_ncnn.py').absolutePath}"
         }.result.get()
         execResult.assertNormalExitValue()
+
+        // pnnx writes this helper after conversion, so remove it again after successful execution.
+        fileTree(sourceOnnx.parentFile).matching { include "*.pnnxsim.onnx" }.files.each { it.delete() }
 
         if (!outputParam.isFile() || outputParam.length() < 1_000L) {
             throw new GradleException("pnnx did not create ${outputParam}")
