@@ -1,0 +1,116 @@
+name: Add PR57 Cutout backend badge
+
+on:
+  push:
+    branches:
+      - perf/ppmattingv2-gpu-128-v57
+    paths:
+      - .github/workflows/pr57-cutout-backend-badge.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/ppmattingv2-gpu-128-v57
+          fetch-depth: 0
+
+      - name: Add persistent GPU/CPU badge to Cutout UI
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('app/src/main/java/com/tajuli/digitorandroid/ui/editor/CutoutWorkspaceV50.kt')
+          text = path.read_text()
+
+          old_status = '''        val analysisFailed = analysisStatus?.contains("failed", ignoreCase = true) == true ||
+              analysisStatus?.contains("incomplete", ignoreCase = true) == true
+
+          Row(
+          '''
+          new_status = '''        val analysisFailed = analysisStatus?.contains("failed", ignoreCase = true) == true ||
+              analysisStatus?.contains("incomplete", ignoreCase = true) == true
+          val backendBadgeV57 = when {
+              analysisStatus?.contains("CPU", ignoreCase = true) == true ||
+                  analysisStatus?.contains("ARM", ignoreCase = true) == true -> "CUTOUT: CPU"
+              analysisFailed -> "CUTOUT: GPU ERROR"
+              analysisStatus?.contains("OpenCL", ignoreCase = true) == true ||
+                  analysisStatus?.contains("GPU", ignoreCase = true) == true ||
+                  analysisStatus?.contains("refined frame", ignoreCase = true) == true ||
+                  personReady -> "CUTOUT: GPU"
+              analysisBusy -> "CUTOUT: CHECKING"
+              else -> "CUTOUT: NOT RUN"
+          }
+
+          Row(
+          '''
+          if old_status not in text:
+              raise SystemExit('analysis status anchor not found')
+          text = text.replace(old_status, new_status, 1)
+
+          old_person = '''            CutoutModeV43.PERSON -> {
+                  Text("Analysis quality", fontSize = 9.sp, color = C50Text)
+          '''
+          new_person = '''            CutoutModeV43.PERSON -> {
+                  Row(
+                      Modifier.fillMaxWidth(),
+                      verticalAlignment = Alignment.CenterVertically,
+                  ) {
+                      Text(
+                          "Neural matte backend",
+                          fontSize = 8.sp,
+                          color = C50Text.copy(alpha = .62f),
+                      )
+                      Spacer(Modifier.weight(1f))
+                      Box(
+                          Modifier
+                              .background(
+                                  Color.White.copy(alpha = if (backendBadgeV57 == "CUTOUT: GPU") .16f else .08f),
+                                  RoundedCornerShape(999.dp),
+                              )
+                              .padding(horizontal = 9.dp, vertical = 4.dp),
+                      ) {
+                          Text(backendBadgeV57, fontSize = 8.sp, color = C50Text)
+                      }
+                  }
+                  Text(
+                      when (backendBadgeV57) {
+                          "CUTOUT: GPU" -> "PP-MattingV2 512 inference verified on GPU."
+                          "CUTOUT: CPU" -> "PP-MattingV2 inference is running on CPU."
+                          "CUTOUT: CHECKING" -> "Verifying PP-MattingV2 GPU execution…"
+                          "CUTOUT: GPU ERROR" -> "GPU backend failed; check the analysis message below."
+                          else -> "Analyze to verify whether PP-MattingV2 runs on GPU."
+                      },
+                      fontSize = 7.sp,
+                      color = C50Text.copy(alpha = .55f),
+                  )
+
+                  Text("Analysis quality", fontSize = 9.sp, color = C50Text)
+          '''
+          if old_person not in text:
+              raise SystemExit('person-mode UI anchor not found')
+          text = text.replace(old_person, new_person, 1)
+
+          path.write_text(text)
+          PY
+
+          git diff --check
+          grep -n "CUTOUT:" app/src/main/java/com/tajuli/digitorandroid/ui/editor/CutoutWorkspaceV50.kt
+
+      - name: Commit UI badge and remove one-time workflow
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/src/main/java/com/tajuli/digitorandroid/ui/editor/CutoutWorkspaceV50.kt
+          git rm .github/workflows/pr57-cutout-backend-badge.yml
+          git commit -m 'Show persistent Cutout GPU backend badge'
+          git pull --rebase origin perf/ppmattingv2-gpu-128-v57
+          git push origin HEAD:perf/ppmattingv2-gpu-128-v57
