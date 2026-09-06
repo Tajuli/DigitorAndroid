@@ -193,19 +193,31 @@ tasks.register("preparePpMattingNcnnModel") {
         delete(optimizedAssetsDir)
         optimizedAssetsDir.mkdirs()
 
+        def pnnxArgs = [
+            pnnxTool.absolutePath,
+            sourceOnnx.absolutePath,
+        ]
+        // A genuine Paddle fixed-256 export already carries complete static shapes. Passing a second
+        // inputshape override makes pnnx 20260526 re-specialize shape constants and can SIGFPE. Let
+        // pnnx consume the graph's own fixed shape. The legacy 512 ONNX keeps its proven explicit
+        // shape argument for backward-compatible local builds.
+        if (!useTrue256) {
+            pnnxArgs.add("inputshape=[1,3,512,512]")
+        }
+        pnnxArgs.addAll([
+            "fp16=1",
+            "ncnnparam=${outputParam.absolutePath}",
+            "ncnnbin=${outputBin.absolutePath}",
+            "pnnxparam=${new File(generatedRoot, 'ppmatting.pnnx.param').absolutePath}",
+            "pnnxbin=${new File(generatedRoot, 'ppmatting.pnnx.bin').absolutePath}",
+            "pnnxpy=${new File(generatedRoot, 'ppmatting_pnnx.py').absolutePath}",
+            "pnnxonnx=${new File(generatedRoot, 'ppmatting.pnnx.onnx').absolutePath}",
+            "ncnnpy=${new File(generatedRoot, 'ppmatting_ncnn.py').absolutePath}",
+        ])
+
         def execResult = providers.exec {
             workingDir generatedRoot
-            commandLine pnnxTool.absolutePath,
-                    sourceOnnx.absolutePath,
-                    "inputshape=[1,3,${modelSize},${modelSize}]",
-                    "fp16=1",
-                    "ncnnparam=${outputParam.absolutePath}",
-                    "ncnnbin=${outputBin.absolutePath}",
-                    "pnnxparam=${new File(generatedRoot, 'ppmatting.pnnx.param').absolutePath}",
-                    "pnnxbin=${new File(generatedRoot, 'ppmatting.pnnx.bin').absolutePath}",
-                    "pnnxpy=${new File(generatedRoot, 'ppmatting_pnnx.py').absolutePath}",
-                    "pnnxonnx=${new File(generatedRoot, 'ppmatting.pnnx.onnx').absolutePath}",
-                    "ncnnpy=${new File(generatedRoot, 'ppmatting_ncnn.py').absolutePath}"
+            commandLine pnnxArgs
         }.result.get()
         execResult.assertNormalExitValue()
 
