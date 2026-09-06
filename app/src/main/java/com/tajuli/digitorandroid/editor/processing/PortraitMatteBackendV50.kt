@@ -103,9 +103,6 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
     private val predictor: ReleasablePaddlePredictorV57
     private val inputTensor: Tensor
 
-    // Last fully accepted 512x512 base alpha and a tiny source-luma signature. Keeping this state
-    // inside the single-threaded predictor avoids locks and lets a one-frame OpenCL anomaly be
-    // replaced without changing Cutout cadence/settings or introducing CPU neural inference.
     private var previousAcceptedAlphaV60: FloatArray? = null
     private var previousSourceSignatureV60: FloatArray? = null
 
@@ -117,8 +114,6 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
         }
         val config = MobileConfig().apply {
             setModelFromFile(modelFile.absolutePath)
-            // The .nb program itself was optimized for OpenCL only. One host thread is sufficient;
-            // neural kernels execute through Paddle Lite's OpenCL backend on the device GPU.
             setThreads(1)
             setPowerMode(PowerMode.LITE_POWER_NO_BIND)
         }
@@ -131,8 +126,6 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
     }
 
     fun warmUp() {
-        // A successful predictor object alone does not prove OpenCL execution. Run the full graph
-        // once before advertising GPU so unsupported drivers/devices fail immediately and honestly.
         inputData.fill(0f)
         check(inputTensor.setData(inputData)) { "Paddle Lite rejected PP-MattingV2 warm-up input" }
         check(predictor.run()) { "Paddle Lite PP-MattingV2 OpenCL warm-up inference failed" }
@@ -147,15 +140,7 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
             Rect(0, 0, MODEL_SIZE, MODEL_SIZE),
             filterPaint,
         )
-        inputSquare.getPixels(
-            inputPixels,
-            0,
-            MODEL_SIZE,
-            0,
-            0,
-            MODEL_SIZE,
-            MODEL_SIZE,
-        )
+        inputSquare.getPixels(inputPixels, 0, MODEL_SIZE, 0, 0, MODEL_SIZE, MODEL_SIZE)
         fillPpMattingV2InputV56(inputPixels, inputData)
 
         val sourceSignature = sourceSignatureV60(inputPixels)
@@ -171,8 +156,6 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
             selected = first
             acceptedCurrent = true
         } else {
-            // A retry is deliberately rare: normal frames pay for one OpenCL run, while a suspicious
-            // frame gets one same-input rerun to distinguish a transient GPU tensor fault from motion.
             val retry = runAlphaV60()
             val retrySane = isIntrinsicAlphaSaneV60(retry) &&
                 isTemporallyPlausibleV60(previousAlpha, previousSource, retry, sourceSignature)
@@ -182,14 +165,15 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
                     acceptedCurrent = true
                 }
                 previousAlpha != null && previousSource != null &&
-                    meanAbsDeltaV60(previousSource, sourceSignature) <= .18f -> {
-                    // Both GPU attempts are implausible while the decoded source is still related to
-                    // the previous frame. Hold one known-clean alpha instead of persisting a stripe.
+                    meanAbsDeltaV60(previousSource, sourceSignature) <= .14f -> {
+                    // Both GPU attempts look implausible while the source is still close enough to
+                    // the previous frame. Hold one known-clean matte; do not poison temporal history.
                     selected = previousAlpha
                     acceptedCurrent = false
                 }
                 isIntrinsicAlphaSaneV60(retry) -> {
-                    // Large source change/scene cut: do not freeze an old subject into a new scene.
+                    // Large motion/cut: prefer the current source's retry rather than freezing a
+                    // previous subject merely because temporal difference is high.
                     selected = retry
                     acceptedCurrent = true
                 }
@@ -204,12 +188,7 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
 
         writeAlphaBitmapV60(selected)
         return Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888).also { output ->
-            Canvas(output).drawBitmap(
-                alphaSquare,
-                null,
-                Rect(0, 0, source.width, source.height),
-                filterPaint,
-            )
+            Canvas(output).drawBitmap(alphaSquare, null, Rect(0, 0, source.width, source.height), filterPaint)
         }
     }
 
@@ -236,11 +215,7 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
         alphaSquare.setPixels(alphaPixels, 0, MODEL_SIZE, 0, 0, MODEL_SIZE, MODEL_SIZE)
     }
 
-    /**
-     * Detect the large horizontal/vertical bands seen on affected vendor OpenCL drivers without
-     * rejecting normal human silhouettes. We sample a 48x48 grid and look for a boundary where a
-     * large fraction of the full row/column flips by a large alpha amount at once.
-     */
+    /** Reject full-width/full-height tile or stripe discontinuities while allowing silhouette edges. */
     private fun isIntrinsicAlphaSaneV60(alpha: FloatArray): Boolean {
         if (alpha.size < plane) return false
         val grid = FloatArray(GUARD_SIDE_V60 * GUARD_SIDE_V60)
@@ -258,9 +233,10 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
             var severe = 0
             var meanDelta = 0f
             for (gx in 0 until GUARD_SIDE_V60) {
-                val a = grid[(gy - 1) * GUARD_SIDE_V60 + gx]
-                val b = grid[gy * GUARD_SIDE_V60 + gx]
-                val delta = abs(a - b)
+                val delta = abs(
+                    grid[(gy - 1) * GUARD_SIDE_V60 + gx] -
+                        grid[gy * GUARD_SIDE_V60 + gx],
+                )
                 meanDelta += delta
                 if (delta >= .62f) severe++
             }
@@ -271,9 +247,10 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
             var severe = 0
             var meanDelta = 0f
             for (gy in 0 until GUARD_SIDE_V60) {
-                val a = grid[gy * GUARD_SIDE_V60 + gx - 1]
-                val b = grid[gy * GUARD_SIDE_V60 + gx]
-                val delta = abs(a - b)
+                val delta = abs(
+                    grid[gy * GUARD_SIDE_V60 + gx - 1] -
+                        grid[gy * GUARD_SIDE_V60 + gx],
+                )
                 meanDelta += delta
                 if (delta >= .62f) severe++
             }
@@ -291,8 +268,7 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
     ): Boolean {
         if (previousAlpha == null || previousSource == null) return true
         val sourceDelta = meanAbsDeltaV60(previousSource, currentSource)
-        // A genuine cut/large camera move is allowed to change the matte abruptly.
-        if (sourceDelta >= .16f) return true
+        if (sourceDelta >= .14f) return true
 
         var alphaDelta = 0f
         var severeFlips = 0
@@ -317,9 +293,9 @@ private class PaddleLitePpMattingV57(modelFile: File) : AutoCloseable {
         val meanAlphaDelta = alphaDelta / samples.toFloat()
         val flipRate = severeFlips / samples.toFloat()
         return when {
-            sourceDelta < .045f -> meanAlphaDelta <= .15f && flipRate <= .075f
-            sourceDelta < .09f -> meanAlphaDelta <= .22f && flipRate <= .13f
-            else -> meanAlphaDelta <= .30f && flipRate <= .20f
+            sourceDelta < .04f -> meanAlphaDelta <= .16f && flipRate <= .08f
+            sourceDelta < .08f -> meanAlphaDelta <= .23f && flipRate <= .14f
+            else -> meanAlphaDelta <= .31f && flipRate <= .21f
         }
     }
 
