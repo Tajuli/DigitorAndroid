@@ -24,6 +24,13 @@
 -keep class com.google.mediapipe.proto.** { *; }
 -keep class com.google.mediapipe.tasks.**.proto.** { *; }
 
+# The protobuf-lite runtime also contains well-known messages (for example com.google.protobuf.Any)
+# whose generated message-info/schema metadata is discovered at runtime. R8 shrinking/obfuscation can
+# otherwise leave MediaPipe with "Unable to get message info for com.google.protobuf.Any" even when
+# MediaPipe's own proto package is kept. Preserve the protobuf runtime and its generated messages.
+-keep class com.google.protobuf.** { *; }
+-dontwarn com.google.protobuf.**
+
 # Gson, protobuf-lite and Kotlin generic/reflection metadata used by persisted collections/runtime.
 -keepattributes Signature
 -keepattributes RuntimeVisibleAnnotations,RuntimeInvisibleAnnotations,AnnotationDefault,InnerClasses,EnclosingMethod
