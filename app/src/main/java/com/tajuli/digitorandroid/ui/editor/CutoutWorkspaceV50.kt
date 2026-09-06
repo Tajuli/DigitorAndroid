@@ -312,11 +312,15 @@ fun CutoutWorkspaceV50(
 
 @Composable
 private fun BackendIndicatorV50(backendLabel: String?) {
+    val vulkanActive = backendLabel?.contains("ncnn Vulkan", ignoreCase = true) == true
+    val nnapiActive = backendLabel?.contains("Matting: Hardware (NNAPI", ignoreCase = true) == true
+    val xnnpackActive = backendLabel?.contains("Matting: CPU (XNNPACK", ignoreCase = true) == true
+
     val classification = when {
         backendLabel == null -> "Processing: not measured yet"
-        backendLabel.contains("Hardware", ignoreCase = true) ||
-            backendLabel.contains("NNAPI", ignoreCase = true) -> "Processing: HARDWARE · NNAPI GPU/NPU"
-        backendLabel.contains("XNNPACK", ignoreCase = true) -> "Processing: CPU · XNNPACK"
+        vulkanActive -> "Processing: GPU · PP-MattingV2 Vulkan"
+        nnapiActive -> "Processing: HARDWARE · NNAPI GPU/NPU"
+        xnnpackActive -> "Processing: CPU · XNNPACK"
         else -> "Processing: CPU · ONNX Runtime"
     }
     Box(
@@ -332,9 +336,14 @@ private fun BackendIndicatorV50(backendLabel: String?) {
                 fontSize = 7.sp,
                 color = C50Text.copy(alpha = .62f),
             )
-            if (backendLabel?.contains("NNAPI", ignoreCase = true) == true) {
-                Text(
-                    "NNAPI chooses the vendor accelerator; on supported devices this may be Mali GPU, NPU/DSP, with unsupported ORT ops still able to use CPU.",
+            when {
+                vulkanActive -> Text(
+                    "Direct Vulkan: PP-MattingV2 neural inference is dispatched through ncnn to the mobile GPU. The ONNX CPU backend stays cold unless Vulkan fails.",
+                    fontSize = 7.sp,
+                    color = C50Text.copy(alpha = .54f),
+                )
+                nnapiActive -> Text(
+                    "NNAPI chooses the vendor accelerator; on supported devices this may be GPU, NPU/DSP, with unsupported ORT ops still able to use CPU.",
                     fontSize = 7.sp,
                     color = C50Text.copy(alpha = .54f),
                 )

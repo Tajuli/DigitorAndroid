@@ -1,0 +1,238 @@
+// PP-MattingV2 GPU backend for Android.
+//
+// Paddle Lite OpenCL was process-fatal on the target Symphony Z60 / UNISOC T606 firmware.
+// This build therefore converts the already-pinned PP-MattingV2 ONNX model to ncnn and runs the
+// network through ncnn's Vulkan compute backend. Vulkan talks to the Mali GPU directly and avoids
+// both NNAPI and the Paddle Lite runtime that crashed the device.
+
+import java.security.MessageDigest
+
+
+def generatedRoot = file("${buildDir}/generated/ppmattingNcnnVulkan")
+def downloadsDir = file("${generatedRoot}/downloads")
+def pnnxExtractDir = file("${generatedRoot}/pnnxExtract")
+def toolsDir = file("${generatedRoot}/tools")
+def pnnxTool = file("${toolsDir}/pnnx")
+def ncnnExtractDir = file("${generatedRoot}/ncnnExtract")
+def ncnnRuntimeRoot = file("${generatedRoot}/ncnnRuntime")
+def optimizedAssetsDir = file("${generatedRoot}/assets")
+
+def sourceOnnx = file("${buildDir}/generated/ppMattingV2Assets/ppmattingv2_stdc1_human_512.onnx")
+def outputParam = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_512_vulkan.ncnn.param")
+def outputBin = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_512_vulkan.ncnn.bin")
+
+def pnnxZip = file("${downloadsDir}/pnnx-20260526-linux.zip")
+def ncnnZip = file("${downloadsDir}/ncnn-20260526-android-vulkan.zip")
+
+def pnnxUrl = "https://github.com/pnnx/pnnx/releases/download/20260526/pnnx-20260526-linux.zip"
+def ncnnUrl = "https://github.com/Tencent/ncnn/releases/download/20260526/ncnn-20260526-android-vulkan.zip"
+
+def pnnxSha256 = "dde08ce2e2e1744a4ddce576910b451a860663af91d2aeed0d21ebee4fa69955"
+def ncnnSha256 = "26909c92eed35afed4a966b5e9e503fcb0a529691ea3f910ec2c94a4fff52804"
+
+def sha256Of = { File source ->
+    MessageDigest digest = MessageDigest.getInstance("SHA-256")
+    source.withInputStream { input ->
+        byte[] buffer = new byte[1024 * 1024]
+        int read
+        while ((read = input.read(buffer)) > 0) {
+            digest.update(buffer, 0, read)
+        }
+    }
+    digest.digest().collect { String.format("%02x", it & 0xff) }.join("")
+}
+
+// Keep this closure dynamically typed. Gradle 9/Groovy can emit invalid verifier metadata for a
+// script closure that mixes primitive long and reference parameters ("Bad local variable type").
+def downloadWithRetry = { source, target, minimumBytes, expectedSha256 ->
+    long minBytes = (minimumBytes as Number).longValue()
+    File targetFile = target as File
+    String sourceUrl = source.toString()
+    String expected = expectedSha256 == null ? null : expectedSha256.toString()
+
+    if (targetFile.isFile() && targetFile.length() > minBytes) {
+        if (expected == null || sha256Of(targetFile).equalsIgnoreCase(expected)) return
+        targetFile.delete()
+    }
+
+    targetFile.parentFile.mkdirs()
+    File tmp = new File(targetFile.parentFile, targetFile.name + ".download")
+    Throwable last = null
+    for (int attempt = 1; attempt <= 5; attempt++) {
+        try {
+            if (tmp.exists()) tmp.delete()
+            def connection = new URL(sourceUrl).openConnection()
+            connection.setConnectTimeout(30000)
+            connection.setReadTimeout(240000)
+            connection.setRequestProperty("User-Agent", "DigitorAndroid-build/1.0")
+            connection.getInputStream().withCloseable { input ->
+                tmp.withOutputStream { out -> out << input }
+            }
+            if (tmp.length() <= minBytes) {
+                throw new GradleException("Downloaded ${targetFile.name} is unexpectedly small (${tmp.length()} bytes)")
+            }
+            if (expected != null) {
+                String actual = sha256Of(tmp)
+                if (!actual.equalsIgnoreCase(expected)) {
+                    throw new GradleException("${targetFile.name} SHA-256 mismatch: expected ${expected}, got ${actual}")
+                }
+            }
+            if (targetFile.exists()) targetFile.delete()
+            if (!tmp.renameTo(targetFile)) {
+                targetFile.bytes = tmp.bytes
+                tmp.delete()
+            }
+            return
+        } catch (Throwable error) {
+            last = error
+            if (tmp.exists()) tmp.delete()
+            if (attempt < 5) {
+                sleep(Math.min(20000L, 2000L * (1L << (attempt - 1))))
+            }
+        }
+    }
+    throw new GradleException("Could not download ${sourceUrl}", last)
+}
+
+tasks.register("preparePnnxForPpMatting") {
+    outputs.file(pnnxTool)
+    doLast {
+        downloadsDir.mkdirs()
+        downloadWithRetry(pnnxUrl, pnnxZip, 20_000_000L, pnnxSha256)
+        delete(pnnxExtractDir)
+        pnnxExtractDir.mkdirs()
+        copy {
+            from zipTree(pnnxZip)
+            into pnnxExtractDir
+        }
+
+        File detected = fileTree(pnnxExtractDir).files.find { candidate ->
+            candidate.isFile() && candidate.name == "pnnx"
+        }
+        if (detected == null) {
+            throw new GradleException("pnnx release archive did not contain the Linux pnnx executable")
+        }
+
+        delete(toolsDir)
+        toolsDir.mkdirs()
+        copy {
+            from detected
+            into toolsDir
+            rename { "pnnx" }
+        }
+        pnnxTool.setExecutable(true)
+        if (!pnnxTool.isFile() || pnnxTool.length() < 5_000_000L) {
+            throw new GradleException("Could not materialize pnnx converter at ${pnnxTool}")
+        }
+    }
+}
+
+tasks.register("prepareNcnnVulkanRuntime") {
+    outputs.file(new File(ncnnRuntimeRoot, "arm64-v8a/lib/cmake/ncnn/ncnnConfig.cmake"))
+    doLast {
+        downloadsDir.mkdirs()
+        downloadWithRetry(ncnnUrl, ncnnZip, 25_000_000L, ncnnSha256)
+        delete(ncnnExtractDir)
+        ncnnExtractDir.mkdirs()
+        copy {
+            from zipTree(ncnnZip)
+            into ncnnExtractDir
+        }
+
+        File arm64Config = fileTree(ncnnExtractDir).matching {
+            include "**/arm64-v8a/lib/cmake/ncnn/ncnnConfig.cmake"
+        }.files.find { true }
+        if (arm64Config == null) {
+            throw new GradleException("ncnn Android Vulkan archive did not contain arm64-v8a ncnnConfig.cmake")
+        }
+
+        File detectedRoot = arm64Config.parentFile.parentFile.parentFile.parentFile.parentFile
+        delete(ncnnRuntimeRoot)
+        ncnnRuntimeRoot.mkdirs()
+        copy {
+            from detectedRoot
+            into ncnnRuntimeRoot
+        }
+
+        File normalized = new File(ncnnRuntimeRoot, "arm64-v8a/lib/cmake/ncnn/ncnnConfig.cmake")
+        if (!normalized.isFile()) {
+            throw new GradleException("Could not normalize ncnn Vulkan runtime under ${ncnnRuntimeRoot}")
+        }
+    }
+}
+
+tasks.register("preparePpMattingNcnnModel") {
+    dependsOn("downloadPpMattingV2Model", "preparePnnxForPpMatting")
+    outputs.files(outputParam, outputBin)
+    doLast {
+        if (!sourceOnnx.isFile() || sourceOnnx.length() < 30_000_000L) {
+            throw new GradleException("Pinned PP-MattingV2 ONNX model is missing: ${sourceOnnx}")
+        }
+
+        // pnnx creates a source-adjacent *.pnnxsim.onnx helper by default. The source directory is
+        // also an Android asset source for the ONNX fallback, so delete that conversion-only copy
+        // before packaging. CI #979 accidentally shipped it and added ~32 MB compressed to the APK.
+        fileTree(sourceOnnx.parentFile).matching { include "*.pnnxsim.onnx" }.files.each { it.delete() }
+
+        delete(optimizedAssetsDir)
+        optimizedAssetsDir.mkdirs()
+
+        def execResult = providers.exec {
+            workingDir generatedRoot
+            commandLine pnnxTool.absolutePath,
+                    sourceOnnx.absolutePath,
+                    "inputshape=[1,3,512,512]",
+                    "fp16=1",
+                    "ncnnparam=${outputParam.absolutePath}",
+                    "ncnnbin=${outputBin.absolutePath}",
+                    "pnnxparam=${new File(generatedRoot, 'ppmatting.pnnx.param').absolutePath}",
+                    "pnnxbin=${new File(generatedRoot, 'ppmatting.pnnx.bin').absolutePath}",
+                    "pnnxpy=${new File(generatedRoot, 'ppmatting_pnnx.py').absolutePath}",
+                    "pnnxonnx=${new File(generatedRoot, 'ppmatting.pnnx.onnx').absolutePath}",
+                    "ncnnpy=${new File(generatedRoot, 'ppmatting_ncnn.py').absolutePath}"
+        }.result.get()
+        execResult.assertNormalExitValue()
+
+        // pnnx writes this helper after conversion, so remove it again after successful execution.
+        fileTree(sourceOnnx.parentFile).matching { include "*.pnnxsim.onnx" }.files.each { it.delete() }
+
+        if (!outputParam.isFile() || outputParam.length() < 1_000L) {
+            throw new GradleException("pnnx did not create ${outputParam}")
+        }
+        if (!outputBin.isFile() || outputBin.length() < 5_000_000L) {
+            throw new GradleException("pnnx did not create a valid ${outputBin}")
+        }
+    }
+}
+
+def prepareGpu = tasks.register("preparePpMattingNcnnVulkanGpu") {
+    dependsOn("preparePpMattingNcnnModel", "prepareNcnnVulkanRuntime")
+}
+
+android {
+    ndkVersion "29.0.14206865"
+
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                arguments "-DNCNN_ANDROID_ROOT=${ncnnRuntimeRoot.absolutePath}"
+                cppFlags "-std=c++17 -O3 -ffast-math"
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
+            version "3.22.1"
+        }
+    }
+
+    sourceSets.main.assets.srcDir(optimizedAssetsDir)
+}
+
+tasks.matching { task ->
+    def n = task.name.toLowerCase(Locale.ROOT)
+    n.contains("cmake") || n == "prebuild" || (n.contains("merge") && n.contains("native"))
+}.configureEach {
+    dependsOn(prepareGpu)
+}

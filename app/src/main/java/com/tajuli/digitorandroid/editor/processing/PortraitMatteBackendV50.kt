@@ -13,6 +13,7 @@ import android.graphics.Rect
 import android.os.Build
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.util.EnumSet
 import kotlin.math.roundToInt
 
@@ -24,22 +25,10 @@ internal interface PortraitMatteBackendV50 : AutoCloseable {
 /**
  * PP-MattingV2/STDC1 512 portrait matte backend used by Pro Cutout.
  *
- * Upstream PP-MattingV2 is published by PaddleSeg under Apache-2.0. The fixed 512x512 ONNX export
- * is downloaded and SHA-256 pinned by app/build.gradle.kts; ONNX Runtime Android is MIT licensed.
- *
- * Backend order on Android 10+:
- * 1) NNAPI with NNAPI's CPU device disabled, so NNAPI partitions are sent to vendor hardware
- *    accelerators (GPU/NPU/DSP where the device driver supports them). Unsupported ORT nodes may
- *    still remain on ORT CPU, so the UI deliberately reports this as hardware/mixed rather than
- *    claiming that every model op ran on the GPU.
- * 2) XNNPACK CPU.
- * 3) Default ORT CPU.
- *
- * NNAPI provider registration can terminate the whole Android process inside native vendor/ORT
- * code on some devices; that is not catchable with Kotlin try/catch. Devices matching the observed
- * Symphony Z60 / UNISOC T606 family are therefore kept on the original, proven ORT CPU backend.
- * This is intentionally conservative until a direct Mali GPU backend replaces NNAPI for this class
- * of device.
+ * Primary path is ncnn Vulkan, which runs the converted PP-MattingV2 graph directly through the
+ * mobile GPU and avoids both NNAPI and Paddle Lite. The ONNX Runtime implementation is retained as
+ * a reliability fallback and is initialized lazily so the Z60 does not keep two ~large neural
+ * runtimes/models resident while Vulkan is working.
  */
 internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBackendV50 {
     private companion object {
@@ -58,12 +47,23 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     }
 
     private val appContext = context.applicationContext
-    private val environment = OrtEnvironment.getEnvironment()
-    private val modelBytes = appContext.assets.open(MODEL_ASSET).use { it.readBytes() }
 
-    private var backend = createBestBackend().also { PortraitMatteRuntimeStatusV50.update(it.label) }
-    private var inputName: String = backend.session.inputNames.firstOrNull()
-        ?: error("PP-MattingV2 ONNX did not expose an input tensor")
+    // Vulkan is attempted first on every device, including UNISOC/T606. The UNISOC guard below is
+    // specifically for the known process-fatal NNAPI provider path, not for ncnn Vulkan.
+    private var vulkanBackend: NcnnVulkanPortraitMatteV52? =
+        NcnnVulkanPortraitMatteV52.tryCreate(appContext)
+
+    // Keep the CPU model/session cold while Vulkan is active. This avoids duplicating the ONNX
+    // model/session in RAM on low-memory phones such as the Symphony Z60.
+    private val environment: OrtEnvironment by lazy { OrtEnvironment.getEnvironment() }
+    private val modelBytes: ByteArray by lazy {
+        appContext.assets.open(MODEL_ASSET).use { it.readBytes() }
+    }
+    private var backend: BackendSession? = null
+    private var inputName: String? = null
+    private var directBytes: ByteBuffer? = null
+    private var inputBuffer: FloatBuffer? = null
+    private var inputTensor: OnnxTensor? = null
 
     private val plane = MODEL_SIZE * MODEL_SIZE
     private val inputPixels = IntArray(plane)
@@ -72,23 +72,24 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     private val alphaSquare = Bitmap.createBitmap(MODEL_SIZE, MODEL_SIZE, Bitmap.Config.ARGB_8888)
     private val inputCanvas = Canvas(inputSquare)
     private val filterPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val directBytes = ByteBuffer
-        .allocateDirect(plane * CHANNELS * Float.SIZE_BYTES)
-        .order(ByteOrder.nativeOrder())
-    private val inputBuffer = directBytes.asFloatBuffer()
-    private val inputTensor: OnnxTensor = OnnxTensor.createTensor(
-        environment,
-        inputBuffer,
-        longArrayOf(1L, 3L, MODEL_SIZE.toLong(), MODEL_SIZE.toLong()),
-    )
+
+    init {
+        val gpu = vulkanBackend
+        if (gpu != null) {
+            PortraitMatteRuntimeStatusV50.update(gpu.backendLabel)
+        } else {
+            PortraitMatteRuntimeStatusV50.update(ensureFallbackBackend().label)
+        }
+    }
 
     override val backendLabel: String
-        get() = backend.label
+        get() = vulkanBackend?.backendLabel
+            ?: backend?.label
+            ?: "Matting: backend not initialized"
 
-    private fun createBestBackend(): BackendSession {
+    /** Create the best non-Vulkan backend. Called only when Vulkan is unavailable/failed. */
+    private fun createBestFallbackBackend(): BackendSession {
         unsafeNnapiDeviceReason()?.let { reason ->
-            // Do not even call addNnapi() on these devices. A native SIGSEGV/SIGABRT during
-            // provider registration cannot be recovered by runCatching/try-catch.
             return createOrtCpuBackend("NNAPI disabled for device safety · $reason")
         }
 
@@ -99,11 +100,33 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         return createOrtCpuBackend()
     }
 
-    /**
-     * The first observed fatal regression was Symphony Z60 / UNISOC T606. Match both the exact
-     * device and common UNISOC/Spreadtrum SoC identifiers so the same native NNAPI path is not
-     * attempted on closely related firmware where a process-level crash would be unrecoverable.
-     */
+    private fun ensureFallbackBackend(): BackendSession {
+        backend?.let { return it }
+        val created = createBestFallbackBackend()
+        backend = created
+        inputName = created.session.inputNames.firstOrNull()
+            ?: error("PP-MattingV2 ONNX did not expose an input tensor")
+        ensureOrtInputTensor()
+        return created
+    }
+
+    private fun ensureOrtInputTensor(): OnnxTensor {
+        inputTensor?.let { return it }
+        val bytes = ByteBuffer
+            .allocateDirect(plane * CHANNELS * Float.SIZE_BYTES)
+            .order(ByteOrder.nativeOrder())
+        val buffer = bytes.asFloatBuffer()
+        val tensor = OnnxTensor.createTensor(
+            environment,
+            buffer,
+            longArrayOf(1L, 3L, MODEL_SIZE.toLong(), MODEL_SIZE.toLong()),
+        )
+        directBytes = bytes
+        inputBuffer = buffer
+        inputTensor = tensor
+        return tensor
+    }
+
     private fun unsafeNnapiDeviceReason(): String? {
         val identity = buildList {
             add(Build.MANUFACTURER)
@@ -194,27 +217,43 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         }
     }
 
-    /**
-     * Some vendor NNAPI drivers accept a graph at session creation but fail when the first real
-     * frame executes. Java-visible failures can fall back to CPU. Native fatal signals cannot, so
-     * known-unsafe devices are excluded before provider registration in createBestBackend().
-     */
     private fun switchFromNnapiToCpuFallback() {
-        if (backend.kind != BackendSession.Kind.NNAPI) return
-        val old = backend
-        backend = createXnnpackBackend() ?: createOrtCpuBackend()
-        inputName = backend.session.inputNames.firstOrNull()
+        val old = backend ?: return
+        if (old.kind != BackendSession.Kind.NNAPI) return
+
+        val replacement = createXnnpackBackend() ?: createOrtCpuBackend()
+        backend = replacement
+        inputName = replacement.session.inputNames.firstOrNull()
             ?: error("PP-MattingV2 fallback session did not expose an input tensor")
-        PortraitMatteRuntimeStatusV50.update(backend.label)
+        PortraitMatteRuntimeStatusV50.update(replacement.label)
         runCatching { old.session.close() }
         runCatching { old.options.close() }
+    }
+
+    private fun disableVulkanAfterFailure() {
+        val old = vulkanBackend ?: return
+        vulkanBackend = null
+        runCatching { old.close() }
+        val fallback = ensureFallbackBackend()
+        PortraitMatteRuntimeStatusV50.update(fallback.label + " · Vulkan runtime fallback")
     }
 
     override fun infer(source: Bitmap): Bitmap {
         check(!source.isRecycled) { "Cannot run PP-MattingV2 on a recycled bitmap" }
 
-        // The fixed Paddle2ONNX export expects NCHW 512x512. Like PaddleSeg deployment, resize to
-        // the model shape and normalize RGB from [0,255] to [-1,1] (mean/std 0.5).
+        vulkanBackend?.let { gpu ->
+            val result = runCatching { gpu.infer(source) }
+            result.getOrNull()?.let { return it }
+            disableVulkanAfterFailure()
+        }
+
+        val activeBackend = ensureFallbackBackend()
+        val activeInputName = inputName
+            ?: error("PP-MattingV2 ONNX input name is unavailable")
+        val activeInputTensor = ensureOrtInputTensor()
+        val activeInputBuffer = inputBuffer
+            ?: error("PP-MattingV2 ONNX input buffer is unavailable")
+
         inputCanvas.drawBitmap(
             source,
             null,
@@ -233,19 +272,28 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
 
         for (i in 0 until plane) {
             val pixel = inputPixels[i]
-            inputBuffer.put(i, Color.red(pixel) / 127.5f - 1f)
-            inputBuffer.put(plane + i, Color.green(pixel) / 127.5f - 1f)
-            inputBuffer.put(plane * 2 + i, Color.blue(pixel) / 127.5f - 1f)
+            activeInputBuffer.put(i, Color.red(pixel) / 127.5f - 1f)
+            activeInputBuffer.put(plane + i, Color.green(pixel) / 127.5f - 1f)
+            activeInputBuffer.put(plane * 2 + i, Color.blue(pixel) / 127.5f - 1f)
         }
 
-        val firstRun = runCatching { runSessionAndFillAlpha() }
-        if (firstRun.isFailure && backend.kind == BackendSession.Kind.NNAPI) {
+        val firstRun = runCatching {
+            runSessionAndFillAlpha(activeBackend, activeInputName, activeInputTensor)
+        }
+        if (firstRun.isFailure && activeBackend.kind == BackendSession.Kind.NNAPI) {
             switchFromNnapiToCpuFallback()
-            runSessionAndFillAlpha()
+            val fallback = ensureFallbackBackend()
+            runSessionAndFillAlpha(
+                fallback,
+                inputName ?: error("PP-MattingV2 fallback input name is unavailable"),
+                activeInputTensor,
+            )
         } else {
             firstRun.getOrThrow()
         }
 
+        val finalBackend = backend ?: activeBackend
+        PortraitMatteRuntimeStatusV50.update(finalBackend.label)
         alphaSquare.setPixels(
             alphaPixels,
             0,
@@ -265,8 +313,12 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         }
     }
 
-    private fun runSessionAndFillAlpha() {
-        backend.session.run(mapOf(inputName to inputTensor)).use { result ->
+    private fun runSessionAndFillAlpha(
+        activeBackend: BackendSession,
+        activeInputName: String,
+        activeInputTensor: OnnxTensor,
+    ) {
+        activeBackend.session.run(mapOf(activeInputName to activeInputTensor)).use { result ->
             val output = result[0] as? OnnxTensor
                 ?: error("PP-MattingV2 first output is not a tensor")
             val alpha = output.floatBuffer
@@ -283,9 +335,17 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     }
 
     override fun close() {
-        runCatching { inputTensor.close() }
-        runCatching { backend.session.close() }
-        runCatching { backend.options.close() }
+        vulkanBackend?.let { runCatching { it.close() } }
+        vulkanBackend = null
+        inputTensor?.let { runCatching { it.close() } }
+        inputTensor = null
+        inputBuffer = null
+        directBytes = null
+        backend?.let { active ->
+            runCatching { active.session.close() }
+            runCatching { active.options.close() }
+        }
+        backend = null
         if (!inputSquare.isRecycled) inputSquare.recycle()
         if (!alphaSquare.isRecycled) alphaSquare.recycle()
     }

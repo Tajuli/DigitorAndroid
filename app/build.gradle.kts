@@ -8,6 +8,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Build-time PP-MattingV2 -> ncnn conversion plus Android Vulkan runtime/native bridge.
+apply(from = "ppmatting-opencl.gradle")
+
 fun sha256Of(file: File): String {
     val digest = MessageDigest.getInstance("SHA-256")
     file.inputStream().buffered().use { input ->
@@ -117,9 +120,8 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
     }
 }
 
-// V50 Pro Cutout uses PP-MattingV2/STDC1 512 from PaddleSeg (Apache-2.0). The ONNX export is
-// downloaded at build time so the ~36 MB model never enters git history. SHA-256 pinning prevents
-// silent model replacement from changing creator output between builds.
+// V50 Pro Cutout uses PP-MattingV2/STDC1 512. The pinned ONNX model is the conversion source for
+// the ncnn Vulkan GPU artifact and remains the lazy ONNX Runtime CPU reliability fallback.
 val generatedPpMattingV2Assets = layout.buildDirectory.dir("generated/ppMattingV2Assets")
 val ppMattingV2ModelFile = generatedPpMattingV2Assets.map { it.file("ppmattingv2_stdc1_human_512.onnx") }
 val downloadPpMattingV2Model by tasks.registering {
@@ -171,8 +173,9 @@ android {
         create("phone") {
             initWith(getByName("debug"))
             isDebuggable = true
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("debug")
             matchingFallbacks += listOf("debug")
         }
@@ -231,7 +234,7 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // PP-MattingV2 execution backend. ONNX Runtime Android is MIT licensed.
+    // Lazy CPU reliability fallback. Primary PP-MattingV2 inference is ncnn Vulkan GPU.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
 
     testImplementation("junit:junit:4.13.2")
