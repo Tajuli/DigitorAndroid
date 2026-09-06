@@ -9,8 +9,54 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Phone APKs from this job package a genuine fixed-shape PP-MattingV2 256 graph. The 512 ONNX
+      # remains packaged only as the lazy CPU reliability fallback.
+      DIGITOR_PPMATTING_TRUE_256: '1'
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Export genuine fixed PP-MattingV2 256 graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install \
+            'numpy==1.26.4' \
+            'paddlepaddle==2.6.2' \
+            'paddle2onnx==1.3.1' \
+            'onnx==1.16.2'
+
+          PADDLESEG_DIR="$RUNNER_TEMP/PaddleSeg"
+          git clone --depth 1 --branch release/2.10 https://github.com/PaddlePaddle/PaddleSeg.git "$PADDLESEG_DIR"
+          python -m pip install -e "$PADDLESEG_DIR"
+          python -m pip install -r "$PADDLESEG_DIR/Matting/requirements.txt"
+
+          mkdir -p "$PADDLESEG_DIR/Matting/pretrained_models"
+          curl -L --fail --retry 4 --retry-delay 2 \
+            -o "$PADDLESEG_DIR/Matting/pretrained_models/ppmattingv2-stdc1-human_512.pdparams" \
+            https://paddleseg.bj.bcebos.com/matting/models/ppmattingv2-stdc1-human_512.pdparams
+
+          TRUE256_ONNX="$GITHUB_WORKSPACE/app/build/generated/ppMattingV2True256/ppmattingv2_stdc1_human_256.onnx"
+          PADDLESEG_DIR="$PADDLESEG_DIR" \
+          OUTPUT_ONNX="$TRUE256_ONNX" \
+            bash "$GITHUB_WORKSPACE/tools/ppmattingv2/export_true_256.sh"
+
+          python - "$TRUE256_ONNX" <<'PY'
+          import os, sys, onnx
+          p = sys.argv[1]
+          m = onnx.load(p)
+          onnx.checker.check_model(m)
+          dims = [d.dim_value for d in m.graph.input[0].type.tensor_type.shape.dim]
+          assert dims == [1, 3, 256, 256], dims
+          print(f"True-256 ONNX ready: {os.path.getsize(p) / 1024 / 1024:.1f} MiB, input={dims}")
+          PY
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
