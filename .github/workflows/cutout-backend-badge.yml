@@ -1,0 +1,86 @@
+name: Add Cutout GPU CPU badge
+
+on:
+  push:
+    branches:
+      - perf/ppmattingv2-gpu-128-v57
+    paths:
+      - .github/workflows/cutout-backend-badge.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/ppmattingv2-gpu-128-v57
+          fetch-depth: 0
+      - name: Add persistent Cutout backend badge
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: Path, old: str, new: str):
+              s = path.read_text()
+              if old not in s:
+                  raise SystemExit(f'Expected block not found in {path}')
+              path.write_text(s.replace(old, new, 1))
+
+          generation = Path('app/src/main/java/com/tajuli/digitorandroid/editor/processing/PersonCutoutGenerationV47.kt')
+          replace_once(
+              generation,
+              'private const val V47_PENDING_MARKER = ".v47_gpu_pending"\nprivate const val V47_GENERATION_VERSION = "adaptive-v57-ppmattingv2-paddle-opencl-gpu-only-r1"',
+              'private const val V47_PENDING_MARKER = ".v47_gpu_pending"\nprivate const val V57_BACKEND_MARKER = ".v57_backend"\nprivate const val V47_GENERATION_VERSION = "adaptive-v57-ppmattingv2-paddle-opencl-gpu-only-r1"',
+          )
+          replace_once(
+              generation,
+              '''internal fun hasPersonCutoutGenerationV47PendingMarker(context: Context, clip: TimelineClip): Boolean {\n    val marker = File(personCutoutSourceDirV47(context, clip.uri), V47_PENDING_MARKER)\n    if (!marker.isFile) return false\n    return runCatching { marker.readText() == personCutoutGenerationSignatureV47(clip) }.getOrDefault(false)\n}\n\nprivate fun personCutoutGenerationSignatureV47(clip: TimelineClip): String {''',
+              '''internal fun hasPersonCutoutGenerationV47PendingMarker(context: Context, clip: TimelineClip): Boolean {\n    val marker = File(personCutoutSourceDirV47(context, clip.uri), V47_PENDING_MARKER)\n    if (!marker.isFile) return false\n    return runCatching { marker.readText() == personCutoutGenerationSignatureV47(clip) }.getOrDefault(false)\n}\n\ninternal fun storePersonCutoutBackendV57(\n    context: Context,\n    clip: TimelineClip,\n    backend: String,\n) {\n    val dir = personCutoutSourceDirV47(context, clip.uri).apply { mkdirs() }\n    File(dir, V57_BACKEND_MARKER).writeText(\n        personCutoutGenerationSignatureV47(clip) + "\\n" + backend,\n    )\n}\n\ninternal fun personCutoutBackendSummaryV57(context: Context, clip: TimelineClip): String? {\n    val marker = File(personCutoutSourceDirV47(context, clip.uri), V57_BACKEND_MARKER)\n    if (!marker.isFile) return null\n    return runCatching {\n        val lines = marker.readLines()\n        if (lines.firstOrNull() != personCutoutGenerationSignatureV47(clip)) return@runCatching null\n        lines.drop(1).joinToString("\\n").takeIf { it.isNotBlank() }\n    }.getOrNull()\n}\n\nprivate fun personCutoutGenerationSignatureV47(clip: TimelineClip): String {''',
+          )
+
+          bridge = Path('app/src/main/java/com/tajuli/digitorandroid/ui/editor/CutoutEditorBridgeV43.kt')
+          replace_once(
+              bridge,
+              'import com.tajuli.digitorandroid.editor.processing.markPersonCutoutGenerationV47Ready\n',
+              'import com.tajuli.digitorandroid.editor.processing.markPersonCutoutGenerationV47Ready\nimport com.tajuli.digitorandroid.editor.processing.storePersonCutoutBackendV57\n',
+          )
+          replace_once(
+              bridge,
+              '''                            onBackendResolved = { backend ->\n                                resolvedBackend = backend\n                                viewModelScope.launch(Dispatchers.Main) {\n                                    setEditorStatusV19("Pro Cutout · $label · $backend")\n                                }\n                            },''',
+              '''                            onBackendResolved = { backend ->\n                                resolvedBackend = backend\n                                storePersonCutoutBackendV57(app.applicationContext, clip, backend)\n                                viewModelScope.launch(Dispatchers.Main) {\n                                    setEditorStatusV19("Pro Cutout · $label · $backend")\n                                }\n                            },''',
+          )
+          replace_once(
+              bridge,
+              '''                                    viewModelScope.launch(Dispatchers.Main) {\n                                        setEditorStatusV19("Pro Cutout · $label · $completed refined frame(s)")\n                                    }''',
+              '''                                    viewModelScope.launch(Dispatchers.Main) {\n                                        val backendPart = resolvedBackend?.let { " · $it" }.orEmpty()\n                                        setEditorStatusV19(\n                                            "Pro Cutout · $label$backendPart · $completed refined frame(s)",\n                                        )\n                                    }''',
+          )
+
+          workspace = Path('app/src/main/java/com/tajuli/digitorandroid/ui/editor/CutoutWorkspaceV50.kt')
+          replace_once(
+              workspace,
+              'import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43\n',
+              'import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43\nimport com.tajuli.digitorandroid.editor.processing.personCutoutBackendSummaryV57\n',
+          )
+          replace_once(
+              workspace,
+              '''        val analysisFailed = analysisStatus?.contains("failed", ignoreCase = true) == true ||\n            analysisStatus?.contains("incomplete", ignoreCase = true) == true\n\n        Row(''',
+              '''        val analysisFailed = analysisStatus?.contains("failed", ignoreCase = true) == true ||\n            analysisStatus?.contains("incomplete", ignoreCase = true) == true\n        val cutoutBackend = personCutoutBackendSummaryV57(appContext, selectedClip)\n        val baseGpu = cutoutBackend?.contains("Paddle Lite OpenCL GPU", ignoreCase = true) == true\n        val baseCpu = cutoutBackend?.contains("ARM CPU", ignoreCase = true) == true ||\n            cutoutBackend?.contains("PP-MattingV2 · CPU", ignoreCase = true) == true\n        val helperCpu = cutoutBackend?.contains("CPU fallback", ignoreCase = true) == true\n        val cutoutBackendBadge = when {\n            baseCpu -> "CUTOUT: CPU"\n            baseGpu && helperCpu -> "CUTOUT: GPU + CPU"\n            baseGpu -> "CUTOUT: GPU"\n            personReady -> "CUTOUT: GPU"\n            analysisFailed -> "CUTOUT: GPU FAILED"\n            analysisBusy -> "CUTOUT: CHECKING…"\n            else -> "CUTOUT: NOT ANALYZED"\n        }\n\n        Row(''',
+          )
+          replace_once(
+              workspace,
+              '''            CutoutModeV43.PERSON -> {\n                Text("Analysis quality", fontSize = 9.sp, color = C50Text)''',
+              '''            CutoutModeV43.PERSON -> {\n                Box(\n                    Modifier\n                        .fillMaxWidth()\n                        .background(Color.White.copy(alpha = .07f), RoundedCornerShape(8.dp))\n                        .padding(horizontal = 10.dp, vertical = 8.dp),\n                ) {\n                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {\n                        Text(\n                            cutoutBackendBadge,\n                            fontSize = 10.sp,\n                            color = if (cutoutBackendBadge == "CUTOUT: GPU") Color(0xFF32D6C1) else C50Text,\n                        )\n                        Text(\n                            cutoutBackend ?: when {\n                                analysisBusy -> "Checking PP-MattingV2 execution backend…"\n                                analysisFailed -> "GPU backend did not complete analysis"\n                                personReady -> "PP-MattingV2 · Paddle Lite OpenCL GPU · 512"\n                                else -> "Tap Analyze to verify the Cutout execution backend"\n                            },\n                            fontSize = 7.sp,\n                            color = C50Text.copy(alpha = .60f),\n                        )\n                    }\n                }\n\n                Text("Analysis quality", fontSize = 9.sp, color = C50Text)''',
+          )
+          PY
+
+          rm .github/workflows/cutout-backend-badge.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Show Cutout GPU CPU backend badge'
+          git push origin HEAD:perf/ppmattingv2-gpu-128-v57
