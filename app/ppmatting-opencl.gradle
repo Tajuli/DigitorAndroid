@@ -1,26 +1,55 @@
-// Direct PP-MattingV2 GPU backend for ARM Android devices. This intentionally avoids NNAPI:
-// Paddle Lite's OpenCL publish includes a self-contained Java/JNI runtime, so Digitor does not
-// link the legacy Paddle shared C++ ELF with the app's modern Android linker.
-def generatedRoot = file("${buildDir}/generated/ppmattingOpenCl")
+// PP-MattingV2 GPU backend for Android.
+//
+// Paddle Lite OpenCL was process-fatal on the target Symphony Z60 / UNISOC T606 firmware.
+// This build therefore converts the already-pinned PP-MattingV2 ONNX model to ncnn and runs the
+// network through ncnn's Vulkan compute backend. Vulkan talks to the Mali GPU directly and avoids
+// both NNAPI and the Paddle Lite runtime that crashed the device.
+
+import java.security.MessageDigest
+
+
+def generatedRoot = file("${buildDir}/generated/ppmattingNcnnVulkan")
 def downloadsDir = file("${generatedRoot}/downloads")
-def paddleModelDir = file("${generatedRoot}/paddleModel")
+def pnnxExtractDir = file("${generatedRoot}/pnnxExtract")
+def toolsDir = file("${generatedRoot}/tools")
+def pnnxTool = file("${toolsDir}/pnnx")
+def ncnnExtractDir = file("${generatedRoot}/ncnnExtract")
+def ncnnRuntimeRoot = file("${generatedRoot}/ncnnRuntime")
 def optimizedAssetsDir = file("${generatedRoot}/assets")
-def runtimeExtractDir = file("${generatedRoot}/runtimeExtract")
-def paddleJavaDir = file("${generatedRoot}/java")
-def generatedJniLibsDir = file("${generatedRoot}/jniLibs")
-def paddlePredictorJar = file("${paddleJavaDir}/PaddlePredictor.jar")
-def paddleJniSo = file("${generatedJniLibsDir}/arm64-v8a/libpaddle_lite_jni.so")
-def optTool = file("${generatedRoot}/tools/opt_linux_x86")
 
-def modelZip = file("${downloadsDir}/ppmattingv2-stdc1-human_512.zip")
-def runtimeTar = file("${downloadsDir}/paddle-lite-opencl-armv8.tar.gz")
+def sourceOnnx = file("${buildDir}/generated/ppMattingV2Assets/ppmattingv2_stdc1_human_512.onnx")
+def outputParam = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_512_vulkan.ncnn.param")
+def outputBin = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_512_vulkan.ncnn.bin")
 
-def modelUrl = "https://paddleseg.bj.bcebos.com/matting/models/deploy/ppmattingv2-stdc1-human_512.zip"
-def optUrl = "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/v2.14-rc/opt_linux_x86"
-def runtimeUrl = "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/v2.14-rc/inference_lite_lib.armv8.clang.with_exception.with_extra.with_cv.opencl.tar.gz"
+def pnnxZip = file("${downloadsDir}/pnnx-20260526-linux.zip")
+def ncnnZip = file("${downloadsDir}/ncnn-20260526-android-vulkan.zip")
 
-def downloadWithRetry = { String source, File target, long minimumBytes ->
-    if (target.isFile() && target.length() > minimumBytes) return
+def pnnxUrl = "https://github.com/pnnx/pnnx/releases/download/20260526/pnnx-20260526-linux.zip"
+def ncnnUrl = "https://github.com/Tencent/ncnn/releases/download/20260526/ncnn-20260526-android-vulkan.zip"
+
+def pnnxSha256 = "dde08ce2e2e1744a4ddce576910b451a860663af91d2aeed0d21ebee4fa69955"
+def ncnnSha256 = "26909c92eed35afed4a966b5e9e503fcb0a529691ea3f910ec2c94a4fff52804"
+
+def sha256Of = { File source ->
+    MessageDigest digest = MessageDigest.getInstance("SHA-256")
+    source.withInputStream { raw ->
+        raw.withStream { input ->
+            byte[] buffer = new byte[1024 * 1024]
+            int read
+            while ((read = input.read(buffer)) > 0) {
+                digest.update(buffer, 0, read)
+            }
+        }
+    }
+    digest.digest().collect { String.format("%02x", it & 0xff) }.join("")
+}
+
+def downloadWithRetry = { String source, File target, long minimumBytes, String expectedSha256 ->
+    if (target.isFile() && target.length() > minimumBytes) {
+        if (expectedSha256 == null || sha256Of(target).equalsIgnoreCase(expectedSha256)) return
+        target.delete()
+    }
+
     target.parentFile.mkdirs()
     File tmp = new File(target.parentFile, target.name + ".download")
     Throwable last = null
@@ -37,6 +66,12 @@ def downloadWithRetry = { String source, File target, long minimumBytes ->
             if (tmp.length() <= minimumBytes) {
                 throw new GradleException("Downloaded ${target.name} is unexpectedly small (${tmp.length()} bytes)")
             }
+            if (expectedSha256 != null) {
+                String actual = sha256Of(tmp)
+                if (!actual.equalsIgnoreCase(expectedSha256)) {
+                    throw new GradleException("${target.name} SHA-256 mismatch: expected ${expectedSha256}, got ${actual}")
+                }
+            }
             if (target.exists()) target.delete()
             if (!tmp.renameTo(target)) {
                 target.bytes = tmp.bytes
@@ -45,116 +80,152 @@ def downloadWithRetry = { String source, File target, long minimumBytes ->
             return
         } catch (Throwable error) {
             last = error
-            if (attempt < 5) sleep(Math.min(20000L, 2000L * (1L << (attempt - 1))))
+            if (tmp.exists()) tmp.delete()
+            if (attempt < 5) {
+                sleep(Math.min(20000L, 2000L * (1L << (attempt - 1))))
+            }
         }
     }
     throw new GradleException("Could not download ${source}", last)
 }
 
-tasks.register("preparePpMattingOpenClModel") {
-    outputs.file(new File(optimizedAssetsDir, "ppmattingv2_stdc1_human_512_opencl.nb"))
+tasks.register("preparePnnxForPpMatting") {
+    outputs.file(pnnxTool)
     doLast {
         downloadsDir.mkdirs()
-        downloadWithRetry(modelUrl, modelZip, 1_000_000L)
-        downloadWithRetry(optUrl, optTool, 5_000_000L)
-        optTool.setExecutable(true)
-
-        delete(paddleModelDir)
-        paddleModelDir.mkdirs()
+        downloadWithRetry(pnnxUrl, pnnxZip, 20_000_000L, pnnxSha256)
+        delete(pnnxExtractDir)
+        pnnxExtractDir.mkdirs()
         copy {
-            from zipTree(modelZip)
-            into paddleModelDir
+            from zipTree(pnnxZip)
+            into pnnxExtractDir
         }
 
-        File pdModel = fileTree(paddleModelDir).matching {
-            include "**/*.pdmodel"
-            include "**/__model__"
+        File detected = fileTree(pnnxExtractDir).files.find { candidate ->
+            candidate.isFile() && candidate.name == "pnnx"
+        }
+        if (detected == null) {
+            throw new GradleException("pnnx release archive did not contain the Linux pnnx executable")
+        }
+
+        delete(toolsDir)
+        toolsDir.mkdirs()
+        copy {
+            from detected
+            into toolsDir
+            rename { "pnnx" }
+        }
+        pnnxTool.setExecutable(true)
+        if (!pnnxTool.isFile() || pnnxTool.length() < 5_000_000L) {
+            throw new GradleException("Could not materialize pnnx converter at ${pnnxTool}")
+        }
+    }
+}
+
+tasks.register("prepareNcnnVulkanRuntime") {
+    outputs.file(new File(ncnnRuntimeRoot, "arm64-v8a/lib/cmake/ncnn/ncnnConfig.cmake"))
+    doLast {
+        downloadsDir.mkdirs()
+        downloadWithRetry(ncnnUrl, ncnnZip, 25_000_000L, ncnnSha256)
+        delete(ncnnExtractDir)
+        ncnnExtractDir.mkdirs()
+        copy {
+            from zipTree(ncnnZip)
+            into ncnnExtractDir
+        }
+
+        File arm64Config = fileTree(ncnnExtractDir).matching {
+            include "**/arm64-v8a/lib/cmake/ncnn/ncnnConfig.cmake"
         }.files.find { true }
-        if (pdModel == null) {
-            throw new GradleException("PP-MattingV2 inference archive did not contain a Paddle model")
+        if (arm64Config == null) {
+            throw new GradleException("ncnn Android Vulkan archive did not contain arm64-v8a ncnnConfig.cmake")
         }
-        File inferenceDir = pdModel.parentFile
 
+        // Normalize the release's top-level directory so CMake has a stable path independent of
+        // the archive layout: ncnnRuntime/<abi>/lib/cmake/ncnn/ncnnConfig.cmake.
+        File detectedRoot = arm64Config.parentFile.parentFile.parentFile.parentFile.parentFile
+        delete(ncnnRuntimeRoot)
+        ncnnRuntimeRoot.mkdirs()
+        copy {
+            from detectedRoot
+            into ncnnRuntimeRoot
+        }
+
+        File normalized = new File(ncnnRuntimeRoot, "arm64-v8a/lib/cmake/ncnn/ncnnConfig.cmake")
+        if (!normalized.isFile()) {
+            throw new GradleException("Could not normalize ncnn Vulkan runtime under ${ncnnRuntimeRoot}")
+        }
+    }
+}
+
+tasks.register("preparePpMattingNcnnModel") {
+    dependsOn("downloadPpMattingV2Model", "preparePnnxForPpMatting")
+    outputs.files(outputParam, outputBin)
+    doLast {
+        if (!sourceOnnx.isFile() || sourceOnnx.length() < 30_000_000L) {
+            throw new GradleException("Pinned PP-MattingV2 ONNX model is missing: ${sourceOnnx}")
+        }
+
+        delete(optimizedAssetsDir)
         optimizedAssetsDir.mkdirs()
-        File outputBase = new File(optimizedAssetsDir, "ppmattingv2_stdc1_human_512_opencl")
-        File outputNb = new File(outputBase.absolutePath + ".nb")
-        if (outputNb.exists()) outputNb.delete()
 
         def execResult = providers.exec {
-            commandLine optTool.absolutePath,
-                    "--model_dir=${inferenceDir.absolutePath}",
-                    "--valid_targets=opencl,arm",
-                    "--optimize_out=${outputBase.absolutePath}"
+            workingDir generatedRoot
+            commandLine pnnxTool.absolutePath,
+                    sourceOnnx.absolutePath,
+                    "inputshape=[1,3,512,512]",
+                    "fp16=1",
+                    "ncnnparam=${outputParam.absolutePath}",
+                    "ncnnbin=${outputBin.absolutePath}",
+                    "pnnxparam=${new File(generatedRoot, 'ppmatting.pnnx.param').absolutePath}",
+                    "pnnxbin=${new File(generatedRoot, 'ppmatting.pnnx.bin').absolutePath}",
+                    "pnnxpy=${new File(generatedRoot, 'ppmatting_pnnx.py').absolutePath}",
+                    "pnnxonnx=${new File(generatedRoot, 'ppmatting.pnnx.onnx').absolutePath}",
+                    "ncnnpy=${new File(generatedRoot, 'ppmatting_ncnn.py').absolutePath}"
         }.result.get()
         execResult.assertNormalExitValue()
 
-        if (!outputNb.isFile() || outputNb.length() < 1_000_000L) {
-            throw new GradleException("Paddle Lite opt did not create ${outputNb}")
+        if (!outputParam.isFile() || outputParam.length() < 1_000L) {
+            throw new GradleException("pnnx did not create ${outputParam}")
+        }
+        if (!outputBin.isFile() || outputBin.length() < 5_000_000L) {
+            throw new GradleException("pnnx did not create a valid ${outputBin}")
         }
     }
 }
 
-tasks.register("preparePaddleLiteOpenClRuntime") {
-    outputs.file(paddlePredictorJar)
-    outputs.file(paddleJniSo)
-    doLast {
-        downloadsDir.mkdirs()
-        downloadWithRetry(runtimeUrl, runtimeTar, 1_000_000L)
-        delete(runtimeExtractDir)
-        runtimeExtractDir.mkdirs()
-        copy {
-            from tarTree(resources.gzip(runtimeTar))
-            into runtimeExtractDir
-        }
-
-        // Paddle Lite's official Android publish creates both of these artifacts. The JNI module
-        // is self-contained (it links Paddle Lite internally when Paddle itself is built), which
-        // avoids the malformed libpaddle_light_api_shared.so symbol table that modern lld rejects.
-        File predictorJar = fileTree(runtimeExtractDir).matching {
-            include "**/PaddlePredictor.jar"
-        }.files.find { true }
-        File jniRuntime = fileTree(runtimeExtractDir).matching {
-            include "**/libpaddle_lite_jni.so"
-        }.files.find { true }
-        if (predictorJar == null || jniRuntime == null) {
-            throw new GradleException(
-                "Paddle Lite OpenCL archive missing Java publish artifacts: " +
-                    "PaddlePredictor.jar=${predictorJar}, libpaddle_lite_jni.so=${jniRuntime}"
-            )
-        }
-
-        delete(paddleJavaDir)
-        paddleJavaDir.mkdirs()
-        copy {
-            from predictorJar
-            into paddleJavaDir
-        }
-
-        delete(generatedJniLibsDir)
-        File targetJniDir = new File(generatedJniLibsDir, "arm64-v8a")
-        targetJniDir.mkdirs()
-        copy {
-            from jniRuntime
-            into targetJniDir
-        }
-    }
-}
-
-def prepareGpu = tasks.register("preparePpMattingOpenClGpu") {
-    dependsOn("preparePpMattingOpenClModel", "preparePaddleLiteOpenClRuntime")
+def prepareGpu = tasks.register("preparePpMattingNcnnVulkanGpu") {
+    dependsOn("preparePpMattingNcnnModel", "prepareNcnnVulkanRuntime")
 }
 
 android {
+    // ncnn 20260526 Android Vulkan prebuilts are produced with NDK r29. Matching the toolchain
+    // avoids ABI/linker surprises and still supports the app's Android 24 minimum.
+    ndkVersion "29.0.14206865"
+
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                arguments "-DNCNN_ANDROID_ROOT=${ncnnRuntimeRoot.absolutePath}"
+                cppFlags "-std=c++17 -O3 -ffast-math"
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
+            version "3.22.1"
+        }
+    }
+
     sourceSets.main.assets.srcDir(optimizedAssetsDir)
-    sourceSets.main.jniLibs.srcDir(generatedJniLibsDir)
 }
 
-dependencies {
-    implementation files(paddlePredictorJar)
-}
-
-// preBuild is upstream of Kotlin/Java compilation and APK packaging. This guarantees the generated
-// jar, JNI runtime and optimized .nb model exist before any variant consumes them.
-tasks.matching { task -> task.name.equalsIgnoreCase("preBuild") }.configureEach {
+// The generated ncnn package must exist before CMake configure/build, and the converted model must
+// exist before Android packages the main assets.
+tasks.matching { task ->
+    def n = task.name.toLowerCase(Locale.ROOT)
+    n.contains("cmake") || n == "prebuild" || (n.contains("merge") && n.contains("native"))
+}.configureEach {
     dependsOn(prepareGpu)
 }
