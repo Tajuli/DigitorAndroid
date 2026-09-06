@@ -44,7 +44,7 @@ Java_com_tajuli_digitorandroid_editor_processing_PaddleLiteOpenClNativeV51_isOpe
         JNIEnv*, jobject) {
 #ifdef DIGITOR_PADDLE_OPENCL
     try {
-        return ::IsOpenCLBackendValid(false) ? JNI_TRUE : JNI_FALSE;
+        return paddle::lite_api::IsOpenCLBackendValid(false) ? JNI_TRUE : JNI_FALSE;
     } catch (...) {
         return JNI_FALSE;
     }
@@ -58,7 +58,7 @@ Java_com_tajuli_digitorandroid_editor_processing_PaddleLiteOpenClNativeV51_creat
         JNIEnv* env, jobject, jstring modelPath, jint threads) {
 #ifdef DIGITOR_PADDLE_OPENCL
     try {
-        if (!::IsOpenCLBackendValid(false)) return 0;
+        if (!paddle::lite_api::IsOpenCLBackendValid(false)) return 0;
 
         const std::string path = JStringToString(env, modelPath);
         paddle::lite_api::MobileConfig config;
