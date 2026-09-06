@@ -18,13 +18,12 @@ import kotlin.math.roundToInt
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 
 /**
- * V56 PP-MattingV2 Paddle Lite/OpenCL revision of the adaptive Pro Cutout analyzer.
+ * V58 PP-MattingV2 Paddle Lite/OpenCL revision of the adaptive Pro Cutout analyzer.
  *
- * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. Hardware decode overlaps a bounded
- * inference worker and decoded frame ownership moves straight into that queue with no second ARGB
- * copy. PP-MattingV2/STDC1 512 supplies the base soft alpha through an OpenCL-only model, with the
- * an OpenCL FP32 program. MediaPipe HairSegmenter and the existing GPU-first local
- * spatial-flow stabilizer then refine the matte before shared preview/export persistence.
+ * LOW: 4 fps. MEDIUM: 12 fps. HIGH: every decoded frame. PP-MattingV2/STDC1 512 supplies the
+ * base soft alpha through an OpenCL-only FP32 program. Decoder Bitmap ownership still transfers
+ * directly, but the V58 worker is a strict barrier so OES/GL readback cannot overlap the current
+ * Paddle Lite OpenCL inference on vendor GPUs that corrupt frames under cross-context pressure.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -39,7 +38,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         } else {
             analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
-        check(completed > 0) { "Could not generate any V56 PP-MattingV2 portrait matte" }
+        check(completed > 0) { "Could not generate any V58 PP-MattingV2 portrait matte" }
         markPersonCutoutGenerationV47Ready(context, clip)
         return PersonCutoutMaskStoreV43.index(context, clip)
     }
@@ -78,8 +77,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         val cadence = personCutoutCadenceV47(quality)
         val targetTimes = personCutoutTargetTimesV47(start, end, quality)
 
-        // Important: lazy initialization happens on the inference worker, not this producer thread.
-        // Paddle Lite OpenCL and the downstream GL stage keep create/run/close thread affinity.
         val segmenterLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
             GpuPersonCutoutSegmenterV47(context).also {
                 onBackendResolved?.invoke(it.backendSummary())
@@ -103,8 +100,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         }
 
         try {
-            // LOW/MEDIUM retain one playhead-priority frame, but it is ownership-transferred to the
-            // same inference worker. HIGH uses only true decoded source-frame timestamps.
             val priority = if (quality == CutoutAnalysisQualityV47.HIGH) {
                 null
             } else {
@@ -116,8 +111,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                 }
             }
 
-            // Producer: MediaCodec + OES + GL scale. Consumer: PP-MattingV2 + MediaPipe Hair + GL
-            // temporal flow. Decoder Bitmaps are transferred directly to the bounded worker.
             val sequentialResult = runCatching {
                 GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
                     uri = Uri.parse(clip.uri),
@@ -126,6 +119,8 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                     targetTimesUs = targetTimes,
                     emitEveryFrame = cadence.everyDecodedFrame,
                 ) { sourceUs, bitmap ->
+                    // enqueueOwned is synchronous in V58. This prevents MediaCodec/OES GL work for
+                    // the next selected frame from racing the current Paddle OpenCL inference.
                     worker.enqueueOwned(sourceUs, bitmap)
                 }
             }
@@ -139,8 +134,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                     )
                 }
 
-                // LOW/MEDIUM reliability fallback for unusual vendor codecs. These Bitmaps are also
-                // ownership-transferred, so the fallback avoids the old second ARGB copy.
                 val retriever = MediaMetadataRetriever()
                 try {
                     retriever.setDataSource(context, Uri.parse(clip.uri))
@@ -252,7 +245,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         append(portraitMatte.backendLabel)
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
         append(" · Flow "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
-        append(" · direct frame queue")
+        append(" · serialized GPU frames")
     }
 
     fun segmentAndStore(clip: TimelineClip, bitmap: Bitmap, sourceTimeUs: Long): Boolean {
@@ -284,8 +277,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 baseMatte.recycle()
             }
 
-            // Ownership transfers to the parallel low-priority writers; compression never runs on
-            // the inference worker.
             matteWriter.enqueue(clip.uri, sourceTimeUs, stabilized)
             return true
         } finally {
@@ -352,7 +343,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
             gpuTemporal = null
         }
 
-        // Compatibility fallback only; normal devices stay on the GL path above.
         val fused = fuseHairCpu(baseMatte, hairMask, hairStrength)
         return try {
             cpuTemporal.stabilize(source, fused, sourceTimeUs, temporalStrength)
@@ -384,11 +374,13 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 val h = Color.red(hPixels[i]) / 255f
                 val uncertainty = (4f * a * (1f - a)).coerceIn(0f, 1f)
                 val contribution = h * s * (.10f + .46f * uncertainty)
-                val fused = max(a, a + (1f - a) * contribution).coerceIn(0f, 1f)
-                val v = (fused * 255f).roundToInt().coerceIn(0, 255)
+                val value = max(a, a + (1f - a) * contribution).coerceIn(0f, 1f)
+                val v = (value * 255f).roundToInt().coerceIn(0, 255)
                 out[i] = Color.argb(255, v, v, v)
             }
-            return Bitmap.createBitmap(out, base.width, base.height, Bitmap.Config.ARGB_8888)
+            return Bitmap.createBitmap(base.width, base.height, Bitmap.Config.ARGB_8888).also {
+                it.setPixels(out, 0, base.width, 0, 0, base.width, base.height)
+            }
         } finally {
             scaledHair.recycle()
         }
@@ -399,12 +391,12 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     }
 
     override fun close() {
-        runCatching { matteWriter.close() }
         cachedHairMask?.let { if (!it.isRecycled) it.recycle() }
         cachedHairMask = null
+        runCatching { matteWriter.close() }
         runCatching { gpuTemporal?.close() }
         gpuTemporal = null
-        cpuTemporal.close()
+        runCatching { cpuTemporal.close() }
         runCatching { hair.close() }
         runCatching { portraitMatte.close() }
     }
