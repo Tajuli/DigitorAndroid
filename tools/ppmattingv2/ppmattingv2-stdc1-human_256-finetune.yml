@@ -3,6 +3,13 @@
 # This is intentionally a real 256 training/export profile, not a 512 graph fed with a 256 tensor.
 # Start from PaddleSeg's official human-512 checkpoint so the learned matting representation is
 # preserved, then adapt the network to the 256x256 operating point used by the mobile Vulkan path.
+#
+# IMPORTANT 256 specialization:
+# PP-MattingV2's default DPP bins are [2, 4, 6]. At a 256x256 input the first pyramid pool produces
+# a 4x4 feature map, so the default 6x6 AdaptiveAvgPool asks the exporter/runtime to pool a 4x4 map
+# to 6x6. Paddle can serialize that graph, but ONNX consumers (onnxruntime/pnnx) hit SIGFPE on it.
+# [2, 3, 4] keeps all pyramid stages <= the 4x4 DPP map while preserving three transformer stages
+# and their parameter shapes, so the official 512 checkpoint remains weight-compatible.
 
 batch_size: 16
 iters: 20000
@@ -55,6 +62,8 @@ model:
   head_channel: 8
   dpp_output_channel: 256
   dpp_merge_type: add
+  # 256-safe DPP pyramid: pp1 output is 4x4, therefore no adaptive pool may request >4x4.
+  dpp_bin_sizes: [2, 3, 4]
   # tools/train.py treats this as a warm-start checkpoint when present in the config.
   pretrained: pretrained_models/ppmattingv2-stdc1-human_512.pdparams
 
