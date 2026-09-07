@@ -10,6 +10,7 @@ import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
+import java.nio.ByteOrder
 import kotlin.math.max
 import kotlin.math.sqrt
 
@@ -17,6 +18,7 @@ private const val PERSON_DETECTOR_MODEL_ASSET_V57 = "efficientdet_lite0_int8.tfl
 private const val PERSON_SEMANTIC_MODEL_ASSET_V58 = "selfie_multiclass_256x256.tflite"
 private const val PERSON_DETECTOR_SCORE_THRESHOLD_V58 = .15f
 private const val PERSON_DETECTOR_MAX_RESULTS_V58 = 20
+private const val PERSON_SEMANTIC_CONFIDENCE_V61 = .18f
 
 internal data class PersonDetectionV57(
     val bounds: RectF,
@@ -27,12 +29,14 @@ internal data class PersonDetectionV57(
 /**
  * Person ROI localizer used before PP-MattingV2.
  *
- * EfficientDet-Lite0 is the primary detector. MediaPipe category labels are metadata-driven and can
- * be empty on some model/runtime combinations, so COCO person is accepted by category name,
- * display name or label index 0. If EfficientDet still misses a close-up/selfie frame, the already
- * packaged SelfieMulticlass model is used only to recover one connected person bounding box from
- * non-background classes 1..5. Neither detector output nor semantic mask is ever used as the final
- * cutout alpha; PP-MattingV2 remains responsible for the matte.
+ * SelfieMulticlass confidence masks are evaluated on every analyzed frame and are preferred for
+ * close-up portrait ROI geometry because they localize actual human pixels rather than a generic
+ * object rectangle. EfficientDet-Lite0 remains an independent detector/fallback. Neither output is
+ * used as the final cutout alpha; PP-MattingV2 remains responsible for the stored soft matte.
+ *
+ * We intentionally do not depend on the Android category mask for SelfieMulticlass. Confidence
+ * masks expose float probabilities per class and avoid category-index issues seen on some Android
+ * MediaPipe/model combinations.
  */
 internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -63,28 +67,37 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
             )
             .setRunningMode(RunningMode.IMAGE)
             .setOutputCategoryMask(true)
-            .setOutputConfidenceMasks(false)
+            .setOutputConfidenceMasks(true)
             .build(),
     )
 
-    val backendLabel: String = "EfficientDet-Lite0 int8 CPU + SelfieMulticlass ROI fallback"
+    val backendLabel: String =
+        "SelfieMulticlass confidence ROI + EfficientDet-Lite0 int8 CPU fallback"
 
     fun detectPeople(bitmap: Bitmap): List<PersonDetectionV57> {
         check(!bitmap.isRecycled) { "Cannot detect a person on a recycled bitmap" }
 
+        // Always evaluate the semantic portrait locator. In the previous implementation it only ran
+        // after EfficientDet returned no result, which made a broad object box win even when a much
+        // tighter human-pixel bbox was available.
+        val semanticBounds = runCatching { detectWithSelfieMulticlassConfidence(bitmap) }.getOrNull()
         val efficientDetPeople = runCatching { detectWithEfficientDet(bitmap) }
             .getOrElse { emptyList() }
-        if (efficientDetPeople.isNotEmpty()) return efficientDetPeople
 
-        val semanticBounds = runCatching { detectWithSelfieMulticlass(bitmap) }.getOrNull()
-            ?: return emptyList()
-        return listOf(
-            PersonDetectionV57(
-                bounds = semanticBounds,
-                score = .20f,
-                source = "SelfieMulticlass",
-            ),
-        )
+        return buildList {
+            semanticBounds?.let { bounds ->
+                add(
+                    PersonDetectionV57(
+                        bounds = bounds,
+                        // Ranking weight rather than a calibrated detector probability. Prefer the
+                        // semantic human bbox when it is plausible; PP-Matting remains final alpha.
+                        score = .98f,
+                        source = "SelfieMulticlass confidence",
+                    ),
+                )
+            }
+            addAll(efficientDetPeople)
+        }
     }
 
     private fun detectWithEfficientDet(bitmap: Bitmap): List<PersonDetectionV57> {
@@ -115,12 +128,52 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
     }
 
     /**
-     * SelfieMulticlass categories are 0 background and 1..5 person parts (hair, skin, face,
-     * clothes, accessories). Keep only the largest plausible connected non-background component and
-     * return its source-image bounding box. This is a locator fallback only, never a matte fallback.
+     * Union SelfieMulticlass confidence masks for classes 1..N (all non-background person parts),
+     * then keep the largest plausible connected human component and return only its source bbox.
+     * Category 0 is background. This mask is a locator only and is never stored as cutout alpha.
      */
-    private fun detectWithSelfieMulticlass(bitmap: Bitmap): RectF? {
+    private fun detectWithSelfieMulticlassConfidence(bitmap: Bitmap): RectF? {
         val result = semanticFallback.segment(BitmapImageBuilder(bitmap).build())
+        val masks = result.confidenceMasks().orElse(null)
+        if (masks == null || masks.size < 2) {
+            return detectWithSelfieMulticlassCategoryFallback(result, bitmap)
+        }
+
+        val width = masks.first().width.coerceAtLeast(1)
+        val height = masks.first().height.coerceAtLeast(1)
+        val count = width * height
+        val personConfidence = FloatArray(count)
+        var usableMasks = 0
+
+        // Index 0 is background. Union all person-part classes by max confidence.
+        for (maskIndex in 1 until masks.size) {
+            val mask = masks[maskIndex]
+            if (mask.width != width || mask.height != height) continue
+            val bytes = ByteBufferExtractor.extract(mask).order(ByteOrder.nativeOrder())
+            bytes.rewind()
+            val floats = bytes.asFloatBuffer()
+            if (floats.remaining() < count) continue
+            usableMasks++
+            for (i in 0 until count) {
+                val confidence = floats.get(i)
+                if (confidence > personConfidence[i]) personConfidence[i] = confidence
+            }
+        }
+        if (usableMasks == 0) return detectWithSelfieMulticlassCategoryFallback(result, bitmap)
+
+        val foreground = BooleanArray(count)
+        for (i in 0 until count) {
+            foreground[i] = personConfidence[i] >= PERSON_SEMANTIC_CONFIDENCE_V61
+        }
+        return connectedPersonBounds(foreground, width, height, bitmap)
+            ?: detectWithSelfieMulticlassCategoryFallback(result, bitmap)
+    }
+
+    /** Category-mask fallback retained only as a secondary compatibility path. */
+    private fun detectWithSelfieMulticlassCategoryFallback(
+        result: com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenterResult,
+        bitmap: Bitmap,
+    ): RectF? {
         val mpMask = result.categoryMask().orElse(null) ?: return null
         val width = mpMask.width.coerceAtLeast(1)
         val height = mpMask.height.coerceAtLeast(1)
@@ -128,9 +181,22 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
         val buffer = ByteBufferExtractor.extract(mpMask)
         buffer.rewind()
         if (buffer.remaining() < count) return null
-
         val labels = ByteArray(count)
         buffer.get(labels)
+        val foreground = BooleanArray(count)
+        for (i in 0 until count) {
+            foreground[i] = (labels[i].toInt() and 0xFF) != 0
+        }
+        return connectedPersonBounds(foreground, width, height, bitmap)
+    }
+
+    private fun connectedPersonBounds(
+        foreground: BooleanArray,
+        width: Int,
+        height: Int,
+        bitmap: Bitmap,
+    ): RectF? {
+        val count = width * height
         val visited = BooleanArray(count)
         val queue = IntArray(count)
         val minArea = max(32, (count * .004f).toInt())
@@ -147,7 +213,7 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
         for (start in 0 until count) {
             if (visited[start]) continue
             visited[start] = true
-            if ((labels[start].toInt() and 0xFF) == 0) continue
+            if (!foreground[start]) continue
 
             var head = 0
             var tail = 0
@@ -175,7 +241,7 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
                 fun offer(next: Int) {
                     if (visited[next]) return
                     visited[next] = true
-                    if ((labels[next].toInt() and 0xFF) == 0) return
+                    if (!foreground[next]) return
                     queue[tail++] = next
                 }
 
@@ -192,9 +258,13 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
 
             val cx = sumX.toFloat() / area.toFloat()
             val cy = sumY.toFloat() / area.toFloat()
-            val centerDistance = sqrt((cx - frameCx) * (cx - frameCx) + (cy - frameCy) * (cy - frameCy))
-            val centerBonus = 1f + .25f * (1f - (centerDistance / frameDiag).coerceIn(0f, 1f))
-            val verticalBonus = 1f + .12f * (boxH.toFloat() / height.toFloat()).coerceIn(0f, 1f)
+            val centerDistance = sqrt(
+                (cx - frameCx) * (cx - frameCx) + (cy - frameCy) * (cy - frameCy),
+            )
+            val centerBonus = 1f + .30f *
+                (1f - (centerDistance / frameDiag).coerceIn(0f, 1f))
+            val verticalBonus = 1f + .12f *
+                (boxH.toFloat() / height.toFloat()).coerceIn(0f, 1f)
             val score = area.toFloat() * centerBonus * verticalBonus
 
             if (score > bestScore) {
