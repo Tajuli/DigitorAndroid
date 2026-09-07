@@ -15,18 +15,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.roundToInt
 
-// Decode a materially denser analysis proxy before person cropping. The old 720-long-edge proxy
-// threw away scene detail before ROI selection, so a 384 ROI could look nearly identical to a
-// full-frame 384 pass. PP-MattingV2 still receives a fixed 384 tensor after the verified crop.
+// Decode a materially denser analysis proxy before person cropping. PP-MattingV2 still receives a
+// fixed 384 tensor after the verified crop.
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 1280
 
 /**
  * Per-frame PP-MattingV2 Pro Cutout analyzer.
  *
  * Every analyzed frame gets a real person ROI first. Scene pixels are cropped before the
- * PP-MattingV2 384 resize, PP-MattingV2 produces the soft alpha inside that ROI, a generous
- * confidence envelope suppresses in-box background leakage, then hair/temporal refinement runs and
- * a final ROI clamp prevents those refiners from reintroducing background outside the crop.
+ * PP-MattingV2 384 resize, PP-MattingV2 produces the soft alpha inside that ROI, then hair/temporal
+ * refinement runs and a final ROI clamp prevents refiners from reintroducing background outside the
+ * crop. PP-MattingV2 remains the sole in-box alpha authority.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -247,7 +246,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         append(portraitMatte.backendLabel)
         append(" · Tight person ROI (").append(roiMatte.detectorBackendLabel).append(")")
         append(" · Crop before PP-MattingV2 384 resize")
-        append(" · In-box core envelope")
+        append(" · In-box alpha PP-MattingV2 RAW")
         append(" · Final ROI clamp")
         append(" · Fresh neural matte every analyzed frame")
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
@@ -389,7 +388,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 val uncertainty = (4f * a * (1f - a)).coerceIn(0f, 1f)
                 val contribution = h * s * (.10f + .46f * uncertainty)
                 val fused = max(a, a + (1f - a) * contribution).coerceIn(0f, 1f)
-                val v = (fused * 255f).roundToInt().coerceIn(0, 255)
+                val v = (fused * 255f + .5f).toInt().coerceIn(0, 255)
                 out[i] = Color.argb(255, v, v, v)
             }
             return Bitmap.createBitmap(out, base.width, base.height, Bitmap.Config.ARGB_8888)
@@ -398,19 +397,16 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         }
     }
 
-    fun awaitPendingStores() {
-        matteWriter.awaitIdle()
-    }
+    fun awaitPendingStores() = matteWriter.awaitIdle()
 
     override fun close() {
-        runCatching { matteWriter.close() }
-        runCatching { gpuTemporal?.close() }
-        gpuTemporal = null
-        runCatching { cpuTemporal.close() }
+        runCatching { matteWriter.awaitIdle() }
+        cachedHairMask?.recycle()
+        cachedHairMask = null
         runCatching { hair.close() }
         runCatching { roiMatte.close() }
         runCatching { portraitMatte.close() }
-        cachedHairMask?.let { if (!it.isRecycled) it.recycle() }
-        cachedHairMask = null
+        runCatching { gpuTemporal?.close() }
+        gpuTemporal = null
     }
 }
