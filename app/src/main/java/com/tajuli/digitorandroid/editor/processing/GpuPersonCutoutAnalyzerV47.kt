@@ -225,7 +225,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     }
 
     /**
-     * High-mode writes arrive sequentially but the two-writer pipeline can leave the final couple of
+     * High-mode writes arrive sequentially but the writer pipeline can leave the final couple of
      * PNGs out of order during an abrupt process death. Find the first meaningful gap instead of
      * blindly trusting max(timestamp), then decode again from just after the last contiguous frame.
      */
@@ -492,7 +492,9 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     fun awaitPendingStores() = matteWriter.awaitIdle()
 
     override fun close() {
-        runCatching { matteWriter.awaitIdle() }
+        // Drain then actually shut down all long-lived worker/state objects. The previous code only
+        // awaited the matte writer, leaving its executor thread alive after every Analyze/Resume.
+        runCatching { matteWriter.close() }
         cachedHairMask?.recycle()
         cachedHairMask = null
         runCatching { hair.close() }
@@ -500,5 +502,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         runCatching { portraitMatte.close() }
         runCatching { gpuTemporal?.close() }
         gpuTemporal = null
+        runCatching { cpuTemporal.close() }
     }
 }
