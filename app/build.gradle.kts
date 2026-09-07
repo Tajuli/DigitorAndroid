@@ -120,6 +120,26 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
     }
 }
 
+// A real COCO object detector is used only to localize the person ROI. We deliberately filter the
+// returned detections in Kotlin instead of using a delegate category allow-list, and keep this small
+// detector on CPU while PP-MattingV2 itself stays on ncnn Vulkan.
+val generatedPersonDetectorAssets = layout.buildDirectory.dir("generated/personDetectorAssets")
+val personDetectorModelFile = generatedPersonDetectorAssets.map { it.file("efficientdet_lite0_int8.tflite") }
+val downloadPersonDetectorModel by tasks.registering {
+    outputs.file(personDetectorModelFile)
+    doLast {
+        val output = personDetectorModelFile.get().asFile
+        downloadGeneratedAssetWithRetry(
+            urls = listOf(
+                "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/latest/efficientdet_lite0.tflite",
+            ),
+            output = output,
+            minimumBytes = 2_000_000L,
+            label = "MediaPipe EfficientDet-Lite0 int8 person detector",
+        )
+    }
+}
+
 // V50 Pro Cutout uses PP-MattingV2/STDC1 512. The pinned ONNX model is the conversion source for
 // the ncnn Vulkan GPU artifact and remains the lazy ONNX Runtime CPU reliability fallback.
 val generatedPpMattingV2Assets = layout.buildDirectory.dir("generated/ppMattingV2Assets")
@@ -198,12 +218,14 @@ android {
 
     sourceSets["main"].assets.srcDir(generatedHairModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedFaceSkinModelAssets.get().asFile)
+    sourceSets["main"].assets.srcDir(generatedPersonDetectorAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedPpMattingV2Assets.get().asFile)
 }
 
 tasks.named("preBuild").configure {
     dependsOn(downloadHairSegmenterModel)
     dependsOn(downloadFaceSkinSegmenterModel)
+    dependsOn(downloadPersonDetectorModel)
     dependsOn(downloadPpMattingV2Model)
 }
 
