@@ -18,7 +18,8 @@ private const val PERSON_DETECTOR_MODEL_ASSET_V57 = "efficientdet_lite0_int8.tfl
 private const val PERSON_SEMANTIC_MODEL_ASSET_V58 = "selfie_multiclass_256x256.tflite"
 private const val PERSON_DETECTOR_SCORE_THRESHOLD_V58 = .15f
 private const val PERSON_DETECTOR_MAX_RESULTS_V58 = 20
-private const val PERSON_SEMANTIC_CONFIDENCE_V61 = .18f
+private const val PERSON_SEMANTIC_CONFIDENCE_V62 = .28f
+private const val PERSON_SEMANTIC_BG_MARGIN_V62 = .05f
 
 internal data class PersonDetectionV57(
     val bounds: RectF,
@@ -34,9 +35,9 @@ internal data class PersonDetectionV57(
  * object rectangle. EfficientDet-Lite0 remains an independent detector/fallback. Neither output is
  * used as the final cutout alpha; PP-MattingV2 remains responsible for the stored soft matte.
  *
- * We intentionally do not depend on the Android category mask for SelfieMulticlass. Confidence
- * masks expose float probabilities per class and avoid category-index issues seen on some Android
- * MediaPipe/model combinations.
+ * Confidence-mask localization uses both the strongest person-part probability and the background
+ * probability. A pixel must be confidently human and beat background by a margin. This prevents a
+ * weak halo around the chair/wall from inflating the bbox.
  */
 internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -77,9 +78,6 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
     fun detectPeople(bitmap: Bitmap): List<PersonDetectionV57> {
         check(!bitmap.isRecycled) { "Cannot detect a person on a recycled bitmap" }
 
-        // Always evaluate the semantic portrait locator. In the previous implementation it only ran
-        // after EfficientDet returned no result, which made a broad object box win even when a much
-        // tighter human-pixel bbox was available.
         val semanticBounds = runCatching { detectWithSelfieMulticlassConfidence(bitmap) }.getOrNull()
         val efficientDetPeople = runCatching { detectWithEfficientDet(bitmap) }
             .getOrElse { emptyList() }
@@ -89,9 +87,7 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
                 add(
                     PersonDetectionV57(
                         bounds = bounds,
-                        // Ranking weight rather than a calibrated detector probability. Prefer the
-                        // semantic human bbox when it is plausible; PP-Matting remains final alpha.
-                        score = .98f,
+                        score = .99f,
                         source = "SelfieMulticlass confidence",
                     ),
                 )
@@ -143,9 +139,19 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
         val height = masks.first().height.coerceAtLeast(1)
         val count = width * height
         val personConfidence = FloatArray(count)
-        var usableMasks = 0
+        val backgroundConfidence = FloatArray(count)
 
-        // Index 0 is background. Union all person-part classes by max confidence.
+        val bgMask = masks[0]
+        if (bgMask.width == width && bgMask.height == height) {
+            val bytes = ByteBufferExtractor.extract(bgMask).order(ByteOrder.nativeOrder())
+            bytes.rewind()
+            val floats = bytes.asFloatBuffer()
+            if (floats.remaining() >= count) {
+                for (i in 0 until count) backgroundConfidence[i] = floats.get(i)
+            }
+        }
+
+        var usableMasks = 0
         for (maskIndex in 1 until masks.size) {
             val mask = masks[maskIndex]
             if (mask.width != width || mask.height != height) continue
@@ -163,7 +169,10 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
 
         val foreground = BooleanArray(count)
         for (i in 0 until count) {
-            foreground[i] = personConfidence[i] >= PERSON_SEMANTIC_CONFIDENCE_V61
+            val person = personConfidence[i]
+            val background = backgroundConfidence[i]
+            foreground[i] = person >= PERSON_SEMANTIC_CONFIDENCE_V62 &&
+                person >= background + PERSON_SEMANTIC_BG_MARGIN_V62
         }
         return connectedPersonBounds(foreground, width, height, bitmap)
             ?: detectWithSelfieMulticlassCategoryFallback(result, bitmap)
