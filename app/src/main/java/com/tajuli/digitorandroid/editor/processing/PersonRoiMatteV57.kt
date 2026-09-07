@@ -24,11 +24,15 @@ private const val PERSON_ROI_BOOTSTRAP_ALPHA_V59 = 160
 /**
  * Robust person ROI wrapper for PP-MattingV2 384.
  *
- * EfficientDet is the primary locator. If it misses, a recent matte-derived tracked box is reused.
- * If no recent box exists, one explicit full-frame PP-Matting pass is used only to bootstrap the
- * foreground bounding box; that bootstrap matte is NEVER stored as the final cutout. The detected
- * crop is then run through PP-MattingV2 384 again, so final output still comes from the dense ROI
- * inference. Every successful ROI matte refreshes the tracked box for following frames.
+ * EfficientDet + SelfieMulticlass provide the cheap primary localization path. If they miss, a
+ * recent matte-derived tracked box is reused. If no recent box exists, one explicit full-frame
+ * PP-Matting pass is used ONLY to bootstrap a foreground bounding box; that bootstrap matte is
+ * discarded and never becomes the final cutout. The detected crop is then run through the fixed
+ * PP-MattingV2 384 graph again, so the stored matte still comes from dense ROI inference.
+ *
+ * Every successful ROI matte refreshes the tracked box. This makes ROI localization independent of
+ * whether the vendor/MediaPipe detector succeeds on every decoded frame while preserving the real
+ * crop-before-384-resize behavior that increases subject pixel density.
  */
 internal class PersonRoiMatteV57(
     context: Context,
@@ -39,7 +43,6 @@ internal class PersonRoiMatteV57(
 
     private var cachedPersonBounds: RectF? = null
     private var lastLocalizedTimeUs: Long = Long.MIN_VALUE
-    private var lastSourceTimeUs: Long = Long.MIN_VALUE
     private var sourceWidth: Int = 0
     private var sourceHeight: Int = 0
     private var activeRoi: Rect? = null
@@ -77,7 +80,6 @@ internal class PersonRoiMatteV57(
 
         val roi = tightRoi(cachedPersonBounds!!, source.width, source.height)
         activeRoi = roi
-        lastSourceTimeUs = sourceTimeUs
 
         val crop = Bitmap.createBitmap(source, roi.left, roi.top, roi.width(), roi.height())
         val roiMatte = try {
