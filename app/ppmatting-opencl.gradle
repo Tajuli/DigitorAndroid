@@ -29,15 +29,17 @@ def outputParam = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.ncn
 def outputBin = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.ncnn.bin")
 def outputProfile = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.profile")
 
-// Use the newer pnnx converter for genuine fixed-resolution Paddle2ONNX graphs while keeping the
-// already-tested 20260526 Android ncnn Vulkan runtime on the target device.
-def pnnxZip = file("${downloadsDir}/pnnx-20260704-linux.zip")
+// Keep converter and Android runtime on the exact same ncnn generation. The earlier 384 APK used
+// pnnx 20260704 to emit the param/bin but linked ncnn 20260526 on-device. On the Symphony Z60 that
+// model did not initialize and Kotlin silently fell back to ORT CPU 512. The fixed-384 graph does
+// not have the 256 DPP 6x6-on-4x4 pathology, so the matching 20260526 pnnx can safely be tested here.
+def pnnxZip = file("${downloadsDir}/pnnx-20260526-linux.zip")
 def ncnnZip = file("${downloadsDir}/ncnn-20260526-android-vulkan.zip")
 
-def pnnxUrl = "https://github.com/pnnx/pnnx/releases/download/20260704/pnnx-20260704-linux.zip"
+def pnnxUrl = "https://github.com/pnnx/pnnx/releases/download/20260526/pnnx-20260526-linux.zip"
 def ncnnUrl = "https://github.com/Tencent/ncnn/releases/download/20260526/ncnn-20260526-android-vulkan.zip"
 
-def pnnxSha256 = "685ee1d718068809bdbbc7a9417fa4e2e98a9f2164e8ad9fad73f63377464066"
+def pnnxSha256 = "dde08ce2e2e1744a4ddce576910b451a860663af91d2aeed0d21ebee4fa69955"
 def ncnnSha256 = "26909c92eed35afed4a966b5e9e503fcb0a529691ea3f910ec2c94a4fff52804"
 
 def sha256Of = { File source ->
@@ -228,8 +230,8 @@ tasks.register("preparePpMattingNcnnModel") {
         if (!outputBin.isFile() || outputBin.length() < 5_000_000L) {
             throw new GradleException("pnnx did not create a valid ${outputBin}")
         }
-        outputProfile.text = "PP-MattingV2 STDC1 fixed ${modelSize}x${modelSize}\nsource=${sourceOnnx.name}\npnnx=20260704\n"
-        logger.lifecycle("PP-MattingV2 Vulkan profile: fixed ${modelSize}x${modelSize} from ${sourceOnnx.name} via pnnx 20260704")
+        outputProfile.text = "PP-MattingV2 STDC1 fixed ${modelSize}x${modelSize}\nsource=${sourceOnnx.name}\npnnx=20260526\nncnn=20260526\n"
+        logger.lifecycle("PP-MattingV2 Vulkan profile: fixed ${modelSize}x${modelSize} from ${sourceOnnx.name} via matched pnnx/ncnn 20260526")
     }
 }
 
