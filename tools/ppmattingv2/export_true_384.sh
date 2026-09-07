@@ -5,10 +5,16 @@ set -euo pipefail
 # This deliberately avoids pnnx input-shape overrides and avoids feeding a 512 graph with a smaller
 # runtime tensor. The exported graph carries [1,3,384,384] from Paddle all the way into ncnn.
 #
+# IMPORTANT: the production Android CI intentionally uses PaddleSeg's proven official human-512
+# checkpoint as the weight source while exporting a true fixed 384 graph. A short CI-side 384
+# adaptation experiment produced repeatable holes through valid human shoulder/arm/face regions on
+# the physical Symphony Z60, so that adaptation path was removed. A future 384 fine-tuned checkpoint
+# can still be supplied explicitly through PPMATTING_CHECKPOINT after it has been validated.
+#
 # Inputs:
 #   PADDLESEG_DIR         PaddleSeg release/2.10 checkout (required)
-#   PPMATTING_CHECKPOINT  Fine-tuned 384 checkpoint when available; defaults to official 512 warm start
-#   PPMATTING_CONFIG      384 config; defaults to this repository's fine-tune profile
+#   PPMATTING_CHECKPOINT  validated checkpoint; defaults to official human-512 weights
+#   PPMATTING_CONFIG      384 config; defaults to this repository's 384 export profile
 #   OUTPUT_ONNX           destination ONNX path (required)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
