@@ -7,35 +7,35 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
-import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-private const val PERSON_ROI_STALE_US_V57 = 1_500_000L
-private const val PERSON_ROI_SIDE_MARGIN_V60 = .08f
-private const val PERSON_ROI_TOP_MARGIN_V60 = .07f
-private const val PERSON_ROI_BOTTOM_MARGIN_V60 = .06f
-private const val PERSON_ROI_BOOTSTRAP_EDGE_V59 = 256
-private const val PERSON_ROI_BOOTSTRAP_ALPHA_V60 = 190
-private const val PERSON_ROI_GATE_EDGE_V60 = 192
-private const val PERSON_ROI_GATE_CORE_ALPHA_V60 = 200
-private const val PERSON_ROI_GATE_FEATHER_V60 = 4
+private const val PERSON_ROI_SIDE_MARGIN_V62 = .055f
+private const val PERSON_ROI_TOP_MARGIN_V62 = .045f
+private const val PERSON_ROI_BOTTOM_MARGIN_V62 = .035f
+private const val PERSON_ROI_MAX_FRAME_FRACTION_V62 = .46f
+private const val PERSON_ROI_BOOTSTRAP_MAX_FRAME_FRACTION_V62 = .44f
+private const val PERSON_ROI_BOOTSTRAP_EDGE_V62 = 256
+private const val PERSON_ROI_BOOTSTRAP_ALPHA_V62 = 200
+private const val PERSON_ROI_GATE_EDGE_V62 = 192
+private const val PERSON_ROI_GATE_CORE_ALPHA_V62 = 205
+private const val PERSON_ROI_GATE_FEATHER_V62 = 4
+private const val PERSON_ROI_CENTER_TRACK_GAIN_V62 = .25f
+private const val PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V62 = .04f
 
 /**
- * Robust person ROI wrapper for PP-MattingV2 384.
+ * Detector-authoritative person ROI wrapper for PP-MattingV2 384.
  *
- * The important invariant is crop-before-resize: a real source-frame person box is cropped first,
- * then that crop is padded to square and only then PP-MattingV2 performs its fixed 384 resize.
- * This concentrates the model resolution on the subject instead of the whole 16:9 scene.
+ * The bbox size comes only from SelfieMulticlass confidence localization or EfficientDet. A dense
+ * PP-Matting result is allowed to move the bbox center between detector hits, but it can NEVER grow
+ * or shrink bbox width/height. This removes the feedback loop where a leaked chair widened the
+ * matte-derived bbox and then remained inside every later crop.
  *
- * A rectangular ROI alone cannot remove a chair that is physically behind the person but still
- * inside the rectangle. To suppress that failure mode without replacing PP-MattingV2 with a coarse
- * segmentation mask, the dense PP-Matting result is additionally constrained by a generous
- * high-confidence connected foreground envelope. PP-MattingV2 still supplies all final soft alpha
- * and edge detail inside that envelope.
+ * The source-frame crop is taken before the fixed 384 resize. PP-MattingV2 remains the final soft
+ * alpha source; a generous high-confidence PP-Matting envelope only vetoes obvious in-box leakage.
  */
 internal class PersonRoiMatteV57(
     context: Context,
@@ -44,47 +44,42 @@ internal class PersonRoiMatteV57(
     private val detector = FastPersonObjectDetectorV57(context.applicationContext)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
 
-    private var cachedPersonBounds: RectF? = null
-    private var lastLocalizedTimeUs: Long = Long.MIN_VALUE
-    private var lastLocalizationSource: String = "none"
+    private var detectorAnchor: RectF? = null
+    private var lastDetectorTimeUs: Long = Long.MIN_VALUE
+    private var lastSizeAuthoritySource: String = "none"
     private var sourceWidth: Int = 0
     private var sourceHeight: Int = 0
     private var activeRoi: Rect? = null
 
     val detectorBackendLabel: String
-        get() = detector.backendLabel + " + matte bootstrap/track + core envelope"
+        get() = detector.backendLabel +
+            " + detector-only bbox size + matte center-only tracking + core envelope"
 
     fun infer(source: Bitmap, sourceTimeUs: Long): Bitmap {
         check(!source.isRecycled) { "Cannot run ROI matting on a recycled bitmap" }
         resetTrackingIfNeeded(source)
 
-        val people = runCatching { detector.detectPeople(source) }.getOrElse { emptyList() }
+        val detections = runCatching { detector.detectPeople(source) }.getOrElse { emptyList() }
         val detected = choosePerson(
-            detections = people,
-            previous = cachedPersonBounds,
+            detections = detections,
+            previous = detectorAnchor,
             frameWidth = source.width,
             frameHeight = source.height,
         )
 
         if (detected != null) {
-            updateTrackedBounds(detected.bounds, sourceTimeUs)
-            lastLocalizationSource = detected.source
-        }
-
-        val tracked = cachedPersonBounds
-        val trackedIsRecent = tracked != null && lastLocalizedTimeUs != Long.MIN_VALUE &&
-            abs(sourceTimeUs - lastLocalizedTimeUs) <= PERSON_ROI_STALE_US_V57
-
-        if (!trackedIsRecent) {
+            updateDetectorAnchor(detected.bounds, sourceTimeUs, detected.source)
+        } else if (detectorAnchor == null) {
             val bootstrapBounds = bootstrapPersonBounds(source)
             check(bootstrapBounds != null) {
-                "Person ROI localization failed: detector/semantic locator missed and PP-Matting bootstrap found no foreground"
+                "Person ROI localization failed: Selfie/EfficientDet missed and PP-Matting bootstrap found no foreground"
             }
-            updateTrackedBounds(bootstrapBounds, sourceTimeUs)
-            lastLocalizationSource = "PP-Matting bootstrap"
+            detectorAnchor = capBootstrapSeed(bootstrapBounds)
+            lastSizeAuthoritySource = "PP-Matting bootstrap seed"
         }
 
-        val roi = tightRoi(cachedPersonBounds!!, source.width, source.height)
+        val anchor = detectorAnchor ?: error("Person ROI anchor is unavailable")
+        val roi = tightRoi(anchor, source.width, source.height)
         activeRoi = roi
 
         val crop = Bitmap.createBitmap(source, roi.left, roi.top, roi.width(), roi.height())
@@ -99,25 +94,26 @@ internal class PersonRoiMatteV57(
         val gateApplied = gatedRoiMatte != null
         if (roiMatte !== rawRoiMatte && !rawRoiMatte.isRecycled) rawRoiMatte.recycle()
 
-        // Refresh tracking from the actual dense ROI matte, but do not allow a leaked chair/vase to
-        // suddenly expand the tracked box. External detector/semantic localization can still move
-        // the box freely on the next frame.
-        dominantForegroundBounds(roiMatte)?.let { local ->
-            val sourceBounds = RectF(
-                roi.left + local.left,
-                roi.top + local.top,
-                roi.left + local.right,
-                roi.top + local.bottom,
-            )
-            updateTrackedBoundsFromMatte(sourceBounds, sourceTimeUs)
-            if (detected == null) lastLocalizationSource = "Dense matte track"
+        var centerTrackApplied = false
+        if (detected == null) {
+            dominantForegroundBounds(roiMatte)?.let { local ->
+                val sourceBounds = RectF(
+                    roi.left + local.left,
+                    roi.top + local.top,
+                    roi.left + local.right,
+                    roi.top + local.bottom,
+                )
+                centerTrackApplied = shiftAnchorCenterOnly(sourceBounds)
+            }
         }
 
         publishRoiProof(
             roi = roi,
             frameWidth = source.width,
             frameHeight = source.height,
-            source = lastLocalizationSource,
+            sourceTimeUs = sourceTimeUs,
+            sizeAuthoritySource = lastSizeAuthoritySource,
+            centerTrackApplied = centerTrackApplied,
             gateApplied = gateApplied,
         )
 
@@ -134,7 +130,7 @@ internal class PersonRoiMatteV57(
 
     /**
      * Hair/temporal refinement works in full-frame coordinates. Clamp the final matte back to the
-     * active ROI so those refiners cannot reintroduce background outside the crop.
+     * active ROI so those refiners cannot reintroduce background outside the verified crop.
      */
     fun clampToActiveRoi(matte: Bitmap): Bitmap {
         val roi = activeRoi ?: error("No verified person ROI is active for this matte")
@@ -155,9 +151,9 @@ internal class PersonRoiMatteV57(
     private fun resetTrackingIfNeeded(source: Bitmap) {
         val dimensionsChanged = source.width != sourceWidth || source.height != sourceHeight
         if (dimensionsChanged) {
-            cachedPersonBounds = null
-            lastLocalizedTimeUs = Long.MIN_VALUE
-            lastLocalizationSource = "none"
+            detectorAnchor = null
+            lastDetectorTimeUs = Long.MIN_VALUE
+            lastSizeAuthoritySource = "none"
             activeRoi = null
             PersonRoiRuntimeStatusV60.update(null)
         }
@@ -165,36 +161,69 @@ internal class PersonRoiMatteV57(
         sourceHeight = source.height
     }
 
-    private fun updateTrackedBounds(bounds: RectF, sourceTimeUs: Long) {
+    /** Detector/Selfie is the only normal authority allowed to change bbox width and height. */
+    private fun updateDetectorAnchor(bounds: RectF, sourceTimeUs: Long, source: String) {
         val clipped = clipBounds(bounds)
         if (clipped.width() < 2f || clipped.height() < 2f) return
-        cachedPersonBounds = cachedPersonBounds?.let { previous ->
-            smoothBounds(previous, clipped)
-        } ?: clipped
-        lastLocalizedTimeUs = sourceTimeUs
+        val previous = detectorAnchor
+        detectorAnchor = if (
+            previous == null ||
+            lastSizeAuthoritySource.startsWith("PP-Matting bootstrap") ||
+            intersectionOverUnion(previous, clipped) < .08f
+        ) {
+            clipped
+        } else {
+            smoothDetectorBounds(previous, clipped, source)
+        }
+        lastDetectorTimeUs = sourceTimeUs
+        lastSizeAuthoritySource = source
     }
 
-    private fun updateTrackedBoundsFromMatte(bounds: RectF, sourceTimeUs: Long) {
+    /**
+     * Dense matte tracking may move only the center. Width and height are copied byte-for-byte from
+     * the detector-owned anchor, so chair/vase leakage can never inflate the next ROI.
+     */
+    private fun shiftAnchorCenterOnly(bounds: RectF): Boolean {
+        val anchor = detectorAnchor ?: return false
         val candidate = clipBounds(bounds)
-        if (candidate.width() < 2f || candidate.height() < 2f) return
-        val previous = cachedPersonBounds
-        if (previous == null) {
-            cachedPersonBounds = candidate
-            lastLocalizedTimeUs = sourceTimeUs
-            return
-        }
+        if (candidate.width() < 2f || candidate.height() < 2f) return false
 
-        val maxExpandX = previous.width() * .06f
-        val maxExpandY = previous.height() * .06f
-        val constrained = RectF(
-            max(candidate.left, previous.left - maxExpandX),
-            max(candidate.top, previous.top - maxExpandY),
-            min(candidate.right, previous.right + maxExpandX),
-            min(candidate.bottom, previous.bottom + maxExpandY),
-        )
-        if (constrained.width() < 2f || constrained.height() < 2f) return
-        cachedPersonBounds = smoothBounds(previous, constrained)
-        lastLocalizedTimeUs = sourceTimeUs
+        val width = anchor.width()
+        val height = anchor.height()
+        val maxShiftX = width * PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V62
+        val maxShiftY = height * PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V62
+        val desiredDx = (candidate.centerX() - anchor.centerX()) * PERSON_ROI_CENTER_TRACK_GAIN_V62
+        val desiredDy = (candidate.centerY() - anchor.centerY()) * PERSON_ROI_CENTER_TRACK_GAIN_V62
+        val dx = desiredDx.coerceIn(-maxShiftX, maxShiftX)
+        val dy = desiredDy.coerceIn(-maxShiftY, maxShiftY)
+        if (kotlin.math.abs(dx) < .5f && kotlin.math.abs(dy) < .5f) return false
+
+        val halfW = width * .5f
+        val halfH = height * .5f
+        val cx = (anchor.centerX() + dx).coerceIn(halfW, sourceWidth - halfW)
+        val cy = (anchor.centerY() + dy).coerceIn(halfH, sourceHeight - halfH)
+        detectorAnchor = RectF(cx - halfW, cy - halfH, cx + halfW, cy + halfH)
+        return true
+    }
+
+    private fun smoothDetectorBounds(previous: RectF, current: RectF, source: String): RectF {
+        val freshCenter = if (source.startsWith("SelfieMulticlass")) .82f else .68f
+        val freshSize = if (source.startsWith("SelfieMulticlass")) .72f else .55f
+        val cx = previous.centerX() * (1f - freshCenter) + current.centerX() * freshCenter
+        val cy = previous.centerY() * (1f - freshCenter) + current.centerY() * freshCenter
+        val width = previous.width() * (1f - freshSize) + current.width() * freshSize
+        val height = previous.height() * (1f - freshSize) + current.height() * freshSize
+        return clipCenteredBox(cx, cy, width, height)
+    }
+
+    private fun clipCenteredBox(cx: Float, cy: Float, width: Float, height: Float): RectF {
+        val safeW = width.coerceIn(2f, sourceWidth.toFloat())
+        val safeH = height.coerceIn(2f, sourceHeight.toFloat())
+        val halfW = safeW * .5f
+        val halfH = safeH * .5f
+        val safeCx = cx.coerceIn(halfW, sourceWidth - halfW)
+        val safeCy = cy.coerceIn(halfH, sourceHeight - halfH)
+        return RectF(safeCx - halfW, safeCy - halfH, safeCx + halfW, safeCy + halfH)
     }
 
     private fun clipBounds(bounds: RectF): RectF = RectF(
@@ -204,10 +233,7 @@ internal class PersonRoiMatteV57(
         bounds.bottom.coerceIn(0f, sourceHeight.toFloat()),
     )
 
-    /**
-     * Run PP-Matting full-frame only to bootstrap a person box when both cheap locators fail. This
-     * matte is discarded; final output still comes from a second PP-Matting pass on the tight ROI.
-     */
+    /** Full-frame PP-Matting is only an emergency first-frame seed; it never becomes final alpha. */
     private fun bootstrapPersonBounds(source: Bitmap): RectF? {
         val bootstrap = portraitMatte.infer(source)
         return try {
@@ -217,10 +243,23 @@ internal class PersonRoiMatteV57(
         }
     }
 
+    /** Keep a bootstrap seed from becoming another near-full-frame bbox. */
+    private fun capBootstrapSeed(bounds: RectF): RectF {
+        val clipped = clipBounds(bounds)
+        val frameArea = (sourceWidth.toFloat() * sourceHeight.toFloat()).coerceAtLeast(1f)
+        val area = clipped.width() * clipped.height()
+        val maxArea = frameArea * PERSON_ROI_BOOTSTRAP_MAX_FRAME_FRACTION_V62
+        if (area <= maxArea || clipped.height() <= 1f) return clipped
+
+        val targetWidth = (maxArea / clipped.height()).coerceAtLeast(2f)
+        if (targetWidth >= clipped.width()) return clipped
+        return clipCenteredBox(clipped.centerX(), clipped.centerY(), targetWidth, clipped.height())
+    }
+
     /** Find the dominant high-confidence connected foreground component. */
     private fun dominantForegroundBounds(matte: Bitmap): RectF? {
         val longEdge = max(matte.width, matte.height).coerceAtLeast(1)
-        val scale = min(1f, PERSON_ROI_BOOTSTRAP_EDGE_V59 / longEdge.toFloat())
+        val scale = min(1f, PERSON_ROI_BOOTSTRAP_EDGE_V62 / longEdge.toFloat())
         val workW = (matte.width * scale).roundToInt().coerceAtLeast(1)
         val workH = (matte.height * scale).roundToInt().coerceAtLeast(1)
         val work = if (workW == matte.width && workH == matte.height) {
@@ -235,7 +274,7 @@ internal class PersonRoiMatteV57(
             work.getPixels(pixels, 0, workW, 0, 0, workW, workH)
             val foreground = BooleanArray(count)
             for (i in 0 until count) {
-                foreground[i] = Color.red(pixels[i]) >= PERSON_ROI_BOOTSTRAP_ALPHA_V60
+                foreground[i] = Color.red(pixels[i]) >= PERSON_ROI_BOOTSTRAP_ALPHA_V62
             }
 
             val component = findBestForegroundComponent(foreground, workW, workH) ?: return null
@@ -253,14 +292,12 @@ internal class PersonRoiMatteV57(
     }
 
     /**
-     * Suppress background leakage that sits inside the rectangular bbox (for example a chair behind
-     * the shoulders). We seed from only very confident PP-Matting foreground, keep the dominant
-     * centered component, then dilate/feather it generously. The original PP alpha is multiplied by
-     * this envelope, so edge quality is still PP-MattingV2 rather than a hard segmentation mask.
+     * Suppress background leakage that remains inside the rectangular ROI. PP-MattingV2 still owns
+     * the final soft alpha; this envelope only vetoes pixels far from its strongest human component.
      */
     private fun buildForegroundEnvelopeGatedMatte(matte: Bitmap): Bitmap? {
         val longEdge = max(matte.width, matte.height).coerceAtLeast(1)
-        val scale = min(1f, PERSON_ROI_GATE_EDGE_V60 / longEdge.toFloat())
+        val scale = min(1f, PERSON_ROI_GATE_EDGE_V62 / longEdge.toFloat())
         val workW = (matte.width * scale).roundToInt().coerceAtLeast(1)
         val workH = (matte.height * scale).roundToInt().coerceAtLeast(1)
         val work = if (workW == matte.width && workH == matte.height) {
@@ -275,7 +312,7 @@ internal class PersonRoiMatteV57(
             work.getPixels(pixels, 0, workW, 0, 0, workW, workH)
             val foreground = BooleanArray(count)
             for (i in 0 until count) {
-                foreground[i] = Color.red(pixels[i]) >= PERSON_ROI_GATE_CORE_ALPHA_V60
+                foreground[i] = Color.red(pixels[i]) >= PERSON_ROI_GATE_CORE_ALPHA_V62
             }
 
             val component = findBestForegroundComponent(foreground, workW, workH) ?: return null
@@ -311,7 +348,7 @@ internal class PersonRoiMatteV57(
         }
     }
 
-    private data class ForegroundComponentV60(
+    private data class ForegroundComponentV62(
         val left: Int,
         val top: Int,
         val right: Int,
@@ -323,7 +360,7 @@ internal class PersonRoiMatteV57(
         foreground: BooleanArray,
         width: Int,
         height: Int,
-    ): ForegroundComponentV60? {
+    ): ForegroundComponentV62? {
         val count = width * height
         val visited = BooleanArray(count)
         val queue = IntArray(count)
@@ -332,7 +369,7 @@ internal class PersonRoiMatteV57(
         val frameCy = (height - 1) * .5f
 
         var bestScore = -1f
-        var best: ForegroundComponentV60? = null
+        var best: ForegroundComponentV62? = null
 
         for (start in 0 until count) {
             if (visited[start]) continue
@@ -390,7 +427,7 @@ internal class PersonRoiMatteV57(
 
             if (score > bestScore) {
                 bestScore = score
-                best = ForegroundComponentV60(
+                best = ForegroundComponentV62(
                     left = minX,
                     top = minY,
                     right = maxX + 1,
@@ -405,7 +442,7 @@ internal class PersonRoiMatteV57(
     private fun buildDilatedComponentGate(component: IntArray, width: Int, height: Int): Bitmap {
         val count = width * height
         val radius = max(5, min(width, height) / 18)
-        val maxDistance = radius + PERSON_ROI_GATE_FEATHER_V60
+        val maxDistance = radius + PERSON_ROI_GATE_FEATHER_V62
         val distance = IntArray(count) { Int.MAX_VALUE }
         val queue = IntArray(count)
         var head = 0
@@ -449,7 +486,7 @@ internal class PersonRoiMatteV57(
                 d > maxDistance -> 0
                 else -> {
                     val featherStep = d - radius
-                    (255f * (1f - featherStep / (PERSON_ROI_GATE_FEATHER_V60 + 1f)))
+                    (255f * (1f - featherStep / (PERSON_ROI_GATE_FEATHER_V62 + 1f)))
                         .roundToInt()
                         .coerceIn(0, 255)
                 }
@@ -459,6 +496,7 @@ internal class PersonRoiMatteV57(
         return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
     }
 
+    /** Prefer the semantic human-pixel bbox over the generic object detector rectangle. */
     private fun choosePerson(
         detections: List<PersonDetectionV57>,
         previous: RectF?,
@@ -466,6 +504,11 @@ internal class PersonRoiMatteV57(
         frameHeight: Int,
     ): PersonDetectionV57? {
         if (detections.isEmpty()) return null
+        detections
+            .filter { it.source.startsWith("SelfieMulticlass") }
+            .maxByOrNull { it.score }
+            ?.let { return it }
+
         val frameArea = (frameWidth.toFloat() * frameHeight.toFloat()).coerceAtLeast(1f)
         val frameCx = frameWidth * .5f
         val frameCy = frameHeight * .5f
@@ -475,52 +518,62 @@ internal class PersonRoiMatteV57(
         return detections.maxByOrNull { detection ->
             val box = detection.bounds
             val areaFraction = (box.width() * box.height() / frameArea).coerceIn(0f, 1f)
-            val cx = box.centerX()
-            val cy = box.centerY()
-            val dx = (cx - frameCx) / safeWidth
-            val dy = (cy - frameCy) / safeHeight
+            val dx = (box.centerX() - frameCx) / safeWidth
+            val dy = (box.centerY() - frameCy) / safeHeight
             val centerScore = (1f - min(1f, dx * dx + dy * dy)).coerceIn(0f, 1f)
             val continuity = previous?.let { intersectionOverUnion(it, box) } ?: 0f
-
-            if (previous == null) {
-                detection.score * 2.0f + areaFraction * 1.2f + centerScore * .25f
-            } else {
-                continuity * 3.0f + detection.score * 1.5f + areaFraction * .35f
-            }
+            continuity * 2.5f + detection.score * 1.5f + areaFraction * .25f + centerScore * .20f
         }
     }
 
-    private fun smoothBounds(previous: RectF, current: RectF): RectF {
-        val iou = intersectionOverUnion(previous, current)
-        if (iou < .15f) return RectF(current)
-        val fresh = .72f
-        val old = 1f - fresh
-        return RectF(
-            previous.left * old + current.left * fresh,
-            previous.top * old + current.top * fresh,
-            previous.right * old + current.right * fresh,
-            previous.bottom * old + current.bottom * fresh,
-        )
-    }
-
-    private fun tightRoi(person: RectF, frameWidth: Int, frameHeight: Int): Rect {
-        val personW = person.width().coerceAtLeast(1f)
-        val personH = person.height().coerceAtLeast(1f)
-        val left = floor(person.left - personW * PERSON_ROI_SIDE_MARGIN_V60)
-            .toInt().coerceIn(0, frameWidth - 1)
-        val top = floor(person.top - personH * PERSON_ROI_TOP_MARGIN_V60)
-            .toInt().coerceIn(0, frameHeight - 1)
-        val right = ceil(person.right + personW * PERSON_ROI_SIDE_MARGIN_V60)
-            .toInt().coerceIn(left + 1, frameWidth)
-        val bottom = ceil(person.bottom + personH * PERSON_ROI_BOTTOM_MARGIN_V60)
-            .toInt().coerceIn(top + 1, frameHeight)
-        return Rect(left, top, right, bottom)
-    }
-
     /**
-     * Preserve person geometry by square-padding the ROI with replicated edge pixels before the
-     * backend performs its fixed 384 resize.
+     * Add small safety margins, but if margins alone push a detector-owned ROI above 46% of the
+     * frame, shrink the margins (never the detector bbox itself) until the ROI is at or below target.
      */
+    private fun tightRoi(person: RectF, frameWidth: Int, frameHeight: Int): Rect {
+        val raw = RectF(
+            person.left.coerceIn(0f, frameWidth.toFloat()),
+            person.top.coerceIn(0f, frameHeight.toFloat()),
+            person.right.coerceIn(0f, frameWidth.toFloat()),
+            person.bottom.coerceIn(0f, frameHeight.toFloat()),
+        )
+
+        fun expanded(scale: Float): Rect {
+            val personW = raw.width().coerceAtLeast(1f)
+            val personH = raw.height().coerceAtLeast(1f)
+            val left = floor(raw.left - personW * PERSON_ROI_SIDE_MARGIN_V62 * scale)
+                .toInt().coerceIn(0, frameWidth - 1)
+            val top = floor(raw.top - personH * PERSON_ROI_TOP_MARGIN_V62 * scale)
+                .toInt().coerceIn(0, frameHeight - 1)
+            val right = ceil(raw.right + personW * PERSON_ROI_SIDE_MARGIN_V62 * scale)
+                .toInt().coerceIn(left + 1, frameWidth)
+            val bottom = ceil(raw.bottom + personH * PERSON_ROI_BOTTOM_MARGIN_V62 * scale)
+                .toInt().coerceIn(top + 1, frameHeight)
+            return Rect(left, top, right, bottom)
+        }
+
+        val frameArea = (frameWidth.toLong() * frameHeight.toLong()).coerceAtLeast(1L)
+        val rawAreaFraction = raw.width() * raw.height() / frameArea.toFloat()
+        var roi = expanded(1f)
+        fun fraction(rect: Rect): Float =
+            (rect.width().toLong() * rect.height().toLong()).toFloat() / frameArea.toFloat()
+
+        if (fraction(roi) > PERSON_ROI_MAX_FRAME_FRACTION_V62 &&
+            rawAreaFraction < PERSON_ROI_MAX_FRAME_FRACTION_V62
+        ) {
+            var low = 0f
+            var high = 1f
+            repeat(10) {
+                val mid = (low + high) * .5f
+                if (fraction(expanded(mid)) <= PERSON_ROI_MAX_FRAME_FRACTION_V62) low = mid
+                else high = mid
+            }
+            roi = expanded(low)
+        }
+        return roi
+    }
+
+    /** Preserve person geometry by square-padding the ROI before the fixed 384 resize. */
     private fun inferWithEdgeReplicatedSquare(crop: Bitmap): Bitmap {
         if (crop.width == crop.height) return portraitMatte.infer(crop)
 
@@ -585,22 +638,39 @@ internal class PersonRoiMatteV57(
         roi: Rect,
         frameWidth: Int,
         frameHeight: Int,
-        source: String,
+        sourceTimeUs: Long,
+        sizeAuthoritySource: String,
+        centerTrackApplied: Boolean,
         gateApplied: Boolean,
     ) {
         val frameArea = (frameWidth.toLong() * frameHeight.toLong()).coerceAtLeast(1L)
-        val roiArea = roi.width().toLong() * roi.height().toLong()
+        val roiArea = (roi.width().toLong() * roi.height().toLong()).coerceAtLeast(1L)
         val coverage = roiArea * 100.0 / frameArea.toDouble()
-        val density = frameArea.toDouble() / roiArea.coerceAtLeast(1L).toDouble()
+        val densityVs384 = frameArea.toDouble() / roiArea.toDouble()
+        val densityVs512 = densityVs384 * (384.0 * 384.0) / (512.0 * 512.0)
+        val detectorAgeMs = if (lastDetectorTimeUs == Long.MIN_VALUE) null
+        else ((sourceTimeUs - lastDetectorTimeUs).coerceAtLeast(0L) / 1000L)
+        val authority = if (sizeAuthoritySource.startsWith("PP-Matting bootstrap")) {
+            "BOOTSTRAP_SEED_LOCKED"
+        } else {
+            "DETECTOR_ONLY"
+        }
+
         PersonRoiRuntimeStatusV60.update(
             buildString {
                 append("ROI DEBUG: ACTIVE")
-                append(" · source=").append(source)
+                append(" · source=").append(sizeAuthoritySource)
+                append(" · size-authority=").append(authority)
+                append(" · matte-track=center-only")
+                append(" · center-shift=").append(if (centerTrackApplied) "ON" else "OFF")
+                detectorAgeMs?.let { append(" · detector-age=").append(it).append("ms") }
                 append(" · box=").append(roi.left).append(',').append(roi.top)
                 append(" ").append(roi.width()).append('x').append(roi.height())
                 append(" of ").append(frameWidth).append('x').append(frameHeight)
                 append(" · frame=").append("%.1f".format(coverage)).append('%')
-                append(" · pixel-density≈").append("%.2f".format(density)).append('x')
+                append(" · density-vs-384≈").append("%.2f".format(densityVs384)).append('x')
+                append(" · density-vs-512≈").append("%.2f".format(densityVs512)).append('x')
+                append(" · target<=").append((PERSON_ROI_MAX_FRAME_FRACTION_V62 * 100).roundToInt()).append('%')
                 append(" · crop-before-384=YES")
                 append(" · outside-ROI alpha=0")
                 append(" · core-envelope=").append(if (gateApplied) "ON" else "BYPASS")
