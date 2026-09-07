@@ -3,240 +3,189 @@ package com.tajuli.digitorandroid.editor.processing
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.graphics.ImageDecoder
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.roundToInt
 
+// Decode a materially denser analysis proxy before person cropping. PP-MattingV2 still receives a
+// fixed 384 tensor after the verified crop.
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 1280
 
-internal data class PersonCutoutAnalysisResultV47(
-    val analyzedFrames: Int,
-    val attemptedFrames: Int,
-    val backendSummary: String,
-    val error: String? = null,
-)
-
-internal class GpuPersonCutoutAnalyzerV47(
-    context: Context,
-) : AutoCloseable {
-    private val appContext = context.applicationContext
-    private val segmenter = GpuPersonCutoutSegmenterV47(appContext)
-    private val decoder = GpuSequentialCutoutDecoderV47(appContext)
-
-    fun analyze(
+/**
+ * Per-frame PP-MattingV2 Pro Cutout analyzer.
+ *
+ * Every analyzed frame gets a real person ROI first. Scene pixels are cropped before the
+ * PP-MattingV2 384 resize, PP-MattingV2 produces the soft alpha inside that ROI, then hair/temporal
+ * refinement runs and a final ROI clamp prevents refiners from reintroducing background outside the
+ * crop. PP-MattingV2 remains the sole in-box alpha authority.
+ */
+class GpuPersonCutoutAnalyzerV47(private val context: Context) {
+    fun analyzeAndStore(
         clip: TimelineClip,
-        onProgress: (Float) -> Unit,
-    ): PersonCutoutAnalysisResultV47 {
-        preparePersonCutoutGenerationV47(appContext, clip)
-        val settings = clip.resolvedCutoutV43()
-        val policy = PersonCutoutAnalysisPolicyV46.forQuality(settings.analysisQualityV47)
-        var attempted = 0
-        var analyzed = 0
-        var error: String? = null
-
-        try {
-            decoder.decode(
-                clip = clip,
-                policy = policy,
-                onFrame = { bitmap, sourceTimeUs, progress ->
-                    attempted++
-                    val stored = runCatching {
-                        segmenter.segmentAndStore(clip, bitmap, sourceTimeUs)
-                    }.getOrElse { throwable ->
-                        error = throwable.message ?: throwable.javaClass.simpleName
-                        false
-                    }
-                    if (stored) analyzed++
-                    onProgress(progress)
-                    error == null
-                },
-            )
-            if (error == null && analyzed > 0) {
-                segmenter.flushWrites()
-                markPersonCutoutGenerationV47Ready(appContext, clip)
-            }
-        } catch (throwable: Throwable) {
-            error = throwable.message ?: throwable.javaClass.simpleName
+        prioritySourceUs: Long? = null,
+        onAnchorStored: ((completedAnchors: Int) -> Unit)? = null,
+        onBackendResolved: ((backend: String) -> Unit)? = null,
+    ): PersonCutoutMaskTrackV43 {
+        preparePersonCutoutGenerationV47(context, clip)
+        val completed = if (clip.isImageV21) {
+            analyzeImage(clip, onAnchorStored, onBackendResolved)
+        } else {
+            analyzeVideo(clip, prioritySourceUs, onAnchorStored, onBackendResolved)
         }
-
-        return PersonCutoutAnalysisResultV47(
-            analyzedFrames = analyzed,
-            attemptedFrames = attempted,
-            backendSummary = segmenter.backendSummary(),
-            error = error,
-        )
+        check(completed > 0) { "Could not generate any per-frame PP-MattingV2 portrait matte" }
+        markPersonCutoutGenerationV47Ready(context, clip)
+        return PersonCutoutMaskStoreV43.index(context, clip)
     }
 
-    override fun close() {
-        runCatching { decoder.close() }
-        runCatching { segmenter.close() }
-    }
-}
-
-private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
-    private val appContext = context.applicationContext
-    private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
-    private val roiMatte = PersonRoiMatteV57(appContext, portraitMatte)
-    private val hair = BeautyHairSegmenterV29(appContext)
-    private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
-    private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
-    private val matteWriter = AsyncPersonCutoutMaskWriterV48(appContext)
-
-    private var cachedHairMask: Bitmap? = null
-    private var cachedHairTimeUs: Long = Long.MIN_VALUE
-    private var cachedHairQuality: CutoutAnalysisQualityV47? = null
-
-    fun backendSummary(): String = buildString {
-        append(portraitMatte.backendLabel)
-        append(" · Motion-safe tight person ROI (").append(roiMatte.detectorBackendLabel).append(")")
-        append(" · Crop before PP-MattingV2 384 resize")
-        append(" · Hair/hijab/body safety headroom")
-        append(" · Outward-fast/inward-slow bbox motion tracking")
-        append(" · Final ROI clamp")
-        append(" · Fresh neural matte every analyzed frame")
-        append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
-        append(" · Temporal refine "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
-        append(" · CPU scheduler")
-    }
-
-    fun segmentAndStore(clip: TimelineClip, bitmap: Bitmap, sourceTimeUs: Long): Boolean {
-        val source = if (bitmap.config == Bitmap.Config.ARGB_8888) bitmap else {
-            bitmap.copy(Bitmap.Config.ARGB_8888, false)
-                ?: error("Could not convert decoded frame to ARGB_8888 for Pro Cutout")
-        }
+    private fun analyzeImage(
+        clip: TimelineClip,
+        onAnchorStored: ((Int) -> Unit)?,
+        onBackendResolved: ((String) -> Unit)?,
+    ): Int {
+        val bitmap = decodeImage(Uri.parse(clip.uri)) ?: error("Could not decode image for Pro Cutout")
         try {
-            val settings = clip.resolvedCutoutV43()
-            val quality = settings.analysisQualityV47
-            val hairMask = hairMaskForFrame(source, sourceTimeUs, quality)
-            val neuralMatte = roiMatte.infer(source, sourceTimeUs)
-            val hairRefined = try {
-                refineWithHairV44(neuralMatte, hairMask, settings.hairDetailV44)
-            } finally {
-                neuralMatte.recycle()
-            }
-
-            val temporal = try {
-                stabilizeTemporal(source, hairRefined, sourceTimeUs, settings.temporalStabilityV44)
-            } finally {
-                hairRefined.recycle()
-            }
-
-            val clamped = try {
-                roiMatte.clampToActiveRoi(temporal)
-            } finally {
-                temporal.recycle()
-            }
-            return try {
-                matteWriter.write(clip, sourceTimeUs, clamped)
-                true
-            } finally {
-                clamped.recycle()
+            GpuPersonCutoutSegmenterV47(context).use { segmenter ->
+                onBackendResolved?.invoke(segmenter.backendSummary())
+                check(segmenter.segmentAndStore(clip, bitmap, clip.sourceInUs)) {
+                    "Portrait matting returned no alpha"
+                }
+                onAnchorStored?.invoke(1)
+                segmenter.awaitPendingStores()
             }
         } finally {
-            if (source !== bitmap && !source.isRecycled) source.recycle()
+            bitmap.recycle()
         }
+        return 1
     }
 
-    fun flushWrites() {
-        matteWriter.flush()
-    }
-
-    private fun hairMaskForFrame(
-        source: Bitmap,
-        sourceTimeUs: Long,
-        quality: CutoutAnalysisQualityV47,
-    ): Bitmap? {
-        val cached = cachedHairMask
-        val maxAgeUs = when (quality) {
-            CutoutAnalysisQualityV47.LOW -> 1_000_000L
-            CutoutAnalysisQualityV47.MEDIUM -> 600_000L
-            CutoutAnalysisQualityV47.HIGH -> 350_000L
-        }
-        if (
-            cached != null && !cached.isRecycled && cachedHairQuality == quality &&
-            cachedHairTimeUs != Long.MIN_VALUE && sourceTimeUs >= cachedHairTimeUs &&
-            sourceTimeUs - cachedHairTimeUs <= maxAgeUs
-        ) return cached
-
-        val fresh = runCatching { hair.segment(source) }.getOrNull() ?: return cached
-        if (cached != null && cached !== fresh && !cached.isRecycled) cached.recycle()
-        cachedHairMask = fresh
-        cachedHairTimeUs = sourceTimeUs
-        cachedHairQuality = quality
-        return fresh
-    }
-
-    private fun stabilizeTemporal(
-        source: Bitmap,
-        matte: Bitmap,
-        sourceTimeUs: Long,
-        amount: Float,
-    ): Bitmap {
-        val gpu = gpuTemporal
-        if (gpu != null) {
-            val result = runCatching { gpu.stabilize(source, matte, sourceTimeUs, amount) }.getOrNull()
-            if (result != null) return result
-            runCatching { gpu.close() }
-            gpuTemporal = null
-        }
-        return cpuTemporal.stabilize(source, matte, sourceTimeUs, amount)
-    }
-
-    override fun close() {
-        cachedHairMask?.let { if (!it.isRecycled) it.recycle() }
-        cachedHairMask = null
-        runCatching { gpuTemporal?.close() }
-        runCatching { cpuTemporal.close() }
-        runCatching { hair.close() }
-        runCatching { roiMatte.close() }
-        runCatching { portraitMatte.close() }
-        runCatching { matteWriter.close() }
-    }
-}
-
-private class GpuSequentialCutoutDecoderV47(
-    private val context: Context,
-) : AutoCloseable {
-    fun decode(
+    private fun analyzeVideo(
         clip: TimelineClip,
-        policy: PersonCutoutAnalysisPolicyV46,
-        onFrame: (Bitmap, Long, Float) -> Boolean,
-    ) {
-        val uri = Uri.parse(clip.uri)
-        if (uri.scheme == "content" || uri.scheme == "file") decodeVideoOrImage(uri, clip, policy, onFrame)
-        else {
-            val bitmap = decodeImage(uri) ?: error("Could not decode Pro Cutout source")
-            try { onFrame(bitmap, clip.sourceInUs, 1f) } finally { bitmap.recycle() }
-        }
-    }
+        prioritySourceUs: Long?,
+        onAnchorStored: ((Int) -> Unit)?,
+        onBackendResolved: ((String) -> Unit)?,
+    ): Int {
+        val start = clip.sourceInUs.coerceAtLeast(0L)
+        val end = clip.sourceOutUs.coerceAtLeast(start + 1L)
+        val settings = clip.resolvedCutoutV43()
+        val quality = settings.analysisQualityV47
+        val cadence = personCutoutCadenceV47(quality)
+        val targetTimes = personCutoutTargetTimesV47(start, end, quality)
 
-    private fun decodeVideoOrImage(
-        uri: Uri,
-        clip: TimelineClip,
-        policy: PersonCutoutAnalysisPolicyV46,
-        onFrame: (Bitmap, Long, Float) -> Boolean,
-    ) {
-        val videoResult = runCatching {
-            AsyncCutoutInferenceWorkerV48(context).use { worker ->
-                worker.decode(uri, clip, policy) { bitmap, sourceTimeUs, progress ->
-                    val normalized = normalizeForAnalysis(bitmap)
-                    try { onFrame(normalized, sourceTimeUs, progress) }
-                    finally { if (normalized !== bitmap && !normalized.isRecycled) normalized.recycle() }
+        val segmenterLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+            GpuPersonCutoutSegmenterV47(context).also {
+                onBackendResolved?.invoke(it.backendSummary())
+            }
+        }
+        val segmenterClosed = AtomicBoolean(false)
+        val worker = AsyncCutoutInferenceWorkerV48(
+            process = { sourceUs, bitmap -> segmenterLazy.value.segmentAndStore(clip, bitmap, sourceUs) },
+            onCompleted = onAnchorStored,
+        )
+
+        fun closeSegmenterOnWorker() {
+            if (segmenterClosed.compareAndSet(false, true) && segmenterLazy.isInitialized()) {
+                val segmenter = segmenterLazy.value
+                try {
+                    segmenter.awaitPendingStores()
+                } finally {
+                    segmenter.close()
                 }
             }
         }
-        if (videoResult.isSuccess) return
 
-        val bitmap = decodeImage(uri) ?: throw videoResult.exceptionOrNull() ?: error("Could not decode Pro Cutout source")
-        try { onFrame(bitmap, clip.sourceInUs, 1f) } finally { bitmap.recycle() }
+        try {
+            val priority = if (quality == CutoutAnalysisQualityV47.HIGH) {
+                null
+            } else {
+                prioritySourceUs?.coerceIn(start, (end - 1L).coerceAtLeast(start))
+            }
+            if (priority != null) {
+                decodeSinglePriorityFrame(clip, priority)?.let { frame ->
+                    worker.enqueueOwned(priority, frame)
+                }
+            }
+
+            val sequentialResult = runCatching {
+                GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
+                    uri = Uri.parse(clip.uri),
+                    startUs = start,
+                    endUs = end,
+                    targetTimesUs = targetTimes,
+                    emitEveryFrame = cadence.everyDecodedFrame,
+                ) { sourceUs, bitmap ->
+                    worker.enqueueOwned(sourceUs, bitmap)
+                }
+            }
+
+            if (sequentialResult.isFailure || sequentialResult.getOrDefault(0) <= 0) {
+                if (quality == CutoutAnalysisQualityV47.HIGH) {
+                    val cause = sequentialResult.exceptionOrNull()
+                    error(
+                        "High quality requires every-frame MediaCodec GPU decode on this device" +
+                            (cause?.message?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""),
+                    )
+                }
+
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(context, Uri.parse(clip.uri))
+                    for (sourceUs in targetTimes) {
+                        val frame = scaledFrameAtTime(retriever, sourceUs) ?: continue
+                        worker.enqueueOwned(sourceUs, frame)
+                    }
+                } finally {
+                    runCatching { retriever.release() }
+                }
+            }
+
+            val completed = worker.awaitIdle()
+            worker.runAfterPending { closeSegmenterOnWorker() }
+            return completed
+        } finally {
+            if (!segmenterClosed.get()) {
+                runCatching { worker.runAfterPending { closeSegmenterOnWorker() } }
+            }
+            runCatching { worker.close() }
+        }
     }
 
-    private fun normalizeForAnalysis(raw: Bitmap): Bitmap {
+    private fun decodeSinglePriorityFrame(clip: TimelineClip, sourceUs: Long): Bitmap? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(context, Uri.parse(clip.uri))
+            scaledFrameAtTime(retriever, sourceUs)
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
+    private fun scaledFrameAtTime(retriever: MediaMetadataRetriever, sourceUs: Long): Bitmap? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            if (width > 0 && height > 0) {
+                val longEdge = max(width, height)
+                val scale = if (longEdge <= PERSON_ANALYSIS_LONG_EDGE_V47) 1f
+                else PERSON_ANALYSIS_LONG_EDGE_V47 / longEdge.toFloat()
+                val targetWidth = (width * scale).roundToInt().coerceAtLeast(1)
+                val targetHeight = (height * scale).roundToInt().coerceAtLeast(1)
+                retriever.getScaledFrameAtTime(
+                    sourceUs,
+                    MediaMetadataRetriever.OPTION_CLOSEST,
+                    targetWidth,
+                    targetHeight,
+                )?.let { return ensureArgb(it) }
+            }
+        }
+        val raw = retriever.getFrameAtTime(sourceUs, MediaMetadataRetriever.OPTION_CLOSEST) ?: return null
         val normalized = ensureArgb(raw)
         if (normalized !== raw && !raw.isRecycled) raw.recycle()
         val longEdge = max(normalized.width, normalized.height)
@@ -250,7 +199,9 @@ private class GpuSequentialCutoutDecoderV47(
         ).also { if (it !== normalized) normalized.recycle() }
     }
 
-    private fun ensureArgb(bitmap: Bitmap): Bitmap = if (bitmap.config == Bitmap.Config.ARGB_8888) bitmap else {
+    private fun ensureArgb(bitmap: Bitmap): Bitmap = if (bitmap.config == Bitmap.Config.ARGB_8888) {
+        bitmap
+    } else {
         bitmap.copy(Bitmap.Config.ARGB_8888, false)
             ?: error("Could not convert video frame to ARGB_8888")
     }
@@ -276,6 +227,186 @@ private class GpuSequentialCutoutDecoderV47(
         if (normalized !== raw && !raw.isRecycled) raw.recycle()
         normalized
     }.getOrNull()
+}
 
-    override fun close() = Unit
+private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
+    private val appContext = context.applicationContext
+    private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
+    private val roiMatte = PersonRoiMatteV57(appContext, portraitMatte)
+    private val hair = BeautyHairSegmenterV29(appContext)
+    private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
+    private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
+    private val matteWriter = AsyncPersonCutoutMaskWriterV48(appContext)
+
+    private var cachedHairMask: Bitmap? = null
+    private var cachedHairTimeUs: Long = Long.MIN_VALUE
+    private var cachedHairQuality: CutoutAnalysisQualityV47? = null
+
+    fun backendSummary(): String = buildString {
+        append(portraitMatte.backendLabel)
+        append(" · Tight person ROI (").append(roiMatte.detectorBackendLabel).append(")")
+        append(" · Crop before PP-MattingV2 384 resize")
+        append(" · In-box alpha PP-MattingV2 RAW")
+        append(" · Final ROI clamp")
+        append(" · Fresh neural matte every analyzed frame")
+        append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
+        append(" · Temporal refine "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
+        append(" · CPU scheduler")
+    }
+
+    fun segmentAndStore(clip: TimelineClip, bitmap: Bitmap, sourceTimeUs: Long): Boolean {
+        val source = if (bitmap.config == Bitmap.Config.ARGB_8888) {
+            bitmap
+        } else {
+            bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                ?: error("Could not convert decoded frame to ARGB_8888 for Pro Cutout")
+        }
+        try {
+            val settings = clip.resolvedCutoutV43()
+            val quality = settings.analysisQualityV47
+            val hairMask = hairMaskForFrame(
+                source = source,
+                sourceTimeUs = sourceTimeUs,
+                quality = quality,
+                strength = settings.hairDetailV44,
+            )
+
+            val baseMatte = roiMatte.infer(source, sourceTimeUs)
+            val stabilized = try {
+                stabilizeWithGpuOrFallback(
+                    source = source,
+                    baseMatte = baseMatte,
+                    hairMask = hairMask,
+                    sourceTimeUs = sourceTimeUs,
+                    hairStrength = settings.hairDetailV44,
+                    temporalStrength = settings.temporalStabilityV44,
+                )
+            } finally {
+                baseMatte.recycle()
+            }
+
+            val finalMatte = try {
+                roiMatte.clampToActiveRoi(stabilized)
+            } finally {
+                stabilized.recycle()
+            }
+            matteWriter.enqueue(clip.uri, sourceTimeUs, finalMatte)
+            return true
+        } finally {
+            if (source !== bitmap && !source.isRecycled) source.recycle()
+        }
+    }
+
+    private fun hairMaskForFrame(
+        source: Bitmap,
+        sourceTimeUs: Long,
+        quality: CutoutAnalysisQualityV47,
+        strength: Float,
+    ): Bitmap? {
+        if (strength <= .001f) {
+            cachedHairMask?.recycle()
+            cachedHairMask = null
+            cachedHairTimeUs = Long.MIN_VALUE
+            cachedHairQuality = quality
+            return null
+        }
+
+        val old = cachedHairMask
+        val intervalUs = hairSemanticRefreshIntervalUsV48(quality)
+        val monotonic = sourceTimeUs > cachedHairTimeUs
+        val shouldRefresh =
+            old == null || cachedHairQuality != quality || !monotonic ||
+                sourceTimeUs - cachedHairTimeUs >= intervalUs
+
+        if (!shouldRefresh) return old
+
+        val fresh = runCatching { hair.segmentSoftMask(source) }.getOrNull()
+        if (fresh != null) {
+            if (old != null && old !== fresh && !old.isRecycled) old.recycle()
+            cachedHairMask = fresh
+            cachedHairTimeUs = sourceTimeUs
+            cachedHairQuality = quality
+            return fresh
+        }
+        return old
+    }
+
+    private fun stabilizeWithGpuOrFallback(
+        source: Bitmap,
+        baseMatte: Bitmap,
+        hairMask: Bitmap?,
+        sourceTimeUs: Long,
+        hairStrength: Float,
+        temporalStrength: Float,
+    ): Bitmap {
+        val gpu = gpuTemporal
+        if (gpu != null) {
+            val result = runCatching {
+                gpu.stabilize(
+                    source = source,
+                    currentMatte = baseMatte,
+                    hairMask = hairMask,
+                    sourceTimeUs = sourceTimeUs,
+                    hairStrength = hairStrength,
+                    temporalStrength = temporalStrength,
+                )
+            }
+            result.getOrNull()?.let { return it }
+            runCatching { gpu.close() }
+            gpuTemporal = null
+        }
+
+        val fused = fuseHairCpu(baseMatte, hairMask, hairStrength)
+        return try {
+            cpuTemporal.stabilize(source, fused, sourceTimeUs, temporalStrength)
+        } finally {
+            fused.recycle()
+        }
+    }
+
+    private fun fuseHairCpu(base: Bitmap, hair: Bitmap?, strength: Float): Bitmap {
+        if (hair == null || strength <= .001f) {
+            return base.copy(Bitmap.Config.ARGB_8888, false)
+                ?: error("Could not copy portrait matte")
+        }
+        val scaledHair = if (hair.width == base.width && hair.height == base.height) {
+            hair.copy(Bitmap.Config.ARGB_8888, false)
+                ?: error("Could not copy hair matte")
+        } else {
+            Bitmap.createScaledBitmap(hair, base.width, base.height, true)
+        }
+        try {
+            val aPixels = IntArray(base.width * base.height)
+            val hPixels = IntArray(aPixels.size)
+            val out = IntArray(aPixels.size)
+            base.getPixels(aPixels, 0, base.width, 0, 0, base.width, base.height)
+            scaledHair.getPixels(hPixels, 0, base.width, 0, 0, base.width, base.height)
+            val s = strength.coerceIn(0f, 1f)
+            for (i in out.indices) {
+                val a = Color.red(aPixels[i]) / 255f
+                val h = Color.red(hPixels[i]) / 255f
+                val uncertainty = (4f * a * (1f - a)).coerceIn(0f, 1f)
+                val contribution = h * s * (.10f + .46f * uncertainty)
+                val fused = max(a, a + (1f - a) * contribution).coerceIn(0f, 1f)
+                val v = (fused * 255f + .5f).toInt().coerceIn(0, 255)
+                out[i] = Color.argb(255, v, v, v)
+            }
+            return Bitmap.createBitmap(out, base.width, base.height, Bitmap.Config.ARGB_8888)
+        } finally {
+            scaledHair.recycle()
+        }
+    }
+
+    fun awaitPendingStores() = matteWriter.awaitIdle()
+
+    override fun close() {
+        runCatching { matteWriter.awaitIdle() }
+        cachedHairMask?.recycle()
+        cachedHairMask = null
+        runCatching { hair.close() }
+        runCatching { roiMatte.close() }
+        runCatching { portraitMatte.close() }
+        runCatching { gpuTemporal?.close() }
+        gpuTemporal = null
+    }
 }
