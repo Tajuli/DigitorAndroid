@@ -28,8 +28,12 @@ import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
+import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisPhaseV66
+import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisRuntimeV66
 import com.tajuli.digitorandroid.editor.processing.PersonRoiRuntimeStatusV60
 import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
+import com.tajuli.digitorandroid.editor.processing.hasResumablePersonCutoutGenerationV66
+import com.tajuli.digitorandroid.editor.processing.personCutoutSavedFrameCountV66
 
 private val C50Panel = Color(0xFF0B0B0F)
 private val C50Text = Color.White
@@ -43,6 +47,7 @@ fun CutoutWorkspaceV50(
     val state by vm.state.collectAsState()
     val backendLabel by CutoutBackendStatusV50.label.collectAsState()
     val roiDebug by PersonRoiRuntimeStatusV60.label.collectAsState()
+    val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
     val clip = state.project.clip(state.selectedClipId)
     val isVisualClip = clip != null && state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO
 
@@ -55,7 +60,7 @@ fun CutoutWorkspaceV50(
     ) {
         Text("Pro Cutout & Chroma Key", fontSize = 12.sp, color = C50Text)
         Text(
-            "PP-MattingV2 portrait matting. Choose analysis quality, then Analyze. Replacement background goes on a lower V track.",
+            "PP-MattingV2 portrait matting. Analyze is checkpointed frame-by-frame; Pause/Resume keeps completed work when analysis settings stay unchanged.",
             fontSize = 8.sp,
             color = C50Text.copy(alpha = .62f),
         )
@@ -76,28 +81,35 @@ fun CutoutWorkspaceV50(
         val settings = selectedClip.resolvedCutoutV43()
         val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
         val personReady = hasPersonCutoutCoverageV43(appContext, selectedClip)
+        val persistentResume = hasResumablePersonCutoutGenerationV66(appContext, selectedClip)
+        val persistentSaved = if (persistentResume) {
+            personCutoutSavedFrameCountV66(appContext, selectedClip)
+        } else {
+            0
+        }
+        val runtimeMatches = analysisRuntime.clipId == selectedClip.id
+        val runtimePhase = if (runtimeMatches) analysisRuntime.phase else CutoutAnalysisPhaseV66.IDLE
+        val runtimeSaved = if (runtimeMatches) analysisRuntime.savedFrames else 0
+        val analysisBusy = runtimeMatches && analysisRuntime.busy
+        val resumeAvailable = persistentResume ||
+            (runtimeMatches && (runtimePhase == CutoutAnalysisPhaseV66.PAUSED ||
+                runtimePhase == CutoutAnalysisPhaseV66.FAILED) && persistentSaved > 0)
+        val resumeSaved = maxOf(persistentSaved, runtimeSaved.takeIf { resumeAvailable } ?: 0)
+
         val analysisStatus = state.status.takeIf {
             it.startsWith("Pro Cutout") || it.startsWith("Auto Cutout")
         }
-        val analysisBusy = analysisStatus?.let { status ->
-            val active = status.contains("starting", ignoreCase = true) ||
-                status.contains("selecting", ignoreCase = true) ||
-                status.contains("matting", ignoreCase = true) ||
-                status.contains("analysis", ignoreCase = true) ||
-                status.contains("refined frame", ignoreCase = true)
-            active &&
-                !status.contains("ready", ignoreCase = true) &&
-                !status.contains("failed", ignoreCase = true) &&
-                !status.contains("incomplete", ignoreCase = true)
-        } == true
-        val analysisFailed = analysisStatus?.contains("failed", ignoreCase = true) == true ||
-            analysisStatus?.contains("incomplete", ignoreCase = true) == true
+        val analysisFailed = runtimePhase == CutoutAnalysisPhaseV66.FAILED ||
+            analysisStatus?.contains("failed", ignoreCase = true) == true ||
+            analysisStatus?.contains("incomplete", ignoreCase = true) == true ||
+            analysisStatus?.contains("interrupted", ignoreCase = true) == true
 
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             OutlinedButton(
+                enabled = !analysisBusy,
                 onClick = {
                     vm.setSelectedCutoutV43(
                         settings.copy(mode = CutoutModeV43.NONE),
@@ -201,29 +213,58 @@ fun CutoutWorkspaceV50(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        when {
-                            analysisBusy -> "Building PP-MattingV2 matte…"
-                            personReady -> "Pro matte ready"
-                            analysisFailed -> "Analysis failed / incomplete"
-                            else -> "Choose quality, then Analyze"
+                        when (runtimePhase) {
+                            CutoutAnalysisPhaseV66.RUNNING ->
+                                "Building PP-MattingV2 matte… · $runtimeSaved processed"
+                            CutoutAnalysisPhaseV66.PAUSE_REQUESTED ->
+                                "Pausing safely after current frame…"
+                            CutoutAnalysisPhaseV66.PAUSED ->
+                                "Paused · $resumeSaved saved · Resume keeps progress"
+                            CutoutAnalysisPhaseV66.FAILED -> if (resumeAvailable) {
+                                "Interrupted · $resumeSaved saved · Resume available"
+                            } else {
+                                "Analysis failed"
+                            }
+                            else -> when {
+                                personReady -> "Pro matte ready"
+                                resumeAvailable -> "Checkpoint found · $resumeSaved saved · Resume available"
+                                analysisFailed -> "Analysis failed / incomplete"
+                                else -> "Choose quality, then Analyze"
+                            }
                         },
                         fontSize = 8.sp,
                         color = C50Text,
                     )
                     Spacer(Modifier.weight(1f))
                     FilledTonalButton(
-                        enabled = !analysisBusy,
-                        onClick = vm::analyzeSelectedPersonCutoutV43,
+                        enabled = runtimePhase != CutoutAnalysisPhaseV66.PAUSE_REQUESTED,
+                        onClick = {
+                            if (runtimePhase == CutoutAnalysisPhaseV66.RUNNING) {
+                                vm.pauseSelectedPersonCutoutV66()
+                            } else {
+                                vm.analyzeSelectedPersonCutoutV43()
+                            }
+                        },
                     ) {
                         Text(
                             when {
-                                analysisBusy -> "Analyzing…"
+                                runtimePhase == CutoutAnalysisPhaseV66.RUNNING -> "Pause"
+                                runtimePhase == CutoutAnalysisPhaseV66.PAUSE_REQUESTED -> "Pausing…"
+                                resumeAvailable -> "Resume"
                                 personReady -> "Refresh Matte"
                                 else -> "Analyze"
                             },
                             fontSize = 8.sp,
                         )
                     }
+                }
+
+                if (resumeAvailable && !analysisBusy) {
+                    Text(
+                        "Resume continues from the first missing/next durable frame. Changing Quality, Hair Detail, Temporal Stability, or clip trim starts a fresh analysis.",
+                        fontSize = 7.sp,
+                        color = C50Text.copy(alpha = .58f),
+                    )
                 }
 
                 if (analysisStatus != null) {
@@ -242,13 +283,23 @@ fun CutoutWorkspaceV50(
                 }
 
                 Text("Analysis-time refinement", fontSize = 9.sp, color = C50Text)
-                CutoutSliderV50("Hair Detail", settings.hairDetailV44, 0f..1f) {
+                CutoutSliderV50(
+                    label = "Hair Detail",
+                    value = settings.hairDetailV44,
+                    range = 0f..1f,
+                    enabled = !analysisBusy,
+                ) {
                     vm.setSelectedCutoutV43(
                         settings.copy(hairDetailV44 = it),
                         status = "Pro Cutout Hair Detail changed · tap Analyze",
                     )
                 }
-                CutoutSliderV50("Temporal Stability", settings.temporalStabilityV44, 0f..0.92f) {
+                CutoutSliderV50(
+                    label = "Temporal Stability",
+                    value = settings.temporalStabilityV44,
+                    range = 0f..0.92f,
+                    enabled = !analysisBusy,
+                ) {
                     vm.setSelectedCutoutV43(
                         settings.copy(temporalStabilityV44 = it),
                         status = "Pro Cutout temporal stability changed · tap Analyze",
@@ -264,7 +315,7 @@ fun CutoutWorkspaceV50(
                 }
 
                 Text(
-                    "Quality, Hair Detail and Temporal Stability are baked into the analyzed matte; refresh after changing them. Edge controls update in realtime.",
+                    "Quality, Hair Detail and Temporal Stability are baked into the analyzed matte. Edge controls update in realtime and do not invalidate a checkpoint.",
                     fontSize = 8.sp,
                     color = C50Text.copy(alpha = .62f),
                 )
@@ -400,6 +451,7 @@ private fun CutoutSliderV50(
     label: String,
     value: Float,
     range: ClosedFloatingPointRange<Float>,
+    enabled: Boolean = true,
     onValueChange: (Float) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth()) {
@@ -412,6 +464,7 @@ private fun CutoutSliderV50(
             value = value.coerceIn(range.start, range.endInclusive),
             onValueChange = onValueChange,
             valueRange = range,
+            enabled = enabled,
         )
     }
 }
