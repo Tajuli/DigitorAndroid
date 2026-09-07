@@ -7,26 +7,28 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
-private const val PERSON_ROI_STALE_US_V57 = 600_000L
+private const val PERSON_ROI_STALE_US_V57 = 1_500_000L
 private const val PERSON_ROI_SIDE_MARGIN_V57 = .12f
 private const val PERSON_ROI_TOP_MARGIN_V57 = .10f
 private const val PERSON_ROI_BOTTOM_MARGIN_V57 = .08f
+private const val PERSON_ROI_BOOTSTRAP_EDGE_V59 = 256
+private const val PERSON_ROI_BOOTSTRAP_ALPHA_V59 = 160
 
 /**
- * Verified person-detection ROI wrapper for PP-MattingV2 384.
+ * Robust person ROI wrapper for PP-MattingV2 384.
  *
- * The object detector supplies only a person bounding box. We crop scene pixels BEFORE the
- * PP-MattingV2 resize, pad the rectangular crop to square with replicated edge pixels, run the
- * fixed 384 graph on that subject-focused square, crop the alpha back to ROI coordinates and paste
- * it into an otherwise-black full-frame matte.
- *
- * There is deliberately no silent full-frame fallback. If a real person box cannot be found and a
- * recent tracked box is unavailable, analysis fails rather than pretending ROI was used.
+ * EfficientDet is the primary locator. If it misses, a recent matte-derived tracked box is reused.
+ * If no recent box exists, one explicit full-frame PP-Matting pass is used only to bootstrap the
+ * foreground bounding box; that bootstrap matte is NEVER stored as the final cutout. The detected
+ * crop is then run through PP-MattingV2 384 again, so final output still comes from the dense ROI
+ * inference. Every successful ROI matte refreshes the tracked box for following frames.
  */
 internal class PersonRoiMatteV57(
     context: Context,
@@ -36,18 +38,18 @@ internal class PersonRoiMatteV57(
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
 
     private var cachedPersonBounds: RectF? = null
-    private var lastSuccessfulDetectionUs: Long = Long.MIN_VALUE
+    private var lastLocalizedTimeUs: Long = Long.MIN_VALUE
     private var lastSourceTimeUs: Long = Long.MIN_VALUE
     private var sourceWidth: Int = 0
     private var sourceHeight: Int = 0
     private var activeRoi: Rect? = null
 
     val detectorBackendLabel: String
-        get() = detector.backendLabel
+        get() = detector.backendLabel + " + matte bootstrap/track"
 
     fun infer(source: Bitmap, sourceTimeUs: Long): Bitmap {
         check(!source.isRecycled) { "Cannot run ROI matting on a recycled bitmap" }
-        resetTrackingIfNeeded(source, sourceTimeUs)
+        resetTrackingIfNeeded(source)
 
         val people = runCatching { detector.detectPeople(source) }.getOrElse { emptyList() }
         val detected = choosePerson(
@@ -58,21 +60,22 @@ internal class PersonRoiMatteV57(
         )
 
         if (detected != null) {
-            cachedPersonBounds = cachedPersonBounds?.let { previous ->
-                smoothBounds(previous, detected.bounds)
-            } ?: RectF(detected.bounds)
-            lastSuccessfulDetectionUs = sourceTimeUs
+            updateTrackedBounds(detected.bounds, sourceTimeUs)
         }
 
-        val trackedBounds = cachedPersonBounds
-        val recentEnough = trackedBounds != null &&
-            lastSuccessfulDetectionUs != Long.MIN_VALUE &&
-            sourceTimeUs - lastSuccessfulDetectionUs <= PERSON_ROI_STALE_US_V57
-        check(recentEnough) {
-            "Person ROI detector could not localize a person; refusing silent full-frame PP-Matting fallback"
+        val tracked = cachedPersonBounds
+        val trackedIsRecent = tracked != null && lastLocalizedTimeUs != Long.MIN_VALUE &&
+            abs(sourceTimeUs - lastLocalizedTimeUs) <= PERSON_ROI_STALE_US_V57
+
+        if (!trackedIsRecent) {
+            val bootstrapBounds = bootstrapPersonBounds(source)
+            check(bootstrapBounds != null) {
+                "Person ROI localization failed: detector/semantic locator missed and PP-Matting bootstrap found no foreground"
+            }
+            updateTrackedBounds(bootstrapBounds, sourceTimeUs)
         }
 
-        val roi = tightRoi(trackedBounds!!, source.width, source.height)
+        val roi = tightRoi(cachedPersonBounds!!, source.width, source.height)
         activeRoi = roi
         lastSourceTimeUs = sourceTimeUs
 
@@ -81,6 +84,18 @@ internal class PersonRoiMatteV57(
             inferWithEdgeReplicatedSquare(crop)
         } finally {
             if (!crop.isRecycled) crop.recycle()
+        }
+
+        // Refresh tracking from the actual dense ROI matte. This keeps ROI alive even when the
+        // external detector misses several consecutive frames, and it follows slow subject motion.
+        dominantForegroundBounds(roiMatte)?.let { local ->
+            val sourceBounds = RectF(
+                roi.left + local.left,
+                roi.top + local.top,
+                roi.left + local.right,
+                roi.top + local.bottom,
+            )
+            updateTrackedBounds(sourceBounds, sourceTimeUs)
         }
 
         return try {
@@ -115,16 +130,156 @@ internal class PersonRoiMatteV57(
         }
     }
 
-    private fun resetTrackingIfNeeded(source: Bitmap, sourceTimeUs: Long) {
+    private fun resetTrackingIfNeeded(source: Bitmap) {
         val dimensionsChanged = source.width != sourceWidth || source.height != sourceHeight
-        val nonMonotonic = lastSourceTimeUs != Long.MIN_VALUE && sourceTimeUs <= lastSourceTimeUs
-        if (dimensionsChanged || nonMonotonic) {
+        if (dimensionsChanged) {
             cachedPersonBounds = null
-            lastSuccessfulDetectionUs = Long.MIN_VALUE
+            lastLocalizedTimeUs = Long.MIN_VALUE
             activeRoi = null
         }
         sourceWidth = source.width
         sourceHeight = source.height
+    }
+
+    private fun updateTrackedBounds(bounds: RectF, sourceTimeUs: Long) {
+        val clipped = RectF(
+            bounds.left.coerceIn(0f, sourceWidth.toFloat()),
+            bounds.top.coerceIn(0f, sourceHeight.toFloat()),
+            bounds.right.coerceIn(0f, sourceWidth.toFloat()),
+            bounds.bottom.coerceIn(0f, sourceHeight.toFloat()),
+        )
+        if (clipped.width() < 2f || clipped.height() < 2f) return
+        cachedPersonBounds = cachedPersonBounds?.let { previous ->
+            smoothBounds(previous, clipped)
+        } ?: clipped
+        lastLocalizedTimeUs = sourceTimeUs
+    }
+
+    /**
+     * Guaranteed bootstrap path for a visible subject: run PP-Matting full-frame once only to find
+     * the dominant high-confidence foreground component, then discard that matte. The caller always
+     * performs a second, subject-focused ROI inference for the final frame matte.
+     */
+    private fun bootstrapPersonBounds(source: Bitmap): RectF? {
+        val bootstrap = portraitMatte.infer(source)
+        return try {
+            dominantForegroundBounds(bootstrap)
+        } finally {
+            bootstrap.recycle()
+        }
+    }
+
+    /**
+     * Find the dominant connected high-alpha component on a small working bitmap. Connected-component
+     * selection prevents an isolated vase/flower false-positive from widening the bootstrap ROI.
+     */
+    private fun dominantForegroundBounds(matte: Bitmap): RectF? {
+        val longEdge = max(matte.width, matte.height).coerceAtLeast(1)
+        val scale = min(1f, PERSON_ROI_BOOTSTRAP_EDGE_V59 / longEdge.toFloat())
+        val workW = (matte.width * scale).roundToInt().coerceAtLeast(1)
+        val workH = (matte.height * scale).roundToInt().coerceAtLeast(1)
+        val work = if (workW == matte.width && workH == matte.height) {
+            matte
+        } else {
+            Bitmap.createScaledBitmap(matte, workW, workH, true)
+        }
+
+        try {
+            val count = workW * workH
+            val pixels = IntArray(count)
+            work.getPixels(pixels, 0, workW, 0, 0, workW, workH)
+            val foreground = BooleanArray(count)
+            for (i in 0 until count) {
+                foreground[i] = Color.red(pixels[i]) >= PERSON_ROI_BOOTSTRAP_ALPHA_V59
+            }
+
+            val visited = BooleanArray(count)
+            val queue = IntArray(count)
+            val minArea = max(20, (count * .0025f).roundToInt())
+            val frameCx = (workW - 1) * .5f
+            val frameCy = (workH - 1) * .5f
+
+            var bestScore = -1f
+            var bestLeft = 0
+            var bestTop = 0
+            var bestRight = 0
+            var bestBottom = 0
+
+            for (start in 0 until count) {
+                if (visited[start]) continue
+                visited[start] = true
+                if (!foreground[start]) continue
+
+                var head = 0
+                var tail = 0
+                queue[tail++] = start
+                var area = 0
+                var minX = workW
+                var minY = workH
+                var maxX = -1
+                var maxY = -1
+                var sumX = 0L
+                var sumY = 0L
+
+                while (head < tail) {
+                    val index = queue[head++]
+                    val y = index / workW
+                    val x = index - y * workW
+                    area++
+                    sumX += x
+                    sumY += y
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
+
+                    fun offer(next: Int) {
+                        if (visited[next]) return
+                        visited[next] = true
+                        if (!foreground[next]) return
+                        queue[tail++] = next
+                    }
+
+                    if (x > 0) offer(index - 1)
+                    if (x + 1 < workW) offer(index + 1)
+                    if (y > 0) offer(index - workW)
+                    if (y + 1 < workH) offer(index + workW)
+                }
+
+                if (area < minArea || maxX < minX || maxY < minY) continue
+                val boxW = maxX - minX + 1
+                val boxH = maxY - minY + 1
+                if (boxW < workW * .05f || boxH < workH * .10f) continue
+
+                val cx = sumX.toFloat() / area.toFloat()
+                val cy = sumY.toFloat() / area.toFloat()
+                val dx = (cx - frameCx) / workW.coerceAtLeast(1).toFloat()
+                val dy = (cy - frameCy) / workH.coerceAtLeast(1).toFloat()
+                val centerBonus = 1f + .35f * (1f - min(1f, dx * dx + dy * dy))
+                val verticalBonus = 1f + .15f * (boxH.toFloat() / workH.toFloat())
+                val score = area.toFloat() * centerBonus * verticalBonus
+
+                if (score > bestScore) {
+                    bestScore = score
+                    bestLeft = minX
+                    bestTop = minY
+                    bestRight = maxX + 1
+                    bestBottom = maxY + 1
+                }
+            }
+
+            if (bestScore <= 0f) return null
+            val scaleX = matte.width.toFloat() / workW.toFloat()
+            val scaleY = matte.height.toFloat() / workH.toFloat()
+            return RectF(
+                bestLeft * scaleX,
+                bestTop * scaleY,
+                bestRight * scaleX,
+                bestBottom * scaleY,
+            )
+        } finally {
+            if (work !== matte && !work.isRecycled) work.recycle()
+        }
     }
 
     private fun choosePerson(
