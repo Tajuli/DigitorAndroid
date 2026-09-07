@@ -3,14 +3,12 @@ package com.tajuli.digitorandroid.editor.processing
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Color
 import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
-import java.io.File
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -48,11 +46,7 @@ internal class GpuPersonCutoutAnalyzerV47(
                 onFrame = { bitmap, sourceTimeUs, progress ->
                     attempted++
                     val stored = runCatching {
-                        segmenter.segmentAndStore(
-                            clip = clip,
-                            bitmap = bitmap,
-                            sourceTimeUs = sourceTimeUs,
-                        )
+                        segmenter.segmentAndStore(clip, bitmap, sourceTimeUs)
                     }.getOrElse { throwable ->
                         error = throwable.message ?: throwable.javaClass.simpleName
                         false
@@ -111,38 +105,23 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     }
 
     fun segmentAndStore(clip: TimelineClip, bitmap: Bitmap, sourceTimeUs: Long): Boolean {
-        val source = if (bitmap.config == Bitmap.Config.ARGB_8888) {
-            bitmap
-        } else {
+        val source = if (bitmap.config == Bitmap.Config.ARGB_8888) bitmap else {
             bitmap.copy(Bitmap.Config.ARGB_8888, false)
                 ?: error("Could not convert decoded frame to ARGB_8888 for Pro Cutout")
         }
         try {
             val settings = clip.resolvedCutoutV43()
             val quality = settings.analysisQualityV47
-            val hairMask = hairMaskForFrame(
-                source = source,
-                sourceTimeUs = sourceTimeUs,
-                quality = quality,
-            )
+            val hairMask = hairMaskForFrame(source, sourceTimeUs, quality)
             val neuralMatte = roiMatte.infer(source, sourceTimeUs)
             val hairRefined = try {
-                refineWithHairV44(
-                    matte = neuralMatte,
-                    hairMask = hairMask,
-                    amount = settings.hairDetailV44,
-                )
+                refineWithHairV44(neuralMatte, hairMask, settings.hairDetailV44)
             } finally {
                 neuralMatte.recycle()
             }
 
             val temporal = try {
-                stabilizeTemporal(
-                    source = source,
-                    matte = hairRefined,
-                    sourceTimeUs = sourceTimeUs,
-                    amount = settings.temporalStabilityV44,
-                )
+                stabilizeTemporal(source, hairRefined, sourceTimeUs, settings.temporalStabilityV44)
             } finally {
                 hairRefined.recycle()
             }
@@ -153,11 +132,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 temporal.recycle()
             }
             return try {
-                matteWriter.write(
-                    clip = clip,
-                    sourceTimeUs = sourceTimeUs,
-                    matte = clamped,
-                )
+                matteWriter.write(clip, sourceTimeUs, clamped)
                 true
             } finally {
                 clamped.recycle()
@@ -183,15 +158,10 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
             CutoutAnalysisQualityV47.HIGH -> 350_000L
         }
         if (
-            cached != null &&
-            !cached.isRecycled &&
-            cachedHairQuality == quality &&
-            cachedHairTimeUs != Long.MIN_VALUE &&
-            sourceTimeUs >= cachedHairTimeUs &&
+            cached != null && !cached.isRecycled && cachedHairQuality == quality &&
+            cachedHairTimeUs != Long.MIN_VALUE && sourceTimeUs >= cachedHairTimeUs &&
             sourceTimeUs - cachedHairTimeUs <= maxAgeUs
-        ) {
-            return cached
-        }
+        ) return cached
 
         val fresh = runCatching { hair.segment(source) }.getOrNull() ?: return cached
         if (cached != null && cached !== fresh && !cached.isRecycled) cached.recycle()
@@ -209,24 +179,12 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     ): Bitmap {
         val gpu = gpuTemporal
         if (gpu != null) {
-            val result = runCatching {
-                gpu.stabilize(
-                    source = source,
-                    matte = matte,
-                    sourceTimeUs = sourceTimeUs,
-                    amount = amount,
-                )
-            }.getOrNull()
+            val result = runCatching { gpu.stabilize(source, matte, sourceTimeUs, amount) }.getOrNull()
             if (result != null) return result
             runCatching { gpu.close() }
             gpuTemporal = null
         }
-        return cpuTemporal.stabilize(
-            source = source,
-            matte = matte,
-            sourceTimeUs = sourceTimeUs,
-            amount = amount,
-        )
+        return cpuTemporal.stabilize(source, matte, sourceTimeUs, amount)
     }
 
     override fun close() {
@@ -250,15 +208,10 @@ private class GpuSequentialCutoutDecoderV47(
         onFrame: (Bitmap, Long, Float) -> Boolean,
     ) {
         val uri = Uri.parse(clip.uri)
-        if (uri.scheme == "content" || uri.scheme == "file") {
-            decodeVideoOrImage(uri, clip, policy, onFrame)
-        } else {
+        if (uri.scheme == "content" || uri.scheme == "file") decodeVideoOrImage(uri, clip, policy, onFrame)
+        else {
             val bitmap = decodeImage(uri) ?: error("Could not decode Pro Cutout source")
-            try {
-                onFrame(bitmap, clip.sourceInUs, 1f)
-            } finally {
-                bitmap.recycle()
-            }
+            try { onFrame(bitmap, clip.sourceInUs, 1f) } finally { bitmap.recycle() }
         }
     }
 
@@ -270,30 +223,17 @@ private class GpuSequentialCutoutDecoderV47(
     ) {
         val videoResult = runCatching {
             AsyncCutoutInferenceWorkerV48(context).use { worker ->
-                worker.decode(
-                    uri = uri,
-                    clip = clip,
-                    policy = policy,
-                    onFrame = { bitmap, sourceTimeUs, progress ->
-                        val normalized = normalizeForAnalysis(bitmap)
-                        try {
-                            onFrame(normalized, sourceTimeUs, progress)
-                        } finally {
-                            if (normalized !== bitmap && !normalized.isRecycled) normalized.recycle()
-                        }
-                    },
-                )
+                worker.decode(uri, clip, policy) { bitmap, sourceTimeUs, progress ->
+                    val normalized = normalizeForAnalysis(bitmap)
+                    try { onFrame(normalized, sourceTimeUs, progress) }
+                    finally { if (normalized !== bitmap && !normalized.isRecycled) normalized.recycle() }
+                }
             }
         }
         if (videoResult.isSuccess) return
 
-        val bitmap = decodeImage(uri) ?: throw videoResult.exceptionOrNull()
-            ?: error("Could not decode Pro Cutout source")
-        try {
-            onFrame(bitmap, clip.sourceInUs, 1f)
-        } finally {
-            bitmap.recycle()
-        }
+        val bitmap = decodeImage(uri) ?: throw videoResult.exceptionOrNull() ?: error("Could not decode Pro Cutout source")
+        try { onFrame(bitmap, clip.sourceInUs, 1f) } finally { bitmap.recycle() }
     }
 
     private fun normalizeForAnalysis(raw: Bitmap): Bitmap {
@@ -310,9 +250,7 @@ private class GpuSequentialCutoutDecoderV47(
         ).also { if (it !== normalized) normalized.recycle() }
     }
 
-    private fun ensureArgb(bitmap: Bitmap): Bitmap = if (bitmap.config == Bitmap.Config.ARGB_8888) {
-        bitmap
-    } else {
+    private fun ensureArgb(bitmap: Bitmap): Bitmap = if (bitmap.config == Bitmap.Config.ARGB_8888) bitmap else {
         bitmap.copy(Bitmap.Config.ARGB_8888, false)
             ?: error("Could not convert video frame to ARGB_8888")
     }
@@ -338,4 +276,6 @@ private class GpuSequentialCutoutDecoderV47(
         if (normalized !== raw && !raw.isRecycled) raw.recycle()
         normalized
     }.getOrNull()
+
+    override fun close() = Unit
 }
