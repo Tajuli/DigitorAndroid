@@ -12,7 +12,7 @@ import java.security.MessageDigest
 private const val V57_CACHE_DIR_NAME = "person_cutout_masks_v65_ppmattingv2_384_motion_safe_detector_roi"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-private const val V47_GENERATION_VERSION = "stable-v65-ppmattingv2-384-motion-safe-detector-hysteresis-headroom-r1"
+private const val V47_GENERATION_VERSION = "stable-v65-ppmattingv2-384-motion-safe-detector-hysteresis-headroom-r2"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
