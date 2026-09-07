@@ -8,6 +8,7 @@ sensitive layers and BN statistics before the fixed-384 export used by Android C
 """
 
 import argparse
+import math
 import os
 import random
 import sys
@@ -56,10 +57,11 @@ def main():
     frozen = 0
     total = 0
     for name, parameter in model.named_parameters():
-        total += parameter.numel()
+        count = math.prod(int(v) for v in parameter.shape)
+        total += count
         if name.startswith("backbone."):
             parameter.stop_gradient = True
-            frozen += parameter.numel()
+            frozen += count
 
     print(
         f"384 adaptation: frozen_backbone_params={frozen} total_params={total} "
