@@ -18,8 +18,8 @@ private const val PERSON_DETECTOR_MODEL_ASSET_V57 = "efficientdet_lite0_int8.tfl
 private const val PERSON_SEMANTIC_MODEL_ASSET_V58 = "selfie_multiclass_256x256.tflite"
 private const val PERSON_DETECTOR_SCORE_THRESHOLD_V58 = .15f
 private const val PERSON_DETECTOR_MAX_RESULTS_V58 = 20
-private const val PERSON_SEMANTIC_CONFIDENCE_V62 = .28f
-private const val PERSON_SEMANTIC_BG_MARGIN_V62 = .05f
+private const val PERSON_SEMANTIC_CONFIDENCE_V64 = .18f
+private const val PERSON_SEMANTIC_BACKGROUND_MARGIN_V64 = .06f
 
 internal data class PersonDetectionV57(
     val bounds: RectF,
@@ -34,10 +34,6 @@ internal data class PersonDetectionV57(
  * close-up portrait ROI geometry because they localize actual human pixels rather than a generic
  * object rectangle. EfficientDet-Lite0 remains an independent detector/fallback. Neither output is
  * used as the final cutout alpha; PP-MattingV2 remains responsible for the stored soft matte.
- *
- * Confidence-mask localization uses both the strongest person-part probability and the background
- * probability. A pixel must be confidently human and beat background by a margin. This prevents a
- * weak halo around the chair/wall from inflating the bbox.
  */
 internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -87,7 +83,7 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
                 add(
                     PersonDetectionV57(
                         bounds = bounds,
-                        score = .99f,
+                        score = .98f,
                         source = "SelfieMulticlass confidence",
                     ),
                 )
@@ -125,8 +121,8 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
 
     /**
      * Union SelfieMulticlass confidence masks for classes 1..N (all non-background person parts),
-     * then keep the largest plausible connected human component and return only its source bbox.
-     * Category 0 is background. This mask is a locator only and is never stored as cutout alpha.
+     * but require the human confidence to beat both an absolute threshold and the background class
+     * by a margin. The earlier raw max-union could admit weak chair/wall halo into the bbox.
      */
     private fun detectWithSelfieMulticlassConfidence(bitmap: Bitmap): RectF? {
         val result = semanticFallback.segment(BitmapImageBuilder(bitmap).build())
@@ -138,17 +134,22 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
         val width = masks.first().width.coerceAtLeast(1)
         val height = masks.first().height.coerceAtLeast(1)
         val count = width * height
+        val background = FloatArray(count)
         val personConfidence = FloatArray(count)
-        val backgroundConfidence = FloatArray(count)
 
-        val bgMask = masks[0]
-        if (bgMask.width == width && bgMask.height == height) {
-            val bytes = ByteBufferExtractor.extract(bgMask).order(ByteOrder.nativeOrder())
+        fun readMask(maskIndex: Int, destination: FloatArray): Boolean {
+            val mask = masks.getOrNull(maskIndex) ?: return false
+            if (mask.width != width || mask.height != height) return false
+            val bytes = ByteBufferExtractor.extract(mask).order(ByteOrder.nativeOrder())
             bytes.rewind()
             val floats = bytes.asFloatBuffer()
-            if (floats.remaining() >= count) {
-                for (i in 0 until count) backgroundConfidence[i] = floats.get(i)
-            }
+            if (floats.remaining() < count) return false
+            for (i in 0 until count) destination[i] = floats.get(i)
+            return true
+        }
+
+        if (!readMask(0, background)) {
+            return detectWithSelfieMulticlassCategoryFallback(result, bitmap)
         }
 
         var usableMasks = 0
@@ -169,10 +170,9 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
 
         val foreground = BooleanArray(count)
         for (i in 0 until count) {
-            val person = personConfidence[i]
-            val background = backgroundConfidence[i]
-            foreground[i] = person >= PERSON_SEMANTIC_CONFIDENCE_V62 &&
-                person >= background + PERSON_SEMANTIC_BG_MARGIN_V62
+            val human = personConfidence[i]
+            foreground[i] = human >= PERSON_SEMANTIC_CONFIDENCE_V64 &&
+                human >= background[i] + PERSON_SEMANTIC_BACKGROUND_MARGIN_V64
         }
         return connectedPersonBounds(foreground, width, height, bitmap)
             ?: detectWithSelfieMulticlassCategoryFallback(result, bitmap)
