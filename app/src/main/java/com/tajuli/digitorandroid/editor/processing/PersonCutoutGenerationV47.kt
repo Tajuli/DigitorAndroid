@@ -6,12 +6,12 @@ import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import java.io.File
 import java.security.MessageDigest
 
-// Keep verified-ROI mattes physically separate from older full-frame/semantic-ROI generations so
-// an APK update can never make a newly analyzed clip appear identical by reusing stale masks.
-private const val V57_CACHE_DIR_NAME = "person_cutout_masks_v61_ppmattingv2_384_semantic_confidence_roi"
+// Keep detector-authoritative ROI mattes physically separate from older generations so an APK
+// update can never reuse the oversized Dense-matte-track bbox masks from previous builds.
+private const val V57_CACHE_DIR_NAME = "person_cutout_masks_v62_ppmattingv2_384_detector_authority_roi"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-private const val V47_GENERATION_VERSION = "adaptive-v61-ppmattingv2-384-semantic-confidence-roi-r1"
+private const val V47_GENERATION_VERSION = "adaptive-v62-ppmattingv2-384-detector-size-matte-center-r1"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
@@ -19,7 +19,6 @@ internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineCl
         dir.listFiles().orEmpty().forEach { file -> runCatching { file.delete() } }
     }
     dir.mkdirs()
-    // Persist exact tuple before decode so a killed/failed analysis cannot be mistaken for ready.
     File(dir, V47_PENDING_MARKER).writeText(personCutoutGenerationSignatureV47(clip))
 }
 
