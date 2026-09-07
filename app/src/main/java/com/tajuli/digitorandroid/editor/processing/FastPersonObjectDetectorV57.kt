@@ -20,16 +20,9 @@ private const val PERSON_DETECTOR_SCORE_THRESHOLD_V58 = .15f
 private const val PERSON_DETECTOR_MAX_RESULTS_V58 = 20
 private const val PERSON_SEMANTIC_CONFIDENCE_V64 = .18f
 private const val PERSON_SEMANTIC_BACKGROUND_MARGIN_V64 = .06f
-
-// Safety guard around the detector-owned human pixels. The top guard is deliberately larger so
-// hair/hijab/head motion cannot touch the hard outside-ROI clamp between detector samples.
 private const val PERSON_GUARD_SIDE_PAD_V65 = .07f
 private const val PERSON_GUARD_TOP_PAD_V65 = .12f
 private const val PERSON_GUARD_BOTTOM_PAD_V65 = .07f
-
-// Detector boxes may expand outward immediately, but transient segmentation contraction is allowed
-// to shrink each edge only slowly. This edge hysteresis makes the ROI follow body motion while
-// preventing one weak SelfieMulticlass frame from chopping hair, hijab, arms, or hands.
 private const val PERSON_GUARD_INWARD_SHRINK_X_FRAME_V65 = .012f
 private const val PERSON_GUARD_INWARD_SHRINK_Y_FRAME_V65 = .010f
 private const val PERSON_GUARD_RESET_IOU_V65 = .03f
@@ -44,14 +37,12 @@ internal data class PersonDetectionV57(
  * Person ROI localizer used before PP-MattingV2.
  *
  * SelfieMulticlass confidence masks are evaluated on every analyzed frame and are preferred for
- * close-up portrait ROI geometry because they localize actual human pixels rather than a generic
- * object rectangle. EfficientDet-Lite0 remains an independent detector/fallback. Neither output is
- * used as the final cutout alpha; PP-MattingV2 remains responsible for the stored soft matte.
+ * close-up portrait ROI geometry. EfficientDet-Lite0 remains an independent fallback. Neither is
+ * used as final alpha.
  *
- * V65 adds motion-safe detector hysteresis. The current human box can expand immediately in any
- * direction as the person moves, while inward edge contraction is rate-limited. The result is still
- * detector-authoritative, but a single under-segmented frame cannot cut the top of a hijab/hair or
- * moving body parts at the final ROI clamp.
+ * V65 adds motion-safe bbox hysteresis: outward edges follow immediately while inward contraction
+ * is deliberately slow. Extra top/side/bottom guard protects hijab/hair/head/arms/hands from the
+ * hard outside-ROI clamp during fast movement or one weak segmentation frame.
  */
 internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -98,24 +89,14 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
         resetGuardIfDimensionsChanged(bitmap.width, bitmap.height)
 
         val semanticBounds = runCatching { detectWithSelfieMulticlassConfidence(bitmap) }.getOrNull()
-        val efficientDetPeople = runCatching { detectWithEfficientDet(bitmap) }
-            .getOrElse { emptyList() }
+        val efficientDetPeople = runCatching { detectWithEfficientDet(bitmap) }.getOrElse { emptyList() }
 
         val rawCandidate = semanticBounds?.let { bounds ->
-            PersonDetectionV57(
-                bounds = bounds,
-                score = .98f,
-                source = "SelfieMulticlass confidence",
-            )
+            PersonDetectionV57(bounds, .98f, "SelfieMulticlass confidence")
         } ?: chooseEfficientDetCandidate(efficientDetPeople)
 
         if (rawCandidate == null) return emptyList()
-
-        val guarded = motionSafeBounds(
-            raw = rawCandidate.bounds,
-            frameWidth = bitmap.width,
-            frameHeight = bitmap.height,
-        )
+        val guarded = motionSafeBounds(rawCandidate.bounds, bitmap.width, bitmap.height)
         return listOf(
             rawCandidate.copy(
                 bounds = guarded,
@@ -124,9 +105,7 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
         )
     }
 
-    private fun chooseEfficientDetCandidate(
-        detections: List<PersonDetectionV57>,
-    ): PersonDetectionV57? {
+    private fun chooseEfficientDetCandidate(detections: List<PersonDetectionV57>): PersonDetectionV57? {
         if (detections.isEmpty()) return null
         val previous = guardedPersonBounds
         return detections.maxByOrNull { detection ->
@@ -143,11 +122,6 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
         }
     }
 
-    /**
-     * Expand the raw human pixels with explicit head/body safety padding, then apply edge hysteresis:
-     * outward motion follows immediately, inward contraction is slow. Translation therefore makes
-     * the ROI temporarily wider rather than cutting the trailing/leading body edge.
-     */
     private fun motionSafeBounds(raw: RectF, frameWidth: Int, frameHeight: Int): RectF {
         val clipped = clipBounds(raw, frameWidth, frameHeight)
         if (clipped.width() < 2f || clipped.height() < 2f) return clipped
@@ -164,25 +138,16 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
         )
 
         val previous = guardedPersonBounds
-        val next = if (
-            previous == null ||
-            intersectionOverUnion(previous, padded) < PERSON_GUARD_RESET_IOU_V65
-        ) {
+        val next = if (previous == null || intersectionOverUnion(previous, padded) < PERSON_GUARD_RESET_IOU_V65) {
             padded
         } else {
             val maxShrinkX = frameWidth * PERSON_GUARD_INWARD_SHRINK_X_FRAME_V65
             val maxShrinkY = frameHeight * PERSON_GUARD_INWARD_SHRINK_Y_FRAME_V65
             RectF(
-                // left/top moving outward (smaller value) is immediate; inward is rate-limited.
-                if (padded.left <= previous.left) padded.left
-                else minOf(padded.left, previous.left + maxShrinkX),
-                if (padded.top <= previous.top) padded.top
-                else minOf(padded.top, previous.top + maxShrinkY),
-                // right/bottom moving outward (larger value) is immediate; inward is rate-limited.
-                if (padded.right >= previous.right) padded.right
-                else maxOf(padded.right, previous.right - maxShrinkX),
-                if (padded.bottom >= previous.bottom) padded.bottom
-                else maxOf(padded.bottom, previous.bottom - maxShrinkY),
+                if (padded.left <= previous.left) padded.left else minOf(padded.left, previous.left + maxShrinkX),
+                if (padded.top <= previous.top) padded.top else minOf(padded.top, previous.top + maxShrinkY),
+                if (padded.right >= previous.right) padded.right else maxOf(padded.right, previous.right - maxShrinkX),
+                if (padded.bottom >= previous.bottom) padded.bottom else maxOf(padded.bottom, previous.bottom - maxShrinkY),
             )
         }
 
@@ -227,19 +192,10 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
             val bottom = box.bottom.coerceIn(0f, bitmap.height.toFloat())
             if (right - left < 2f || bottom - top < 2f) return@mapNotNull null
 
-            PersonDetectionV57(
-                bounds = RectF(left, top, right, bottom),
-                score = personCategory.score(),
-                source = "EfficientDet",
-            )
+            PersonDetectionV57(RectF(left, top, right, bottom), personCategory.score(), "EfficientDet")
         }
     }
 
-    /**
-     * Union SelfieMulticlass confidence masks for classes 1..N (all non-background person parts),
-     * but require the human confidence to beat both an absolute threshold and the background class
-     * by a margin. The earlier raw max-union could admit weak chair/wall halo into the bbox.
-     */
     private fun detectWithSelfieMulticlassConfidence(bitmap: Bitmap): RectF? {
         val result = semanticFallback.segment(BitmapImageBuilder(bitmap).build())
         val masks = result.confidenceMasks().orElse(null)
@@ -264,9 +220,7 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
             return true
         }
 
-        if (!readMask(0, background)) {
-            return detectWithSelfieMulticlassCategoryFallback(result, bitmap)
-        }
+        if (!readMask(0, background)) return detectWithSelfieMulticlassCategoryFallback(result, bitmap)
 
         var usableMasks = 0
         for (maskIndex in 1 until masks.size) {
@@ -294,7 +248,6 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
             ?: detectWithSelfieMulticlassCategoryFallback(result, bitmap)
     }
 
-    /** Category-mask fallback retained only as a secondary compatibility path. */
     private fun detectWithSelfieMulticlassCategoryFallback(
         result: com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenterResult,
         bitmap: Bitmap,
@@ -309,9 +262,7 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
         val labels = ByteArray(count)
         buffer.get(labels)
         val foreground = BooleanArray(count)
-        for (i in 0 until count) {
-            foreground[i] = (labels[i].toInt() and 0xFF) != 0
-        }
+        for (i in 0 until count) foreground[i] = (labels[i].toInt() and 0xFF) != 0
         return connectedPersonBounds(foreground, width, height, bitmap)
     }
 
@@ -339,7 +290,6 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
             if (visited[start]) continue
             visited[start] = true
             if (!foreground[start]) continue
-
             var head = 0
             var tail = 0
             queue[tail++] = start
@@ -369,7 +319,6 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
                     if (!foreground[next]) return
                     queue[tail++] = next
                 }
-
                 if (x > 0) offer(index - 1)
                 if (x + 1 < width) offer(index + 1)
                 if (y > 0) offer(index - width)
@@ -383,13 +332,9 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
 
             val cx = sumX.toFloat() / area.toFloat()
             val cy = sumY.toFloat() / area.toFloat()
-            val centerDistance = sqrt(
-                (cx - frameCx) * (cx - frameCx) + (cy - frameCy) * (cy - frameCy),
-            )
-            val centerBonus = 1f + .30f *
-                (1f - (centerDistance / frameDiag).coerceIn(0f, 1f))
-            val verticalBonus = 1f + .12f *
-                (boxH.toFloat() / height.toFloat()).coerceIn(0f, 1f)
+            val centerDistance = sqrt((cx - frameCx) * (cx - frameCx) + (cy - frameCy) * (cy - frameCy))
+            val centerBonus = 1f + .30f * (1f - (centerDistance / frameDiag).coerceIn(0f, 1f))
+            val verticalBonus = 1f + .12f * (boxH.toFloat() / height.toFloat()).coerceIn(0f, 1f)
             val score = area.toFloat() * centerBonus * verticalBonus
 
             if (score > bestScore) {
@@ -404,12 +349,7 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
         if (bestScore <= 0f) return null
         val scaleX = bitmap.width.toFloat() / width.toFloat()
         val scaleY = bitmap.height.toFloat() / height.toFloat()
-        return RectF(
-            bestLeft * scaleX,
-            bestTop * scaleY,
-            bestRight * scaleX,
-            bestBottom * scaleY,
-        )
+        return RectF(bestLeft * scaleX, bestTop * scaleY, bestRight * scaleX, bestBottom * scaleY)
     }
 
     override fun close() {
