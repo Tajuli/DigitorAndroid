@@ -21,6 +21,7 @@ private const val PERSON_DETECTOR_MAX_RESULTS_V58 = 20
 internal data class PersonDetectionV57(
     val bounds: RectF,
     val score: Float,
+    val source: String = "unknown",
 )
 
 /**
@@ -77,7 +78,13 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
 
         val semanticBounds = runCatching { detectWithSelfieMulticlass(bitmap) }.getOrNull()
             ?: return emptyList()
-        return listOf(PersonDetectionV57(bounds = semanticBounds, score = .20f))
+        return listOf(
+            PersonDetectionV57(
+                bounds = semanticBounds,
+                score = .20f,
+                source = "SelfieMulticlass",
+            ),
+        )
     }
 
     private fun detectWithEfficientDet(bitmap: Bitmap): List<PersonDetectionV57> {
@@ -102,6 +109,7 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
             PersonDetectionV57(
                 bounds = RectF(left, top, right, bottom),
                 score = personCategory.score(),
+                source = "EfficientDet",
             )
         }
     }
