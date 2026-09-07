@@ -15,14 +15,18 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.roundToInt
 
-private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
+// Decode a materially denser analysis proxy before person cropping. The old 720-long-edge proxy
+// threw away scene detail before ROI selection, so a 384 ROI could look nearly identical to a
+// full-frame 384 pass. PP-MattingV2 still receives a fixed 384 tensor after the verified crop.
+private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 1280
 
 /**
  * Per-frame PP-MattingV2 Pro Cutout analyzer.
  *
- * Every analyzed frame receives a fresh full-frame PP-MattingV2 neural matte. There is no person
- * ROI, no crop/letterbox tracking layer and no coarse person gate in the active cutout path.
- * Hair refinement, temporal refinement, analysis cadence and async storage remain unchanged.
+ * Every analyzed frame gets a real object-detection person ROI first. Scene pixels are cropped
+ * before the PP-MattingV2 384 resize, PP-MattingV2 produces the soft alpha inside that ROI, then
+ * hair/temporal refinement runs as before and a final ROI clamp prevents those refiners from
+ * reintroducing background outside the detected person box.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -229,6 +233,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
+    private val roiMatte = PersonRoiMatteV57(appContext, portraitMatte)
     private val hair = BeautyHairSegmenterV29(appContext)
     private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
     private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
@@ -240,7 +245,9 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
 
     fun backendSummary(): String = buildString {
         append(portraitMatte.backendLabel)
-        append(" · Full-frame PP-MattingV2")
+        append(" · Verified person ROI (").append(roiMatte.detectorBackendLabel).append(")")
+        append(" · Crop before PP-MattingV2 384 resize")
+        append(" · Final ROI clamp")
         append(" · Fresh neural matte every analyzed frame")
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
         append(" · Temporal refine "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
@@ -264,7 +271,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 strength = settings.hairDetailV44,
             )
 
-            val baseMatte = portraitMatte.infer(source)
+            val baseMatte = roiMatte.infer(source, sourceTimeUs)
             val stabilized = try {
                 stabilizeWithGpuOrFallback(
                     source = source,
@@ -278,7 +285,12 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 baseMatte.recycle()
             }
 
-            matteWriter.enqueue(clip.uri, sourceTimeUs, stabilized)
+            val finalMatte = try {
+                roiMatte.clampToActiveRoi(stabilized)
+            } finally {
+                stabilized.recycle()
+            }
+            matteWriter.enqueue(clip.uri, sourceTimeUs, finalMatte)
             return true
         } finally {
             if (source !== bitmap && !source.isRecycled) source.recycle()
@@ -397,6 +409,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         gpuTemporal = null
         cpuTemporal.close()
         runCatching { hair.close() }
+        runCatching { roiMatte.close() }
         runCatching { portraitMatte.close() }
     }
 }
