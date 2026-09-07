@@ -13,15 +13,15 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-private const val PERSON_ROI_SIDE_MARGIN_V63 = .055f
-private const val PERSON_ROI_TOP_MARGIN_V63 = .045f
-private const val PERSON_ROI_BOTTOM_MARGIN_V63 = .035f
-private const val PERSON_ROI_MAX_FRAME_FRACTION_V63 = .46f
-private const val PERSON_ROI_BOOTSTRAP_MAX_FRAME_FRACTION_V63 = .44f
-private const val PERSON_ROI_BOOTSTRAP_EDGE_V63 = 256
-private const val PERSON_ROI_BOOTSTRAP_ALPHA_V63 = 200
-private const val PERSON_ROI_CENTER_TRACK_GAIN_V63 = .25f
-private const val PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V63 = .04f
+private const val PERSON_ROI_SIDE_MARGIN_V64 = .055f
+private const val PERSON_ROI_TOP_MARGIN_V64 = .045f
+private const val PERSON_ROI_BOTTOM_MARGIN_V64 = .035f
+private const val PERSON_ROI_MAX_FRAME_FRACTION_V64 = .46f
+private const val PERSON_ROI_BOOTSTRAP_MAX_FRAME_FRACTION_V64 = .44f
+private const val PERSON_ROI_BOOTSTRAP_EDGE_V64 = 256
+private const val PERSON_ROI_BOOTSTRAP_ALPHA_V64 = 200
+private const val PERSON_ROI_CENTER_TRACK_GAIN_V64 = .25f
+private const val PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V64 = .04f
 
 /**
  * Detector-authoritative person ROI wrapper for PP-MattingV2 384.
@@ -29,10 +29,10 @@ private const val PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V63 = .04f
  * Bbox width/height come only from SelfieMulticlass confidence localization or EfficientDet.
  * Dense PP-Matting may move only the bbox center between detector hits and can never change size.
  *
- * IMPORTANT: PP-Matting alpha inside the verified ROI is now kept non-destructively. The previous
- * high-confidence connected-component envelope multiplied the matte by a hard-ish gate and could
- * erase valid clothes/shoulder/face regions when the strongest component fragmented. Selfie and
- * EfficientDet remain locator-only; PP-MattingV2 is the final soft-alpha authority inside the ROI.
+ * PP-Matting alpha inside the verified ROI is kept non-destructively. Selfie and EfficientDet are
+ * locator-only; PP-MattingV2 is the final soft-alpha authority inside the ROI. The production model
+ * is a true fixed-384 graph using the proven official human weights after the short 384 adaptation
+ * experiment was rolled back for device-visible body holes.
  */
 internal class PersonRoiMatteV57(
     context: Context,
@@ -178,10 +178,10 @@ internal class PersonRoiMatteV57(
 
         val width = anchor.width()
         val height = anchor.height()
-        val maxShiftX = width * PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V63
-        val maxShiftY = height * PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V63
-        val desiredDx = (candidate.centerX() - anchor.centerX()) * PERSON_ROI_CENTER_TRACK_GAIN_V63
-        val desiredDy = (candidate.centerY() - anchor.centerY()) * PERSON_ROI_CENTER_TRACK_GAIN_V63
+        val maxShiftX = width * PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V64
+        val maxShiftY = height * PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V64
+        val desiredDx = (candidate.centerX() - anchor.centerX()) * PERSON_ROI_CENTER_TRACK_GAIN_V64
+        val desiredDy = (candidate.centerY() - anchor.centerY()) * PERSON_ROI_CENTER_TRACK_GAIN_V64
         val dx = desiredDx.coerceIn(-maxShiftX, maxShiftX)
         val dy = desiredDy.coerceIn(-maxShiftY, maxShiftY)
         if (kotlin.math.abs(dx) < .5f && kotlin.math.abs(dy) < .5f) return false
@@ -236,7 +236,7 @@ internal class PersonRoiMatteV57(
         val clipped = clipBounds(bounds)
         val frameArea = (sourceWidth.toFloat() * sourceHeight.toFloat()).coerceAtLeast(1f)
         val area = clipped.width() * clipped.height()
-        val maxArea = frameArea * PERSON_ROI_BOOTSTRAP_MAX_FRAME_FRACTION_V63
+        val maxArea = frameArea * PERSON_ROI_BOOTSTRAP_MAX_FRAME_FRACTION_V64
         if (area <= maxArea || clipped.height() <= 1f) return clipped
 
         val targetWidth = (maxArea / clipped.height()).coerceAtLeast(2f)
@@ -247,7 +247,7 @@ internal class PersonRoiMatteV57(
     /** Find dominant high-confidence PP-Matting component for center tracking/bootstrap only. */
     private fun dominantForegroundBounds(matte: Bitmap): RectF? {
         val longEdge = max(matte.width, matte.height).coerceAtLeast(1)
-        val scale = min(1f, PERSON_ROI_BOOTSTRAP_EDGE_V63 / longEdge.toFloat())
+        val scale = min(1f, PERSON_ROI_BOOTSTRAP_EDGE_V64 / longEdge.toFloat())
         val workW = (matte.width * scale).roundToInt().coerceAtLeast(1)
         val workH = (matte.height * scale).roundToInt().coerceAtLeast(1)
         val work = if (workW == matte.width && workH == matte.height) {
@@ -262,7 +262,7 @@ internal class PersonRoiMatteV57(
             work.getPixels(pixels, 0, workW, 0, 0, workW, workH)
             val foreground = BooleanArray(count)
             for (i in 0 until count) {
-                foreground[i] = Color.red(pixels[i]) >= PERSON_ROI_BOOTSTRAP_ALPHA_V63
+                foreground[i] = Color.red(pixels[i]) >= PERSON_ROI_BOOTSTRAP_ALPHA_V64
             }
 
             val component = findBestForegroundComponent(foreground, workW, workH) ?: return null
@@ -279,7 +279,7 @@ internal class PersonRoiMatteV57(
         }
     }
 
-    private data class ForegroundComponentV63(
+    private data class ForegroundComponentV64(
         val left: Int,
         val top: Int,
         val right: Int,
@@ -290,7 +290,7 @@ internal class PersonRoiMatteV57(
         foreground: BooleanArray,
         width: Int,
         height: Int,
-    ): ForegroundComponentV63? {
+    ): ForegroundComponentV64? {
         val count = width * height
         val visited = BooleanArray(count)
         val queue = IntArray(count)
@@ -299,7 +299,7 @@ internal class PersonRoiMatteV57(
         val frameCy = (height - 1) * .5f
 
         var bestScore = -1f
-        var best: ForegroundComponentV63? = null
+        var best: ForegroundComponentV64? = null
 
         for (start in 0 until count) {
             if (visited[start]) continue
@@ -357,7 +357,7 @@ internal class PersonRoiMatteV57(
 
             if (score > bestScore) {
                 bestScore = score
-                best = ForegroundComponentV63(
+                best = ForegroundComponentV64(
                     left = minX,
                     top = minY,
                     right = maxX + 1,
@@ -413,13 +413,13 @@ internal class PersonRoiMatteV57(
         fun expanded(scale: Float): Rect {
             val personW = raw.width().coerceAtLeast(1f)
             val personH = raw.height().coerceAtLeast(1f)
-            val left = floor(raw.left - personW * PERSON_ROI_SIDE_MARGIN_V63 * scale)
+            val left = floor(raw.left - personW * PERSON_ROI_SIDE_MARGIN_V64 * scale)
                 .toInt().coerceIn(0, frameWidth - 1)
-            val top = floor(raw.top - personH * PERSON_ROI_TOP_MARGIN_V63 * scale)
+            val top = floor(raw.top - personH * PERSON_ROI_TOP_MARGIN_V64 * scale)
                 .toInt().coerceIn(0, frameHeight - 1)
-            val right = ceil(raw.right + personW * PERSON_ROI_SIDE_MARGIN_V63 * scale)
+            val right = ceil(raw.right + personW * PERSON_ROI_SIDE_MARGIN_V64 * scale)
                 .toInt().coerceIn(left + 1, frameWidth)
-            val bottom = ceil(raw.bottom + personH * PERSON_ROI_BOTTOM_MARGIN_V63 * scale)
+            val bottom = ceil(raw.bottom + personH * PERSON_ROI_BOTTOM_MARGIN_V64 * scale)
                 .toInt().coerceIn(top + 1, frameHeight)
             return Rect(left, top, right, bottom)
         }
@@ -430,14 +430,14 @@ internal class PersonRoiMatteV57(
         fun fraction(rect: Rect): Float =
             (rect.width().toLong() * rect.height().toLong()).toFloat() / frameArea.toFloat()
 
-        if (fraction(roi) > PERSON_ROI_MAX_FRAME_FRACTION_V63 &&
-            rawAreaFraction < PERSON_ROI_MAX_FRAME_FRACTION_V63
+        if (fraction(roi) > PERSON_ROI_MAX_FRAME_FRACTION_V64 &&
+            rawAreaFraction < PERSON_ROI_MAX_FRAME_FRACTION_V64
         ) {
             var low = 0f
             var high = 1f
             repeat(10) {
                 val mid = (low + high) * .5f
-                if (fraction(expanded(mid)) <= PERSON_ROI_MAX_FRAME_FRACTION_V63) low = mid
+                if (fraction(expanded(mid)) <= PERSON_ROI_MAX_FRAME_FRACTION_V64) low = mid
                 else high = mid
             }
             roi = expanded(low)
@@ -541,10 +541,11 @@ internal class PersonRoiMatteV57(
                 append(" · frame=").append("%.1f".format(coverage)).append('%')
                 append(" · density-vs-384≈").append("%.2f".format(densityVs384)).append('x')
                 append(" · density-vs-512≈").append("%.2f".format(densityVs512)).append('x')
-                append(" · target<=").append((PERSON_ROI_MAX_FRAME_FRACTION_V63 * 100).roundToInt()).append('%')
+                append(" · target<=").append((PERSON_ROI_MAX_FRAME_FRACTION_V64 * 100).roundToInt()).append('%')
                 append(" · crop-before-384=YES")
                 append(" · outside-ROI alpha=0")
                 append(" · in-box-alpha=PP-MattingV2 RAW")
+                append(" · weights=OFFICIAL_HUMAN_STABLE")
             },
         )
     }
