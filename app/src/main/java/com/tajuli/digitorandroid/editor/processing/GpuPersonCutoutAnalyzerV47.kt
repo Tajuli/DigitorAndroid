@@ -23,10 +23,10 @@ private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 1280
 /**
  * Per-frame PP-MattingV2 Pro Cutout analyzer.
  *
- * Every analyzed frame gets a real object-detection person ROI first. Scene pixels are cropped
- * before the PP-MattingV2 384 resize, PP-MattingV2 produces the soft alpha inside that ROI, then
- * hair/temporal refinement runs as before and a final ROI clamp prevents those refiners from
- * reintroducing background outside the detected person box.
+ * Every analyzed frame gets a real person ROI first. Scene pixels are cropped before the
+ * PP-MattingV2 384 resize, PP-MattingV2 produces the soft alpha inside that ROI, a generous
+ * confidence envelope suppresses in-box background leakage, then hair/temporal refinement runs and
+ * a final ROI clamp prevents those refiners from reintroducing background outside the crop.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -245,8 +245,9 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
 
     fun backendSummary(): String = buildString {
         append(portraitMatte.backendLabel)
-        append(" · Verified person ROI (").append(roiMatte.detectorBackendLabel).append(")")
+        append(" · Tight person ROI (").append(roiMatte.detectorBackendLabel).append(")")
         append(" · Crop before PP-MattingV2 384 resize")
+        append(" · In-box core envelope")
         append(" · Final ROI clamp")
         append(" · Fresh neural matte every analyzed frame")
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
@@ -403,13 +404,13 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
 
     override fun close() {
         runCatching { matteWriter.close() }
-        cachedHairMask?.let { if (!it.isRecycled) it.recycle() }
-        cachedHairMask = null
         runCatching { gpuTemporal?.close() }
         gpuTemporal = null
-        cpuTemporal.close()
+        runCatching { cpuTemporal.close() }
         runCatching { hair.close() }
         runCatching { roiMatte.close() }
         runCatching { portraitMatte.close() }
+        cachedHairMask?.let { if (!it.isRecycled) it.recycle() }
+        cachedHairMask = null
     }
 }
