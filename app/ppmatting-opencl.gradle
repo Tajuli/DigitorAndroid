@@ -29,10 +29,7 @@ def outputParam = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.ncn
 def outputBin = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.ncnn.bin")
 def outputProfile = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.profile")
 
-// Keep converter and Android runtime on the exact same ncnn generation. The earlier 384 APK used
-// pnnx 20260704 to emit the param/bin but linked ncnn 20260526 on-device. On the Symphony Z60 that
-// model did not initialize and Kotlin silently fell back to ORT CPU 512. The fixed-384 graph does
-// not have the 256 DPP 6x6-on-4x4 pathology, so the matching 20260526 pnnx can safely be tested here.
+// Keep converter and Android runtime on the exact same ncnn generation.
 def pnnxZip = file("${downloadsDir}/pnnx-20260526-linux.zip")
 def ncnnZip = file("${downloadsDir}/ncnn-20260526-android-vulkan.zip")
 
@@ -54,8 +51,6 @@ def sha256Of = { File source ->
     digest.digest().collect { String.format("%02x", it & 0xff) }.join("")
 }
 
-// Keep this closure dynamically typed. Gradle 9/Groovy can emit invalid verifier metadata for a
-// script closure that mixes primitive long and reference parameters ("Bad local variable type").
 def downloadWithRetry = { source, target, minimumBytes, expectedSha256 ->
     long minBytes = (minimumBytes as Number).longValue()
     File targetFile = target as File
@@ -174,8 +169,6 @@ tasks.register("prepareNcnnVulkanRuntime") {
 }
 
 tasks.register("preparePpMattingNcnnModel") {
-    // Keep the official 512 ONNX available as the lazy ORT reliability fallback even when the
-    // primary Vulkan graph is true-384.
     dependsOn("downloadPpMattingV2Model", "preparePnnxForPpMatting")
     inputs.file(sourceOnnx)
     outputs.files(outputParam, outputBin, outputProfile)
@@ -190,7 +183,6 @@ tasks.register("preparePpMattingNcnnModel") {
             throw new GradleException("PP-MattingV2 ${modelSize} ONNX model is missing: ${sourceOnnx}")
         }
 
-        // pnnx creates a source-adjacent *.pnnxsim.onnx helper by default. Never package it.
         fileTree(sourceOnnx.parentFile).matching { include "*.pnnxsim.onnx" }.files.each { it.delete() }
 
         delete(optimizedAssetsDir)
@@ -200,8 +192,6 @@ tasks.register("preparePpMattingNcnnModel") {
             pnnxTool.absolutePath,
             sourceOnnx.absolutePath,
         ]
-        // Genuine true-384 ONNX already carries complete static shapes. Do not re-specialize it.
-        // The fallback 512 ONNX keeps its proven explicit shape for local/non-true384 builds.
         if (!useTrue384) {
             pnnxArgs.add("inputshape=[1,3,512,512]")
         }
@@ -230,8 +220,9 @@ tasks.register("preparePpMattingNcnnModel") {
         if (!outputBin.isFile() || outputBin.length() < 5_000_000L) {
             throw new GradleException("pnnx did not create a valid ${outputBin}")
         }
-        outputProfile.text = "PP-MattingV2 STDC1 fixed ${modelSize}x${modelSize}\nsource=${sourceOnnx.name}\npnnx=20260526\nncnn=20260526\n"
-        logger.lifecycle("PP-MattingV2 Vulkan profile: fixed ${modelSize}x${modelSize} from ${sourceOnnx.name} via matched pnnx/ncnn 20260526")
+        def weightProfile = useTrue384 ? "official-human-512-stable" : "official-human-512"
+        outputProfile.text = "PP-MattingV2 STDC1 fixed ${modelSize}x${modelSize}\nsource=${sourceOnnx.name}\nweights=${weightProfile}\npnnx=20260526\nncnn=20260526\n"
+        logger.lifecycle("PP-MattingV2 Vulkan profile: fixed ${modelSize}x${modelSize} from ${sourceOnnx.name}, weights=${weightProfile}, via matched pnnx/ncnn 20260526")
     }
 }
 
