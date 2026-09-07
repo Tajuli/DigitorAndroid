@@ -20,9 +20,9 @@ private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 720
 /**
  * Per-frame PP-MattingV2 Pro Cutout analyzer.
  *
- * Every analyzed frame receives a fresh PP-MattingV2 neural matte. A lightweight person localizer
- * is used only to keep the 256 model focused on the tracked human ROI and to veto obvious distant
- * background; PP-MattingV2 remains responsible for the actual soft alpha/edge detail.
+ * Every analyzed frame receives a fresh full-frame PP-MattingV2 neural matte. There is no person
+ * ROI, no crop/letterbox tracking layer and no coarse person gate in the active cutout path.
+ * Hair refinement, temporal refinement, analysis cadence and async storage remain unchanged.
  */
 class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     fun analyzeAndStore(
@@ -229,7 +229,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
-    private val roiMatte = PersonRoiMatteV55(appContext, portraitMatte)
     private val hair = BeautyHairSegmenterV29(appContext)
     private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
     private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
@@ -241,9 +240,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
 
     fun backendSummary(): String = buildString {
         append(portraitMatte.backendLabel)
-        append(" · Tight person ROI (").append(roiMatte.localizerBackendLabel).append(")")
-        append(" · Coarse background veto only")
-        append(" · PP-MattingV2 edge alpha")
+        append(" · Full-frame PP-MattingV2")
         append(" · Fresh neural matte every analyzed frame")
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
         append(" · Temporal refine "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
@@ -267,7 +264,7 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
                 strength = settings.hairDetailV44,
             )
 
-            val baseMatte = roiMatte.infer(source, sourceTimeUs)
+            val baseMatte = portraitMatte.infer(source)
             val stabilized = try {
                 stabilizeWithGpuOrFallback(
                     source = source,
@@ -400,7 +397,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         gpuTemporal = null
         cpuTemporal.close()
         runCatching { hair.close() }
-        runCatching { roiMatte.close() }
         runCatching { portraitMatte.close() }
     }
 }
