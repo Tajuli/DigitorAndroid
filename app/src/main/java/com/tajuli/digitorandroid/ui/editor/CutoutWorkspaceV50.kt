@@ -28,6 +28,7 @@ import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
+import com.tajuli.digitorandroid.editor.processing.PersonRoiRuntimeStatusV60
 import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 
 private val C50Panel = Color(0xFF0B0B0F)
@@ -41,6 +42,7 @@ fun CutoutWorkspaceV50(
 ) {
     val state by vm.state.collectAsState()
     val backendLabel by CutoutBackendStatusV50.label.collectAsState()
+    val roiDebug by PersonRoiRuntimeStatusV60.label.collectAsState()
     val clip = state.project.clip(state.selectedClipId)
     val isVisualClip = clip != null && state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO
 
@@ -145,6 +147,9 @@ fun CutoutWorkspaceV50(
 
             CutoutModeV43.PERSON -> {
                 BackendIndicatorV50(backendLabel)
+                if (roiDebug != null) {
+                    RoiProofIndicatorV60(roiDebug!!)
+                }
 
                 Text("Analysis quality", fontSize = 9.sp, color = C50Text)
                 Row(
@@ -306,6 +311,26 @@ fun CutoutWorkspaceV50(
                     vm.setSelectedCutoutV43(settings.copy(spillSuppression = it), status = "Spill suppression updated")
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun RoiProofIndicatorV60(label: String) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF153329), RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("ROI proof", fontSize = 9.sp, color = C50Text)
+            Text(label, fontSize = 7.sp, color = C50Text.copy(alpha = .78f))
+            Text(
+                "If this says crop-before-384=YES, PP-MattingV2 is receiving only the reported source-frame box. Outside that box the stored matte is forced to zero.",
+                fontSize = 7.sp,
+                color = C50Text.copy(alpha = .58f),
+            )
         }
     }
 }
