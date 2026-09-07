@@ -6,12 +6,12 @@ import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import java.io.File
 import java.security.MessageDigest
 
-// Keep detector-authoritative ROI mattes physically separate from older generations so an APK
-// update can never reuse the oversized Dense-matte-track bbox masks from previous builds.
-private const val V57_CACHE_DIR_NAME = "person_cutout_masks_v62_ppmattingv2_384_detector_authority_roi"
+// Keep the human-preserving detector-authoritative ROI mattes physically separate from older
+// generations, especially v62 masks produced with the destructive in-box core envelope.
+private const val V57_CACHE_DIR_NAME = "person_cutout_masks_v63_ppmattingv2_384_detector_roi_raw_alpha"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-private const val V47_GENERATION_VERSION = "adaptive-v62-ppmattingv2-384-detector-size-matte-center-r1"
+private const val V47_GENERATION_VERSION = "adaptive-v63-ppmattingv2-384-detector-size-matte-center-raw-alpha-r1"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
