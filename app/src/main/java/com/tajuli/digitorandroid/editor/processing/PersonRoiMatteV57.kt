@@ -137,14 +137,16 @@ internal class PersonRoiMatteV57(
         val frameArea = (frameWidth.toFloat() * frameHeight.toFloat()).coerceAtLeast(1f)
         val frameCx = frameWidth * .5f
         val frameCy = frameHeight * .5f
+        val safeWidth = frameWidth.coerceAtLeast(1).toFloat()
+        val safeHeight = frameHeight.coerceAtLeast(1).toFloat()
 
         return detections.maxByOrNull { detection ->
             val box = detection.bounds
             val areaFraction = (box.width() * box.height() / frameArea).coerceIn(0f, 1f)
             val cx = box.centerX()
             val cy = box.centerY()
-            val dx = (cx - frameCx) / frameWidth.coerceAtLeast(1)
-            val dy = (cy - frameCy) / frameHeight.coerceAtLeast(1)
+            val dx = (cx - frameCx) / safeWidth
+            val dy = (cy - frameCy) / safeHeight
             val centerScore = (1f - min(1f, dx * dx + dy * dy)).coerceIn(0f, 1f)
             val continuity = previous?.let { intersectionOverUnion(it, box) } ?: 0f
 
