@@ -10,17 +10,24 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # Phone APKs from this job package a genuine fixed-shape PP-MattingV2 384 graph. The 512 ONNX
-      # remains packaged only as the lazy CPU reliability fallback.
+      # Phone APKs package a genuine fixed-shape PP-MattingV2 384 graph. The 512 ONNX remains only
+      # as the lazy CPU reliability fallback if ncnn Vulkan itself cannot run.
       DIGITOR_PPMATTING_TRUE_384: '1'
     steps:
       - uses: actions/checkout@v4
+
+      - name: Restore cached 384-adapted checkpoint
+        id: ppmatting384-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ppmattingv2-384-adapt
+          key: ppmattingv2-384-adapt-v2-${{ hashFiles('tools/ppmattingv2/ppmattingv2-stdc1-human_384-ci-adapt.yml', 'tools/ppmattingv2/adapt_true_384.py') }}
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Export genuine fixed PP-MattingV2 384 graph
+      - name: Adapt and export genuine fixed PP-MattingV2 384 graph
         shell: bash
         run: |
           set -euo pipefail
@@ -37,23 +44,70 @@ jobs:
           python -m pip install -r "$PADDLESEG_DIR/Matting/requirements.txt"
 
           mkdir -p "$PADDLESEG_DIR/Matting/pretrained_models"
+          OFFICIAL_512="$PADDLESEG_DIR/Matting/pretrained_models/ppmattingv2-stdc1-human_512.pdparams"
           curl -L --fail --retry 4 --retry-delay 2 \
-            -o "$PADDLESEG_DIR/Matting/pretrained_models/ppmattingv2-stdc1-human_512.pdparams" \
+            -o "$OFFICIAL_512" \
             https://paddleseg.bj.bcebos.com/matting/models/ppmattingv2-stdc1-human_512.pdparams
+
+          ADAPT_DIR="$RUNNER_TEMP/ppmattingv2-384-adapt"
+          ADAPTED_CHECKPOINT="$ADAPT_DIR/ppmattingv2-stdc1-human_384-adapted.pdparams"
+          mkdir -p "$ADAPT_DIR"
+
+          if [[ ! -s "$ADAPTED_CHECKPOINT" ]]; then
+            echo "No cached 384-adapted checkpoint; performing real 384 gradient adaptation"
+            mkdir -p "$PADDLESEG_DIR/Matting/data"
+            PPM_ZIP="$RUNNER_TEMP/PPM-100.zip"
+            curl -L --fail --retry 4 --retry-delay 2 \
+              -o "$PPM_ZIP" \
+              https://paddleseg.bj.bcebos.com/matting/datasets/PPM-100.zip
+            unzip -q "$PPM_ZIP" -d "$PADDLESEG_DIR/Matting/data"
+            test -f "$PADDLESEG_DIR/Matting/data/PPM-100/train.txt"
+
+            TRAIN_OUT="$RUNNER_TEMP/ppmattingv2-384-train"
+            rm -rf "$TRAIN_OUT"
+            pushd "$PADDLESEG_DIR/Matting" >/dev/null
+            python "$GITHUB_WORKSPACE/tools/ppmattingv2/adapt_true_384.py" \
+              --paddleseg_dir "$PADDLESEG_DIR" \
+              --config "$GITHUB_WORKSPACE/tools/ppmattingv2/ppmattingv2-stdc1-human_384-ci-adapt.yml" \
+              --save_dir "$TRAIN_OUT" \
+              --iters 320 \
+              --batch_size 1 \
+              --device cpu \
+              --seed 20260907
+            popd >/dev/null
+
+            cp "$TRAIN_OUT/iter_320/model.pdparams" "$ADAPTED_CHECKPOINT"
+          else
+            echo "Using cached real 384-adapted checkpoint"
+          fi
+
+          test "$(stat -c%s "$ADAPTED_CHECKPOINT")" -gt 5000000
+          if cmp -s "$OFFICIAL_512" "$ADAPTED_CHECKPOINT"; then
+            echo "Adapted checkpoint is byte-identical to the untouched official 512 checkpoint" >&2
+            exit 4
+          fi
+          echo "Official 512 checkpoint: $(sha256sum "$OFFICIAL_512" | cut -d' ' -f1)"
+          echo "Adapted 384 checkpoint: $(sha256sum "$ADAPTED_CHECKPOINT" | cut -d' ' -f1)"
 
           TRUE384_ONNX="$GITHUB_WORKSPACE/app/build/generated/ppMattingV2True384/ppmattingv2_stdc1_human_384.onnx"
           PADDLESEG_DIR="$PADDLESEG_DIR" \
+          PPMATTING_CONFIG="$GITHUB_WORKSPACE/tools/ppmattingv2/ppmattingv2-stdc1-human_384-ci-adapt.yml" \
+          PPMATTING_CHECKPOINT="$ADAPTED_CHECKPOINT" \
           OUTPUT_ONNX="$TRUE384_ONNX" \
             bash "$GITHUB_WORKSPACE/tools/ppmattingv2/export_true_384.sh"
 
-          python - "$TRUE384_ONNX" <<'PY'
+          python - "$TRUE384_ONNX" "$ADAPTED_CHECKPOINT" <<'PY'
           import os, sys, onnx
-          p = sys.argv[1]
-          m = onnx.load(p)
-          onnx.checker.check_model(m)
-          dims = [d.dim_value for d in m.graph.input[0].type.tensor_type.shape.dim]
+          onnx_path, checkpoint = sys.argv[1:]
+          model = onnx.load(onnx_path)
+          onnx.checker.check_model(model)
+          dims = [d.dim_value for d in model.graph.input[0].type.tensor_type.shape.dim]
           assert dims == [1, 3, 384, 384], dims
-          print(f"True-384 ONNX ready: {os.path.getsize(p) / 1024 / 1024:.1f} MiB, input={dims}")
+          assert os.path.getsize(checkpoint) > 5_000_000
+          print(
+              f"True-384 adapted ONNX ready: {os.path.getsize(onnx_path) / 1024 / 1024:.1f} MiB, "
+              f"input={dims}, checkpoint={os.path.basename(checkpoint)}"
+          )
           PY
 
       - uses: actions/setup-java@v4
