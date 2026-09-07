@@ -6,12 +6,14 @@ import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import java.io.File
 import java.security.MessageDigest
 
-// Keep the human-preserving detector-authoritative ROI mattes physically separate from older
-// generations, especially v62 masks produced with the destructive in-box core envelope.
-private const val V57_CACHE_DIR_NAME = "person_cutout_masks_v63_ppmattingv2_384_detector_roi_raw_alpha"
+// Keep the stable-weight, human-preserving detector-authoritative ROI mattes physically separate
+// from v62/v63 generations. v62 used a destructive envelope; v63 removed that gate but still used
+// the CI-adapted 384 checkpoint that produced repeatable holes through valid human body regions on
+// the physical Symphony Z60. v64 restores the proven official human weights at fixed 384.
+private const val V57_CACHE_DIR_NAME = "person_cutout_masks_v64_ppmattingv2_384_stable_weights_detector_roi"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-private const val V47_GENERATION_VERSION = "adaptive-v63-ppmattingv2-384-detector-size-matte-center-raw-alpha-r1"
+private const val V47_GENERATION_VERSION = "stable-v64-ppmattingv2-384-official-human-weights-detector-size-matte-center-raw-alpha-r1"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
