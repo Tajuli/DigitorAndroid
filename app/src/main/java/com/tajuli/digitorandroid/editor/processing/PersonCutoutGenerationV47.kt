@@ -8,10 +8,10 @@ import java.security.MessageDigest
 
 // Keep verified-ROI mattes physically separate from older full-frame/semantic-ROI generations so
 // an APK update can never make a newly analyzed clip appear identical by reusing stale masks.
-private const val V57_CACHE_DIR_NAME = "person_cutout_masks_v57_ppmattingv2_384_effdet_roi"
+private const val V57_CACHE_DIR_NAME = "person_cutout_masks_v60_ppmattingv2_384_bbox_proof"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-private const val V47_GENERATION_VERSION = "adaptive-v57-ppmattingv2-384-effdet-roi-r1"
+private const val V47_GENERATION_VERSION = "adaptive-v60-ppmattingv2-384-tight-roi-core-envelope-r2"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
