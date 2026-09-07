@@ -19,14 +19,13 @@ private const val PERSON_ROI_TOP_MARGIN_V55 = .10f
 private const val PERSON_ROI_BOTTOM_MARGIN_V55 = .08f
 
 /**
- * Tight tracked person ROI wrapper for PP-MattingV2 256.
+ * Tight tracked person ROI wrapper for PP-MattingV2 384.
  *
- * The lightweight localizer is never the final matte. It provides a largest-person ROI plus a
- * generous coarse human gate. PP-MattingV2 remains the source of alpha/edge detail; the gate only
- * vetoes obvious background pixels after inference so isolated flowers/furniture and chair regions
- * that PP-MattingV2 falsely marks as foreground cannot survive merely because they sit inside the
- * crop. The ROI is rectangular rather than forced square to avoid widening a portrait crop until it
- * includes most of a landscape frame.
+ * The localizer is never the final matte. It supplies a largest-person ROI and a generous coarse
+ * human gate. PP-MattingV2 supplies all soft alpha/detail. The ROI stays rectangular so a portrait
+ * subject does not force a wide scene crop; before neural inference it is letterboxed into a square
+ * instead of stretched, preserving body geometry while keeping furniture outside the ROI invisible
+ * to PP-MattingV2. After inference the coarse gate is only a background veto.
  */
 internal class PersonRoiMatteV55(
     context: Context,
@@ -52,7 +51,7 @@ internal class PersonRoiMatteV55(
 
         val crop = Bitmap.createBitmap(source, roi.left, roi.top, roi.width(), roi.height())
         val roiMatte = try {
-            portraitMatte.infer(crop)
+            inferLetterboxed(crop)
         } finally {
             if (!crop.isRecycled) crop.recycle()
         }
@@ -71,6 +70,35 @@ internal class PersonRoiMatteV55(
             }
         } finally {
             if (!gatedRoi.isRecycled) gatedRoi.recycle()
+        }
+    }
+
+    /**
+     * Keep the tight rectangular ROI but do not geometrically stretch it into the model's square
+     * tensor. Black letterbox padding contains no scene pixels, so the 384 tensor remains focused on
+     * the subject and the returned alpha can be cropped back to the exact ROI coordinates.
+     */
+    private fun inferLetterboxed(crop: Bitmap): Bitmap {
+        if (crop.width == crop.height) return portraitMatte.infer(crop)
+
+        val side = max(crop.width, crop.height)
+        val offsetX = (side - crop.width) / 2
+        val offsetY = (side - crop.height) / 2
+        val square = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
+        Canvas(square).apply {
+            drawColor(Color.BLACK)
+            drawBitmap(crop, offsetX.toFloat(), offsetY.toFloat(), pastePaint)
+        }
+
+        val squareMatte = try {
+            portraitMatte.infer(square)
+        } finally {
+            square.recycle()
+        }
+        return try {
+            Bitmap.createBitmap(squareMatte, offsetX, offsetY, crop.width, crop.height)
+        } finally {
+            squareMatte.recycle()
         }
     }
 
