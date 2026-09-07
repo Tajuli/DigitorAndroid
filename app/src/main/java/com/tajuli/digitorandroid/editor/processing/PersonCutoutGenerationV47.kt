@@ -6,10 +6,12 @@ import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import java.io.File
 import java.security.MessageDigest
 
-private const val V50_CACHE_DIR_NAME = "person_cutout_masks_v50_ppmattingv2_hair_spatialflow_512"
+// Keep verified-ROI mattes physically separate from older full-frame/semantic-ROI generations so
+// an APK update can never make a newly analyzed clip appear identical by reusing stale masks.
+private const val V57_CACHE_DIR_NAME = "person_cutout_masks_v57_ppmattingv2_384_effdet_roi"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-private const val V47_GENERATION_VERSION = "adaptive-v50-ppmattingv2-only-r2"
+private const val V47_GENERATION_VERSION = "adaptive-v57-ppmattingv2-384-effdet-roi-r1"
 
 internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
     val dir = personCutoutSourceDirV47(context, clip.uri)
@@ -17,9 +19,7 @@ internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineCl
         dir.listFiles().orEmpty().forEach { file -> runCatching { file.delete() } }
     }
     dir.mkdirs()
-    // Persist the exact quality/trim/hair/temporal tuple before decode starts. If a vendor codec
-    // fails only while draining EOS after already producing complete dense coverage, the UI can
-    // safely recover that generation instead of discarding hundreds/thousands of valid mattes.
+    // Persist exact tuple before decode so a killed/failed analysis cannot be mistaken for ready.
     File(dir, V47_PENDING_MARKER).writeText(personCutoutGenerationSignatureV47(clip))
 }
 
@@ -54,7 +54,7 @@ private fun personCutoutGenerationSignatureV47(clip: TimelineClip): String {
 }
 
 private fun personCutoutSourceDirV47(context: Context, sourceUri: String): File =
-    File(File(context.filesDir, V50_CACHE_DIR_NAME), personCutoutCacheKeyV47(sourceUri))
+    File(File(context.filesDir, V57_CACHE_DIR_NAME), personCutoutCacheKeyV47(sourceUri))
 
 private fun personCutoutCacheKeyV47(sourceUri: String): String = MessageDigest.getInstance("SHA-256")
     .digest(sourceUri.toByteArray())
