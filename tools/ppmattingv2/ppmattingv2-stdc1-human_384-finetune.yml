@@ -1,11 +1,15 @@
-# Digitor PP-MattingV2/STDC1 true-384 fine-tune profile.
+# Digitor PP-MattingV2/STDC1 true-384 profile.
 #
-# This is a genuine 384x384 operating point for the mobile Vulkan path. It is not a 512 graph
-# receiving smaller runtime tensors. Start from PaddleSeg's official human-512 checkpoint, then
-# fine-tune at 384 so hair/fabric/detail filters adapt to the deployment resolution.
+# The graph is a genuine fixed [1,3,384,384] operating point for the mobile Vulkan path. Production
+# Android CI currently loads PaddleSeg's proven official human-512 checkpoint and exports it through
+# this true-384 graph without the former short CI-side adaptation pass. That adaptation produced
+# repeatable internal holes through valid shoulder/arm/face regions on the physical Symphony Z60.
 #
 # At 384 input the first DPP feature map is 6x6, so PP-MattingV2's original [2, 4, 6] pyramid is
 # valid and can be retained without the 256-specific [2, 3, 4] workaround.
+#
+# The training section is retained for a future properly validated offline 384 fine-tune. It is not
+# executed by Android CI.
 
 batch_size: 8
 iters: 20000
@@ -68,8 +72,6 @@ optimizer:
 
 lr_scheduler:
   type: PolynomialDecay
-  # Conservative LR keeps the 512 checkpoint's learned fine-detail filters while adapting them to
-  # the denser 384 ROI operating point.
   learning_rate: 0.00075
   end_lr: 0
   power: 0.9
