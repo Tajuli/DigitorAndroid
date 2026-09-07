@@ -13,26 +13,27 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-private const val PERSON_ROI_SIDE_MARGIN_V64 = .055f
-private const val PERSON_ROI_TOP_MARGIN_V64 = .045f
-private const val PERSON_ROI_BOTTOM_MARGIN_V64 = .035f
-private const val PERSON_ROI_MAX_FRAME_FRACTION_V64 = .46f
-private const val PERSON_ROI_BOOTSTRAP_MAX_FRAME_FRACTION_V64 = .44f
-private const val PERSON_ROI_BOOTSTRAP_EDGE_V64 = 256
-private const val PERSON_ROI_BOOTSTRAP_ALPHA_V64 = 200
-private const val PERSON_ROI_CENTER_TRACK_GAIN_V64 = .25f
-private const val PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V64 = .04f
+private const val PERSON_ROI_SIDE_MARGIN_V65 = .055f
+private const val PERSON_ROI_TOP_MARGIN_V65 = .045f
+private const val PERSON_ROI_BOTTOM_MARGIN_V65 = .035f
+private const val PERSON_ROI_MAX_FRAME_FRACTION_V65 = .52f
+private const val PERSON_ROI_BOOTSTRAP_MAX_FRAME_FRACTION_V65 = .48f
+private const val PERSON_ROI_BOOTSTRAP_EDGE_V65 = 256
+private const val PERSON_ROI_BOOTSTRAP_ALPHA_V65 = 200
+private const val PERSON_ROI_CENTER_TRACK_GAIN_V65 = .35f
+private const val PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V65 = .06f
 
 /**
  * Detector-authoritative person ROI wrapper for PP-MattingV2 384.
  *
- * Bbox width/height come only from SelfieMulticlass confidence localization or EfficientDet.
- * Dense PP-Matting may move only the bbox center between detector hits and can never change size.
+ * Bbox width/height come from the motion-safe SelfieMulticlass/EfficientDet localizer. The detector
+ * layer already applies head/body padding plus asymmetric edge hysteresis: outward motion expands
+ * immediately while inward contraction is slow. Dense PP-Matting is still only a fallback center
+ * tracker when both detectors miss and can never change bbox width/height.
  *
  * PP-Matting alpha inside the verified ROI is kept non-destructively. Selfie and EfficientDet are
  * locator-only; PP-MattingV2 is the final soft-alpha authority inside the ROI. The production model
- * is a true fixed-384 graph using the proven official human weights after the short 384 adaptation
- * experiment was rolled back for device-visible body holes.
+ * is a true fixed-384 graph using the proven official human weights.
  */
 internal class PersonRoiMatteV57(
     context: Context,
@@ -50,7 +51,7 @@ internal class PersonRoiMatteV57(
 
     val detectorBackendLabel: String
         get() = detector.backendLabel +
-            " + detector-only bbox size + matte center-only tracking + non-destructive PP alpha"
+            " + detector-owned motion-safe size + matte center-only fallback + raw PP alpha"
 
     fun infer(source: Bitmap, sourceTimeUs: Long): Bitmap {
         check(!source.isRecycled) { "Cannot run ROI matting on a recycled bitmap" }
@@ -65,7 +66,9 @@ internal class PersonRoiMatteV57(
         )
 
         if (detected != null) {
-            updateDetectorAnchor(detected.bounds, sourceTimeUs, detected.source)
+            // The detector's V65 box is already temporally guarded. Do not average it back toward a
+            // stale smaller rectangle here; that used to re-introduce clipping after sudden motion.
+            updateDetectorAnchorDirect(detected.bounds, sourceTimeUs, detected.source)
         } else if (detectorAnchor == null) {
             val bootstrapBounds = bootstrapPersonBounds(source)
             check(bootstrapBounds != null) {
@@ -121,7 +124,7 @@ internal class PersonRoiMatteV57(
 
     /**
      * Hair/temporal refinement works in full-frame coordinates. Clamp the final matte back to the
-     * active ROI so refiners cannot reintroduce background outside the verified crop.
+     * active motion-safe ROI so refiners cannot reintroduce background outside the verified crop.
      */
     fun clampToActiveRoi(matte: Bitmap): Bitmap {
         val roi = activeRoi ?: error("No verified person ROI is active for this matte")
@@ -152,25 +155,16 @@ internal class PersonRoiMatteV57(
         sourceHeight = source.height
     }
 
-    /** Detector/Selfie is the only normal authority allowed to change bbox width and height. */
-    private fun updateDetectorAnchor(bounds: RectF, sourceTimeUs: Long, source: String) {
+    /** Detector V65 already owns temporal size/motion safety; accept that guarded box directly. */
+    private fun updateDetectorAnchorDirect(bounds: RectF, sourceTimeUs: Long, source: String) {
         val clipped = clipBounds(bounds)
         if (clipped.width() < 2f || clipped.height() < 2f) return
-        val previous = detectorAnchor
-        detectorAnchor = if (
-            previous == null ||
-            lastSizeAuthoritySource.startsWith("PP-Matting bootstrap") ||
-            intersectionOverUnion(previous, clipped) < .08f
-        ) {
-            clipped
-        } else {
-            smoothDetectorBounds(previous, clipped, source)
-        }
+        detectorAnchor = clipped
         lastDetectorTimeUs = sourceTimeUs
         lastSizeAuthoritySource = source
     }
 
-    /** Dense matte tracking may move center only. Width/height remain detector-authoritative. */
+    /** Dense matte fallback may move center only. Width/height remain detector-authoritative. */
     private fun shiftAnchorCenterOnly(bounds: RectF): Boolean {
         val anchor = detectorAnchor ?: return false
         val candidate = clipBounds(bounds)
@@ -178,10 +172,10 @@ internal class PersonRoiMatteV57(
 
         val width = anchor.width()
         val height = anchor.height()
-        val maxShiftX = width * PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V64
-        val maxShiftY = height * PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V64
-        val desiredDx = (candidate.centerX() - anchor.centerX()) * PERSON_ROI_CENTER_TRACK_GAIN_V64
-        val desiredDy = (candidate.centerY() - anchor.centerY()) * PERSON_ROI_CENTER_TRACK_GAIN_V64
+        val maxShiftX = width * PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V65
+        val maxShiftY = height * PERSON_ROI_CENTER_TRACK_MAX_SHIFT_V65
+        val desiredDx = (candidate.centerX() - anchor.centerX()) * PERSON_ROI_CENTER_TRACK_GAIN_V65
+        val desiredDy = (candidate.centerY() - anchor.centerY()) * PERSON_ROI_CENTER_TRACK_GAIN_V65
         val dx = desiredDx.coerceIn(-maxShiftX, maxShiftX)
         val dy = desiredDy.coerceIn(-maxShiftY, maxShiftY)
         if (kotlin.math.abs(dx) < .5f && kotlin.math.abs(dy) < .5f) return false
@@ -192,16 +186,6 @@ internal class PersonRoiMatteV57(
         val cy = (anchor.centerY() + dy).coerceIn(halfH, sourceHeight - halfH)
         detectorAnchor = RectF(cx - halfW, cy - halfH, cx + halfW, cy + halfH)
         return true
-    }
-
-    private fun smoothDetectorBounds(previous: RectF, current: RectF, source: String): RectF {
-        val freshCenter = if (source.startsWith("SelfieMulticlass")) .82f else .68f
-        val freshSize = if (source.startsWith("SelfieMulticlass")) .72f else .55f
-        val cx = previous.centerX() * (1f - freshCenter) + current.centerX() * freshCenter
-        val cy = previous.centerY() * (1f - freshCenter) + current.centerY() * freshCenter
-        val width = previous.width() * (1f - freshSize) + current.width() * freshSize
-        val height = previous.height() * (1f - freshSize) + current.height() * freshSize
-        return clipCenteredBox(cx, cy, width, height)
     }
 
     private fun clipCenteredBox(cx: Float, cy: Float, width: Float, height: Float): RectF {
@@ -236,7 +220,7 @@ internal class PersonRoiMatteV57(
         val clipped = clipBounds(bounds)
         val frameArea = (sourceWidth.toFloat() * sourceHeight.toFloat()).coerceAtLeast(1f)
         val area = clipped.width() * clipped.height()
-        val maxArea = frameArea * PERSON_ROI_BOOTSTRAP_MAX_FRAME_FRACTION_V64
+        val maxArea = frameArea * PERSON_ROI_BOOTSTRAP_MAX_FRAME_FRACTION_V65
         if (area <= maxArea || clipped.height() <= 1f) return clipped
 
         val targetWidth = (maxArea / clipped.height()).coerceAtLeast(2f)
@@ -247,7 +231,7 @@ internal class PersonRoiMatteV57(
     /** Find dominant high-confidence PP-Matting component for center tracking/bootstrap only. */
     private fun dominantForegroundBounds(matte: Bitmap): RectF? {
         val longEdge = max(matte.width, matte.height).coerceAtLeast(1)
-        val scale = min(1f, PERSON_ROI_BOOTSTRAP_EDGE_V64 / longEdge.toFloat())
+        val scale = min(1f, PERSON_ROI_BOOTSTRAP_EDGE_V65 / longEdge.toFloat())
         val workW = (matte.width * scale).roundToInt().coerceAtLeast(1)
         val workH = (matte.height * scale).roundToInt().coerceAtLeast(1)
         val work = if (workW == matte.width && workH == matte.height) {
@@ -262,7 +246,7 @@ internal class PersonRoiMatteV57(
             work.getPixels(pixels, 0, workW, 0, 0, workW, workH)
             val foreground = BooleanArray(count)
             for (i in 0 until count) {
-                foreground[i] = Color.red(pixels[i]) >= PERSON_ROI_BOOTSTRAP_ALPHA_V64
+                foreground[i] = Color.red(pixels[i]) >= PERSON_ROI_BOOTSTRAP_ALPHA_V65
             }
 
             val component = findBestForegroundComponent(foreground, workW, workH) ?: return null
@@ -279,7 +263,7 @@ internal class PersonRoiMatteV57(
         }
     }
 
-    private data class ForegroundComponentV64(
+    private data class ForegroundComponentV65(
         val left: Int,
         val top: Int,
         val right: Int,
@@ -290,7 +274,7 @@ internal class PersonRoiMatteV57(
         foreground: BooleanArray,
         width: Int,
         height: Int,
-    ): ForegroundComponentV64? {
+    ): ForegroundComponentV65? {
         val count = width * height
         val visited = BooleanArray(count)
         val queue = IntArray(count)
@@ -299,7 +283,7 @@ internal class PersonRoiMatteV57(
         val frameCy = (height - 1) * .5f
 
         var bestScore = -1f
-        var best: ForegroundComponentV64? = null
+        var best: ForegroundComponentV65? = null
 
         for (start in 0 until count) {
             if (visited[start]) continue
@@ -357,7 +341,7 @@ internal class PersonRoiMatteV57(
 
             if (score > bestScore) {
                 bestScore = score
-                best = ForegroundComponentV64(
+                best = ForegroundComponentV65(
                     left = minX,
                     top = minY,
                     right = maxX + 1,
@@ -399,8 +383,8 @@ internal class PersonRoiMatteV57(
     }
 
     /**
-     * Add small safety margins. If margins alone push a detector-owned ROI above 46% of the frame,
-     * reduce only the margins; never crop the detector bbox itself to hit the target.
+     * Add a small final safety margin around the detector's already motion-safe box. Margins may be
+     * reduced above the preferred density target, but the detector-owned box itself is never cut.
      */
     private fun tightRoi(person: RectF, frameWidth: Int, frameHeight: Int): Rect {
         val raw = RectF(
@@ -413,13 +397,13 @@ internal class PersonRoiMatteV57(
         fun expanded(scale: Float): Rect {
             val personW = raw.width().coerceAtLeast(1f)
             val personH = raw.height().coerceAtLeast(1f)
-            val left = floor(raw.left - personW * PERSON_ROI_SIDE_MARGIN_V64 * scale)
+            val left = floor(raw.left - personW * PERSON_ROI_SIDE_MARGIN_V65 * scale)
                 .toInt().coerceIn(0, frameWidth - 1)
-            val top = floor(raw.top - personH * PERSON_ROI_TOP_MARGIN_V64 * scale)
+            val top = floor(raw.top - personH * PERSON_ROI_TOP_MARGIN_V65 * scale)
                 .toInt().coerceIn(0, frameHeight - 1)
-            val right = ceil(raw.right + personW * PERSON_ROI_SIDE_MARGIN_V64 * scale)
+            val right = ceil(raw.right + personW * PERSON_ROI_SIDE_MARGIN_V65 * scale)
                 .toInt().coerceIn(left + 1, frameWidth)
-            val bottom = ceil(raw.bottom + personH * PERSON_ROI_BOTTOM_MARGIN_V64 * scale)
+            val bottom = ceil(raw.bottom + personH * PERSON_ROI_BOTTOM_MARGIN_V65 * scale)
                 .toInt().coerceIn(top + 1, frameHeight)
             return Rect(left, top, right, bottom)
         }
@@ -430,14 +414,14 @@ internal class PersonRoiMatteV57(
         fun fraction(rect: Rect): Float =
             (rect.width().toLong() * rect.height().toLong()).toFloat() / frameArea.toFloat()
 
-        if (fraction(roi) > PERSON_ROI_MAX_FRAME_FRACTION_V64 &&
-            rawAreaFraction < PERSON_ROI_MAX_FRAME_FRACTION_V64
+        if (fraction(roi) > PERSON_ROI_MAX_FRAME_FRACTION_V65 &&
+            rawAreaFraction < PERSON_ROI_MAX_FRAME_FRACTION_V65
         ) {
             var low = 0f
             var high = 1f
             repeat(10) {
                 val mid = (low + high) * .5f
-                if (fraction(expanded(mid)) <= PERSON_ROI_MAX_FRAME_FRACTION_V64) low = mid
+                if (fraction(expanded(mid)) <= PERSON_ROI_MAX_FRAME_FRACTION_V65) low = mid
                 else high = mid
             }
             roi = expanded(low)
@@ -524,7 +508,7 @@ internal class PersonRoiMatteV57(
         val authority = if (sizeAuthoritySource.startsWith("PP-Matting bootstrap")) {
             "BOOTSTRAP_SEED_LOCKED"
         } else {
-            "DETECTOR_ONLY"
+            "DETECTOR_MOTION_SAFE"
         }
 
         PersonRoiRuntimeStatusV60.update(
@@ -532,7 +516,9 @@ internal class PersonRoiMatteV57(
                 append("ROI DEBUG: ACTIVE")
                 append(" · source=").append(sizeAuthoritySource)
                 append(" · size-authority=").append(authority)
-                append(" · matte-track=center-only")
+                append(" · bbox-motion=OUTWARD_FAST_INWARD_SLOW")
+                append(" · headroom=GUARDED")
+                append(" · matte-track=center-only-fallback")
                 append(" · center-shift=").append(if (centerTrackApplied) "ON" else "OFF")
                 detectorAgeMs?.let { append(" · detector-age=").append(it).append("ms") }
                 append(" · box=").append(roi.left).append(',').append(roi.top)
@@ -541,7 +527,7 @@ internal class PersonRoiMatteV57(
                 append(" · frame=").append("%.1f".format(coverage)).append('%')
                 append(" · density-vs-384≈").append("%.2f".format(densityVs384)).append('x')
                 append(" · density-vs-512≈").append("%.2f".format(densityVs512)).append('x')
-                append(" · target<=").append((PERSON_ROI_MAX_FRAME_FRACTION_V64 * 100).roundToInt()).append('%')
+                append(" · preferred<=").append((PERSON_ROI_MAX_FRAME_FRACTION_V65 * 100).roundToInt()).append('%')
                 append(" · crop-before-384=YES")
                 append(" · outside-ROI alpha=0")
                 append(" · in-box-alpha=PP-MattingV2 RAW")
