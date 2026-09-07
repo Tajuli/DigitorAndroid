@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.RectF
+import android.os.Build
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.ByteBufferExtractor
 import com.google.mediapipe.tasks.core.BaseOptions
@@ -28,6 +29,11 @@ internal data class PersonRegionV55(
  * person component, use that component to localize the subject, and build a deliberately generous
  * dilated gate. The gate is only a background veto after PP-MattingV2: PP-MattingV2 still supplies
  * all final edge/alpha detail inside the allowed human envelope.
+ *
+ * The Symphony Z60 / T606 UNISOC family is kept on the CPU delegate for this lightweight localizer.
+ * On those devices a MediaPipe GPU delegate can be created successfully and then die inside the
+ * vendor driver during the first segment() call, which is process-fatal and cannot be caught by the
+ * Kotlin fallback below. PP-MattingV2 itself remains on ncnn Vulkan; only ROI localization is CPU.
  */
 internal class FastPersonSemanticSegmenterV54(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -36,13 +42,18 @@ internal class FastPersonSemanticSegmenterV54(context: Context) : AutoCloseable 
         private set
 
     init {
-        val gpu = runCatching { createSegmenter(appContext, Delegate.GPU) }
-        if (gpu.isSuccess) {
-            segmenter = gpu.getOrThrow()
-            usingGpuDelegate = true
-        } else {
+        if (isUnsafeUnisocGpuDelegateDevice()) {
             segmenter = createSegmenter(appContext, Delegate.CPU)
             usingGpuDelegate = false
+        } else {
+            val gpu = runCatching { createSegmenter(appContext, Delegate.GPU) }
+            if (gpu.isSuccess) {
+                segmenter = gpu.getOrThrow()
+                usingGpuDelegate = true
+            } else {
+                segmenter = createSegmenter(appContext, Delegate.CPU)
+                usingGpuDelegate = false
+            }
         }
     }
 
@@ -235,6 +246,24 @@ internal class FastPersonSemanticSegmenterV54(context: Context) : AutoCloseable 
     }
 
     private companion object {
+        fun isUnsafeUnisocGpuDelegateDevice(): Boolean {
+            val model = Build.MODEL.orEmpty().lowercase()
+            val manufacturer = Build.MANUFACTURER.orEmpty().lowercase()
+            val hardware = Build.HARDWARE.orEmpty().lowercase()
+            val board = Build.BOARD.orEmpty().lowercase()
+            val device = Build.DEVICE.orEmpty().lowercase()
+            val product = Build.PRODUCT.orEmpty().lowercase()
+            val fingerprint = Build.FINGERPRINT.orEmpty().lowercase()
+            val combined = listOf(model, manufacturer, hardware, board, device, product, fingerprint).joinToString(" ")
+
+            return model.contains("z60") ||
+                combined.contains("t606") ||
+                combined.contains("unisoc") ||
+                combined.contains("spreadtrum") ||
+                hardware.startsWith("ums") ||
+                hardware.startsWith("sp") && manufacturer.contains("symphony")
+        }
+
         fun createSegmenter(context: Context, delegate: Delegate): ImageSegmenter {
             val baseOptions = BaseOptions.builder()
                 .setModelAssetPath(PERSON_SEMANTIC_MODEL_ASSET_V54)
