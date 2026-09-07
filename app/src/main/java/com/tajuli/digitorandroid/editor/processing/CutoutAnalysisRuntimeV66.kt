@@ -53,6 +53,7 @@ object CutoutAnalysisRuntimeV66 {
         true
     }
 
+    /** During RUNNING this is processed progress; terminal states replace it with durable file count. */
     fun updateSavedFrames(savedFrames: Int) {
         synchronized(lock) {
             val current = _state.value
@@ -86,7 +87,7 @@ object CutoutAnalysisRuntimeV66 {
         val current = _state.value
         _state.value = current.copy(
             phase = CutoutAnalysisPhaseV66.PAUSED,
-            savedFrames = maxOf(current.savedFrames, savedFrames),
+            savedFrames = savedFrames.coerceAtLeast(0),
             detail = "Paused safely; Resume continues from the next missing frame",
         )
     }
@@ -96,7 +97,7 @@ object CutoutAnalysisRuntimeV66 {
         val current = _state.value
         _state.value = current.copy(
             phase = CutoutAnalysisPhaseV66.FAILED,
-            savedFrames = maxOf(current.savedFrames, savedFrames),
+            savedFrames = savedFrames.coerceAtLeast(0),
             detail = detail,
         )
     }
@@ -106,7 +107,7 @@ object CutoutAnalysisRuntimeV66 {
         val current = _state.value
         _state.value = current.copy(
             phase = CutoutAnalysisPhaseV66.COMPLETED,
-            savedFrames = maxOf(current.savedFrames, savedFrames),
+            savedFrames = savedFrames.coerceAtLeast(0),
             detail = "Matte analysis complete",
         )
     }
