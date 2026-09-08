@@ -271,7 +271,11 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
                     MediaMetadataRetriever.OPTION_CLOSEST,
                     targetWidth,
                     targetHeight,
-                )?.let { return ensureArgb(it) }
+                )?.let { raw ->
+                    val normalized = ensureArgb(raw)
+                    if (normalized !== raw && !raw.isRecycled) raw.recycle()
+                    return normalized
+                }
             }
         }
         val raw = retriever.getFrameAtTime(sourceUs, MediaMetadataRetriever.OPTION_CLOSEST) ?: return null
@@ -320,10 +324,20 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 
 private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
+    private val conservativeGpuBudget = useInterruptionSafeSerialCutoutV66()
     private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
     private val roiMatte = PersonRoiMatteV57(appContext, portraitMatte)
     private val hair = BeautyHairSegmenterV29(appContext)
-    private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
+
+    // Fragile low-end Mali/UNISOC devices already use the GPU for OES decode + ncnn Vulkan. Running
+    // a second persistent EGL temporal-flow context on the same GPU increased long-session native
+    // memory/driver pressure. Reserve GPU compute for PP-MattingV2 there and use the existing CPU
+    // temporal implementation; healthy devices retain the faster GPU temporal path.
+    private var gpuTemporal = if (conservativeGpuBudget) {
+        null
+    } else {
+        runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
+    }
     private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
     private val matteWriter = AsyncPersonCutoutMaskWriterV48(appContext)
 
@@ -338,11 +352,18 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         append(" · In-box alpha PP-MattingV2 RAW")
         append(" · Final ROI clamp")
         append(" · Durable per-frame checkpoint + Resume")
-        if (useInterruptionSafeSerialCutoutV66()) {
+        if (conservativeGpuBudget) {
             append(" · UNISOC interruption-safe serial GL→Vulkan")
         }
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
-        append(" · Temporal refine "); append(if (gpuTemporal != null) "GPU" else "CPU fallback")
+        append(" · Temporal refine ")
+        append(
+            when {
+                conservativeGpuBudget -> "CPU stability mode"
+                gpuTemporal != null -> "GPU"
+                else -> "CPU fallback"
+            },
+        )
         append(" · CPU scheduler")
     }
 
@@ -492,8 +513,6 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     fun awaitPendingStores() = matteWriter.awaitIdle()
 
     override fun close() {
-        // Drain then actually shut down all long-lived worker/state objects. The previous code only
-        // awaited the matte writer, leaving its executor thread alive after every Analyze/Resume.
         runCatching { matteWriter.close() }
         cachedHairMask?.recycle()
         cachedHairMask = null
