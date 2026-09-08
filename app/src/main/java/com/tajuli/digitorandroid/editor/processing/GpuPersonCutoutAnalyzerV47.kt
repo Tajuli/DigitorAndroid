@@ -137,8 +137,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         }
 
         try {
-            // Priority/playhead analysis is useful on a fresh Low/Medium pass, but a resume should
-            // fill the first durable gap chronologically rather than create another out-of-order island.
             val priority = if (
                 generation.resumed || quality == CutoutAnalysisQualityV47.HIGH
             ) {
@@ -224,11 +222,6 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         CutoutAnalysisQualityV47.HIGH -> 0L
     }
 
-    /**
-     * High-mode writes arrive sequentially but the writer pipeline can leave the final couple of
-     * PNGs out of order during an abrupt process death. Find the first meaningful gap instead of
-     * blindly trusting max(timestamp), then decode again from just after the last contiguous frame.
-     */
     private fun highResumeStartUsV66(existing: List<Long>, startUs: Long, endUs: Long): Long {
         val times = existing.filter { it >= startUs && it < endUs }.distinct().sorted()
         if (times.isEmpty()) return startUs
@@ -324,20 +317,10 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 
 private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
-    private val conservativeGpuBudget = useInterruptionSafeSerialCutoutV66()
     private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
     private val roiMatte = PersonRoiMatteV57(appContext, portraitMatte)
     private val hair = BeautyHairSegmenterV29(appContext)
-
-    // Fragile low-end Mali/UNISOC devices already use the GPU for OES decode + ncnn Vulkan. Running
-    // a second persistent EGL temporal-flow context on the same GPU increased long-session native
-    // memory/driver pressure. Reserve GPU compute for PP-MattingV2 there and use the existing CPU
-    // temporal implementation; healthy devices retain the faster GPU temporal path.
-    private var gpuTemporal = if (conservativeGpuBudget) {
-        null
-    } else {
-        runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
-    }
+    private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
     private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
     private val matteWriter = AsyncPersonCutoutMaskWriterV48(appContext)
 
@@ -352,18 +335,11 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         append(" · In-box alpha PP-MattingV2 RAW")
         append(" · Final ROI clamp")
         append(" · Durable per-frame checkpoint + Resume")
-        if (conservativeGpuBudget) {
+        if (useInterruptionSafeSerialCutoutV66()) {
             append(" · UNISOC interruption-safe serial GL→Vulkan")
         }
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
-        append(" · Temporal refine ")
-        append(
-            when {
-                conservativeGpuBudget -> "CPU stability mode"
-                gpuTemporal != null -> "GPU"
-                else -> "CPU fallback"
-            },
-        )
+        append(" · Temporal refine "); append(if (gpuTemporal != null) "GPU pooled" else "CPU fallback")
         append(" · CPU scheduler")
     }
 
