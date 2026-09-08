@@ -100,6 +100,60 @@ int RunInference(Engine* engine, const ncnn::Mat& input, ncnn::Mat& output, doub
     return status;
 }
 
+bool ValidateOutput(JNIEnv* env, const ncnn::Mat& output, int status) {
+    if (status != 0 || output.empty()) {
+        __android_log_print(ANDROID_LOG_ERROR, kTag, "extract failed with status=%d", status);
+        ThrowJava(env, "java/lang/RuntimeException", "ncnn Vulkan PP-MattingV2 inference failed");
+        return false;
+    }
+    if (output.elembits() != 32 || output.total() < static_cast<size_t>(kPlane)) {
+        __android_log_print(
+                ANDROID_LOG_ERROR,
+                kTag,
+                "Unexpected output for fixed %d graph: bits=%d total=%zu dims=%d w=%d h=%d c=%d",
+                kModelSize,
+                output.elembits(),
+                output.total(),
+                output.dims,
+                output.w,
+                output.h,
+                output.c);
+        ThrowJava(
+                env,
+                "java/lang/IllegalStateException",
+                "ncnn PP-MattingV2 output does not match the compiled fixed graph");
+        return false;
+    }
+    return true;
+}
+
+bool RunFromJavaInput(
+        JNIEnv* env,
+        jlong handle,
+        jfloatArray inputArray,
+        ncnn::Mat& output) {
+    if (handle == 0 || inputArray == nullptr) {
+        ThrowJava(env, "java/lang/IllegalStateException", "ncnn Vulkan PP-MattingV2 engine is not initialized");
+        return false;
+    }
+    if (env->GetArrayLength(inputArray) != kInputCount) {
+        ThrowJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "PP-MattingV2 input tensor size does not match the compiled fixed graph");
+        return false;
+    }
+
+    auto* engine = reinterpret_cast<Engine*>(handle);
+    jfloat* inputData = env->GetFloatArrayElements(inputArray, nullptr);
+    if (inputData == nullptr) return false;
+
+    ncnn::Mat input(kModelSize, kModelSize, 3, static_cast<void*>(inputData), sizeof(float));
+    const int status = RunInference(engine, input, output, &engine->lastInferenceMs);
+    env->ReleaseFloatArrayElements(inputArray, inputData, JNI_ABORT);
+    return ValidateOutput(env, output, status);
+}
+
 void WarmUp(Engine* engine) {
     std::vector<float> zeros(kInputCount, 0.0f);
     ncnn::Mat input(kModelSize, kModelSize, 3, zeros.data(), sizeof(float));
@@ -218,60 +272,43 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_modelSize(
     return kModelSize;
 }
 
+/** Legacy allocating entry point retained for ABI/backward compatibility. */
 extern "C" JNIEXPORT jfloatArray JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
         JNIEnv* env, jobject, jlong handle, jfloatArray inputArray) {
-    if (handle == 0 || inputArray == nullptr) {
-        ThrowJava(env, "java/lang/IllegalStateException", "ncnn Vulkan PP-MattingV2 engine is not initialized");
-        return nullptr;
-    }
-    if (env->GetArrayLength(inputArray) != kInputCount) {
-        ThrowJava(
-                env,
-                "java/lang/IllegalArgumentException",
-                "PP-MattingV2 input tensor size does not match the compiled fixed graph");
-        return nullptr;
-    }
-
-    auto* engine = reinterpret_cast<Engine*>(handle);
-    jfloat* inputData = env->GetFloatArrayElements(inputArray, nullptr);
-    if (inputData == nullptr) return nullptr;
-
-    ncnn::Mat input(kModelSize, kModelSize, 3, static_cast<void*>(inputData), sizeof(float));
     ncnn::Mat output;
-    const int status = RunInference(engine, input, output, &engine->lastInferenceMs);
-
-    env->ReleaseFloatArrayElements(inputArray, inputData, JNI_ABORT);
-
-    if (status != 0 || output.empty()) {
-        __android_log_print(ANDROID_LOG_ERROR, kTag, "extract failed with status=%d", status);
-        ThrowJava(env, "java/lang/RuntimeException", "ncnn Vulkan PP-MattingV2 inference failed");
-        return nullptr;
-    }
-    if (output.elembits() != 32 || output.total() < static_cast<size_t>(kPlane)) {
-        __android_log_print(
-                ANDROID_LOG_ERROR,
-                kTag,
-                "Unexpected output for fixed %d graph: bits=%d total=%zu dims=%d w=%d h=%d c=%d",
-                kModelSize,
-                output.elembits(),
-                output.total(),
-                output.dims,
-                output.w,
-                output.h,
-                output.c);
-        ThrowJava(
-                env,
-                "java/lang/IllegalStateException",
-                "ncnn PP-MattingV2 output does not match the compiled fixed graph");
-        return nullptr;
-    }
+    if (!RunFromJavaInput(env, handle, inputArray, output)) return nullptr;
 
     const float* alpha = output;
     jfloatArray result = env->NewFloatArray(kPlane);
     if (result == nullptr) return nullptr;
     env->SetFloatArrayRegion(result, 0, kPlane, alpha);
     return result;
+}
+
+/**
+ * Steady-state path: copy the native result into a caller-owned reusable FloatArray instead of
+ * allocating ~576 KiB of Java output for every 384x384 frame.
+ */
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_runInto(
+        JNIEnv* env,
+        jobject,
+        jlong handle,
+        jfloatArray inputArray,
+        jfloatArray outputArray) {
+    if (outputArray == nullptr || env->GetArrayLength(outputArray) < kPlane) {
+        ThrowJava(
+                env,
+                "java/lang/IllegalArgumentException",
+                "PP-MattingV2 reusable output array is smaller than the compiled fixed graph");
+        return JNI_FALSE;
+    }
+
+    ncnn::Mat output;
+    if (!RunFromJavaInput(env, handle, inputArray, output)) return JNI_FALSE;
+    env->SetFloatArrayRegion(outputArray, 0, kPlane, static_cast<const float*>(output));
+    return env->ExceptionCheck() ? JNI_FALSE : JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jdouble JNICALL
