@@ -20,6 +20,7 @@ internal object NcnnVulkanNativeV52 {
     external fun createEngine(paramPath: String, binPath: String, threads: Int): Long
     external fun modelSize(handle: Long): Int
     external fun run(handle: Long, input: FloatArray): FloatArray
+    external fun runInto(handle: Long, input: FloatArray, output: FloatArray): Boolean
     external fun lastInferenceMs(handle: Long): Double
     external fun gpuName(handle: Long): String
     external fun destroy(handle: Long)
@@ -31,7 +32,10 @@ internal object NcnnVulkanNativeV52 {
  * The engine is persistent for the lifetime of this backend. Do not recycle it after an arbitrary
  * frame count: physical-device testing showed that destroy/recreate transitions can themselves be
  * less stable than leaving a healthy Vulkan engine alone. Higher-level scheduling decides when GPU
- * work should pause for CPU cooling based on actual thermal/latency signals.
+ * work should pause based on actual thermal/latency signals.
+ *
+ * Input and alpha tensors are also persistent on the Kotlin side. Native inference writes directly
+ * into [alpha] so a fixed-384 High run does not create a new ~576 KiB FloatArray on every frame.
  */
 internal class NcnnVulkanPortraitMatteV52 private constructor(
     private var handle: Long,
@@ -103,6 +107,7 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
     private val pixels = IntArray(plane)
     private val alphaPixels = IntArray(plane)
     private val input = FloatArray(inputCount)
+    private val alpha = FloatArray(plane)
     @Volatile private var lastMs: Double = -1.0
 
     internal val latestInferenceMs: Double
@@ -116,6 +121,7 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
             append(" · ").append(gpuName)
             append(" · CPU op fallback possible")
             append(" · persistent Vulkan engine")
+            append(" · reusable tensor buffers")
             if (Build.MODEL.isNotBlank() && !gpuName.contains(Build.MODEL, ignoreCase = true)) {
                 append(" · ").append(Build.MODEL)
             }
@@ -135,9 +141,8 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
             input[plane * 2 + i] = Color.blue(pixel) / 127.5f - 1f
         }
 
-        val alpha = NcnnVulkanNativeV52.run(activeHandle, input)
-        check(alpha.size >= plane) {
-            "PP-MattingV2 $modelSize Vulkan output has ${alpha.size} values; expected at least $plane"
+        check(NcnnVulkanNativeV52.runInto(activeHandle, input, alpha)) {
+            "ncnn Vulkan PP-MattingV2 did not fill the reusable alpha tensor"
         }
         lastMs = NcnnVulkanNativeV52.lastInferenceMs(activeHandle)
 
