@@ -24,11 +24,15 @@ private const val GPU_FLOW_SCENE_CUT_MAD_V47 = 52f
 /**
  * Near-fully-GPU V47 temporal matte stage.
  *
- * The current/previous source, current MODNet matte and optional hair mask are textures. Pass one
- * estimates a local motion field on a small block grid entirely in a fragment shader. Pass two
+ * The current/previous source, current PP-MattingV2 matte and optional hair mask are textures. Pass
+ * one estimates a local motion field on a small block grid entirely in a fragment shader. Pass two
  * fuses hair only in the uncertain portrait band, warps the previous matte with the local field and
- * applies confidence/disagreement gating. Only the final one-channel-looking RGBA matte is read back
- * for the existing cache contract; the expensive per-pixel block search and matte warp stay on GPU.
+ * applies confidence/disagreement gating.
+ *
+ * Long High-mode runs must not allocate native readback/texture storage once per frame. The output
+ * readback ByteBuffer is therefore persistent for the active dimensions and texture uploads use
+ * texSubImage2D whenever their size is unchanged. This prevents hundreds of megabytes of direct
+ * buffer + GLES driver allocation churn during a few hundred analyzed frames.
  */
 internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
     private val egl = OffscreenEglV47()
@@ -50,6 +54,10 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
     private var outputMatteTex = createTexture()
     private var hairTex = createTexture()
     private var flowTex = createTexture()
+
+    /** Tracks backing-store dimensions so stable-size uploads do not orphan/reallocate textures. */
+    private val textureSizes = HashMap<Int, Long>()
+    private var readbackBytes: ByteBuffer? = null
 
     private var matteWidth = 0
     private var matteHeight = 0
@@ -157,7 +165,12 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
 
     private fun readOutputMatte(width: Int, height: Int): Bitmap {
         attachTexture(outputMatteTex)
-        val bytes = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder())
+        val bytes = readbackBytes
+            ?: error("V47 GPU readback buffer was not allocated for the active matte size")
+        check(bytes.capacity() >= width * height * 4) {
+            "V47 GPU readback buffer is smaller than the active matte"
+        }
+        bytes.clear()
         GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, bytes)
         checkGl("read V47 matte")
         bytes.rewind()
@@ -168,11 +181,14 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
     }
 
     private fun ensureOutputTextures(width: Int, height: Int) {
-        if (width == matteWidth && height == matteHeight) return
+        if (width == matteWidth && height == matteHeight && readbackBytes != null) return
         matteWidth = width.coerceAtLeast(1)
         matteHeight = height.coerceAtLeast(1)
         allocateTexture(previousMatteTex, matteWidth, matteHeight)
         allocateTexture(outputMatteTex, matteWidth, matteHeight)
+        readbackBytes = ByteBuffer
+            .allocateDirect(matteWidth * matteHeight * 4)
+            .order(ByteOrder.nativeOrder())
     }
 
     private fun ensureFlowTexture(cols: Int, rows: Int) {
@@ -252,9 +268,18 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, name), x, y)
     }
 
+    private fun textureSizeKey(width: Int, height: Int): Long =
+        (width.toLong() shl 32) or (height.toLong() and 0xffffffffL)
+
     private fun uploadBitmap(texture: Int, bitmap: Bitmap) {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
-        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+        val key = textureSizeKey(bitmap.width, bitmap.height)
+        if (textureSizes[texture] == key) {
+            GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, bitmap)
+        } else {
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+            textureSizes[texture] = key
+        }
         checkGl("upload V47 texture")
     }
 
@@ -271,6 +296,7 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             GLES20.GL_UNSIGNED_BYTE,
             null,
         )
+        textureSizes[texture] = textureSizeKey(width, height)
     }
 
     private fun createTexture(): Int {
@@ -337,6 +363,8 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 0,
             )
         }
+        textureSizes.clear()
+        readbackBytes = null
         egl.close()
     }
 
@@ -449,13 +477,9 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 vec2 previousUv = clamp(vUv + vec2(dx * uSearchStep.x, dy * uSearchStep.y), vec2(0.0), vec2(1.0));
                 float previousAlpha = texture2D(uPreviousMatte, previousUv).r;
 
-                // MODNet can occasionally classify a stationary object touching the subject (for
-                // example a chair back beside a shoulder) as certain foreground for one/few anchors.
-                // The old path returned immediately for alpha >= .99, so that false positive bypassed
-                // every temporal check and 12-fps interpolation made the chair flash into the result.
-                // Reject only *new*, well-matched, near-zero-motion foreground that has no nearby
-                // support in the previous stabilized matte. Genuine moving hands/hair/cloth retain
-                // their flow-warped support or non-zero motion and therefore pass this gate.
+                // PP-Matting can occasionally classify a stationary object touching the subject
+                // as certain foreground for one/few anchors. Reject only new, well-matched,
+                // near-zero-motion foreground that has no nearby previous support.
                 float previousSupport = previousSupportAt(previousUv);
                 float motionBlocks = length(vec2(dx, dy));
                 float staticMatch = 1.0 - smoothstep(0.35, 1.65, motionBlocks);
