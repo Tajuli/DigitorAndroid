@@ -12,6 +12,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.os.Build
 import android.os.PowerManager
+import android.os.SystemClock
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -27,16 +28,13 @@ internal interface PortraitMatteBackendV50 : AutoCloseable {
 /**
  * PP-MattingV2 portrait matte backend used by Pro Cutout.
  *
- * Primary path is ncnn Vulkan. We no longer force a frame-count-based 80 GPU -> 20 CPU cycle,
- * because that proactive switch itself proved fragile on some devices. Instead, GPU remains active
- * as long as it stays healthy. CPU fallback/cooling is entered only when there is concrete evidence
- * that the GPU path is no longer a good choice on this device right now:
- * - Android thermal status reaches MODERATE/SEVERE, or
- * - Vulkan latency rises well above the device's own recent baseline, or
- * - Vulkan inference/runtime actually fails.
+ * Primary path is ncnn Vulkan. Physical-device testing showed that creating a second ONNX Runtime
+ * CPU session while a long-lived Vulkan engine is parked can itself destabilize low-memory/fragile
+ * GPU stacks. Therefore thermal/latency pressure no longer causes a live GPU -> CPU switch.
  *
- * Resume/checkpointing lives above this class, so backend switching never discards already-
- * completed mattes.
+ * While Vulkan is healthy we keep one persistent GPU engine and reduce load with short adaptive
+ * pauses. CPU fallback is created only after a Java-visible Vulkan inference failure or when Vulkan
+ * was unavailable from the start. This avoids the risky transition during normal healthy GPU work.
  */
 internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBackendV50 {
     private companion object {
@@ -44,16 +42,17 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         const val MODEL_SIZE = 512
         const val CHANNELS = 3
 
-        // Cooling sizes are only used after a real signal says GPU should rest.
-        const val CPU_COOLING_FRAMES = 20
-        const val CPU_SEVERE_COOLING_FRAMES = 40
-        const val CPU_EXTEND_MODERATE_FRAMES = 10
-        const val CPU_EXTEND_SEVERE_FRAMES = 20
-
-        // Latency-based load signal. Use the device's own recent history instead of a fixed ms line.
         const val LATENCY_HISTORY = 12
         const val LATENCY_MIN_BASELINE_MS = 450.0
         const val LATENCY_TRIGGER_MULTIPLIER = 1.85
+
+        const val BACKOFF_LATENCY_MS = 180L
+        const val BACKOFF_LIGHT_MS = 80L
+        const val BACKOFF_MODERATE_MS = 300L
+        const val BACKOFF_SEVERE_MS = 900L
+        const val BACKOFF_CRITICAL_MS = 1_800L
+        const val BACKOFF_EMERGENCY_MS = 3_000L
+        const val FAILURE_RELEASE_DELAY_MS = 180L
     }
 
     private data class BackendSession(
@@ -72,8 +71,6 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         null
     }
 
-    // Vulkan is attempted first on every device, including UNISOC/T606. NNAPI has a separate
-    // safety deny-list because provider registration itself can be process-fatal on affected phones.
     private var vulkanBackend: NcnnVulkanPortraitMatteV52? =
         NcnnVulkanPortraitMatteV52.tryCreate(appContext)
 
@@ -95,11 +92,7 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     private val gpuLatencyHistory = ArrayDeque<Double>()
     private var slowGpuSamples = 0
     private var latencyPressureReason: String? = null
-    private var cpuCoolingFramesRemaining = 0
-    private var cpuCoolingFramesCompleted = 0
-    private var coolingCycleCount = 0
-    private var coolingReason: String? = null
-    private var gpuResumePending = false
+    private var lastBackoffReason: String? = null
     private var permanentlyFellBackFromVulkan = false
 
     init {
@@ -114,17 +107,6 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
 
     override val backendLabel: String
         get() {
-            val cpu = backend
-            if (cpuCoolingFramesRemaining > 0 && cpu != null) {
-                return buildString {
-                    append(cpu.label)
-                    append(" · adaptive cooling")
-                    append(" · ").append(cpuCoolingFramesCompleted).append("/")
-                    append(cpuCoolingFramesCompleted + cpuCoolingFramesRemaining).append(" CPU frames")
-                    coolingReason?.let { append(" · ").append(it) }
-                    append(" · cycle ").append(coolingCycleCount)
-                }
-            }
             val gpu = vulkanBackend
             if (gpu != null) {
                 return buildString {
@@ -132,16 +114,17 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
                     latestGpuLatency()?.let {
                         append(" · recent ").append("%.1f".format(it)).append(" ms")
                     }
+                    lastBackoffReason?.let {
+                        append(" · adaptive GPU backoff · ").append(it)
+                    }
                 }
             }
-            return cpu?.label ?: "Matting: backend not initialized"
+            return backend?.label ?: "Matting: backend not initialized"
         }
 
-    /** Read model bytes only when a CPU session is actually needed; do not pin a second model copy. */
     private fun readModelBytes(): ByteArray =
         appContext.assets.open(MODEL_ASSET).use { it.readBytes() }
 
-    /** Create the best non-Vulkan backend for a true runtime failure. */
     private fun createBestFallbackBackend(): BackendSession {
         unsafeNnapiDeviceReason()?.let { reason ->
             return createOrtCpuBackend("NNAPI disabled for device safety · $reason")
@@ -154,6 +137,15 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         return createOrtCpuBackend()
     }
 
+    /**
+     * Vulkan failure fallback must be actual CPU. Do not route through NNAPI here because a vendor
+     * may select the same GPU/NPU that just failed or overheated.
+     */
+    private fun createCpuAfterVulkanFailure(): BackendSession {
+        return createXnnpackBackend(maxThreads = 2)
+            ?: createOrtCpuBackend("Vulkan runtime fallback")
+    }
+
     private fun ensureFallbackBackend(): BackendSession {
         backend?.let { return it }
         val created = createBestFallbackBackend()
@@ -161,21 +153,14 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         return created
     }
 
-    /**
-     * Thermal cooling must be real CPU work. NNAPI is intentionally not used here because a vendor
-     * NNAPI driver may select the same GPU/NPU and therefore would not give the graphics/compute
-     * stack a cooling window.
-     */
-    private fun ensureCoolingCpuBackend(): BackendSession {
+    private fun ensureCpuAfterVulkanFailure(): BackendSession {
         backend?.let { active ->
             if (active.kind == BackendSession.Kind.XNNPACK || active.kind == BackendSession.Kind.ORT_CPU) {
                 return active
             }
             closeCpuBackend()
         }
-
-        val created = createXnnpackBackend(maxThreads = 2)
-            ?: createOrtCpuBackend("adaptive GPU cooling")
+        val created = createCpuAfterVulkanFailure()
         installCpuBackend(created)
         return created
     }
@@ -337,110 +322,55 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         while (gpuLatencyHistory.size > LATENCY_HISTORY) gpuLatencyHistory.removeFirst()
     }
 
-    private fun shouldStartCpuCooling(): Pair<Int, String>? {
-        if (permanentlyFellBackFromVulkan || vulkanBackend == null) return null
+    /**
+     * Reduce GPU duty cycle without changing inference backend. This is intentionally just a quiet
+     * scheduling gap: no ORT session allocation, no ncnn engine destruction, and no backend switch.
+     */
+    private fun applyGpuBackoffIfNeeded() {
+        if (vulkanBackend == null || permanentlyFellBackFromVulkan) return
 
         val thermal = currentThermalStatus()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val (delayMs, reason) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             when {
-                thermal >= PowerManager.THERMAL_STATUS_SEVERE -> {
-                    return CPU_SEVERE_COOLING_FRAMES to thermalName(thermal)
-                }
-                thermal >= PowerManager.THERMAL_STATUS_MODERATE -> {
-                    return CPU_COOLING_FRAMES to thermalName(thermal)
-                }
+                thermal >= PowerManager.THERMAL_STATUS_EMERGENCY ->
+                    BACKOFF_EMERGENCY_MS to thermalName(thermal)
+                thermal >= PowerManager.THERMAL_STATUS_CRITICAL ->
+                    BACKOFF_CRITICAL_MS to thermalName(thermal)
+                thermal >= PowerManager.THERMAL_STATUS_SEVERE ->
+                    BACKOFF_SEVERE_MS to thermalName(thermal)
+                thermal >= PowerManager.THERMAL_STATUS_MODERATE ->
+                    BACKOFF_MODERATE_MS to thermalName(thermal)
+                thermal >= PowerManager.THERMAL_STATUS_LIGHT ->
+                    BACKOFF_LIGHT_MS to thermalName(thermal)
+                latencyPressureReason != null ->
+                    BACKOFF_LATENCY_MS to latencyPressureReason.orEmpty()
+                else -> 0L to ""
             }
+        } else if (latencyPressureReason != null) {
+            BACKOFF_LATENCY_MS to latencyPressureReason.orEmpty()
+        } else {
+            0L to ""
         }
 
-        latencyPressureReason?.let {
-            return CPU_COOLING_FRAMES to it
+        if (delayMs <= 0L) {
+            lastBackoffReason = null
+            return
         }
 
-        return null
-    }
-
-    private fun startCpuCooling(frames: Int, reason: String): Boolean {
-        // Important: do not destroy/recreate a healthy Vulkan engine merely to cool it. The previous
-        // fixed-cycle implementation crashed on some phones at the transition itself. Park the GPU
-        // (no inference calls), run a short true-CPU batch, then resume the same Vulkan engine.
-        val cpuReady = runCatching { ensureCoolingCpuBackend() }.isSuccess
-        if (!cpuReady) {
-            cpuCoolingFramesRemaining = 0
-            cpuCoolingFramesCompleted = 0
-            coolingReason = null
-            gpuResumePending = false
-            PortraitMatteRuntimeStatusV50.update(
-                (vulkanBackend?.backendLabel ?: "Matting: GPU unavailable") +
-                    " · CPU cooling unavailable; GPU retained"
-            )
-            return false
-        }
-
-        coolingCycleCount += 1
-        cpuCoolingFramesCompleted = 0
-        cpuCoolingFramesRemaining = frames.coerceAtLeast(1)
-        coolingReason = reason
-        gpuResumePending = false
-        slowGpuSamples = 0
-        latencyPressureReason = null
+        lastBackoffReason = reason
         PortraitMatteRuntimeStatusV50.update(backendLabel)
-        return true
-    }
+        SystemClock.sleep(delayMs)
 
-    private fun extendCoolingIfStillHot() {
-        if (cpuCoolingFramesRemaining > 0) return
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            gpuResumePending = true
-            return
-        }
-
-        val thermal = currentThermalStatus()
-        when {
-            thermal >= PowerManager.THERMAL_STATUS_SEVERE -> {
-                cpuCoolingFramesRemaining = CPU_EXTEND_SEVERE_FRAMES
-                coolingReason = thermalName(thermal)
-            }
-            thermal >= PowerManager.THERMAL_STATUS_MODERATE -> {
-                cpuCoolingFramesRemaining = CPU_EXTEND_MODERATE_FRAMES
-                coolingReason = thermalName(thermal)
-            }
-            else -> gpuResumePending = true
-        }
-    }
-
-    private fun tryResumeGpuIfReady() {
-        if (!gpuResumePending || permanentlyFellBackFromVulkan) return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-            currentThermalStatus() >= PowerManager.THERMAL_STATUS_MODERATE
+        // A latency-triggered pause is a one-shot response. Build a fresh local baseline after the
+        // rest period rather than immediately retriggering from stale hot samples.
+        if (latencyPressureReason != null &&
+            (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+                thermal < PowerManager.THERMAL_STATUS_MODERATE)
         ) {
-            cpuCoolingFramesRemaining = CPU_EXTEND_MODERATE_FRAMES
-            coolingReason = thermalName(currentThermalStatus())
-            gpuResumePending = false
-            return
-        }
-
-        val parkedGpu = vulkanBackend
-        if (parkedGpu != null) {
-            closeCpuBackend()
             gpuLatencyHistory.clear()
             slowGpuSamples = 0
             latencyPressureReason = null
-            cpuCoolingFramesCompleted = 0
-            cpuCoolingFramesRemaining = 0
-            coolingReason = null
-            gpuResumePending = false
-            PortraitMatteRuntimeStatusV50.update(
-                parkedGpu.backendLabel + " · resumed after CPU cooling $coolingCycleCount"
-            )
-            return
         }
-
-        // A Java-visible Vulkan failure may have disabled the GPU while cooling. Stay on the
-        // reliable CPU backend rather than repeatedly recreating a known-bad native path.
-        permanentlyFellBackFromVulkan = true
-        gpuResumePending = false
-        val fallback = ensureFallbackBackend()
-        PortraitMatteRuntimeStatusV50.update(fallback.label + " · Vulkan unavailable after cooling")
     }
 
     private fun switchFromNnapiToCpuFallback() {
@@ -460,48 +390,37 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         val old = vulkanBackend ?: return
         vulkanBackend = null
         permanentlyFellBackFromVulkan = true
-        gpuResumePending = false
-        cpuCoolingFramesRemaining = 0
+        lastBackoffReason = "Vulkan inference failed"
+
+        // At this point the Vulkan call already returned a Java-visible failure, so leave the normal
+        // inference path before releasing native state. This is the only runtime GPU -> CPU switch.
         runCatching { old.close() }
-        val fallback = ensureFallbackBackend()
+        SystemClock.sleep(FAILURE_RELEASE_DELAY_MS)
+
+        val fallback = ensureCpuAfterVulkanFailure()
         PortraitMatteRuntimeStatusV50.update(fallback.label + " · Vulkan runtime fallback")
     }
 
     override fun infer(source: Bitmap): Bitmap {
         check(!source.isRecycled) { "Cannot run PP-MattingV2 on a recycled bitmap" }
 
-        tryResumeGpuIfReady()
-
-        if (cpuCoolingFramesRemaining <= 0) {
-            shouldStartCpuCooling()?.let { (frames, reason) ->
-                startCpuCooling(frames, reason)
-            }
-        }
-
-        if (cpuCoolingFramesRemaining > 0) {
-            val output = inferWithCpu(source, cooling = true)
-            cpuCoolingFramesRemaining -= 1
-            cpuCoolingFramesCompleted += 1
-            extendCoolingIfStillHot()
-            PortraitMatteRuntimeStatusV50.update(backendLabel)
-            return output
-        }
-
         vulkanBackend?.let { gpu ->
+            applyGpuBackoffIfNeeded()
             val result = runCatching { gpu.infer(source) }
             result.getOrNull()?.let { bitmap ->
                 val recentMs = gpu.latestInferenceMs
                 if (recentMs > 0.0) recordGpuLatency(recentMs)
+                PortraitMatteRuntimeStatusV50.update(backendLabel)
                 return bitmap
             }
             disableVulkanAfterFailure()
         }
 
-        return inferWithCpu(source, cooling = false)
+        return inferWithCpu(source)
     }
 
-    private fun inferWithCpu(source: Bitmap, cooling: Boolean): Bitmap {
-        val activeBackend = if (cooling) ensureCoolingCpuBackend() else ensureFallbackBackend()
+    private fun inferWithCpu(source: Bitmap): Bitmap {
+        val activeBackend = ensureFallbackBackend()
         val activeInputName = inputName
             ?: error("PP-MattingV2 ONNX input name is unavailable")
         val activeInputTensor = ensureOrtInputTensor()
@@ -547,7 +466,7 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         }
 
         val finalBackend = backend ?: activeBackend
-        if (!cooling) PortraitMatteRuntimeStatusV50.update(finalBackend.label)
+        PortraitMatteRuntimeStatusV50.update(finalBackend.label)
         alphaSquare.setPixels(
             alphaPixels,
             0,
