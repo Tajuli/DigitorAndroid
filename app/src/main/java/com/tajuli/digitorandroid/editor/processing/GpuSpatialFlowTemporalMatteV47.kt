@@ -47,6 +47,10 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
     private val matteProgram = compileProgram(FULLSCREEN_VERTEX, MATTE_FRAGMENT)
     private val framebuffer = IntArray(1).also { GLES20.glGenFramebuffers(1, it, 0) }[0]
 
+    /** Must be initialized before createTexture(), because initial texture storage records its size. */
+    private val textureSizes = HashMap<Int, Long>()
+    private var readbackBytes: ByteBuffer? = null
+
     private var currentSourceTex = createTexture()
     private var previousSourceTex = createTexture()
     private var currentMatteTex = createTexture()
@@ -54,10 +58,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
     private var outputMatteTex = createTexture()
     private var hairTex = createTexture()
     private var flowTex = createTexture()
-
-    /** Tracks backing-store dimensions so stable-size uploads do not orphan/reallocate textures. */
-    private val textureSizes = HashMap<Int, Long>()
-    private var readbackBytes: ByteBuffer? = null
 
     private var matteWidth = 0
     private var matteHeight = 0
@@ -126,7 +126,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             1f / flowWidth.coerceAtLeast(1).toFloat(),
             1f / flowHeight.coerceAtLeast(1).toFloat(),
         )
-        // The source aspect is kept for future tuning and prevents optimizer-specific dead uniforms.
         uniform2f(flowProgram, "uSourceSize", sourceWidth.toFloat(), sourceHeight.toFloat())
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         checkGl("render V47 flow")
@@ -175,7 +174,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
         checkGl("read V47 matte")
         bytes.rewind()
         return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap ->
-            // Output RGB is grayscale and A=255, so RGBA byte order maps safely to ARGB_8888 memory.
             bitmap.copyPixelsFromBuffer(bytes)
         }
     }
@@ -458,8 +456,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 float currentAlpha = texture2D(uCurrentMatte, vUv).r;
                 float uncertainty = clamp(4.0 * currentAlpha * (1.0 - currentAlpha), 0.0, 1.0);
 
-                // Hair is allowed to recover only the uncertain semantic boundary. The deliberately
-                // conservative gain avoids making hijab/cloth behave like synthetic hair strands.
                 if (uHasHair > 0.5 && uHairStrength > 0.001) {
                     float hair = texture2D(uHair, vUv).r;
                     float hairWeight = hair * uHairStrength * (0.10 + 0.46 * uncertainty);
@@ -477,9 +473,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 vec2 previousUv = clamp(vUv + vec2(dx * uSearchStep.x, dy * uSearchStep.y), vec2(0.0), vec2(1.0));
                 float previousAlpha = texture2D(uPreviousMatte, previousUv).r;
 
-                // PP-Matting can occasionally classify a stationary object touching the subject
-                // as certain foreground for one/few anchors. Reject only new, well-matched,
-                // near-zero-motion foreground that has no nearby previous support.
                 float previousSupport = previousSupportAt(previousUv);
                 float motionBlocks = length(vec2(dx, dy));
                 float staticMatch = 1.0 - smoothstep(0.35, 1.65, motionBlocks);
