@@ -19,12 +19,14 @@ import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskFrameV43
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
+import com.tajuli.digitorandroid.editor.processing.personCutoutMaxGapUsV47
+import kotlin.math.abs
 
 /**
  * Shared GPU alpha stage for V44 Pro Cutout and Chroma Key.
  *
- * PERSON consumes MODNet soft alpha mattes that already include hair fusion + motion-aware temporal
- * stabilization. The shader therefore avoids re-binarizing the matte: it performs realtime edge
+ * PERSON consumes PP-MattingV2 soft alpha mattes that already include hair fusion + motion-aware
+ * temporal stabilization. The shader avoids re-binarizing the matte: it performs realtime edge
  * shift/cleanup and foreground-color decontamination (dehalo) while preserving translucent detail.
  * Chroma mode keeps the proven neighbourhood-filtered Cb/Cr keyer from V43.
  */
@@ -125,18 +127,56 @@ internal class CutoutEffectV43 private constructor(
             }
         }
 
+        /**
+         * Best-effort partial Cutout contract. Saved mattes are interpolated only while source time
+         * remains inside the quality-specific coverage window. A cancelled/incomplete tail or a
+         * large hole returns no mask; the shader then uses rawPersonAt()==1 and passes the original
+         * frame through instead of stretching a stale person's silhouette across unprocessed video.
+         */
         private fun personBracket(clip: TimelineClip, sourceUs: Long): MaskBracket {
             val frames = PersonCutoutMaskStoreV43.index(appContext, clip).frames
+                .filter { it.file.isFile }
             if (frames.isEmpty()) return MaskBracket.empty()
-            if (frames.size == 1) return MaskBracket(frames[0], frames[0], 0f)
+
+            val maxGapUs = personCutoutMaxGapUsV47(clip.resolvedCutoutV43().analysisQualityV47)
+            if (frames.size == 1) {
+                val frame = frames[0]
+                return if (abs(sourceUs - frame.sourceTimeUs) <= maxGapUs) {
+                    MaskBracket(frame, frame, 0f)
+                } else {
+                    MaskBracket.empty()
+                }
+            }
+
             var rightIndex = frames.binarySearchBy(sourceUs) { it.sourceTimeUs }
             if (rightIndex >= 0) return MaskBracket(frames[rightIndex], frames[rightIndex], 0f)
             rightIndex = -rightIndex - 1
             val right = frames.getOrNull(rightIndex)
             val left = frames.getOrNull(rightIndex - 1)
-            if (left == null) return MaskBracket(right, right, 0f)
-            if (right == null) return MaskBracket(left, left, 0f)
+
+            if (left == null) {
+                return right?.takeIf { abs(it.sourceTimeUs - sourceUs) <= maxGapUs }
+                    ?.let { MaskBracket(it, it, 0f) }
+                    ?: MaskBracket.empty()
+            }
+            if (right == null) {
+                return left.takeIf { abs(sourceUs - it.sourceTimeUs) <= maxGapUs }
+                    ?.let { MaskBracket(it, it, 0f) }
+                    ?: MaskBracket.empty()
+            }
+
+            val leftDistance = abs(sourceUs - left.sourceTimeUs)
+            val rightDistance = abs(right.sourceTimeUs - sourceUs)
             val span = (right.sourceTimeUs - left.sourceTimeUs).coerceAtLeast(1L)
+            if (span > maxGapUs) {
+                return when {
+                    leftDistance <= rightDistance && leftDistance <= maxGapUs -> MaskBracket(left, left, 0f)
+                    rightDistance <= maxGapUs -> MaskBracket(right, right, 0f)
+                    else -> MaskBracket.empty()
+                }
+            }
+            if (leftDistance > maxGapUs && rightDistance > maxGapUs) return MaskBracket.empty()
+
             val mix = ((sourceUs - left.sourceTimeUs).toDouble() / span.toDouble()).toFloat().coerceIn(0f, 1f)
             return MaskBracket(left, right, mix)
         }
@@ -271,7 +311,7 @@ internal class CutoutEffectV43 private constructor(
                     float thresholdBias = (0.5 - uPersonThreshold) * 0.22;
                     float shifted = clamp(raw + uEdgeShiftV44 + thresholdBias, 0.0, 1.0);
 
-                    // Clean ambiguous matte pixels while leaving near-0 and near-1 MODNet alpha
+                    // Clean ambiguous matte pixels while leaving near-0 and near-1 PP-Matting alpha
                     // untouched. This keeps fine hair translucency instead of re-binarizing it.
                     float contrast = 1.0 + clamp(uEdgeCleanV44, 0.0, 1.0) * 1.65;
                     float cleaned = clamp((shifted - 0.5) * contrast + 0.5, 0.0, 1.0);
