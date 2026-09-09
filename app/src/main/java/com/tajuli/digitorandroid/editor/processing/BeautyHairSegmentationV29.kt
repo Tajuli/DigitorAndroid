@@ -111,57 +111,78 @@ object BeautyHairMaskStoreV29 {
 }
 
 /**
- * Dedicated semantic hair segmenter. V47 asks MediaPipe for GPU execution first and falls back to
- * CPU only on devices/drivers where the GPU delegate cannot be created. Cutout analysis can consume
- * [segmentSoftMask] directly, avoiding the old encode-PNG/decode-PNG round trip for every anchor.
+ * Dedicated semantic hair segmenter. Normal devices ask MediaPipe for GPU execution first and fall
+ * back to CPU if the delegate cannot be created. On the known fragile UNISOC/Z60 path, hair stays on
+ * CPU deliberately so MediaCodec/OES GL and ncnn Vulkan do not also compete with a long-lived
+ * MediaPipe GPU delegate during High/every-frame analysis.
+ *
+ * V67 also closes every input/output MPImage deterministically. MPImage uses reference-counted
+ * native/direct storage, so waiting for GC over hundreds of refreshes can otherwise grow native
+ * pressure during the same run. The ARGB scratch array is retained between masks as well.
  */
 class BeautyHairSegmenterV29(context: Context) : AutoCloseable {
     private val segmenter: ImageSegmenter
     val usingGpuDelegate: Boolean
+    private var pixelScratch = IntArray(0)
 
     init {
         val app = context.applicationContext
-        val gpu = runCatching { createSegmenter(app, Delegate.GPU) }
-        if (gpu.isSuccess) {
-            segmenter = gpu.getOrThrow()
-            usingGpuDelegate = true
-        } else {
+        if (useInterruptionSafeSerialCutoutV66()) {
             segmenter = createSegmenter(app, Delegate.CPU)
             usingGpuDelegate = false
+        } else {
+            val gpu = runCatching { createSegmenter(app, Delegate.GPU) }
+            if (gpu.isSuccess) {
+                segmenter = gpu.getOrThrow()
+                usingGpuDelegate = true
+            } else {
+                segmenter = createSegmenter(app, Delegate.CPU)
+                usingGpuDelegate = false
+            }
         }
     }
 
     /** Returns a soft grayscale hair-confidence bitmap owned by the caller. */
     fun segmentSoftMask(bitmap: Bitmap): Bitmap? {
-        val result = segmenter.segment(BitmapImageBuilder(bitmap).build())
-        val masks = result.confidenceMasks().orElse(emptyList())
-        val mpMask = masks.getOrNull(HAIR_CLASS_V34) ?: return null
-        val width = mpMask.width.coerceAtLeast(1)
-        val height = mpMask.height.coerceAtLeast(1)
-        val confidences = ByteBufferExtractor.extract(mpMask).asFloatBuffer()
-        confidences.rewind()
-        if (confidences.remaining() < width * height) return null
+        val inputImage = BitmapImageBuilder(bitmap).build()
+        try {
+            val result = segmenter.segment(inputImage)
+            val masks = result.confidenceMasks().orElse(emptyList())
+            try {
+                val mpMask = masks.getOrNull(HAIR_CLASS_V34) ?: return null
+                val width = mpMask.width.coerceAtLeast(1)
+                val height = mpMask.height.coerceAtLeast(1)
+                val count = width * height
+                val confidences = ByteBufferExtractor.extract(mpMask).asFloatBuffer()
+                confidences.rewind()
+                if (confidences.remaining() < count) return null
 
-        val pixels = IntArray(width * height)
-        for (index in pixels.indices) {
-            val confidence = confidences.get().coerceIn(0f, 1f)
-            val x = ((confidence - .04f) / .88f).coerceIn(0f, 1f)
-            val smooth = x * x * (3f - 2f * x)
-            val value = (smooth * 255f).roundToInt().coerceIn(0, 255)
-            pixels[index] = Color.argb(255, value, value, value)
+                if (pixelScratch.size < count) pixelScratch = IntArray(count)
+                for (index in 0 until count) {
+                    val confidence = confidences.get().coerceIn(0f, 1f)
+                    val x = ((confidence - .04f) / .88f).coerceIn(0f, 1f)
+                    val smooth = x * x * (3f - 2f * x)
+                    val value = (smooth * 255f).roundToInt().coerceIn(0, 255)
+                    pixelScratch[index] = Color.argb(255, value, value, value)
+                }
+
+                val fullMask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                fullMask.setPixels(pixelScratch, 0, width, 0, 0, width, height)
+                val longEdge = max(width, height)
+                if (longEdge <= HAIR_MASK_LONG_EDGE_V29) return fullMask
+                val scale = HAIR_MASK_LONG_EDGE_V29.toFloat() / longEdge.toFloat()
+                return Bitmap.createScaledBitmap(
+                    fullMask,
+                    (width * scale).toInt().coerceAtLeast(1),
+                    (height * scale).toInt().coerceAtLeast(1),
+                    true,
+                ).also { fullMask.recycle() }
+            } finally {
+                masks.forEach { mask -> runCatching { mask.close() } }
+            }
+        } finally {
+            runCatching { inputImage.close() }
         }
-
-        val fullMask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        fullMask.setPixels(pixels, 0, width, 0, 0, width, height)
-        val longEdge = max(width, height)
-        if (longEdge <= HAIR_MASK_LONG_EDGE_V29) return fullMask
-        val scale = HAIR_MASK_LONG_EDGE_V29.toFloat() / longEdge.toFloat()
-        return Bitmap.createScaledBitmap(
-            fullMask,
-            (width * scale).toInt().coerceAtLeast(1),
-            (height * scale).toInt().coerceAtLeast(1),
-            true,
-        ).also { fullMask.recycle() }
     }
 
     fun segmentAndStore(context: Context, clip: TimelineClip, bitmap: Bitmap, sourceTimeUs: Long): Boolean {
