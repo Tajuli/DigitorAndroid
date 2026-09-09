@@ -10,6 +10,8 @@ enum class CutoutAnalysisPhaseV66 {
     RUNNING,
     PAUSE_REQUESTED,
     PAUSED,
+    CANCEL_REQUESTED,
+    CANCELLED,
     FAILED,
     COMPLETED,
 }
@@ -23,7 +25,8 @@ data class CutoutAnalysisRuntimeStateV66(
 ) {
     val busy: Boolean
         get() = phase == CutoutAnalysisPhaseV66.RUNNING ||
-            phase == CutoutAnalysisPhaseV66.PAUSE_REQUESTED
+            phase == CutoutAnalysisPhaseV66.PAUSE_REQUESTED ||
+            phase == CutoutAnalysisPhaseV66.CANCEL_REQUESTED
 }
 
 /**
@@ -31,11 +34,11 @@ data class CutoutAnalysisRuntimeStateV66(
  *
  * This state intentionally lives outside an Activity/ViewModel. A configuration/UI recreation must
  * not cancel an expensive analysis. Durable PNG mattes plus the matching generation marker provide
- * the cross-process/crash checkpoint; this object only coordinates the currently alive process and
- * the Pause button.
+ * the cross-process/crash checkpoint; this object coordinates Pause/Resume and cooperative Cancel.
  */
 object CutoutAnalysisRuntimeV66 {
     private val pauseRequested = AtomicBoolean(false)
+    private val cancelRequested = AtomicBoolean(false)
     private val lock = Any()
     private val _state = MutableStateFlow(CutoutAnalysisRuntimeStateV66())
     val state: StateFlow<CutoutAnalysisRuntimeStateV66> = _state.asStateFlow()
@@ -43,6 +46,7 @@ object CutoutAnalysisRuntimeV66 {
     fun begin(clipId: String, resumed: Boolean, savedFrames: Int): Boolean = synchronized(lock) {
         if (_state.value.busy) return@synchronized false
         pauseRequested.set(false)
+        cancelRequested.set(false)
         _state.value = CutoutAnalysisRuntimeStateV66(
             phase = CutoutAnalysisPhaseV66.RUNNING,
             clipId = clipId,
@@ -68,6 +72,7 @@ object CutoutAnalysisRuntimeV66 {
         if (current.clipId != clipId || current.phase != CutoutAnalysisPhaseV66.RUNNING) {
             return@synchronized false
         }
+        cancelRequested.set(false)
         pauseRequested.set(true)
         _state.value = current.copy(
             phase = CutoutAnalysisPhaseV66.PAUSE_REQUESTED,
@@ -76,14 +81,54 @@ object CutoutAnalysisRuntimeV66 {
         true
     }
 
-    fun isPauseRequested(): Boolean = pauseRequested.get()
+    /** Export uses this to release the analysis decoder/GPU lease without discarding resumable work. */
+    fun requestPauseForExport(): Boolean = synchronized(lock) {
+        val current = _state.value
+        when (current.phase) {
+            CutoutAnalysisPhaseV66.RUNNING -> {
+                cancelRequested.set(false)
+                pauseRequested.set(true)
+                _state.value = current.copy(
+                    phase = CutoutAnalysisPhaseV66.PAUSE_REQUESTED,
+                    detail = "Pausing Cutout so export can use the decoder/GPU safely",
+                )
+                true
+            }
+            CutoutAnalysisPhaseV66.PAUSE_REQUESTED,
+            CutoutAnalysisPhaseV66.CANCEL_REQUESTED -> true
+            else -> false
+        }
+    }
 
+    fun requestCancel(clipId: String): Boolean = synchronized(lock) {
+        val current = _state.value
+        if (current.clipId != clipId ||
+            (current.phase != CutoutAnalysisPhaseV66.RUNNING &&
+                current.phase != CutoutAnalysisPhaseV66.PAUSE_REQUESTED)
+        ) {
+            return@synchronized false
+        }
+        pauseRequested.set(false)
+        cancelRequested.set(true)
+        _state.value = current.copy(
+            phase = CutoutAnalysisPhaseV66.CANCEL_REQUESTED,
+            detail = "Cancelling after pending durable work is flushed",
+        )
+        true
+    }
+
+    fun isPauseRequested(): Boolean = pauseRequested.get()
+    fun isCancelRequested(): Boolean = cancelRequested.get()
+
+    /** Historical name retained for callers; Cancel is checked first and has stronger semantics. */
     fun throwIfPauseRequested() {
+        if (cancelRequested.get()) throw CutoutAnalysisCancelledV69()
         if (pauseRequested.get()) throw CutoutAnalysisPausedV66()
     }
 
     fun markPaused(savedFrames: Int) = synchronized(lock) {
         pauseRequested.set(false)
+        cancelRequested.set(false)
         val current = _state.value
         _state.value = current.copy(
             phase = CutoutAnalysisPhaseV66.PAUSED,
@@ -92,8 +137,21 @@ object CutoutAnalysisRuntimeV66 {
         )
     }
 
+    fun markCancelled(savedFrames: Int) = synchronized(lock) {
+        pauseRequested.set(false)
+        cancelRequested.set(false)
+        val current = _state.value
+        _state.value = current.copy(
+            phase = CutoutAnalysisPhaseV66.CANCELLED,
+            savedFrames = savedFrames.coerceAtLeast(0),
+            resumed = false,
+            detail = "Cutout analysis cancelled; saved partial matte remains exportable",
+        )
+    }
+
     fun markFailed(savedFrames: Int, detail: String?) = synchronized(lock) {
         pauseRequested.set(false)
+        cancelRequested.set(false)
         val current = _state.value
         _state.value = current.copy(
             phase = CutoutAnalysisPhaseV66.FAILED,
@@ -104,6 +162,7 @@ object CutoutAnalysisRuntimeV66 {
 
     fun markCompleted(savedFrames: Int) = synchronized(lock) {
         pauseRequested.set(false)
+        cancelRequested.set(false)
         val current = _state.value
         _state.value = current.copy(
             phase = CutoutAnalysisPhaseV66.COMPLETED,
@@ -116,9 +175,11 @@ object CutoutAnalysisRuntimeV66 {
         val current = _state.value
         if (current.clipId == clipId && !current.busy) {
             pauseRequested.set(false)
+            cancelRequested.set(false)
             _state.value = CutoutAnalysisRuntimeStateV66()
         }
     }
 }
 
-internal class CutoutAnalysisPausedV66 : RuntimeException("Pro Cutout paused")
+internal open class CutoutAnalysisPausedV66 : RuntimeException("Pro Cutout paused")
+internal class CutoutAnalysisCancelledV69 : CutoutAnalysisPausedV66()
