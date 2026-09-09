@@ -34,8 +34,6 @@ data class ClipCutoutV43(
     val mode: CutoutModeV43 = CutoutModeV43.NONE,
     /** LOW=4 fps, MEDIUM=12 fps, HIGH=every decoded source frame. */
     val analysisQualityV47: CutoutAnalysisQualityV47 = CutoutAnalysisQualityV47.MEDIUM,
-    /** Fixed PP-MattingV2 square input applied only after the motion-safe person ROI crop. */
-    val mattingSizeV69: Int = 320,
     // Legacy controls retained for project compatibility. V46 maps them to matte alpha shaping.
     val personThreshold: Float = .50f,
     val personFeather: Float = .075f,
@@ -55,6 +53,8 @@ data class ClipCutoutV43(
     val hairDetailV44: Float = .62f,
     /** Local-flow previous-matte stabilization; 0 = none, 1 = strongest. */
     val temporalStabilityV44: Float = .54f,
+    /** Fixed PP-MattingV2 square input applied only after the motion-safe person ROI crop. */
+    val mattingSizeV69: Int = 320,
 ) {
     fun normalized(): ClipCutoutV43 {
         val legacyPersonDefaults = personThreshold == .42f && personFeather == .12f
