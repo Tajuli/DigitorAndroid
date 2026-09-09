@@ -32,6 +32,7 @@ import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisPhaseV66
 import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisRuntimeV66
 import com.tajuli.digitorandroid.editor.processing.PersonRoiRuntimeStatusV60
 import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
+import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutPartialGenerationV69
 import com.tajuli.digitorandroid.editor.processing.hasResumablePersonCutoutGenerationV66
 import com.tajuli.digitorandroid.editor.processing.personCutoutSavedFrameCountV66
 
@@ -60,7 +61,7 @@ fun CutoutWorkspaceV50(
     ) {
         Text("Pro Cutout & Chroma Key", fontSize = 12.sp, color = C50Text)
         Text(
-            "PP-MattingV2 portrait matting. Analyze is checkpointed frame-by-frame; Pause/Resume keeps completed work when analysis settings stay unchanged.",
+            "PP-MattingV2 portrait matting. Analyze is checkpointed frame-by-frame; Pause keeps Resume, Cancel stops the run but keeps saved partial mattes exportable.",
             fontSize = 8.sp,
             color = C50Text.copy(alpha = .62f),
         )
@@ -82,7 +83,8 @@ fun CutoutWorkspaceV50(
         val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
         val personReady = hasPersonCutoutCoverageV43(appContext, selectedClip)
         val persistentResume = hasResumablePersonCutoutGenerationV66(appContext, selectedClip)
-        val persistentSaved = if (persistentResume) {
+        val partialAvailable = hasPersonCutoutPartialGenerationV69(appContext, selectedClip)
+        val persistentSaved = if (persistentResume || partialAvailable) {
             personCutoutSavedFrameCountV66(appContext, selectedClip)
         } else {
             0
@@ -95,6 +97,9 @@ fun CutoutWorkspaceV50(
             (runtimeMatches && (runtimePhase == CutoutAnalysisPhaseV66.PAUSED ||
                 runtimePhase == CutoutAnalysisPhaseV66.FAILED) && persistentSaved > 0)
         val resumeSaved = maxOf(persistentSaved, runtimeSaved.takeIf { resumeAvailable } ?: 0)
+        val partialSaved = maxOf(persistentSaved, runtimeSaved.takeIf {
+            runtimePhase == CutoutAnalysisPhaseV66.CANCELLED || partialAvailable
+        } ?: 0)
 
         val analysisStatus = state.status.takeIf {
             it.startsWith("Pro Cutout") || it.startsWith("Auto Cutout")
@@ -284,17 +289,22 @@ fun CutoutWorkspaceV50(
                             CutoutAnalysisPhaseV66.PAUSE_REQUESTED ->
                                 "Pausing safely after current frame…"
                             CutoutAnalysisPhaseV66.PAUSED ->
-                                "Paused · $resumeSaved saved · Resume keeps progress"
+                                "Paused · $resumeSaved saved · Resume keeps progress · Export allowed"
+                            CutoutAnalysisPhaseV66.CANCEL_REQUESTED ->
+                                "Cancelling safely… · saved mattes stay exportable"
+                            CutoutAnalysisPhaseV66.CANCELLED ->
+                                "Cancelled · $partialSaved saved · Partial export allowed"
                             CutoutAnalysisPhaseV66.FAILED -> if (resumeAvailable) {
-                                "Interrupted · $resumeSaved saved · Resume available"
+                                "Interrupted · $resumeSaved saved · Resume available · Export allowed"
                             } else {
-                                "Analysis failed"
+                                "Analysis failed · Export still allowed"
                             }
                             else -> when {
                                 personReady -> "Pro matte ready"
-                                resumeAvailable -> "Checkpoint found · $resumeSaved saved · Resume available"
-                                analysisFailed -> "Analysis failed / incomplete"
-                                else -> "Choose resolution + quality, then Analyze"
+                                resumeAvailable -> "Checkpoint found · $resumeSaved saved · Resume available · Export allowed"
+                                partialAvailable -> "Partial matte · $partialSaved saved · Export allowed"
+                                analysisFailed -> "Analysis failed / incomplete · Export allowed"
+                                else -> "Choose resolution + quality, then Analyze · Export never waits for Cutout"
                             }
                         },
                         fontSize = 8.sp,
@@ -302,7 +312,8 @@ fun CutoutWorkspaceV50(
                     )
                     Spacer(Modifier.weight(1f))
                     FilledTonalButton(
-                        enabled = runtimePhase != CutoutAnalysisPhaseV66.PAUSE_REQUESTED,
+                        enabled = runtimePhase != CutoutAnalysisPhaseV66.PAUSE_REQUESTED &&
+                            runtimePhase != CutoutAnalysisPhaseV66.CANCEL_REQUESTED,
                         onClick = {
                             if (runtimePhase == CutoutAnalysisPhaseV66.RUNNING) {
                                 vm.pauseSelectedPersonCutoutV66()
@@ -315,18 +326,41 @@ fun CutoutWorkspaceV50(
                             when {
                                 runtimePhase == CutoutAnalysisPhaseV66.RUNNING -> "Pause"
                                 runtimePhase == CutoutAnalysisPhaseV66.PAUSE_REQUESTED -> "Pausing…"
+                                runtimePhase == CutoutAnalysisPhaseV66.CANCEL_REQUESTED -> "Stopping…"
                                 resumeAvailable -> "Resume"
                                 personReady -> "Refresh Matte"
+                                partialAvailable || runtimePhase == CutoutAnalysisPhaseV66.CANCELLED -> "Analyze again"
                                 else -> "Analyze"
                             },
                             fontSize = 8.sp,
                         )
                     }
+                    if (runtimePhase == CutoutAnalysisPhaseV66.RUNNING ||
+                        runtimePhase == CutoutAnalysisPhaseV66.PAUSE_REQUESTED ||
+                        runtimePhase == CutoutAnalysisPhaseV66.PAUSED ||
+                        resumeAvailable
+                    ) {
+                        OutlinedButton(
+                            enabled = runtimePhase != CutoutAnalysisPhaseV66.CANCEL_REQUESTED,
+                            onClick = { vm.cancelSelectedPersonCutoutV69() },
+                        ) {
+                            Text(
+                                if (runtimePhase == CutoutAnalysisPhaseV66.CANCEL_REQUESTED) "Cancelling…" else "Cancel",
+                                fontSize = 8.sp,
+                            )
+                        }
+                    }
                 }
 
                 if (resumeAvailable && !analysisBusy) {
                     Text(
-                        "Resume continues from the first missing/next durable frame. Changing Resolution, Quality, Hair Detail, Temporal Stability, or clip trim starts a fresh analysis.",
+                        "Resume continues from the first missing/next durable frame. Cancel keeps saved mattes for partial export but ends Resume; Analyze after Cancel starts fresh.",
+                        fontSize = 7.sp,
+                        color = C50Text.copy(alpha = .58f),
+                    )
+                } else if (partialAvailable || runtimePhase == CutoutAnalysisPhaseV66.CANCELLED) {
+                    Text(
+                        "Partial Cutout is best-effort: nearby saved mattes are used, unprocessed gaps pass through the original frame, and export is never blocked.",
                         fontSize = 7.sp,
                         color = C50Text.copy(alpha = .58f),
                     )
