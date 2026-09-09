@@ -55,6 +55,7 @@ internal fun applyQualifierPickedColor(
                     keyRed = red.coerceIn(0f, 1f),
                     keyGreen = green.coerceIn(0f, 1f),
                     keyBlue = blue.coerceIn(0f, 1f),
+                    chromaKeyColorPickedV71 = true,
                 ),
                 status = "Chroma key color picked from preview",
                 coalesce = false,

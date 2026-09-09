@@ -1,7 +1,9 @@
 package com.tajuli.digitorandroid.editor.preview
 
+import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,7 +29,20 @@ internal object PreviewProjectRegistry {
 
     fun project(): TimelineProject? = latest.get()
 
-    fun clip(id: String): TimelineClip? = latest.get()?.clip(id)
+    fun clip(id: String): TimelineClip? {
+        val clip = latest.get()?.clip(id) ?: return null
+        val settings = clip.resolvedCutoutV43()
+        return if (
+            settings.mode == CutoutModeV43.CHROMA_KEY &&
+            !settings.chromaKeyColorPickedV71
+        ) {
+            // The preview picker must see the untouched screen/background. Keep every other live
+            // clip setting intact, but present pending Chroma as a no-op until a sample is accepted.
+            clip.copy(cutoutV43 = settings.copy(mode = CutoutModeV43.NONE))
+        } else {
+            clip
+        }
+    }
 
     fun clear(project: TimelineProject? = null) {
         if (project == null) {

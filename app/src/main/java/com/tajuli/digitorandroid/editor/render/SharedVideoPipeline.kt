@@ -4,6 +4,7 @@ import androidx.media3.common.Effect
 import androidx.media3.common.util.UnstableApi
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.chromaKeyCanApplyV71
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 
 /**
@@ -39,7 +40,9 @@ object SharedVideoPipeline {
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = false)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
-        CutoutEffectV43.forClip(clip, preview = false)?.let(::add)
+        if (clip.resolvedCutoutV43().chromaKeyCanApplyV71()) {
+            CutoutEffectV43.forClip(clip, preview = false)?.let(::add)
+        }
         FabricAwareCutoutRefineV46.forClip(clip, preview = false)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
     }
@@ -56,7 +59,9 @@ object SharedVideoPipeline {
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = false)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
-        CutoutEffectV43.forClip(clip, preview = false)?.let(::add)
+        if (clip.resolvedCutoutV43().chromaKeyCanApplyV71()) {
+            CutoutEffectV43.forClip(clip, preview = false)?.let(::add)
+        }
         FabricAwareCutoutRefineV46.forClip(clip, preview = false)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = false)?.let(::add)
     }

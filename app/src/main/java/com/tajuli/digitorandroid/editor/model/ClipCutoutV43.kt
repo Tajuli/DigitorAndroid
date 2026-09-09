@@ -40,6 +40,8 @@ data class ClipCutoutV43(
     val keyRed: Float = 0f,
     val keyGreen: Float = 1f,
     val keyBlue: Float = 0f,
+    /** V71: Chroma stays visually inactive until a preview color sample has actually been accepted. */
+    val chromaKeyColorPickedV71: Boolean = false,
     val chromaSimilarity: Float = .10f,
     val chromaSoftness: Float = .08f,
     val spillSuppression: Float = .55f,
@@ -106,6 +108,10 @@ data class ClipCutoutV43(
         )
     }
 }
+
+/** Chroma must remain a no-op until the user has sampled a real screen/background color. */
+fun ClipCutoutV43.chromaKeyCanApplyV71(): Boolean =
+    mode != CutoutModeV43.CHROMA_KEY || chromaKeyColorPickedV71
 
 fun TimelineClip.resolvedCutoutV43(): ClipCutoutV43 =
     (cutoutV43 ?: ClipCutoutV43()).normalized()
