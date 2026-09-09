@@ -19,6 +19,19 @@ import kotlin.math.roundToInt
 // Decode a materially denser analysis proxy before person cropping. PP-MattingV2 still receives a
 // fixed 384 tensor after the verified crop.
 private const val PERSON_ANALYSIS_LONG_EDGE_V47 = 1280
+private const val PERSON_ANALYSIS_LONG_EDGE_UNISOC_V67 = 960
+
+/**
+ * The Z60/UNISOC path has repeatedly disappeared without a Java crash or tombstone while the
+ * vendor graphics stack is active. Keep the 384 PP-Matting tensor unchanged, but reduce only the
+ * full-frame proxy so decoder readback, ROI reconstruction and temporal buffers consume
+ * substantially less native/graphics memory on that known-fragile family.
+ */
+private fun personAnalysisLongEdgeV67(): Int = if (useInterruptionSafeSerialCutoutV66()) {
+    PERSON_ANALYSIS_LONG_EDGE_UNISOC_V67
+} else {
+    PERSON_ANALYSIS_LONG_EDGE_V47
+}
 
 /**
  * Per-frame PP-MattingV2 Pro Cutout analyzer with V66 durable checkpoint/resume.
@@ -153,7 +166,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 
             CutoutAnalysisRuntimeV66.throwIfPauseRequested()
             val sequentialResult = runCatching {
-                GpuSequentialCutoutDecoderV47(context, PERSON_ANALYSIS_LONG_EDGE_V47).decodeTargets(
+                GpuSequentialCutoutDecoderV47(context, personAnalysisLongEdgeV67()).decodeTargets(
                     uri = Uri.parse(clip.uri),
                     startUs = decodeStartUs,
                     endUs = end,
@@ -250,13 +263,14 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     }
 
     private fun scaledFrameAtTime(retriever: MediaMetadataRetriever, sourceUs: Long): Bitmap? {
+        val analysisLongEdge = personAnalysisLongEdgeV67()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
             val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
             if (width > 0 && height > 0) {
                 val longEdge = max(width, height)
-                val scale = if (longEdge <= PERSON_ANALYSIS_LONG_EDGE_V47) 1f
-                else PERSON_ANALYSIS_LONG_EDGE_V47 / longEdge.toFloat()
+                val scale = if (longEdge <= analysisLongEdge) 1f
+                else analysisLongEdge / longEdge.toFloat()
                 val targetWidth = (width * scale).roundToInt().coerceAtLeast(1)
                 val targetHeight = (height * scale).roundToInt().coerceAtLeast(1)
                 retriever.getScaledFrameAtTime(
@@ -275,8 +289,8 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         val normalized = ensureArgb(raw)
         if (normalized !== raw && !raw.isRecycled) raw.recycle()
         val longEdge = max(normalized.width, normalized.height)
-        if (longEdge <= PERSON_ANALYSIS_LONG_EDGE_V47) return normalized
-        val scale = PERSON_ANALYSIS_LONG_EDGE_V47 / longEdge.toFloat()
+        if (longEdge <= analysisLongEdge) return normalized
+        val scale = analysisLongEdge / longEdge.toFloat()
         return Bitmap.createScaledBitmap(
             normalized,
             (normalized.width * scale).roundToInt().coerceAtLeast(1),
@@ -293,13 +307,14 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
     }
 
     private fun decodeImage(uri: Uri): Bitmap? = runCatching {
+        val analysisLongEdge = personAnalysisLongEdgeV67()
         val raw = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val source = ImageDecoder.createSource(context.contentResolver, uri)
             ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
                 val longEdge = max(info.size.width, info.size.height)
-                if (longEdge > PERSON_ANALYSIS_LONG_EDGE_V47) {
-                    val scale = PERSON_ANALYSIS_LONG_EDGE_V47 / longEdge.toFloat()
+                if (longEdge > analysisLongEdge) {
+                    val scale = analysisLongEdge / longEdge.toFloat()
                     decoder.setTargetSize(
                         (info.size.width * scale).roundToInt().coerceAtLeast(1),
                         (info.size.height * scale).roundToInt().coerceAtLeast(1),
@@ -317,10 +332,17 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
 
 private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
+    private val safeUnisoc = useInterruptionSafeSerialCutoutV66()
     private val portraitMatte = PpMattingV2PortraitMatteV50(appContext)
     private val roiMatte = PersonRoiMatteV57(appContext, portraitMatte)
     private val hair = BeautyHairSegmenterV29(appContext)
-    private var gpuTemporal = runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
+    // On the fragile UNISOC family do not create a second long-lived GLES temporal context beside
+    // MediaCodec/OES + ncnn Vulkan. This is a startup policy, not a live GPU->CPU backend switch.
+    private var gpuTemporal = if (safeUnisoc) {
+        null
+    } else {
+        runCatching { GpuSpatialFlowTemporalMatteStabilizerV47() }.getOrNull()
+    }
     private val cpuTemporal = SpatialFlowTemporalMatteStabilizerV45()
     private val matteWriter = AsyncPersonCutoutMaskWriterV48(appContext)
 
@@ -335,11 +357,19 @@ private class GpuPersonCutoutSegmenterV47(context: Context) : AutoCloseable {
         append(" · In-box alpha PP-MattingV2 RAW")
         append(" · Final ROI clamp")
         append(" · Durable per-frame checkpoint + Resume")
-        if (useInterruptionSafeSerialCutoutV66()) {
+        if (safeUnisoc) {
             append(" · UNISOC interruption-safe serial GL→Vulkan")
+            append(" · 960p low-pressure analysis proxy")
         }
         append(" · Hair "); append(if (hair.usingGpuDelegate) "GPU" else "CPU fallback")
-        append(" · Temporal refine "); append(if (gpuTemporal != null) "GPU pooled" else "CPU fallback")
+        append(" · Temporal refine ")
+        append(
+            when {
+                safeUnisoc -> "CPU safe-start"
+                gpuTemporal != null -> "GPU pooled"
+                else -> "CPU fallback"
+            },
+        )
         append(" · CPU scheduler")
     }
 
