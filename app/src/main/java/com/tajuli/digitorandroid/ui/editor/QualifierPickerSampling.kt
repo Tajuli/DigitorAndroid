@@ -19,6 +19,7 @@ private object PreviewColorPickerRoute {
 internal fun startChromaKeyColorPicker(vm: EditorViewModelV4) {
     PreviewColorPickerRoute.target = PreviewColorPickerTarget.CHROMA_KEY
     vm.setQualifierPickerActive(true)
+    vm.setEditorStatusV19("Chroma picker: tap a clean green/blue background area in Preview")
 }
 
 /** Cancels a pending Chroma Key pick and restores the preview picker to its qualifier default. */
