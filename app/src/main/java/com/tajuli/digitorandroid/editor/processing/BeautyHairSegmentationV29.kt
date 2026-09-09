@@ -116,9 +116,11 @@ object BeautyHairMaskStoreV29 {
  * CPU deliberately so MediaCodec/OES GL and ncnn Vulkan do not also compete with a long-lived
  * MediaPipe GPU delegate during High/every-frame analysis.
  *
- * V68 keeps the reusable ARGB scratch array and releases result-mask wrappers after each refresh.
- * BitmapImageBuilder wraps the caller-owned Bitmap, so its input MPImage must NOT be closed here:
- * MediaPipe's BitmapImageContainer.close() recycles that caller Bitmap.
+ * V69 never wraps the caller-owned analysis Bitmap directly. Hair gets a private <=384-long-edge
+ * Bitmap, its input MPImage is explicitly closed after the synchronous segment call, and only that
+ * private bitmap may be recycled by BitmapImageContainer.close(). Result masks are also closed.
+ * This gives every MediaPipe image a deterministic lifetime without reviving the recycled-caller
+ * bug fixed in V68.
  */
 class BeautyHairSegmenterV29(context: Context) : AutoCloseable {
     private val segmenter: ImageSegmenter
@@ -145,40 +147,62 @@ class BeautyHairSegmenterV29(context: Context) : AutoCloseable {
     /** Returns a soft grayscale hair-confidence bitmap owned by the caller. */
     fun segmentSoftMask(bitmap: Bitmap): Bitmap? {
         check(!bitmap.isRecycled) { "Cannot segment hair on a recycled bitmap" }
-        val result = segmenter.segment(BitmapImageBuilder(bitmap).build())
-        val masks = result.confidenceMasks().orElse(emptyList())
+        val owned = privateHairInputBitmap(bitmap)
+        val inputImage = BitmapImageBuilder(owned).build()
         try {
-            val mpMask = masks.getOrNull(HAIR_CLASS_V34) ?: return null
-            val width = mpMask.width.coerceAtLeast(1)
-            val height = mpMask.height.coerceAtLeast(1)
-            val count = width * height
-            val confidences = ByteBufferExtractor.extract(mpMask).asFloatBuffer()
-            confidences.rewind()
-            if (confidences.remaining() < count) return null
+            val result = segmenter.segment(inputImage)
+            val masks = result.confidenceMasks().orElse(emptyList())
+            try {
+                val mpMask = masks.getOrNull(HAIR_CLASS_V34) ?: return null
+                val width = mpMask.width.coerceAtLeast(1)
+                val height = mpMask.height.coerceAtLeast(1)
+                val count = width * height
+                val confidences = ByteBufferExtractor.extract(mpMask).asFloatBuffer()
+                confidences.rewind()
+                if (confidences.remaining() < count) return null
 
-            if (pixelScratch.size < count) pixelScratch = IntArray(count)
-            for (index in 0 until count) {
-                val confidence = confidences.get().coerceIn(0f, 1f)
-                val x = ((confidence - .04f) / .88f).coerceIn(0f, 1f)
-                val smooth = x * x * (3f - 2f * x)
-                val value = (smooth * 255f).roundToInt().coerceIn(0, 255)
-                pixelScratch[index] = Color.argb(255, value, value, value)
+                if (pixelScratch.size < count) pixelScratch = IntArray(count)
+                for (index in 0 until count) {
+                    val confidence = confidences.get().coerceIn(0f, 1f)
+                    val x = ((confidence - .04f) / .88f).coerceIn(0f, 1f)
+                    val smooth = x * x * (3f - 2f * x)
+                    val value = (smooth * 255f).roundToInt().coerceIn(0, 255)
+                    pixelScratch[index] = Color.argb(255, value, value, value)
+                }
+
+                val fullMask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                fullMask.setPixels(pixelScratch, 0, width, 0, 0, width, height)
+                val longEdge = max(width, height)
+                if (longEdge <= HAIR_MASK_LONG_EDGE_V29) return fullMask
+                val scale = HAIR_MASK_LONG_EDGE_V29.toFloat() / longEdge.toFloat()
+                return Bitmap.createScaledBitmap(
+                    fullMask,
+                    (width * scale).toInt().coerceAtLeast(1),
+                    (height * scale).toInt().coerceAtLeast(1),
+                    true,
+                ).also { fullMask.recycle() }
+            } finally {
+                masks.forEach { mask -> runCatching { mask.close() } }
             }
-
-            val fullMask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            fullMask.setPixels(pixelScratch, 0, width, 0, 0, width, height)
-            val longEdge = max(width, height)
-            if (longEdge <= HAIR_MASK_LONG_EDGE_V29) return fullMask
-            val scale = HAIR_MASK_LONG_EDGE_V29.toFloat() / longEdge.toFloat()
-            return Bitmap.createScaledBitmap(
-                fullMask,
-                (width * scale).toInt().coerceAtLeast(1),
-                (height * scale).toInt().coerceAtLeast(1),
-                true,
-            ).also { fullMask.recycle() }
         } finally {
-            masks.forEach { mask -> runCatching { mask.close() } }
+            runCatching { inputImage.close() }
+            if (!owned.isRecycled) owned.recycle()
         }
+    }
+
+    private fun privateHairInputBitmap(source: Bitmap): Bitmap {
+        val longEdge = max(source.width, source.height).coerceAtLeast(1)
+        if (longEdge <= HAIR_MASK_LONG_EDGE_V29) {
+            return source.copy(Bitmap.Config.ARGB_8888, false)
+                ?: error("Could not create owned MediaPipe hair bitmap")
+        }
+        val scale = HAIR_MASK_LONG_EDGE_V29.toFloat() / longEdge.toFloat()
+        val width = (source.width * scale).roundToInt().coerceAtLeast(1)
+        val height = (source.height * scale).roundToInt().coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(source, width, height, true)
+        if (scaled !== source) return scaled
+        return source.copy(Bitmap.Config.ARGB_8888, false)
+            ?: error("Could not create owned MediaPipe hair bitmap")
     }
 
     fun segmentAndStore(context: Context, clip: TimelineClip, bitmap: Bitmap, sourceTimeUs: Long): Boolean {
