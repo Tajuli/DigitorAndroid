@@ -130,8 +130,8 @@ internal class CutoutEffectV43 private constructor(
         /**
          * Best-effort partial Cutout contract. Saved mattes are interpolated only while source time
          * remains inside the quality-specific coverage window. A cancelled/incomplete tail or a
-         * large hole returns no mask; the shader then uses rawPersonAt()==1 and passes the original
-         * frame through instead of stretching a stale person's silhouette across unprocessed video.
+         * large hole returns no mask; the shader then passes the original frame through instead of
+         * stretching a stale person's silhouette across unprocessed video.
          */
         private fun personBracket(clip: TimelineClip, sourceUs: Long): MaskBracket {
             val frames = PersonCutoutMaskStoreV43.index(appContext, clip).frames
@@ -295,7 +295,9 @@ internal class CutoutEffectV43 private constructor(
                 }
 
                 float rawPersonAt(vec2 uv) {
-                    if (uHasMaskA < 0.5 && uHasMaskB < 0.5) return 1.0;
+                    // 2.0 is an intentional sentinel for no matte. Realtime alpha shaping clamps it
+                    // to fully opaque even with aggressive user threshold/edge settings.
+                    if (uHasMaskA < 0.5 && uHasMaskB < 0.5) return 2.0;
                     vec2 maskUv = personMaskUv(clamp(uv, vec2(0.0), vec2(1.0)));
                     float a = uHasMaskA > 0.5 ? texture2D(uMaskA, maskUv).r : 0.0;
                     float b = uHasMaskB > 0.5 ? texture2D(uMaskB, maskUv).r : a;
