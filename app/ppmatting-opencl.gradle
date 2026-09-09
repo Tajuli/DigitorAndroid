@@ -14,7 +14,13 @@ def generatedRoot = file("${buildDir}/generated/ppmattingNcnnVulkan")
 def downloadsDir = file("${generatedRoot}/downloads")
 def pnnxExtractDir = file("${generatedRoot}/pnnxExtract")
 def toolsDir = file("${generatedRoot}/tools")
-def pnnxTool = file("${toolsDir}/pnnx")
+
+def osName = (System.getProperty("os.name") ?: "").toLowerCase(Locale.ROOT)
+def isWindowsHost = osName.contains("windows")
+def isMacHost = osName.contains("mac") || osName.contains("darwin")
+def pnnxArchiveName = isWindowsHost ? "pnnx-20260526-windows.zip" : (isMacHost ? "pnnx-20260526-macos.zip" : "pnnx-20260526-linux.zip")
+def pnnxExecutableName = isWindowsHost ? "pnnx.exe" : "pnnx"
+def pnnxTool = file("${toolsDir}/${pnnxExecutableName}")
 def ncnnExtractDir = file("${generatedRoot}/ncnnExtract")
 def ncnnRuntimeRoot = file("${generatedRoot}/ncnnRuntime")
 def optimizedAssetsDir = file("${generatedRoot}/assets")
@@ -30,13 +36,15 @@ def outputBin = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.ncnn.
 def outputProfile = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.profile")
 
 // Keep converter and Android runtime on the exact same ncnn generation.
-def pnnxZip = file("${downloadsDir}/pnnx-20260526-linux.zip")
+def pnnxZip = file("${downloadsDir}/${pnnxArchiveName}")
 def ncnnZip = file("${downloadsDir}/ncnn-20260526-android-vulkan.zip")
 
-def pnnxUrl = "https://github.com/pnnx/pnnx/releases/download/20260526/pnnx-20260526-linux.zip"
+def pnnxUrl = "https://github.com/pnnx/pnnx/releases/download/20260526/${pnnxArchiveName}"
 def ncnnUrl = "https://github.com/Tencent/ncnn/releases/download/20260526/ncnn-20260526-android-vulkan.zip"
 
-def pnnxSha256 = "dde08ce2e2e1744a4ddce576910b451a860663af91d2aeed0d21ebee4fa69955"
+def pnnxSha256 = isWindowsHost ? "4e188e7606c887ac550820322f34b144140df877b73292b25e48a2ba38f297df" :
+    (isMacHost ? "49f942bba47e0a6bbb971506f7beec73c12a7e5b74c7a90522eced006ca299d0" :
+        "dde08ce2e2e1744a4ddce576910b451a860663af91d2aeed0d21ebee4fa69955")
 def ncnnSha256 = "26909c92eed35afed4a966b5e9e503fcb0a529691ea3f910ec2c94a4fff52804"
 
 def sha256Of = { File source ->
@@ -105,7 +113,7 @@ tasks.register("preparePnnxForPpMatting") {
     outputs.file(pnnxTool)
     doLast {
         downloadsDir.mkdirs()
-        downloadWithRetry(pnnxUrl, pnnxZip, 20_000_000L, pnnxSha256)
+        downloadWithRetry(pnnxUrl, pnnxZip, isWindowsHost ? 15_000_000L : 20_000_000L, pnnxSha256)
         delete(pnnxExtractDir)
         pnnxExtractDir.mkdirs()
         copy {
@@ -114,10 +122,10 @@ tasks.register("preparePnnxForPpMatting") {
         }
 
         File detected = fileTree(pnnxExtractDir).files.find { candidate ->
-            candidate.isFile() && candidate.name == "pnnx"
+            candidate.isFile() && candidate.name.equalsIgnoreCase(pnnxExecutableName)
         }
         if (detected == null) {
-            throw new GradleException("pnnx release archive did not contain the Linux pnnx executable")
+            throw new GradleException("pnnx release archive did not contain ${pnnxExecutableName} for host ${System.getProperty('os.name')}")
         }
 
         delete(toolsDir)
@@ -125,9 +133,9 @@ tasks.register("preparePnnxForPpMatting") {
         copy {
             from detected
             into toolsDir
-            rename { "pnnx" }
+            rename { pnnxExecutableName }
         }
-        pnnxTool.setExecutable(true)
+        if (!isWindowsHost) pnnxTool.setExecutable(true)
         if (!pnnxTool.isFile() || pnnxTool.length() < 5_000_000L) {
             throw new GradleException("Could not materialize pnnx converter at ${pnnxTool}")
         }
