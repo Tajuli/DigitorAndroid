@@ -2,7 +2,9 @@ package com.tajuli.digitorandroid.editor.render
 
 import androidx.media3.common.Effect
 import androidx.media3.common.util.UnstableApi
+import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 
 /**
  * Shared video processing stages used by both preview and export.
@@ -66,7 +68,7 @@ object SharedVideoPipeline {
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
-        CutoutEffectV43.forClip(clip, preview = true)?.let(::add)
+        add(residentPreviewCutoutEffect(clip))
         FabricAwareCutoutRefineV46.forClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
     }
@@ -78,8 +80,28 @@ object SharedVideoPipeline {
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = true)?.let(::add)
         CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
-        CutoutEffectV43.forClip(clip, preview = true)?.let(::add)
+        add(residentPreviewCutoutEffect(clip))
         FabricAwareCutoutRefineV46.forClip(clip, preview = true)?.let(::add)
         TransitionVisualEffectV22.forClip(clip, preview = true)?.let(::add)
     }
+
+    /**
+     * Realtime preview graphs are long-lived. If a session was created while Cutout mode was NONE,
+     * omitting the effect here meant switching to CHROMA_KEY only updated project state; export was
+     * correct, but the already-built preview graph had no alpha stage to execute.
+     *
+     * Keep one no-op-capable Cutout shader resident in preview from the start. The shader already
+     * resolves the latest clip from PreviewProjectRegistry on every frame, so mode/key/sliders become
+     * visible immediately without rebuilding MediaCodec/GL state. A PERSON snapshot is used only to
+     * force construction when the stored mode is NONE; if a synthetic transition-ghost id cannot be
+     * resolved from the registry, missing person mattes intentionally pass through fully opaque.
+     */
+    private fun residentPreviewCutoutEffect(clip: TimelineClip): Effect =
+        CutoutEffectV43.forClip(clip, preview = true)
+            ?: CutoutEffectV43.forClip(
+                clip.copy(
+                    cutoutV43 = clip.resolvedCutoutV43().copy(mode = CutoutModeV43.PERSON),
+                ),
+                preview = true,
+            )!!
 }

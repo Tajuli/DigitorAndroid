@@ -1,8 +1,9 @@
 // PP-MattingV2 GPU backend for Android.
 //
-// Paddle Lite OpenCL was process-fatal on the target Symphony Z60 / UNISOC T606 firmware. V69
-// packages four genuine fixed ncnn Vulkan graphs (256/320/384/512). Runtime loads exactly one graph
-// selected by the user; no engine or tensor-size transition is performed during an analysis run.
+// Paddle Lite OpenCL was process-fatal on the target Symphony Z60 / UNISOC T606 firmware. V70
+// packages four genuine fixed ncnn Vulkan graph params (256/320/384/512), but stores their
+// byte-identical fp16 weight blob only once. Runtime still loads exactly the user-selected fixed
+// graph; there is no engine or tensor-size transition during an analysis run.
 
 import java.security.MessageDigest
 
@@ -37,6 +38,7 @@ def sourceOnnxBySize = [
 def outputParamFor = { int size -> file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan_${size}.ncnn.param") }
 def outputBinFor = { int size -> file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan_${size}.ncnn.bin") }
 def outputProfileFor = { int size -> file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan_${size}.profile") }
+def sharedWeightsBin = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan_shared.ncnn.bin")
 
 // Keep converter and Android runtime on the exact same ncnn generation.
 def pnnxZip = file("${downloadsDir}/${pnnxArchiveName}")
@@ -180,8 +182,8 @@ tasks.register("prepareNcnnVulkanRuntime") {
 }
 
 def allModelOutputs = modelSizes.collectMany { int size ->
-    [outputParamFor(size), outputBinFor(size), outputProfileFor(size)]
-}
+    [outputParamFor(size), outputProfileFor(size)]
+} + [sharedWeightsBin]
 
 tasks.register("preparePpMattingNcnnModels") {
     dependsOn("downloadPpMattingV2Model", "preparePnnxForPpMatting")
@@ -239,6 +241,35 @@ tasks.register("preparePpMattingNcnnModels") {
             outputProfile.text = "PP-MattingV2 STDC1 fixed ${size}x${size}\nsource=${source.name}\nweights=official-human-512-stable\npnnx=20260526\nncnn=20260526\n"
             logger.lifecycle("PP-MattingV2 Vulkan profile ready: fixed ${size}x${size} from ${source.name}")
         }
+
+        // Fixed input shape changes only the ncnn graph param. With the same official STDC1 human
+        // checkpoint and fp16 conversion, pnnx emits the exact same weight blob for all four sizes.
+        // Verify that invariant every build before deduplicating so a future converter/model change
+        // can never silently pair a graph with the wrong weights.
+        def generatedBins = modelSizes.collect { int size -> outputBinFor(size) }
+        def weightHashes = generatedBins.collect { File bin -> sha256Of(bin) }.toSet()
+        if (weightHashes.size() != 1) {
+            throw new GradleException(
+                "PP-MattingV2 fixed graphs no longer share byte-identical ncnn weights; refusing unsafe APK deduplication"
+            )
+        }
+
+        File canonicalWeights = outputBinFor(512)
+        copy {
+            from canonicalWeights
+            into optimizedAssetsDir
+            rename { sharedWeightsBin.name }
+        }
+        if (!sharedWeightsBin.isFile() || sharedWeightsBin.length() < 5_000_000L) {
+            throw new GradleException("Could not create shared PP-MattingV2 ncnn weights asset")
+        }
+        generatedBins.each { File bin ->
+            if (bin.absolutePath != sharedWeightsBin.absolutePath && bin.exists()) bin.delete()
+        }
+        logger.lifecycle(
+            "PP-MattingV2 APK dedupe: 256/320/384/512 params share one ${sharedWeightsBin.name} " +
+            "(${String.format('%.1f', sharedWeightsBin.length() / 1024.0 / 1024.0)} MiB)"
+        )
     }
 }
 

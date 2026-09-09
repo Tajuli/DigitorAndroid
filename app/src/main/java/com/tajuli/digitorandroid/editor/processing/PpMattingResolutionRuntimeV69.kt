@@ -11,9 +11,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * the value once at construction and never switches graph/engine mid-run. That is deliberate: prior
  * physical-device testing showed live Vulkan teardown/recreate transitions can destabilize fragile
  * UNISOC drivers.
+ *
+ * V70 keeps four fixed graph params but all four use one verified byte-identical ncnn weight blob.
+ * This preserves 256/320/384/512 behavior while avoiding three duplicate ~18 MB assets in the APK.
  */
 internal object PpMattingResolutionRuntimeV69 {
     private val selectedSize = AtomicInteger(384)
+    private const val SHARED_BIN_ASSET = "ppmattingv2_stdc1_human_vulkan_shared.ncnn.bin"
 
     val supportedSizes: IntArray
         get() = intArrayOf(256, 320, 384, 512)
@@ -29,6 +33,6 @@ internal object PpMattingResolutionRuntimeV69 {
     fun paramAsset(size: Int = currentSize()): String =
         "ppmattingv2_stdc1_human_vulkan_${normalizedPpMattingSizeV69(size)}.ncnn.param"
 
-    fun binAsset(size: Int = currentSize()): String =
-        "ppmattingv2_stdc1_human_vulkan_${normalizedPpMattingSizeV69(size)}.ncnn.bin"
+    fun binAsset(@Suppress("UNUSED_PARAMETER") size: Int = currentSize()): String =
+        SHARED_BIN_ASSET
 }
