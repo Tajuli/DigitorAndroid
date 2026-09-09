@@ -24,11 +24,15 @@ private const val GPU_FLOW_SCENE_CUT_MAD_V47 = 52f
 /**
  * Near-fully-GPU V47 temporal matte stage.
  *
- * The current/previous source, current MODNet matte and optional hair mask are textures. Pass one
- * estimates a local motion field on a small block grid entirely in a fragment shader. Pass two
+ * The current/previous source, current PP-MattingV2 matte and optional hair mask are textures. Pass
+ * one estimates a local motion field on a small block grid entirely in a fragment shader. Pass two
  * fuses hair only in the uncertain portrait band, warps the previous matte with the local field and
- * applies confidence/disagreement gating. Only the final one-channel-looking RGBA matte is read back
- * for the existing cache contract; the expensive per-pixel block search and matte warp stay on GPU.
+ * applies confidence/disagreement gating.
+ *
+ * Long High-mode runs must not allocate native readback/texture storage once per frame. The output
+ * readback ByteBuffer is therefore persistent for the active dimensions and texture uploads use
+ * texSubImage2D whenever their size is unchanged. This prevents hundreds of megabytes of direct
+ * buffer + GLES driver allocation churn during a few hundred analyzed frames.
  */
 internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
     private val egl = OffscreenEglV47()
@@ -42,6 +46,10 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
     private val flowProgram = compileProgram(FULLSCREEN_VERTEX, FLOW_FRAGMENT)
     private val matteProgram = compileProgram(FULLSCREEN_VERTEX, MATTE_FRAGMENT)
     private val framebuffer = IntArray(1).also { GLES20.glGenFramebuffers(1, it, 0) }[0]
+
+    /** Must be initialized before createTexture(), because initial texture storage records its size. */
+    private val textureSizes = HashMap<Int, Long>()
+    private var readbackBytes: ByteBuffer? = null
 
     private var currentSourceTex = createTexture()
     private var previousSourceTex = createTexture()
@@ -118,7 +126,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             1f / flowWidth.coerceAtLeast(1).toFloat(),
             1f / flowHeight.coerceAtLeast(1).toFloat(),
         )
-        // The source aspect is kept for future tuning and prevents optimizer-specific dead uniforms.
         uniform2f(flowProgram, "uSourceSize", sourceWidth.toFloat(), sourceHeight.toFloat())
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         checkGl("render V47 flow")
@@ -157,22 +164,29 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
 
     private fun readOutputMatte(width: Int, height: Int): Bitmap {
         attachTexture(outputMatteTex)
-        val bytes = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder())
+        val bytes = readbackBytes
+            ?: error("V47 GPU readback buffer was not allocated for the active matte size")
+        check(bytes.capacity() >= width * height * 4) {
+            "V47 GPU readback buffer is smaller than the active matte"
+        }
+        bytes.clear()
         GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, bytes)
         checkGl("read V47 matte")
         bytes.rewind()
         return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap ->
-            // Output RGB is grayscale and A=255, so RGBA byte order maps safely to ARGB_8888 memory.
             bitmap.copyPixelsFromBuffer(bytes)
         }
     }
 
     private fun ensureOutputTextures(width: Int, height: Int) {
-        if (width == matteWidth && height == matteHeight) return
+        if (width == matteWidth && height == matteHeight && readbackBytes != null) return
         matteWidth = width.coerceAtLeast(1)
         matteHeight = height.coerceAtLeast(1)
         allocateTexture(previousMatteTex, matteWidth, matteHeight)
         allocateTexture(outputMatteTex, matteWidth, matteHeight)
+        readbackBytes = ByteBuffer
+            .allocateDirect(matteWidth * matteHeight * 4)
+            .order(ByteOrder.nativeOrder())
     }
 
     private fun ensureFlowTexture(cols: Int, rows: Int) {
@@ -252,9 +266,18 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, name), x, y)
     }
 
+    private fun textureSizeKey(width: Int, height: Int): Long =
+        (width.toLong() shl 32) or (height.toLong() and 0xffffffffL)
+
     private fun uploadBitmap(texture: Int, bitmap: Bitmap) {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
-        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+        val key = textureSizeKey(bitmap.width, bitmap.height)
+        if (textureSizes[texture] == key) {
+            GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, bitmap)
+        } else {
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+            textureSizes[texture] = key
+        }
         checkGl("upload V47 texture")
     }
 
@@ -271,6 +294,7 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
             GLES20.GL_UNSIGNED_BYTE,
             null,
         )
+        textureSizes[texture] = textureSizeKey(width, height)
     }
 
     private fun createTexture(): Int {
@@ -337,6 +361,8 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 0,
             )
         }
+        textureSizes.clear()
+        readbackBytes = null
         egl.close()
     }
 
@@ -430,8 +456,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 float currentAlpha = texture2D(uCurrentMatte, vUv).r;
                 float uncertainty = clamp(4.0 * currentAlpha * (1.0 - currentAlpha), 0.0, 1.0);
 
-                // Hair is allowed to recover only the uncertain semantic boundary. The deliberately
-                // conservative gain avoids making hijab/cloth behave like synthetic hair strands.
                 if (uHasHair > 0.5 && uHairStrength > 0.001) {
                     float hair = texture2D(uHair, vUv).r;
                     float hairWeight = hair * uHairStrength * (0.10 + 0.46 * uncertainty);
@@ -449,13 +473,6 @@ internal class GpuSpatialFlowTemporalMatteStabilizerV47 : AutoCloseable {
                 vec2 previousUv = clamp(vUv + vec2(dx * uSearchStep.x, dy * uSearchStep.y), vec2(0.0), vec2(1.0));
                 float previousAlpha = texture2D(uPreviousMatte, previousUv).r;
 
-                // MODNet can occasionally classify a stationary object touching the subject (for
-                // example a chair back beside a shoulder) as certain foreground for one/few anchors.
-                // The old path returned immediately for alpha >= .99, so that false positive bypassed
-                // every temporal check and 12-fps interpolation made the chair flash into the result.
-                // Reject only *new*, well-matched, near-zero-motion foreground that has no nearby
-                // support in the previous stabilized matte. Genuine moving hands/hair/cloth retain
-                // their flow-warped support or non-zero motion and therefore pass this gate.
                 float previousSupport = previousSupportAt(previousUv);
                 float motionBlocks = length(vec2(dx, dy));
                 float staticMatch = 1.0 - smoothstep(0.35, 1.65, motionBlocks);
