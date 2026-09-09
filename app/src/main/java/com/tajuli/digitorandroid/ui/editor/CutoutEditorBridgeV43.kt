@@ -8,6 +8,7 @@ import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
+import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisCancelledV69
 import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisPausedV66
 import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisPhaseV66
 import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisPowerGuardV48
@@ -16,6 +17,7 @@ import com.tajuli.digitorandroid.editor.processing.GpuPersonCutoutAnalyzerV47
 import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 import com.tajuli.digitorandroid.editor.processing.hasResumablePersonCutoutGenerationV66
 import com.tajuli.digitorandroid.editor.processing.markPersonCutoutGenerationV47Ready
+import com.tajuli.digitorandroid.editor.processing.markPersonCutoutGenerationV69Partial
 import com.tajuli.digitorandroid.editor.processing.personCutoutSavedFrameCountV66
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
@@ -32,7 +34,7 @@ private val personCutoutAnalysisInFlightV43 = ConcurrentHashMap.newKeySet<String
 // real process/native crash on the next launch.
 private val personCutoutAnalysisScopeV66 = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-/** V66 bridge retains historical symbols so existing project/editor code remains source-compatible. */
+/** V69 bridge retains historical symbols so existing project/editor code remains source-compatible. */
 fun EditorViewModelV4.setSelectedCutoutV43(
     settings: ClipCutoutV43,
     status: String = "Cutout updated",
@@ -54,13 +56,13 @@ fun EditorViewModelV4.setSelectedCutoutV43(
         })
     }
     commitProjectV19(
-        label = "cutout-v66",
+        label = "cutout-v69",
         project = snapshot.project.copy(tracks = tracks),
         status = status,
         coalesce = coalesce,
     )
-    // Once paused/failed, changing analysis-time settings makes the on-disk signature mismatch.
-    // Drop only the in-memory terminal UI state; the next Analyze will atomically clear old mattes.
+    // Once paused/failed/cancelled, changing analysis-time settings makes the on-disk signature
+    // mismatch. Drop only in-memory terminal UI state; the next Analyze atomically starts cleanly.
     CutoutAnalysisRuntimeV66.clearIfClip(id)
 }
 
@@ -93,6 +95,31 @@ fun EditorViewModelV4.pauseSelectedPersonCutoutV66() {
     }
 }
 
+/**
+ * Cancel terminates the current analysis run without deleting durable matte PNGs. Unlike Pause it
+ * removes resumability: the saved partial matte remains usable for preview/export, and a later
+ * Analyze starts fresh with the current settings.
+ */
+fun EditorViewModelV4.cancelSelectedPersonCutoutV69() {
+    val clip = state.value.project.clip(state.value.selectedClipId) ?: return
+    val appContext = getApplication<Application>().applicationContext
+    val runtime = CutoutAnalysisRuntimeV66.state.value
+
+    if (runtime.clipId == clip.id && runtime.busy) {
+        if (CutoutAnalysisRuntimeV66.requestCancel(clip.id)) {
+            setEditorStatusV19("Pro Cutout · cancelling safely… · saved frames stay exportable")
+        }
+        return
+    }
+
+    val savedBefore = personCutoutSavedFrameCountV66(appContext, clip)
+    markPersonCutoutGenerationV69Partial(appContext, clip)
+    val saved = maxOf(savedBefore, personCutoutSavedFrameCountV66(appContext, clip))
+    CutoutAnalysisRuntimeV66.markCancelled(saved)
+    PreviewExportCoordinator.refreshActivePreviews(120L)
+    setEditorStatusV19("Pro Cutout cancelled · $saved saved frame(s) · Export allowed")
+}
+
 fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
     val snapshot = state.value
     val clip = snapshot.project.clip(snapshot.selectedClipId) ?: run {
@@ -118,9 +145,10 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
     val quality = settings.analysisQualityV47
     val label = quality.uiLabelV47()
     val analysisKey = buildString {
-        append("v66-checkpoint-resume|")
+        append("v69-checkpoint-resume|")
         append(clip.uri); append('|'); append(clip.sourceInUs); append('|'); append(clip.sourceOutUs)
         append('|'); append(quality.name)
+        append('|'); append(settings.mattingSizeV69)
         append('|'); append(settings.hairDetailV44); append('|'); append(settings.temporalStabilityV44)
     }
     if (!personCutoutAnalysisInFlightV43.add(analysisKey)) {
@@ -208,23 +236,35 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                         val saved = personCutoutSavedFrameCountV66(appContext, clip)
                         CutoutAnalysisRuntimeV66.markFailed(saved, "Coverage incomplete")
                         setEditorStatusV19(
-                            "Pro Cutout incomplete · $label · $saved saved frame(s) · Resume available",
+                            "Pro Cutout incomplete · $label · $saved saved frame(s) · Resume available · Export allowed",
                         )
                     }
                 }.onFailure { error ->
-                    val saved = personCutoutSavedFrameCountV66(appContext, clip)
                     val phase = CutoutAnalysisRuntimeV66.state.value.phase
-                    val pauseRequested =
+                    val cancelRequested =
+                        error is CutoutAnalysisCancelledV69 ||
+                            phase == CutoutAnalysisPhaseV66.CANCEL_REQUESTED
+                    val pauseRequested = !cancelRequested && (
                         error is CutoutAnalysisPausedV66 ||
                             phase == CutoutAnalysisPhaseV66.PAUSE_REQUESTED
+                        )
                     PreviewExportCoordinator.refreshActivePreviews(220L)
 
-                    if (pauseRequested) {
+                    if (cancelRequested) {
+                        markPersonCutoutGenerationV69Partial(appContext, clip)
+                        val saved = personCutoutSavedFrameCountV66(appContext, clip)
+                        CutoutAnalysisRuntimeV66.markCancelled(saved)
+                        setEditorStatusV19(
+                            "Pro Cutout cancelled · $label · $saved saved frame(s) · Export allowed",
+                        )
+                    } else if (pauseRequested) {
+                        val saved = personCutoutSavedFrameCountV66(appContext, clip)
                         CutoutAnalysisRuntimeV66.markPaused(saved)
                         setEditorStatusV19(
-                            "Pro Cutout paused · $label · $saved saved frame(s) · tap Resume",
+                            "Pro Cutout paused · $label · $saved saved frame(s) · tap Resume · Export allowed",
                         )
                     } else {
+                        val saved = personCutoutSavedFrameCountV66(appContext, clip)
                         val currentClip = state.value.project.clip(clip.id) ?: clip
                         val recoveredHigh =
                             quality == CutoutAnalysisQualityV47.HIGH &&
@@ -242,9 +282,9 @@ fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
                             CutoutAnalysisRuntimeV66.markFailed(saved, detail)
                             setEditorStatusV19(
                                 if (resumable) {
-                                    "Pro Cutout interrupted · $label · $saved saved frame(s) · Resume available · $detail"
+                                    "Pro Cutout interrupted · $label · $saved saved frame(s) · Resume available · Export allowed · $detail"
                                 } else {
-                                    "Pro Cutout failed · $label · $detail"
+                                    "Pro Cutout failed · $label · Export still allowed · $detail"
                                 },
                             )
                         }
