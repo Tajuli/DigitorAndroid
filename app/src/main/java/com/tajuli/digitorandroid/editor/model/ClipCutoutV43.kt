@@ -40,8 +40,6 @@ data class ClipCutoutV43(
     val keyRed: Float = 0f,
     val keyGreen: Float = 1f,
     val keyBlue: Float = 0f,
-    /** V71: Chroma stays visually inactive until a preview color sample has actually been accepted. */
-    val chromaKeyColorPickedV71: Boolean = false,
     val chromaSimilarity: Float = .10f,
     val chromaSoftness: Float = .08f,
     val spillSuppression: Float = .55f,
@@ -57,6 +55,8 @@ data class ClipCutoutV43(
     val temporalStabilityV44: Float = .54f,
     /** Fixed PP-MattingV2 square input applied only after the motion-safe person ROI crop. */
     val mattingSizeV69: Int = 320,
+    /** V71: Chroma stays visually inactive until a preview color sample has actually been accepted. */
+    val chromaKeyColorPickedV71: Boolean = false,
 ) {
     fun normalized(): ClipCutoutV43 {
         val legacyPersonDefaults = personThreshold == .42f && personFeather == .12f
