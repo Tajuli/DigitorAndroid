@@ -6,46 +6,134 @@ import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import java.io.File
 import java.security.MessageDigest
 
-private const val V50_CACHE_DIR_NAME = "person_cutout_masks_v50_ppmattingv2_hair_spatialflow_512"
+// V69 extends the durable signature with the selected fixed PP-MattingV2 operating point. A paused
+// 320 run can therefore never resume into a 256/384/512 engine or mix incompatible matte semantics.
+private const val V57_CACHE_DIR_NAME = "person_cutout_masks_v65_ppmattingv2_384_motion_safe_detector_roi"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-private const val V47_GENERATION_VERSION = "adaptive-v50-ppmattingv2-only-r2"
+private const val V69_PARTIAL_MARKER = ".v69_gpu_partial"
+private const val V47_GENERATION_VERSION = "stable-v69-ppmattingv2-multires-motion-safe-detector-hysteresis-headroom-r1"
 
-internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
-    val dir = personCutoutSourceDirV47(context, clip.uri)
-    if (dir.exists()) {
-        dir.listFiles().orEmpty().forEach { file -> runCatching { file.delete() } }
+// PersonCutoutMaskStoreV43 intentionally retains its historical directory name for compatibility.
+// Keep this value in sync with PERSON_CUTOUT_CACHE_DIR_V50 in PersonCutoutSegmentationV43.kt.
+private const val V66_DURABLE_MASK_CACHE_DIR = "person_cutout_masks_v50_ppmattingv2_hair_spatialflow_512"
+
+internal data class PersonCutoutGenerationStartV66(
+    val resumed: Boolean,
+    val durableTimesUs: List<Long>,
+) {
+    val savedFrames: Int get() = durableTimesUs.size
+}
+
+/**
+ * Start or resume one generation.
+ *
+ * Matching pending signature = keep durable frame PNGs and continue. Any analysis-time setting
+ * change (quality / matting resolution / trim / Hair Detail / Temporal Stability) changes the
+ * signature, so old mattes are deleted before a new generation starts. A cancelled partial marker
+ * is intentionally not resumable: tapping Analyze after Cancel starts a clean generation.
+ */
+internal fun beginPersonCutoutGenerationV66(
+    context: Context,
+    clip: TimelineClip,
+): PersonCutoutGenerationStartV66 {
+    val appContext = context.applicationContext
+    val settings = clip.resolvedCutoutV43()
+
+    // Publish the validated size before GpuPersonCutoutSegmenterV47 is lazily constructed. The
+    // selected backend snapshots this once and stays on one persistent engine for the whole run.
+    PpMattingResolutionRuntimeV69.select(settings.mattingSizeV69)
+
+    val dir = personCutoutSourceDirV47(appContext, clip.uri)
+    val signature = personCutoutGenerationSignatureV66(clip)
+    val pending = File(dir, V47_PENDING_MARKER)
+    val matchingPending = pending.isFile &&
+        runCatching { pending.readText() == signature }.getOrDefault(false)
+
+    if (!matchingPending) {
+        clearGenerationMarkersV66(dir)
+        clearDurableMasksV66(appContext, clip.uri)
+    } else {
+        // A crash can leave a half-written temp file. Completed PNGs are atomic rename checkpoints;
+        // temps are never valid resume frames.
+        durableMaskDirV66(appContext, clip.uri).listFiles().orEmpty()
+            .filter { it.name.endsWith(".tmp", ignoreCase = true) }
+            .forEach { runCatching { it.delete() } }
+        runCatching { File(dir, V47_READY_MARKER).delete() }
+        runCatching { File(dir, V69_PARTIAL_MARKER).delete() }
     }
+
     dir.mkdirs()
-    // Persist the exact quality/trim/hair/temporal tuple before decode starts. If a vendor codec
-    // fails only while draining EOS after already producing complete dense coverage, the UI can
-    // safely recover that generation instead of discarding hundreds/thousands of valid mattes.
-    File(dir, V47_PENDING_MARKER).writeText(personCutoutGenerationSignatureV47(clip))
+    pending.writeText(signature)
+
+    val durableTimes = if (matchingPending) durableTimesV66(appContext, clip) else emptyList()
+    return PersonCutoutGenerationStartV66(
+        resumed = matchingPending && durableTimes.isNotEmpty(),
+        durableTimesUs = durableTimes,
+    )
+}
+
+/** Historical entry point retained for source compatibility. */
+internal fun preparePersonCutoutGenerationV47(context: Context, clip: TimelineClip) {
+    beginPersonCutoutGenerationV66(context, clip)
 }
 
 internal fun markPersonCutoutGenerationV47Ready(context: Context, clip: TimelineClip) {
-    val dir = personCutoutSourceDirV47(context, clip.uri).apply { mkdirs() }
-    File(dir, V47_READY_MARKER).writeText(personCutoutGenerationSignatureV47(clip))
+    val dir = personCutoutSourceDirV47(context.applicationContext, clip.uri).apply { mkdirs() }
+    File(dir, V47_READY_MARKER).writeText(personCutoutGenerationSignatureV66(clip))
     runCatching { File(dir, V47_PENDING_MARKER).delete() }
+    runCatching { File(dir, V69_PARTIAL_MARKER).delete() }
+}
+
+/**
+ * Cancel is terminal for this run but not destructive. Durable PNGs stay available to preview/export;
+ * the pending marker is replaced by a signature-matched partial marker so Resume is not offered.
+ */
+internal fun markPersonCutoutGenerationV69Partial(context: Context, clip: TimelineClip) {
+    val dir = personCutoutSourceDirV47(context.applicationContext, clip.uri).apply { mkdirs() }
+    File(dir, V69_PARTIAL_MARKER).writeText(personCutoutGenerationSignatureV66(clip))
+    runCatching { File(dir, V47_PENDING_MARKER).delete() }
+    runCatching { File(dir, V47_READY_MARKER).delete() }
 }
 
 internal fun hasPersonCutoutGenerationV47Marker(context: Context, clip: TimelineClip): Boolean {
-    val marker = File(personCutoutSourceDirV47(context, clip.uri), V47_READY_MARKER)
+    val marker = File(personCutoutSourceDirV47(context.applicationContext, clip.uri), V47_READY_MARKER)
     if (!marker.isFile) return false
-    return runCatching { marker.readText() == personCutoutGenerationSignatureV47(clip) }.getOrDefault(false)
+    return runCatching { marker.readText() == personCutoutGenerationSignatureV66(clip) }.getOrDefault(false)
 }
 
 internal fun hasPersonCutoutGenerationV47PendingMarker(context: Context, clip: TimelineClip): Boolean {
-    val marker = File(personCutoutSourceDirV47(context, clip.uri), V47_PENDING_MARKER)
+    val marker = File(personCutoutSourceDirV47(context.applicationContext, clip.uri), V47_PENDING_MARKER)
     if (!marker.isFile) return false
-    return runCatching { marker.readText() == personCutoutGenerationSignatureV47(clip) }.getOrDefault(false)
+    return runCatching { marker.readText() == personCutoutGenerationSignatureV66(clip) }.getOrDefault(false)
 }
 
-private fun personCutoutGenerationSignatureV47(clip: TimelineClip): String {
+internal fun hasPersonCutoutPartialGenerationV69(context: Context, clip: TimelineClip): Boolean {
+    val marker = File(personCutoutSourceDirV47(context.applicationContext, clip.uri), V69_PARTIAL_MARKER)
+    if (!marker.isFile) return false
+    return runCatching { marker.readText() == personCutoutGenerationSignatureV66(clip) }.getOrDefault(false)
+}
+
+internal fun hasResumablePersonCutoutGenerationV66(context: Context, clip: TimelineClip): Boolean =
+    hasPersonCutoutGenerationV47PendingMarker(context, clip) &&
+        durableTimesV66(context.applicationContext, clip).isNotEmpty()
+
+internal fun personCutoutSavedFrameCountV66(context: Context, clip: TimelineClip): Int =
+    if (hasPersonCutoutGenerationV47PendingMarker(context, clip) ||
+        hasPersonCutoutGenerationV47Marker(context, clip) ||
+        hasPersonCutoutPartialGenerationV69(context, clip)
+    ) {
+        durableTimesV66(context.applicationContext, clip).size
+    } else {
+        0
+    }
+
+internal fun personCutoutGenerationSignatureV66(clip: TimelineClip): String {
     val settings = clip.resolvedCutoutV43()
     return buildString {
         append(V47_GENERATION_VERSION)
         append('|'); append(settings.analysisQualityV47.name)
+        append('|'); append(settings.mattingSizeV69)
         append('|'); append(clip.sourceInUs)
         append('|'); append(clip.sourceOutUs)
         append('|'); append(settings.hairDetailV44.toBits())
@@ -53,8 +141,37 @@ private fun personCutoutGenerationSignatureV47(clip: TimelineClip): String {
     }
 }
 
+private fun durableTimesV66(context: Context, clip: TimelineClip): List<Long> {
+    val start = clip.sourceInUs.coerceAtLeast(0L)
+    val end = clip.sourceOutUs.coerceAtLeast(start + 1L)
+    return durableMaskDirV66(context, clip.uri).listFiles().orEmpty()
+        .asSequence()
+        .filter { it.isFile && it.extension.equals("png", ignoreCase = true) }
+        .mapNotNull { it.nameWithoutExtension.toLongOrNull() }
+        .filter { it >= start && it < end }
+        .distinct()
+        .sorted()
+        .toList()
+}
+
+private fun clearGenerationMarkersV66(dir: File) {
+    if (dir.exists()) {
+        dir.listFiles().orEmpty().forEach { file -> runCatching { file.delete() } }
+    }
+    dir.mkdirs()
+}
+
+private fun clearDurableMasksV66(context: Context, sourceUri: String) {
+    val dir = durableMaskDirV66(context, sourceUri)
+    if (!dir.exists()) return
+    dir.listFiles().orEmpty().forEach { file -> runCatching { file.delete() } }
+}
+
+private fun durableMaskDirV66(context: Context, sourceUri: String): File =
+    File(File(context.filesDir, V66_DURABLE_MASK_CACHE_DIR), personCutoutCacheKeyV47(sourceUri))
+
 private fun personCutoutSourceDirV47(context: Context, sourceUri: String): File =
-    File(File(context.filesDir, V50_CACHE_DIR_NAME), personCutoutCacheKeyV47(sourceUri))
+    File(File(context.filesDir, V57_CACHE_DIR_NAME), personCutoutCacheKeyV47(sourceUri))
 
 private fun personCutoutCacheKeyV47(sourceUri: String): String = MessageDigest.getInstance("SHA-256")
     .digest(sourceUri.toByteArray())
