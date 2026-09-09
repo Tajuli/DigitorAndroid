@@ -288,69 +288,44 @@ fun CutoutWorkspaceV50(
                 )
                 val pickerActive = state.qualifierPickerActive
 
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    FilledTonalButton(
-                        onClick = {
+                OutlinedButton(
+                    onClick = {
+                        if (pickerActive) {
                             cancelChromaKeyColorPicker(vm)
-                            vm.setSelectedCutoutV43(
-                                settings.copy(keyRed = 0f, keyGreen = 1f, keyBlue = 0f),
-                                status = "Green screen key selected",
-                                coalesce = false,
-                            )
-                        },
-                    ) { Text("Green", fontSize = 8.sp) }
-                    FilledTonalButton(
-                        onClick = {
-                            cancelChromaKeyColorPicker(vm)
-                            vm.setSelectedCutoutV43(
-                                settings.copy(keyRed = 0f, keyGreen = .12f, keyBlue = 1f),
-                                status = "Blue screen key selected",
-                                coalesce = false,
-                            )
-                        },
-                    ) { Text("Blue", fontSize = 8.sp) }
-                    OutlinedButton(
-                        onClick = {
-                            if (pickerActive) {
-                                cancelChromaKeyColorPicker(vm)
-                            } else {
-                                startChromaKeyColorPicker(vm)
-                            }
-                        },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                    ) {
-                        Box(
-                            Modifier
-                                .size(20.dp)
-                                .background(keyColor, CircleShape)
-                                .border(
-                                    width = if (pickerActive) 2.dp else 1.dp,
-                                    color = if (pickerActive) C50Text else C50Text.copy(alpha = .55f),
-                                    shape = CircleShape,
-                                ),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                Icons.Rounded.Colorize,
-                                contentDescription = "Pick Chroma Key color from preview",
-                                modifier = Modifier.size(11.dp),
-                                tint = C50Text,
-                            )
+                        } else {
+                            startChromaKeyColorPicker(vm)
                         }
-                        Spacer(Modifier.width(5.dp))
-                        Text(if (pickerActive) "Cancel Pick" else "Pick", fontSize = 8.sp)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                ) {
+                    Box(
+                        Modifier
+                            .size(30.dp)
+                            .background(keyColor, CircleShape)
+                            .border(
+                                width = if (pickerActive) 3.dp else 2.dp,
+                                color = if (pickerActive) C50Text else C50Text.copy(alpha = .62f),
+                                shape = CircleShape,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Rounded.Colorize,
+                            contentDescription = "Pick Chroma Key screen color from preview",
+                            modifier = Modifier.size(16.dp),
+                            tint = C50Text,
+                        )
                     }
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (pickerActive) "Cancel Picker" else "Pick Screen Color", fontSize = 9.sp)
                 }
 
                 Text(
                     if (pickerActive) {
-                        "Picker active — tap a clean green/blue background area in the preview above. The sampled color will become the Chroma Key color."
+                        "Picker active — press a clean background area in the preview above. Keep the ring inside one color area; the pixels inside the ring are averaged for a more stable key color."
                     } else {
-                        "How to use: tap Pick, then tap a clean green/blue background area in the preview. Avoid the subject and shadows; adjust Similarity, Softness and Spill only if needed."
+                        "How to use: tap Pick Screen Color, then press a clean background area in the preview. The picker samples a small area instead of one pixel. Avoid the subject, edges and heavy shadows; adjust Similarity, Softness and Spill only if needed."
                     },
                     fontSize = 8.sp,
                     color = if (pickerActive) C50Text else C50Text.copy(alpha = .68f),
