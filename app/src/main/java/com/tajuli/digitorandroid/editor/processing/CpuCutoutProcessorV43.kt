@@ -30,9 +30,9 @@ class CpuCutoutProcessorV43(
     }
 
     /**
-     * V44 mattes are applied in source coordinates before CpuTransformProcessor. Soft MODNet alpha,
-     * edge shift/clean and dehalo are kept close to the GPU shader contract so CPU-only devices do
-     * not fall back to a visibly different binary silhouette.
+     * V44 mattes are applied in source coordinates before CpuTransformProcessor. Soft PP-MattingV2
+     * alpha, edge shift/clean and dehalo stay close to the GPU shader contract so CPU-only devices
+     * do not fall back to a visibly different binary silhouette.
      */
     fun applyPersonToSource(source: Bitmap, clip: TimelineClip, sourceTimeUs: Long): Bitmap {
         val settings = clip.resolvedCutoutV43()
@@ -174,19 +174,49 @@ class CpuCutoutProcessorV43(
         }
     }
 
+    /** Same best-effort partial coverage contract as the GPU shader path. */
     private fun personBracket(clip: TimelineClip, sourceTimeUs: Long): MaskBracket? {
         val frames = PersonCutoutMaskStoreV43.index(context, clip).frames
+            .filter { it.file.isFile }
         if (frames.isEmpty()) return null
-        if (frames.size == 1) return MaskBracket(frames[0], frames[0], 0f)
+
+        val maxGapUs = personCutoutMaxGapUsV47(clip.resolvedCutoutV43().analysisQualityV47)
+        if (frames.size == 1) {
+            val frame = frames[0]
+            return if (abs(sourceTimeUs - frame.sourceTimeUs) <= maxGapUs) {
+                MaskBracket(frame, frame, 0f)
+            } else {
+                null
+            }
+        }
+
         var rightIndex = frames.binarySearchBy(sourceTimeUs) { it.sourceTimeUs }
         if (rightIndex >= 0) return MaskBracket(frames[rightIndex], frames[rightIndex], 0f)
         rightIndex = -rightIndex - 1
         val right = frames.getOrNull(rightIndex)
         val left = frames.getOrNull(rightIndex - 1)
-        if (left == null && right != null) return MaskBracket(right, right, 0f)
-        if (right == null && left != null) return MaskBracket(left, left, 0f)
-        if (left == null || right == null) return null
+
+        if (left == null) {
+            return right?.takeIf { abs(it.sourceTimeUs - sourceTimeUs) <= maxGapUs }
+                ?.let { MaskBracket(it, it, 0f) }
+        }
+        if (right == null) {
+            return left.takeIf { abs(sourceTimeUs - it.sourceTimeUs) <= maxGapUs }
+                ?.let { MaskBracket(it, it, 0f) }
+        }
+
+        val leftDistance = abs(sourceTimeUs - left.sourceTimeUs)
+        val rightDistance = abs(right.sourceTimeUs - sourceTimeUs)
         val span = (right.sourceTimeUs - left.sourceTimeUs).coerceAtLeast(1L)
+        if (span > maxGapUs) {
+            return when {
+                leftDistance <= rightDistance && leftDistance <= maxGapUs -> MaskBracket(left, left, 0f)
+                rightDistance <= maxGapUs -> MaskBracket(right, right, 0f)
+                else -> null
+            }
+        }
+        if (leftDistance > maxGapUs && rightDistance > maxGapUs) return null
+
         val mix = ((sourceTimeUs - left.sourceTimeUs).toDouble() / span.toDouble()).toFloat().coerceIn(0f, 1f)
         return MaskBracket(left, right, mix)
     }
