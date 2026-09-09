@@ -9,6 +9,7 @@ import android.os.Looper
 import android.view.PixelCopy
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -28,13 +29,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -98,6 +102,11 @@ fun GpuPreviewSurface(
 
     var softwareFallbackActive by remember(engine) { mutableStateOf(false) }
     var previewView by remember(engine) { mutableStateOf<DigitorPreviewSurfaceView?>(null) }
+    var pickerRingPosition by remember(engine) { mutableStateOf<Offset?>(null) }
+
+    LaunchedEffect(qualifierPickerActive) {
+        if (!qualifierPickerActive) pickerRingPosition = null
+    }
 
     LaunchedEffect(engine, hasVideo, activeIsImage, gpuFrame?.timelineUs, exportActive) {
         when {
@@ -285,28 +294,52 @@ fun GpuPreviewSurface(
                     renderWidth,
                     renderHeight,
                 ) {
-                    detectTapGestures { pos ->
-                        val callback = onQualifierColorSample
-                        if (callback == null || size.width <= 0 || size.height <= 0) return@detectTapGestures
+                    detectTapGestures(
+                        onPress = { pos ->
+                            pickerRingPosition = pos
+                            tryAwaitRelease()
+                        },
+                        onTap = { pos ->
+                            val callback = onQualifierColorSample
+                            if (callback == null || size.width <= 0 || size.height <= 0) return@detectTapGestures
 
-                        if (showingSoftwareFrame && softwareFrame != null && !softwareFrame.isRecycled) {
-                            sampleBitmapFitColor(
-                                bitmap = softwareFrame,
-                                tapX = pos.x,
-                                tapY = pos.y,
-                                viewWidth = size.width.toFloat(),
-                                viewHeight = size.height.toFloat(),
-                            )?.let { rgb -> callback(rgb[0], rgb[1], rgb[2]) }
-                        } else {
-                            previewView?.sampleVisibleColor(
-                                normalizedX = (pos.x / size.width.toFloat()).coerceIn(0f, 1f),
-                                normalizedY = (pos.y / size.height.toFloat()).coerceIn(0f, 1f),
-                                onColor = callback,
-                            )
-                        }
-                    }
+                            pickerRingPosition = pos
+                            if (showingSoftwareFrame && softwareFrame != null && !softwareFrame.isRecycled) {
+                                sampleBitmapFitColor(
+                                    bitmap = softwareFrame,
+                                    tapX = pos.x,
+                                    tapY = pos.y,
+                                    viewWidth = size.width.toFloat(),
+                                    viewHeight = size.height.toFloat(),
+                                )?.let { rgb -> callback(rgb[0], rgb[1], rgb[2]) }
+                            } else {
+                                previewView?.sampleVisibleColor(
+                                    normalizedX = (pos.x / size.width.toFloat()).coerceIn(0f, 1f),
+                                    normalizedY = (pos.y / size.height.toFloat()).coerceIn(0f, 1f),
+                                    onColor = callback,
+                                )
+                            }
+                        },
+                    )
                 },
             ) {}
+
+            Canvas(fittedModifier) {
+                val center = pickerRingPosition ?: return@Canvas
+                val radius = PICKER_RING_RADIUS_DP.dp.toPx()
+                drawCircle(
+                    color = Color.Black.copy(alpha = .72f),
+                    radius = radius + 1.dp.toPx(),
+                    center = center,
+                    style = Stroke(width = 4.dp.toPx()),
+                )
+                drawCircle(
+                    color = Color.White,
+                    radius = radius,
+                    center = center,
+                    style = Stroke(width = 2.dp.toPx()),
+                )
+            }
         }
     }
 }
@@ -316,6 +349,8 @@ private const val GPU_FRAME_FRESH_TOLERANCE_US = 180_000L
 private const val STALE_FRAME_FALLBACK_US = 250_000L
 private const val FAST_PLACEHOLDER_LONG_EDGE = 480
 private const val SOFTWARE_PREVIEW_LONG_EDGE = REALTIME_PREVIEW_LONG_EDGE
+private const val PICKER_SAMPLE_RADIUS_PX = 7
+private const val PICKER_RING_RADIUS_DP = 20f
 private val PREVIEW_PASTEBOARD_GRAY = Color(0xFF222226)
 
 private fun sampleBitmapFitColor(
@@ -335,18 +370,27 @@ private fun sampleBitmapFitColor(
 
     val centerX = (((tapX - left) / shownWidth) * bitmap.width).toInt().coerceIn(0, bitmap.width - 1)
     val centerY = (((tapY - top) / shownHeight) * bitmap.height).toInt().coerceIn(0, bitmap.height - 1)
-    return averageBitmapNeighborhood(bitmap, centerX, centerY)
+    return averageBitmapNeighborhood(bitmap, centerX, centerY, PICKER_SAMPLE_RADIUS_PX)
 }
 
-private fun averageBitmapNeighborhood(bitmap: Bitmap, centerX: Int, centerY: Int): FloatArray {
+private fun averageBitmapNeighborhood(
+    bitmap: Bitmap,
+    centerX: Int,
+    centerY: Int,
+    radius: Int = PICKER_SAMPLE_RADIUS_PX,
+): FloatArray {
+    val safeRadius = radius.coerceAtLeast(0)
+    val xStart = (centerX - safeRadius).coerceAtLeast(0)
+    val xEnd = (centerX + safeRadius).coerceAtMost(bitmap.width - 1)
+    val yStart = (centerY - safeRadius).coerceAtLeast(0)
+    val yEnd = (centerY + safeRadius).coerceAtMost(bitmap.height - 1)
+
     var rr = 0f
     var gg = 0f
     var bb = 0f
     var count = 0
-    for (dy in -1..1) {
-        for (dx in -1..1) {
-            val x = (centerX + dx).coerceIn(0, bitmap.width - 1)
-            val y = (centerY + dy).coerceIn(0, bitmap.height - 1)
+    for (y in yStart..yEnd) {
+        for (x in xStart..xEnd) {
             val color = bitmap.getPixel(x, y)
             rr += ((color ushr 16) and 0xFF) / 255f
             gg += ((color ushr 8) and 0xFF) / 255f
@@ -354,6 +398,7 @@ private fun averageBitmapNeighborhood(bitmap: Bitmap, centerX: Int, centerY: Int
             count++
         }
     }
+    if (count <= 0) return floatArrayOf(0f, 0f, 0f)
     return floatArrayOf(rr / count, gg / count, bb / count)
 }
 
@@ -401,10 +446,10 @@ private class DigitorPreviewSurfaceView(
         val centerX = (normalizedX.coerceIn(0f, 1f) * (bufferWidth - 1)).toInt().coerceIn(0, bufferWidth - 1)
         val centerY = (normalizedY.coerceIn(0f, 1f) * (bufferHeight - 1)).toInt().coerceIn(0, bufferHeight - 1)
         val sourceRect = Rect(
-            (centerX - 1).coerceAtLeast(0),
-            (centerY - 1).coerceAtLeast(0),
-            (centerX + 2).coerceAtMost(bufferWidth),
-            (centerY + 2).coerceAtMost(bufferHeight),
+            (centerX - PICKER_SAMPLE_RADIUS_PX).coerceAtLeast(0),
+            (centerY - PICKER_SAMPLE_RADIUS_PX).coerceAtLeast(0),
+            (centerX + PICKER_SAMPLE_RADIUS_PX + 1).coerceAtMost(bufferWidth),
+            (centerY + PICKER_SAMPLE_RADIUS_PX + 1).coerceAtMost(bufferHeight),
         )
         if (sourceRect.width() <= 0 || sourceRect.height() <= 0) return
 
@@ -417,7 +462,12 @@ private class DigitorPreviewSurfaceView(
                 { result ->
                     try {
                         if (result == PixelCopy.SUCCESS && !sample.isRecycled) {
-                            val rgb = averageBitmapNeighborhood(sample, sample.width / 2, sample.height / 2)
+                            val rgb = averageBitmapNeighborhood(
+                                sample,
+                                sample.width / 2,
+                                sample.height / 2,
+                                PICKER_SAMPLE_RADIUS_PX,
+                            )
                             onColor(rgb[0], rgb[1], rgb[2])
                         }
                     } finally {
