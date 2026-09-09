@@ -10,7 +10,6 @@ import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
-import java.nio.ByteOrder
 import kotlin.math.max
 import kotlin.math.sqrt
 
@@ -18,8 +17,6 @@ private const val PERSON_DETECTOR_MODEL_ASSET_V57 = "efficientdet_lite0_int8.tfl
 private const val PERSON_SEMANTIC_MODEL_ASSET_V58 = "selfie_multiclass_256x256.tflite"
 private const val PERSON_DETECTOR_SCORE_THRESHOLD_V58 = .15f
 private const val PERSON_DETECTOR_MAX_RESULTS_V58 = 20
-private const val PERSON_SEMANTIC_CONFIDENCE_V64 = .18f
-private const val PERSON_SEMANTIC_BACKGROUND_MARGIN_V64 = .06f
 private const val PERSON_GUARD_SIDE_PAD_V65 = .07f
 private const val PERSON_GUARD_TOP_PAD_V65 = .12f
 private const val PERSON_GUARD_BOTTOM_PAD_V65 = .07f
@@ -36,7 +33,7 @@ internal data class PersonDetectionV57(
 /**
  * Person ROI localizer used before PP-MattingV2.
  *
- * SelfieMulticlass confidence masks are evaluated on every analyzed frame and are preferred for
+ * SelfieMulticlass semantic output is evaluated on every analyzed frame and is preferred for
  * close-up portrait ROI geometry. EfficientDet-Lite0 remains an independent fallback. Neither is
  * used as final alpha.
  *
@@ -44,10 +41,14 @@ internal data class PersonDetectionV57(
  * is deliberately slow. Extra top/side/bottom guard protects hijab/hair/head/arms/hands from the
  * hard outside-ROI clamp during fast movement or one weak segmentation frame.
  *
- * V67 keeps synchronous MediaPipe MPImage lifetimes explicit. Input/output MPImages use reference-
- * counted native/direct storage, so leaving hundreds of frame results for GC can progressively grow
- * native pressure on low-memory devices. Semantic scratch arrays are also reused, and EfficientDet
- * is now invoked only when the preferred SelfieMulticlass localizer actually misses.
+ * V68 switches the SelfieMulticlass locator from six deep-copied float confidence masks to one
+ * category mask. MediaPipe's synchronous confidence path allocates width*height*4 bytes for every
+ * class on every frame; the category path needs only one byte per pixel and still preserves the
+ * union of hair/skin/clothes/accessories as the person ROI. Scratch arrays are reused and
+ * EfficientDet is invoked only when the semantic localizer misses.
+ *
+ * BitmapImageBuilder wraps the caller-owned Bitmap. Its MPImage is intentionally not closed here,
+ * because BitmapImageContainer.close() recycles that source Bitmap.
  */
 internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -77,11 +78,8 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
                     .build(),
             )
             .setRunningMode(RunningMode.IMAGE)
-            // Confidence masks are the authoritative semantic localizer. If they are unavailable,
-            // EfficientDet is already our independent fallback, so avoid allocating a redundant
-            // category-mask MPImage on every High/every-frame analysis frame.
-            .setOutputCategoryMask(false)
-            .setOutputConfidenceMasks(true)
+            .setOutputCategoryMask(true)
+            .setOutputConfidenceMasks(false)
             .build(),
     )
 
@@ -89,27 +87,21 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
     private var guardedFrameWidth: Int = 0
     private var guardedFrameHeight: Int = 0
 
-    // SelfieMulticlass is fixed-size in practice, but keep these buffers growable so model/output
-    // changes remain safe without returning to frame-by-frame heap allocation.
-    private var semanticBackground = FloatArray(0)
-    private var semanticPersonConfidence = FloatArray(0)
     private var semanticForeground = BooleanArray(0)
     private var semanticVisited = BooleanArray(0)
     private var semanticQueue = IntArray(0)
 
     val backendLabel: String =
-        "SelfieMulticlass confidence ROI + EfficientDet-Lite0 int8 CPU fallback + motion-safe bbox guard"
+        "SelfieMulticlass category ROI + EfficientDet-Lite0 int8 CPU fallback + motion-safe bbox guard"
 
     fun detectPeople(bitmap: Bitmap): List<PersonDetectionV57> {
         check(!bitmap.isRecycled) { "Cannot detect a person on a recycled bitmap" }
         resetGuardIfDimensionsChanged(bitmap.width, bitmap.height)
 
-        val semanticBounds = runCatching { detectWithSelfieMulticlassConfidence(bitmap) }.getOrNull()
+        val semanticBounds = runCatching { detectWithSelfieMulticlassCategory(bitmap) }.getOrNull()
         val rawCandidate = if (semanticBounds != null) {
-            PersonDetectionV57(semanticBounds, .98f, "SelfieMulticlass confidence")
+            PersonDetectionV57(semanticBounds, .98f, "SelfieMulticlass category")
         } else {
-            // SelfieMulticlass has always been preferred. Do not run EfficientDet eagerly and then
-            // discard its result on every successful semantic frame.
             val efficientDetPeople = runCatching { detectWithEfficientDet(bitmap) }.getOrElse { emptyList() }
             chooseEfficientDetCandidate(efficientDetPeople)
         }
@@ -193,98 +185,53 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
     }
 
     private fun detectWithEfficientDet(bitmap: Bitmap): List<PersonDetectionV57> {
-        val inputImage = BitmapImageBuilder(bitmap).build()
-        return try {
-            val result = detector.detect(inputImage)
-            result.detections().mapNotNull { detection ->
-                val personCategory = detection.categories()
-                    .filter { category ->
-                        category.categoryName().trim().equals("person", ignoreCase = true) ||
-                            category.displayName().trim().equals("person", ignoreCase = true) ||
-                            category.index() == 0
-                    }
-                    .maxByOrNull { it.score() }
-                    ?: return@mapNotNull null
+        check(!bitmap.isRecycled) { "Cannot run EfficientDet on a recycled bitmap" }
+        val result = detector.detect(BitmapImageBuilder(bitmap).build())
+        return result.detections().mapNotNull { detection ->
+            val personCategory = detection.categories()
+                .filter { category ->
+                    category.categoryName().trim().equals("person", ignoreCase = true) ||
+                        category.displayName().trim().equals("person", ignoreCase = true) ||
+                        category.index() == 0
+                }
+                .maxByOrNull { it.score() }
+                ?: return@mapNotNull null
 
-                val box = detection.boundingBox()
-                val left = box.left.coerceIn(0f, bitmap.width.toFloat())
-                val top = box.top.coerceIn(0f, bitmap.height.toFloat())
-                val right = box.right.coerceIn(0f, bitmap.width.toFloat())
-                val bottom = box.bottom.coerceIn(0f, bitmap.height.toFloat())
-                if (right - left < 2f || bottom - top < 2f) return@mapNotNull null
+            val box = detection.boundingBox()
+            val left = box.left.coerceIn(0f, bitmap.width.toFloat())
+            val top = box.top.coerceIn(0f, bitmap.height.toFloat())
+            val right = box.right.coerceIn(0f, bitmap.width.toFloat())
+            val bottom = box.bottom.coerceIn(0f, bitmap.height.toFloat())
+            if (right - left < 2f || bottom - top < 2f) return@mapNotNull null
 
-                PersonDetectionV57(RectF(left, top, right, bottom), personCategory.score(), "EfficientDet")
-            }
-        } finally {
-            // MPImage is reference counted. Release its bitmap container immediately instead of
-            // waiting for GC during a hundreds/thousands-frame analysis.
-            runCatching { inputImage.close() }
+            PersonDetectionV57(RectF(left, top, right, bottom), personCategory.score(), "EfficientDet")
         }
     }
 
-    private fun detectWithSelfieMulticlassConfidence(bitmap: Bitmap): RectF? {
-        val inputImage = BitmapImageBuilder(bitmap).build()
+    private fun detectWithSelfieMulticlassCategory(bitmap: Bitmap): RectF? {
+        check(!bitmap.isRecycled) { "Cannot run SelfieMulticlass on a recycled bitmap" }
+        val result = semanticFallback.segment(BitmapImageBuilder(bitmap).build())
+        val mpMask = result.categoryMask().orElse(null) ?: return null
         try {
-            val result = semanticFallback.segment(inputImage)
-            val masks = result.confidenceMasks().orElse(emptyList())
-            try {
-                if (masks.size < 2) return null
+            val width = mpMask.width.coerceAtLeast(1)
+            val height = mpMask.height.coerceAtLeast(1)
+            val count = width * height
+            ensureSemanticCapacity(count)
 
-                val width = masks.first().width.coerceAtLeast(1)
-                val height = masks.first().height.coerceAtLeast(1)
-                val count = width * height
-                ensureSemanticCapacity(count)
-                semanticPersonConfidence.fill(0f, 0, count)
-
-                fun readMask(maskIndex: Int, destination: FloatArray): Boolean {
-                    val mask = masks.getOrNull(maskIndex) ?: return false
-                    if (mask.width != width || mask.height != height) return false
-                    val bytes = ByteBufferExtractor.extract(mask).order(ByteOrder.nativeOrder())
-                    bytes.rewind()
-                    val floats = bytes.asFloatBuffer()
-                    if (floats.remaining() < count) return false
-                    for (i in 0 until count) destination[i] = floats.get(i)
-                    return true
-                }
-
-                if (!readMask(0, semanticBackground)) return null
-
-                var usableMasks = 0
-                for (maskIndex in 1 until masks.size) {
-                    val mask = masks[maskIndex]
-                    if (mask.width != width || mask.height != height) continue
-                    val bytes = ByteBufferExtractor.extract(mask).order(ByteOrder.nativeOrder())
-                    bytes.rewind()
-                    val floats = bytes.asFloatBuffer()
-                    if (floats.remaining() < count) continue
-                    usableMasks++
-                    for (i in 0 until count) {
-                        val confidence = floats.get(i)
-                        if (confidence > semanticPersonConfidence[i]) semanticPersonConfidence[i] = confidence
-                    }
-                }
-                if (usableMasks == 0) return null
-
-                for (i in 0 until count) {
-                    val human = semanticPersonConfidence[i]
-                    semanticForeground[i] = human >= PERSON_SEMANTIC_CONFIDENCE_V64 &&
-                        human >= semanticBackground[i] + PERSON_SEMANTIC_BACKGROUND_MARGIN_V64
-                }
-                return connectedPersonBounds(semanticForeground, width, height, bitmap)
-            } finally {
-                // Synchronous ImageSegmenter results own reference-counted MPImages backed by direct
-                // mask storage. Release all copies deterministically before processing the next frame.
-                masks.forEach { mask -> runCatching { mask.close() } }
+            val buffer = ByteBufferExtractor.extract(mpMask)
+            buffer.rewind()
+            if (buffer.remaining() < count) return null
+            for (i in 0 until count) {
+                semanticForeground[i] = (buffer.get().toInt() and 0xFF) != 0
             }
+            return connectedPersonBounds(semanticForeground, width, height, bitmap)
         } finally {
-            runCatching { inputImage.close() }
+            runCatching { mpMask.close() }
         }
     }
 
     private fun ensureSemanticCapacity(count: Int) {
-        if (semanticBackground.size >= count) return
-        semanticBackground = FloatArray(count)
-        semanticPersonConfidence = FloatArray(count)
+        if (semanticForeground.size >= count) return
         semanticForeground = BooleanArray(count)
         semanticVisited = BooleanArray(count)
         semanticQueue = IntArray(count)
