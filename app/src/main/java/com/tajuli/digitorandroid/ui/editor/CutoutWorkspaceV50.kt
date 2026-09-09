@@ -1,23 +1,32 @@
 package com.tajuli.digitorandroid.ui.editor
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Colorize
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -43,6 +52,10 @@ fun CutoutWorkspaceV50(
     val state by vm.state.collectAsState()
     val clip = state.project.clip(state.selectedClipId)
     val isVisualClip = clip != null && state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO
+
+    DisposableEffect(Unit) {
+        onDispose { cancelChromaKeyColorPicker(vm) }
+    }
 
     Column(
         modifier
@@ -96,6 +109,7 @@ fun CutoutWorkspaceV50(
         ) {
             OutlinedButton(
                 onClick = {
+                    cancelChromaKeyColorPicker(vm)
                     vm.setSelectedCutoutV43(
                         settings.copy(mode = CutoutModeV43.NONE),
                         status = "Cutout off",
@@ -108,7 +122,10 @@ fun CutoutWorkspaceV50(
 
             FilledTonalButton(
                 enabled = !analysisBusy,
-                onClick = { vm.enablePersonCutoutV43(settings) },
+                onClick = {
+                    cancelChromaKeyColorPicker(vm)
+                    vm.enablePersonCutoutV43(settings)
+                },
             ) {
                 Text(
                     if (settings.mode == CutoutModeV43.PERSON) "✓ Pro Cutout" else "Pro Cutout",
@@ -263,9 +280,22 @@ fun CutoutWorkspaceV50(
             }
 
             CutoutModeV43.CHROMA_KEY -> {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                val keyColor = Color(
+                    red = settings.keyRed.coerceIn(0f, 1f),
+                    green = settings.keyGreen.coerceIn(0f, 1f),
+                    blue = settings.keyBlue.coerceIn(0f, 1f),
+                    alpha = 1f,
+                )
+                val pickerActive = state.qualifierPickerActive
+
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     FilledTonalButton(
                         onClick = {
+                            cancelChromaKeyColorPicker(vm)
                             vm.setSelectedCutoutV43(
                                 settings.copy(keyRed = 0f, keyGreen = 1f, keyBlue = 0f),
                                 status = "Green screen key selected",
@@ -275,6 +305,7 @@ fun CutoutWorkspaceV50(
                     ) { Text("Green", fontSize = 8.sp) }
                     FilledTonalButton(
                         onClick = {
+                            cancelChromaKeyColorPicker(vm)
                             vm.setSelectedCutoutV43(
                                 settings.copy(keyRed = 0f, keyGreen = .12f, keyBlue = 1f),
                                 status = "Blue screen key selected",
@@ -282,7 +313,55 @@ fun CutoutWorkspaceV50(
                             )
                         },
                     ) { Text("Blue", fontSize = 8.sp) }
+                    OutlinedButton(
+                        onClick = {
+                            if (pickerActive) {
+                                cancelChromaKeyColorPicker(vm)
+                            } else {
+                                startChromaKeyColorPicker(vm)
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) {
+                        Box(
+                            Modifier
+                                .size(20.dp)
+                                .background(keyColor, CircleShape)
+                                .border(
+                                    width = if (pickerActive) 2.dp else 1.dp,
+                                    color = if (pickerActive) C50Text else C50Text.copy(alpha = .55f),
+                                    shape = CircleShape,
+                                ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Rounded.Colorize,
+                                contentDescription = "Pick Chroma Key color from preview",
+                                modifier = Modifier.size(11.dp),
+                                tint = C50Text,
+                            )
+                        }
+                        Spacer(Modifier.width(5.dp))
+                        Text(if (pickerActive) "Cancel Pick" else "Pick", fontSize = 8.sp)
+                    }
                 }
+
+                Text(
+                    if (pickerActive) {
+                        "Picker active — tap a clean green/blue background area in the preview above. The sampled color will become the Chroma Key color."
+                    } else {
+                        "How to use: tap Pick, then tap a clean green/blue background area in the preview. Avoid the subject and shadows; adjust Similarity, Softness and Spill only if needed."
+                    },
+                    fontSize = 8.sp,
+                    color = if (pickerActive) C50Text else C50Text.copy(alpha = .68f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            if (pickerActive) Color.White.copy(alpha = .08f) else Color.Transparent,
+                            RoundedCornerShape(6.dp),
+                        )
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                )
 
                 CutoutSliderV50("Key R", settings.keyRed, 0f..1f) {
                     vm.setSelectedCutoutV43(settings.copy(keyRed = it), status = "Chroma key color updated")
