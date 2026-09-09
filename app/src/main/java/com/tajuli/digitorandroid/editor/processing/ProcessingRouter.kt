@@ -7,6 +7,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.render.VisualOverlayRenderEnvironmentV19
 import java.io.File
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 
 @UnstableApi
 class ProcessingRouter(context: Context) {
@@ -31,9 +32,10 @@ class ProcessingRouter(context: Context) {
         // stages use whatever durable matte frames already exist and pass through the original frame
         // wherever no sufficiently-near matte exists. If analysis is still running, pause it first
         // so export can acquire the shared decoder/GPU lease without running two fragile native
-        // pipelines concurrently. The pending checkpoint remains resumable after export.
+        // pipelines concurrently. Wait on StateFlow instead of blocking the UI thread on the lease.
         if (CutoutAnalysisRuntimeV66.requestPauseForExport()) {
             onProgress(ExportProgress.Stage("Pausing Pro Cutout for export…", 0f))
+            CutoutAnalysisRuntimeV66.state.first { !it.busy }
         }
 
         if (capabilities.supportsGpuEditing()) {
