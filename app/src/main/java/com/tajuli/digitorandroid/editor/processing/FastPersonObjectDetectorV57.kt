@@ -11,12 +11,15 @@ import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
 import kotlin.math.max
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 private const val PERSON_DETECTOR_MODEL_ASSET_V57 = "efficientdet_lite0_int8.tflite"
 private const val PERSON_SEMANTIC_MODEL_ASSET_V58 = "selfie_multiclass_256x256.tflite"
 private const val PERSON_DETECTOR_SCORE_THRESHOLD_V58 = .15f
 private const val PERSON_DETECTOR_MAX_RESULTS_V58 = 20
+private const val PERSON_SEMANTIC_INPUT_LONG_EDGE_V69 = 384
+private const val PERSON_DETECTOR_INPUT_LONG_EDGE_V69 = 640
 private const val PERSON_GUARD_SIDE_PAD_V65 = .07f
 private const val PERSON_GUARD_TOP_PAD_V65 = .12f
 private const val PERSON_GUARD_BOTTOM_PAD_V65 = .07f
@@ -47,8 +50,10 @@ internal data class PersonDetectionV57(
  * union of hair/skin/clothes/accessories as the person ROI. Scratch arrays are reused and
  * EfficientDet is invoked only when the semantic localizer misses.
  *
- * BitmapImageBuilder wraps the caller-owned Bitmap. Its MPImage is intentionally not closed here,
- * because BitmapImageContainer.close() recycles that source Bitmap.
+ * V69 fixes the caller-Bitmap ownership trap without leaving MediaPipe input MPImages unclosed.
+ * Each MediaPipe call now gets a small private Bitmap. The MPImage is explicitly closed after the
+ * synchronous task returns, so BitmapImageContainer may recycle only our private copy and every
+ * native image wrapper has a deterministic lifetime during long High/every-frame runs.
  */
 internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -92,7 +97,7 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
     private var semanticQueue = IntArray(0)
 
     val backendLabel: String =
-        "SelfieMulticlass category ROI + EfficientDet-Lite0 int8 CPU fallback + motion-safe bbox guard"
+        "SelfieMulticlass category ROI + bounded/closed MediaPipe input + EfficientDet-Lite0 CPU fallback + motion-safe bbox guard"
 
     fun detectPeople(bitmap: Bitmap): List<PersonDetectionV57> {
         check(!bitmap.isRecycled) { "Cannot detect a person on a recycled bitmap" }
@@ -186,48 +191,79 @@ internal class FastPersonObjectDetectorV57(context: Context) : AutoCloseable {
 
     private fun detectWithEfficientDet(bitmap: Bitmap): List<PersonDetectionV57> {
         check(!bitmap.isRecycled) { "Cannot run EfficientDet on a recycled bitmap" }
-        val result = detector.detect(BitmapImageBuilder(bitmap).build())
-        return result.detections().mapNotNull { detection ->
-            val personCategory = detection.categories()
-                .filter { category ->
-                    category.categoryName().trim().equals("person", ignoreCase = true) ||
-                        category.displayName().trim().equals("person", ignoreCase = true) ||
-                        category.index() == 0
-                }
-                .maxByOrNull { it.score() }
-                ?: return@mapNotNull null
+        val owned = privateMediaPipeBitmap(bitmap, PERSON_DETECTOR_INPUT_LONG_EDGE_V69)
+        val inputImage = BitmapImageBuilder(owned).build()
+        try {
+            val scaleX = bitmap.width.toFloat() / owned.width.toFloat()
+            val scaleY = bitmap.height.toFloat() / owned.height.toFloat()
+            val result = detector.detect(inputImage)
+            return result.detections().mapNotNull { detection ->
+                val personCategory = detection.categories()
+                    .filter { category ->
+                        category.categoryName().trim().equals("person", ignoreCase = true) ||
+                            category.displayName().trim().equals("person", ignoreCase = true) ||
+                            category.index() == 0
+                    }
+                    .maxByOrNull { it.score() }
+                    ?: return@mapNotNull null
 
-            val box = detection.boundingBox()
-            val left = box.left.coerceIn(0f, bitmap.width.toFloat())
-            val top = box.top.coerceIn(0f, bitmap.height.toFloat())
-            val right = box.right.coerceIn(0f, bitmap.width.toFloat())
-            val bottom = box.bottom.coerceIn(0f, bitmap.height.toFloat())
-            if (right - left < 2f || bottom - top < 2f) return@mapNotNull null
+                val box = detection.boundingBox()
+                val left = (box.left * scaleX).coerceIn(0f, bitmap.width.toFloat())
+                val top = (box.top * scaleY).coerceIn(0f, bitmap.height.toFloat())
+                val right = (box.right * scaleX).coerceIn(0f, bitmap.width.toFloat())
+                val bottom = (box.bottom * scaleY).coerceIn(0f, bitmap.height.toFloat())
+                if (right - left < 2f || bottom - top < 2f) return@mapNotNull null
 
-            PersonDetectionV57(RectF(left, top, right, bottom), personCategory.score(), "EfficientDet")
+                PersonDetectionV57(RectF(left, top, right, bottom), personCategory.score(), "EfficientDet")
+            }
+        } finally {
+            runCatching { inputImage.close() }
+            if (!owned.isRecycled) owned.recycle()
         }
     }
 
     private fun detectWithSelfieMulticlassCategory(bitmap: Bitmap): RectF? {
         check(!bitmap.isRecycled) { "Cannot run SelfieMulticlass on a recycled bitmap" }
-        val result = semanticFallback.segment(BitmapImageBuilder(bitmap).build())
-        val mpMask = result.categoryMask().orElse(null) ?: return null
+        val owned = privateMediaPipeBitmap(bitmap, PERSON_SEMANTIC_INPUT_LONG_EDGE_V69)
+        val inputImage = BitmapImageBuilder(owned).build()
         try {
-            val width = mpMask.width.coerceAtLeast(1)
-            val height = mpMask.height.coerceAtLeast(1)
-            val count = width * height
-            ensureSemanticCapacity(count)
+            val result = semanticFallback.segment(inputImage)
+            val mpMask = result.categoryMask().orElse(null) ?: return null
+            try {
+                val width = mpMask.width.coerceAtLeast(1)
+                val height = mpMask.height.coerceAtLeast(1)
+                val count = width * height
+                ensureSemanticCapacity(count)
 
-            val buffer = ByteBufferExtractor.extract(mpMask)
-            buffer.rewind()
-            if (buffer.remaining() < count) return null
-            for (i in 0 until count) {
-                semanticForeground[i] = (buffer.get().toInt() and 0xFF) != 0
+                val buffer = ByteBufferExtractor.extract(mpMask)
+                buffer.rewind()
+                if (buffer.remaining() < count) return null
+                for (i in 0 until count) {
+                    semanticForeground[i] = (buffer.get().toInt() and 0xFF) != 0
+                }
+                return connectedPersonBounds(semanticForeground, width, height, bitmap)
+            } finally {
+                runCatching { mpMask.close() }
             }
-            return connectedPersonBounds(semanticForeground, width, height, bitmap)
         } finally {
-            runCatching { mpMask.close() }
+            runCatching { inputImage.close() }
+            if (!owned.isRecycled) owned.recycle()
         }
+    }
+
+    private fun privateMediaPipeBitmap(source: Bitmap, maxLongEdge: Int): Bitmap {
+        val longEdge = max(source.width, source.height).coerceAtLeast(1)
+        if (longEdge <= maxLongEdge) {
+            return source.copy(Bitmap.Config.ARGB_8888, false)
+                ?: error("Could not create owned MediaPipe input bitmap")
+        }
+        val scale = maxLongEdge.toFloat() / longEdge.toFloat()
+        val width = (source.width * scale).roundToInt().coerceAtLeast(1)
+        val height = (source.height * scale).roundToInt().coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(source, width, height, true)
+        if (scaled !== source) return scaled
+        return source.copy(Bitmap.Config.ARGB_8888, false)
+            ?: error("Could not create owned MediaPipe input bitmap")
     }
 
     private fun ensureSemanticCapacity(count: Int) {
