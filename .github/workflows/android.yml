@@ -9,10 +9,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      # Phone APKs package a genuine fixed-shape PP-MattingV2 384 graph. The 512 ONNX remains only
-      # as the lazy CPU reliability fallback if ncnn Vulkan itself cannot run.
-      DIGITOR_PPMATTING_TRUE_384: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -20,7 +16,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Export stable fixed PP-MattingV2 384 graph
+      - name: Export fixed PP-MattingV2 256, 320 and 384 graphs
         shell: bash
         run: |
           set -euo pipefail
@@ -44,30 +40,50 @@ jobs:
           test "$(stat -c%s "$OFFICIAL_512")" -gt 5000000
           echo "Stable official human checkpoint: $(sha256sum "$OFFICIAL_512" | cut -d' ' -f1)"
 
-          # The short CI-side 384 adaptation experiment was removed after physical-device exports
-          # showed repeatable holes through valid shoulder/arm/face regions even after all alpha
-          # gating was disabled. Keep the proven official human weights and specialize only the graph
-          # shape to 384x384. This preserves the earlier intact-human behavior while retaining the
-          # detector-authoritative ROI and the lower 384 inference cost.
-          TRUE384_ONNX="$GITHUB_WORKSPACE/app/build/generated/ppMattingV2True384/ppmattingv2_stdc1_human_384.onnx"
+          TRUE256="$GITHUB_WORKSPACE/app/build/generated/ppMattingV2True256/ppmattingv2_stdc1_human_256.onnx"
+          TRUE320="$GITHUB_WORKSPACE/app/build/generated/ppMattingV2True320/ppmattingv2_stdc1_human_320.onnx"
+          TRUE384="$GITHUB_WORKSPACE/app/build/generated/ppMattingV2True384/ppmattingv2_stdc1_human_384.onnx"
+
+          PADDLESEG_DIR="$PADDLESEG_DIR" \
+          PPMATTING_CONFIG="$GITHUB_WORKSPACE/tools/ppmattingv2/ppmattingv2-stdc1-human_256-finetune.yml" \
+          PPMATTING_CHECKPOINT="$OFFICIAL_512" \
+          OUTPUT_ONNX="$TRUE256" \
+            bash "$GITHUB_WORKSPACE/tools/ppmattingv2/export_true_256.sh"
+
+          PADDLESEG_DIR="$PADDLESEG_DIR" \
+          PPMATTING_CONFIG="$GITHUB_WORKSPACE/tools/ppmattingv2/ppmattingv2-stdc1-human_320-finetune.yml" \
+          PPMATTING_CHECKPOINT="$OFFICIAL_512" \
+          OUTPUT_ONNX="$TRUE320" \
+            bash "$GITHUB_WORKSPACE/tools/ppmattingv2/export_true_320.sh"
+
           PADDLESEG_DIR="$PADDLESEG_DIR" \
           PPMATTING_CONFIG="$GITHUB_WORKSPACE/tools/ppmattingv2/ppmattingv2-stdc1-human_384-finetune.yml" \
           PPMATTING_CHECKPOINT="$OFFICIAL_512" \
-          OUTPUT_ONNX="$TRUE384_ONNX" \
+          OUTPUT_ONNX="$TRUE384" \
             bash "$GITHUB_WORKSPACE/tools/ppmattingv2/export_true_384.sh"
 
-          python - "$TRUE384_ONNX" <<'PY'
+          python - "$TRUE256" 256 "$TRUE320" 320 "$TRUE384" 384 <<'PY'
           import os, sys, onnx
-          onnx_path = sys.argv[1]
-          model = onnx.load(onnx_path)
-          onnx.checker.check_model(model)
-          dims = [d.dim_value for d in model.graph.input[0].type.tensor_type.shape.dim]
-          assert dims == [1, 3, 384, 384], dims
-          print(
-              f"Stable true-384 ONNX ready: {os.path.getsize(onnx_path) / 1024 / 1024:.1f} MiB, "
-              f"input={dims}, weights=official-human-512"
-          )
+          pairs = list(zip(sys.argv[1::2], map(int, sys.argv[2::2])))
+          for path, size in pairs:
+              model = onnx.load(path)
+              onnx.checker.check_model(model)
+              dims = [d.dim_value for d in model.graph.input[0].type.tensor_type.shape.dim]
+              expected = [1, 3, size, size]
+              assert dims == expected, (path, dims, expected)
+              print(f"Fixed {size} ONNX ready: {os.path.getsize(path) / 1024 / 1024:.1f} MiB, input={dims}")
           PY
+
+      - name: Upload fixed PP-MattingV2 ONNX graphs
+        uses: actions/upload-artifact@v4
+        with:
+          name: Digitor-PPMattingV2-fixed-onnx
+          path: |
+            app/build/generated/ppMattingV2True256/ppmattingv2_stdc1_human_256.onnx
+            app/build/generated/ppMattingV2True320/ppmattingv2_stdc1_human_320.onnx
+            app/build/generated/ppMattingV2True384/ppmattingv2_stdc1_human_384.onnx
+          if-no-files-found: error
+          retention-days: 1
 
       - uses: actions/setup-java@v4
         with:
@@ -101,6 +117,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Download fixed PP-MattingV2 ONNX graphs
+        uses: actions/download-artifact@v4
+        with:
+          name: Digitor-PPMattingV2-fixed-onnx
+          path: app/build/generated
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

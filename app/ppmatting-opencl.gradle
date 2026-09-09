@@ -1,11 +1,8 @@
 // PP-MattingV2 GPU backend for Android.
 //
-// Paddle Lite OpenCL was process-fatal on the target Symphony Z60 / UNISOC T606 firmware.
-// This build therefore converts PP-MattingV2 to ncnn and runs the neural graph through Vulkan.
-//
-// DIGITOR_PPMATTING_TRUE_384=1 switches the primary Vulkan source to a genuine fixed-shape
-// 384x384 PaddleSeg export. Local builds without that env var keep the proven 512 graph. The 512
-// ONNX also stays packaged as the lazy ORT CPU reliability fallback for phone builds.
+// Paddle Lite OpenCL was process-fatal on the target Symphony Z60 / UNISOC T606 firmware. V69
+// packages four genuine fixed ncnn Vulkan graphs (256/320/384/512). Runtime loads exactly one graph
+// selected by the user; no engine or tensor-size transition is performed during an analysis run.
 
 import java.security.MessageDigest
 
@@ -26,14 +23,20 @@ def ncnnRuntimeRoot = file("${generatedRoot}/ncnnRuntime")
 def optimizedAssetsDir = file("${generatedRoot}/assets")
 
 def fallback512Onnx = file("${buildDir}/generated/ppMattingV2Assets/ppmattingv2_stdc1_human_512.onnx")
+def true256Onnx = file("${buildDir}/generated/ppMattingV2True256/ppmattingv2_stdc1_human_256.onnx")
+def true320Onnx = file("${buildDir}/generated/ppMattingV2True320/ppmattingv2_stdc1_human_320.onnx")
 def true384Onnx = file("${buildDir}/generated/ppMattingV2True384/ppmattingv2_stdc1_human_384.onnx")
-def useTrue384 = (System.getenv("DIGITOR_PPMATTING_TRUE_384") ?: "0").trim() == "1"
-def modelSize = useTrue384 ? 384 : 512
-def sourceOnnx = useTrue384 ? true384Onnx : fallback512Onnx
+def modelSizes = [256, 320, 384, 512]
+def sourceOnnxBySize = [
+        256: true256Onnx,
+        320: true320Onnx,
+        384: true384Onnx,
+        512: fallback512Onnx,
+]
 
-def outputParam = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.ncnn.param")
-def outputBin = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.ncnn.bin")
-def outputProfile = file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan.profile")
+def outputParamFor = { int size -> file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan_${size}.ncnn.param") }
+def outputBinFor = { int size -> file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan_${size}.ncnn.bin") }
+def outputProfileFor = { int size -> file("${optimizedAssetsDir}/ppmattingv2_stdc1_human_vulkan_${size}.profile") }
 
 // Keep converter and Android runtime on the exact same ncnn generation.
 def pnnxZip = file("${downloadsDir}/${pnnxArchiveName}")
@@ -176,66 +179,71 @@ tasks.register("prepareNcnnVulkanRuntime") {
     }
 }
 
-tasks.register("preparePpMattingNcnnModel") {
-    dependsOn("downloadPpMattingV2Model", "preparePnnxForPpMatting")
-    inputs.file(sourceOnnx)
-    outputs.files(outputParam, outputBin, outputProfile)
-    doLast {
-        if (useTrue384 && (!true384Onnx.isFile() || true384Onnx.length() < 30_000_000L)) {
-            throw new GradleException(
-                "DIGITOR_PPMATTING_TRUE_384=1 but the fixed 384 ONNX export is missing: ${true384Onnx}. " +
-                "Run tools/ppmattingv2/export_true_384.sh before Gradle."
-            )
-        }
-        if (!sourceOnnx.isFile() || sourceOnnx.length() < 30_000_000L) {
-            throw new GradleException("PP-MattingV2 ${modelSize} ONNX model is missing: ${sourceOnnx}")
-        }
+def allModelOutputs = modelSizes.collectMany { int size ->
+    [outputParamFor(size), outputBinFor(size), outputProfileFor(size)]
+}
 
-        fileTree(sourceOnnx.parentFile).matching { include "*.pnnxsim.onnx" }.files.each { it.delete() }
+tasks.register("preparePpMattingNcnnModels") {
+    dependsOn("downloadPpMattingV2Model", "preparePnnxForPpMatting")
+    inputs.files(sourceOnnxBySize.values())
+    outputs.files(allModelOutputs)
+    doLast {
+        modelSizes.each { int size ->
+            File source = sourceOnnxBySize[size] as File
+            if (!source.isFile() || source.length() < 5_000_000L) {
+                throw new GradleException(
+                    "Fixed PP-MattingV2 ${size} ONNX is missing: ${source}. " +
+                    "CI exports 256/320/384 before Gradle; 512 is the pinned downloaded fallback source."
+                )
+            }
+        }
 
         delete(optimizedAssetsDir)
         optimizedAssetsDir.mkdirs()
 
-        def pnnxArgs = [
-            pnnxTool.absolutePath,
-            sourceOnnx.absolutePath,
-        ]
-        if (!useTrue384) {
-            pnnxArgs.add("inputshape=[1,3,512,512]")
-        }
-        pnnxArgs.addAll([
-            "fp16=1",
-            "ncnnparam=${outputParam.absolutePath}",
-            "ncnnbin=${outputBin.absolutePath}",
-            "pnnxparam=${new File(generatedRoot, 'ppmatting.pnnx.param').absolutePath}",
-            "pnnxbin=${new File(generatedRoot, 'ppmatting.pnnx.bin').absolutePath}",
-            "pnnxpy=${new File(generatedRoot, 'ppmatting_pnnx.py').absolutePath}",
-            "pnnxonnx=${new File(generatedRoot, 'ppmatting.pnnx.onnx').absolutePath}",
-            "ncnnpy=${new File(generatedRoot, 'ppmatting_ncnn.py').absolutePath}",
-        ])
+        modelSizes.each { int size ->
+            File source = sourceOnnxBySize[size] as File
+            File outputParam = outputParamFor(size)
+            File outputBin = outputBinFor(size)
+            File outputProfile = outputProfileFor(size)
 
-        def execResult = providers.exec {
-            workingDir generatedRoot
-            commandLine pnnxArgs
-        }.result.get()
-        execResult.assertNormalExitValue()
+            fileTree(source.parentFile).matching { include "*.pnnxsim.onnx" }.files.each { it.delete() }
 
-        fileTree(sourceOnnx.parentFile).matching { include "*.pnnxsim.onnx" }.files.each { it.delete() }
+            def pnnxArgs = [
+                pnnxTool.absolutePath,
+                source.absolutePath,
+                "fp16=1",
+                "ncnnparam=${outputParam.absolutePath}",
+                "ncnnbin=${outputBin.absolutePath}",
+                "pnnxparam=${new File(generatedRoot, "ppmatting_${size}.pnnx.param").absolutePath}",
+                "pnnxbin=${new File(generatedRoot, "ppmatting_${size}.pnnx.bin").absolutePath}",
+                "pnnxpy=${new File(generatedRoot, "ppmatting_${size}_pnnx.py").absolutePath}",
+                "pnnxonnx=${new File(generatedRoot, "ppmatting_${size}.pnnx.onnx").absolutePath}",
+                "ncnnpy=${new File(generatedRoot, "ppmatting_${size}_ncnn.py").absolutePath}",
+            ]
 
-        if (!outputParam.isFile() || outputParam.length() < 1_000L) {
-            throw new GradleException("pnnx did not create ${outputParam}")
+            def execResult = providers.exec {
+                workingDir generatedRoot
+                commandLine pnnxArgs
+            }.result.get()
+            execResult.assertNormalExitValue()
+
+            fileTree(source.parentFile).matching { include "*.pnnxsim.onnx" }.files.each { it.delete() }
+
+            if (!outputParam.isFile() || outputParam.length() < 1_000L) {
+                throw new GradleException("pnnx did not create ${outputParam}")
+            }
+            if (!outputBin.isFile() || outputBin.length() < 5_000_000L) {
+                throw new GradleException("pnnx did not create a valid ${outputBin}")
+            }
+            outputProfile.text = "PP-MattingV2 STDC1 fixed ${size}x${size}\nsource=${source.name}\nweights=official-human-512-stable\npnnx=20260526\nncnn=20260526\n"
+            logger.lifecycle("PP-MattingV2 Vulkan profile ready: fixed ${size}x${size} from ${source.name}")
         }
-        if (!outputBin.isFile() || outputBin.length() < 5_000_000L) {
-            throw new GradleException("pnnx did not create a valid ${outputBin}")
-        }
-        def weightProfile = useTrue384 ? "official-human-512-stable" : "official-human-512"
-        outputProfile.text = "PP-MattingV2 STDC1 fixed ${modelSize}x${modelSize}\nsource=${sourceOnnx.name}\nweights=${weightProfile}\npnnx=20260526\nncnn=20260526\n"
-        logger.lifecycle("PP-MattingV2 Vulkan profile: fixed ${modelSize}x${modelSize} from ${sourceOnnx.name}, weights=${weightProfile}, via matched pnnx/ncnn 20260526")
     }
 }
 
 def prepareGpu = tasks.register("preparePpMattingNcnnVulkanGpu") {
-    dependsOn("preparePpMattingNcnnModel", "prepareNcnnVulkanRuntime")
+    dependsOn("preparePpMattingNcnnModels", "prepareNcnnVulkanRuntime")
 }
 
 android {
@@ -244,8 +252,7 @@ android {
     defaultConfig {
         externalNativeBuild {
             cmake {
-                arguments "-DNCNN_ANDROID_ROOT=${ncnnRuntimeRoot.absolutePath}",
-                        "-DPPMATTING_MODEL_SIZE=${modelSize}"
+                arguments "-DNCNN_ANDROID_ROOT=${ncnnRuntimeRoot.absolutePath}"
                 cppFlags "-std=c++17 -O3 -ffast-math"
             }
         }

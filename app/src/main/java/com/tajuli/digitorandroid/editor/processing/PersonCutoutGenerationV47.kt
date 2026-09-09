@@ -6,12 +6,12 @@ import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import java.io.File
 import java.security.MessageDigest
 
-// V65 matte semantics stay unchanged. V66 adds durable checkpoint/resume around the same model/ROI,
-// so a settings-identical partial generation may safely reuse already-written PNG mattes.
+// V69 extends the durable signature with the selected fixed PP-MattingV2 operating point. A paused
+// 320 run can therefore never resume into a 256/384/512 engine or mix incompatible matte semantics.
 private const val V57_CACHE_DIR_NAME = "person_cutout_masks_v65_ppmattingv2_384_motion_safe_detector_roi"
 private const val V47_READY_MARKER = ".v47_gpu_ready"
 private const val V47_PENDING_MARKER = ".v47_gpu_pending"
-private const val V47_GENERATION_VERSION = "stable-v65-ppmattingv2-384-motion-safe-detector-hysteresis-headroom-r4"
+private const val V47_GENERATION_VERSION = "stable-v69-ppmattingv2-multires-motion-safe-detector-hysteresis-headroom-r1"
 
 // PersonCutoutMaskStoreV43 intentionally retains its historical directory name for compatibility.
 // Keep this value in sync with PERSON_CUTOUT_CACHE_DIR_V50 in PersonCutoutSegmentationV43.kt.
@@ -28,15 +28,21 @@ internal data class PersonCutoutGenerationStartV66(
  * Start or resume one generation.
  *
  * Matching pending signature = keep durable frame PNGs and continue. Any analysis-time setting
- * change (quality / trim / Hair Detail / Temporal Stability) changes the signature, so old mattes
- * are deleted before a new generation starts. A completed generation has no pending marker; tapping
- * Refresh Matte therefore also starts cleanly from frame one.
+ * change (quality / matting resolution / trim / Hair Detail / Temporal Stability) changes the
+ * signature, so old mattes are deleted before a new generation starts. A completed generation has
+ * no pending marker; tapping Refresh Matte therefore also starts cleanly from frame one.
  */
 internal fun beginPersonCutoutGenerationV66(
     context: Context,
     clip: TimelineClip,
 ): PersonCutoutGenerationStartV66 {
     val appContext = context.applicationContext
+    val settings = clip.resolvedCutoutV43()
+
+    // Publish the validated size before GpuPersonCutoutSegmenterV47 is lazily constructed. The
+    // selected backend snapshots this once and stays on one persistent engine for the whole run.
+    PpMattingResolutionRuntimeV69.select(settings.mattingSizeV69)
+
     val dir = personCutoutSourceDirV47(appContext, clip.uri)
     val signature = personCutoutGenerationSignatureV66(clip)
     val pending = File(dir, V47_PENDING_MARKER)
@@ -106,6 +112,7 @@ internal fun personCutoutGenerationSignatureV66(clip: TimelineClip): String {
     return buildString {
         append(V47_GENERATION_VERSION)
         append('|'); append(settings.analysisQualityV47.name)
+        append('|'); append(settings.mattingSizeV69)
         append('|'); append(clip.sourceInUs)
         append('|'); append(clip.sourceOutUs)
         append('|'); append(settings.hairDetailV44.toBits())

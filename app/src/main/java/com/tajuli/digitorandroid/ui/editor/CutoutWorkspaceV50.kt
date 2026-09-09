@@ -158,10 +158,75 @@ fun CutoutWorkspaceV50(
             }
 
             CutoutModeV43.PERSON -> {
-                BackendIndicatorV50(backendLabel)
+                val displayBackend = backendLabel?.replace(
+                    "PP-MattingV2 384 resize",
+                    "PP-MattingV2 ${settings.mattingSizeV69} resize",
+                )
+                BackendIndicatorV50(displayBackend)
                 if (roiDebug != null) {
-                    RoiProofIndicatorV60(roiDebug!!)
+                    RoiProofIndicatorV60(
+                        roiDebug!!.replace(
+                            "crop-before-384=YES",
+                            "crop-before-${settings.mattingSizeV69}=YES",
+                        ),
+                    )
                 }
+
+                Text("Matting resolution · person ROI only", fontSize = 9.sp, color = C50Text)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    QualityChoiceV50(
+                        label = "256\nFast",
+                        selected = settings.mattingSizeV69 == 256,
+                        enabled = !analysisBusy,
+                    ) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(mattingSizeV69 = 256),
+                            status = "Pro Cutout resolution · 256 px · tap Analyze",
+                            coalesce = false,
+                        )
+                    }
+                    QualityChoiceV50(
+                        label = "320\nBalanced",
+                        selected = settings.mattingSizeV69 == 320,
+                        enabled = !analysisBusy,
+                    ) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(mattingSizeV69 = 320),
+                            status = "Pro Cutout resolution · 320 px · tap Analyze",
+                            coalesce = false,
+                        )
+                    }
+                    QualityChoiceV50(
+                        label = "384\nQuality",
+                        selected = settings.mattingSizeV69 == 384,
+                        enabled = !analysisBusy,
+                    ) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(mattingSizeV69 = 384),
+                            status = "Pro Cutout resolution · 384 px · tap Analyze",
+                            coalesce = false,
+                        )
+                    }
+                    QualityChoiceV50(
+                        label = "512\nMax",
+                        selected = settings.mattingSizeV69 == 512,
+                        enabled = !analysisBusy,
+                    ) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(mattingSizeV69 = 512),
+                            status = "Pro Cutout resolution · 512 px · tap Analyze",
+                            coalesce = false,
+                        )
+                    }
+                }
+                Text(
+                    "The motion-safe person ROI is cropped first. 256/320 reduce GPU work; 384/512 trade speed for finer edges. Resolution is locked while Analyze is running.",
+                    fontSize = 7.sp,
+                    color = C50Text.copy(alpha = .58f),
+                )
 
                 Text("Analysis quality", fontSize = 9.sp, color = C50Text)
                 Row(
@@ -229,7 +294,7 @@ fun CutoutWorkspaceV50(
                                 personReady -> "Pro matte ready"
                                 resumeAvailable -> "Checkpoint found · $resumeSaved saved · Resume available"
                                 analysisFailed -> "Analysis failed / incomplete"
-                                else -> "Choose quality, then Analyze"
+                                else -> "Choose resolution + quality, then Analyze"
                             }
                         },
                         fontSize = 8.sp,
@@ -261,7 +326,7 @@ fun CutoutWorkspaceV50(
 
                 if (resumeAvailable && !analysisBusy) {
                     Text(
-                        "Resume continues from the first missing/next durable frame. Changing Quality, Hair Detail, Temporal Stability, or clip trim starts a fresh analysis.",
+                        "Resume continues from the first missing/next durable frame. Changing Resolution, Quality, Hair Detail, Temporal Stability, or clip trim starts a fresh analysis.",
                         fontSize = 7.sp,
                         color = C50Text.copy(alpha = .58f),
                     )
@@ -315,7 +380,7 @@ fun CutoutWorkspaceV50(
                 }
 
                 Text(
-                    "Quality, Hair Detail and Temporal Stability are baked into the analyzed matte. Edge controls update in realtime and do not invalidate a checkpoint.",
+                    "Resolution, Quality, Hair Detail and Temporal Stability are baked into the analyzed matte. Edge controls update in realtime and do not invalidate a checkpoint.",
                     fontSize = 8.sp,
                     color = C50Text.copy(alpha = .62f),
                 )
@@ -378,7 +443,7 @@ private fun RoiProofIndicatorV60(label: String) {
             Text("ROI proof", fontSize = 9.sp, color = C50Text)
             Text(label, fontSize = 7.sp, color = C50Text.copy(alpha = .78f))
             Text(
-                "If this says crop-before-384=YES, PP-MattingV2 is receiving only the reported source-frame box. Outside that box the stored matte is forced to zero.",
+                "If this says crop-before-<selected>=YES, PP-MattingV2 is receiving only the reported source-frame box. Outside that box the stored matte is forced to zero.",
                 fontSize = 7.sp,
                 color = C50Text.copy(alpha = .58f),
             )

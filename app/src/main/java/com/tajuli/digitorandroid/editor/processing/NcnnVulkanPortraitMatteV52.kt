@@ -17,7 +17,7 @@ internal object NcnnVulkanNativeV52 {
     }
 
     external fun isVulkanAvailable(): Boolean
-    external fun createEngine(paramPath: String, binPath: String, threads: Int): Long
+    external fun createEngine(paramPath: String, binPath: String, threads: Int, modelSize: Int): Long
     external fun modelSize(handle: Long): Int
     external fun run(handle: Long, input: FloatArray): FloatArray
     external fun runInto(handle: Long, input: FloatArray, output: FloatArray): Boolean
@@ -27,15 +27,14 @@ internal object NcnnVulkanNativeV52 {
 }
 
 /**
- * PP-MattingV2/STDC1 using ncnn Vulkan.
+ * PP-MattingV2/STDC1 using one persistent ncnn Vulkan engine at a user-selected fixed resolution.
  *
- * The engine is persistent for the lifetime of this backend. Do not recycle it after an arbitrary
- * frame count: physical-device testing showed that destroy/recreate transitions can themselves be
- * less stable than leaving a healthy Vulkan engine alone. Higher-level scheduling decides when GPU
- * work should pause based on actual thermal/latency signals.
+ * V69 packages independent fixed 256/320/384/512 graphs. Only the selected graph is materialized and
+ * loaded for one analysis run, so offering four quality/speed choices does not create four Vulkan
+ * engines or multiply live GPU memory. The engine is never resized or recreated mid-run.
  *
- * Input and alpha tensors are also persistent on the Kotlin side. Native inference writes directly
- * into [alpha] so a fixed-384 High run does not create a new ~576 KiB FloatArray on every frame.
+ * Input and alpha tensors are persistent on the Kotlin side. Native inference writes directly into
+ * [alpha], avoiding a new Java FloatArray for every analyzed frame.
  */
 internal class NcnnVulkanPortraitMatteV52 private constructor(
     private var handle: Long,
@@ -43,15 +42,16 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
     private val modelSize: Int,
 ) : PortraitMatteBackendV50 {
     internal companion object {
-        const val PARAM_ASSET = "ppmattingv2_stdc1_human_vulkan.ncnn.param"
-        const val BIN_ASSET = "ppmattingv2_stdc1_human_vulkan.ncnn.bin"
+        // Retained for source compatibility with old tests/tools; V69 runtime uses the sized helpers.
+        const val PARAM_ASSET = "ppmattingv2_stdc1_human_vulkan_384.ncnn.param"
+        const val BIN_ASSET = "ppmattingv2_stdc1_human_vulkan_384.ncnn.bin"
 
         private fun materializeAsset(
             context: Context,
             assetName: String,
             minimumBytes: Long,
         ): File {
-            val directory = File(context.codeCacheDir, "ppmatting-ncnn-v56-fixed384-profile").apply { mkdirs() }
+            val directory = File(context.codeCacheDir, "ppmatting-ncnn-v69-fixed-multires").apply { mkdirs() }
             val target = File(directory, assetName)
             if (!target.isFile || target.length() < minimumBytes) {
                 val temp = File(directory, "$assetName.tmp")
@@ -75,16 +75,28 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
                 "No usable Vulkan compute device was reported by ncnn"
             }
 
+            val requestedSize = PpMattingResolutionRuntimeV69.currentSize()
+            check(requestedSize in PpMattingResolutionRuntimeV69.supportedSizes) {
+                "Unsupported PP-MattingV2 operating point: $requestedSize"
+            }
+
             val appContext = context.applicationContext
-            val param = materializeAsset(appContext, PARAM_ASSET, 1_000L)
-            val bin = materializeAsset(appContext, BIN_ASSET, 5_000_000L)
-            val engine = NcnnVulkanNativeV52.createEngine(param.absolutePath, bin.absolutePath, 2)
+            val paramAsset = PpMattingResolutionRuntimeV69.paramAsset(requestedSize)
+            val binAsset = PpMattingResolutionRuntimeV69.binAsset(requestedSize)
+            val param = materializeAsset(appContext, paramAsset, 1_000L)
+            val bin = materializeAsset(appContext, binAsset, 5_000_000L)
+            val engine = NcnnVulkanNativeV52.createEngine(
+                param.absolutePath,
+                bin.absolutePath,
+                2,
+                requestedSize,
+            )
             check(engine != 0L) { "ncnn could not create the PP-MattingV2 Vulkan engine" }
 
-            val size = NcnnVulkanNativeV52.modelSize(engine)
-            if (size != 256 && size != 384 && size != 512) {
+            val actualSize = NcnnVulkanNativeV52.modelSize(engine)
+            if (actualSize != requestedSize || actualSize !in PpMattingResolutionRuntimeV69.supportedSizes) {
                 NcnnVulkanNativeV52.destroy(engine)
-                error("Unsupported compiled PP-MattingV2 graph size: $size")
+                error("PP-MattingV2 graph/runtime size mismatch: requested=$requestedSize actual=$actualSize")
             }
             val gpu = runCatching { NcnnVulkanNativeV52.gpuName(engine) }
                 .getOrDefault("Vulkan GPU")
@@ -92,7 +104,7 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
             NcnnVulkanPortraitMatteV52(
                 handle = engine,
                 gpuName = gpu,
-                modelSize = size,
+                modelSize = actualSize,
             )
         }.getOrNull()
     }
@@ -122,6 +134,7 @@ internal class NcnnVulkanPortraitMatteV52 private constructor(
             append(" · CPU op fallback possible")
             append(" · persistent Vulkan engine")
             append(" · reusable tensor buffers")
+            append(" · fixed graph locked for run")
             if (Build.MODEL.isNotBlank() && !gpuName.contains(Build.MODEL, ignoreCase = true)) {
                 append(" · ").append(Build.MODEL)
             }

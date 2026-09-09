@@ -11,18 +11,12 @@
 #include <gpu.h>
 #include <net.h>
 
-#ifndef PPMATTING_MODEL_SIZE
-#define PPMATTING_MODEL_SIZE 512
-#endif
-
 namespace {
 constexpr const char* kTag = "PpMattingNcnnVk";
-constexpr int kModelSize = PPMATTING_MODEL_SIZE;
-static_assert(
-        kModelSize == 256 || kModelSize == 384 || kModelSize == 512,
-        "PP-MattingV2 model size must be 256, 384 or 512");
-constexpr int kPlane = kModelSize * kModelSize;
-constexpr int kInputCount = kPlane * 3;
+
+bool IsSupportedModelSize(int size) {
+    return size == 256 || size == 320 || size == 384 || size == 512;
+}
 
 std::once_flag gGpuInitOnce;
 int gGpuInitResult = -1;
@@ -65,6 +59,7 @@ struct Engine {
     int inputIndex = -1;
     int outputIndex = -1;
     int gpuIndex = -1;
+    int modelSize = 0;
     std::string gpuName;
     double lastInferenceMs = -1.0;
 
@@ -76,6 +71,10 @@ struct Engine {
         }
     }
 };
+
+int Plane(const Engine* engine) {
+    return engine->modelSize * engine->modelSize;
+}
 
 void ConfigureExtractor(Engine* engine, ncnn::Extractor& extractor) {
     extractor.set_light_mode(true);
@@ -100,20 +99,22 @@ int RunInference(Engine* engine, const ncnn::Mat& input, ncnn::Mat& output, doub
     return status;
 }
 
-bool ValidateOutput(JNIEnv* env, const ncnn::Mat& output, int status) {
+bool ValidateOutput(JNIEnv* env, Engine* engine, const ncnn::Mat& output, int status) {
     if (status != 0 || output.empty()) {
         __android_log_print(ANDROID_LOG_ERROR, kTag, "extract failed with status=%d", status);
         ThrowJava(env, "java/lang/RuntimeException", "ncnn Vulkan PP-MattingV2 inference failed");
         return false;
     }
-    if (output.elembits() != 32 || output.total() < static_cast<size_t>(kPlane)) {
+    const size_t expected = static_cast<size_t>(Plane(engine));
+    if (output.elembits() != 32 || output.total() != expected) {
         __android_log_print(
                 ANDROID_LOG_ERROR,
                 kTag,
-                "Unexpected output for fixed %d graph: bits=%d total=%zu dims=%d w=%d h=%d c=%d",
-                kModelSize,
+                "Unexpected output for fixed %d graph: bits=%d total=%zu expected=%zu dims=%d w=%d h=%d c=%d",
+                engine->modelSize,
                 output.elembits(),
                 output.total(),
+                expected,
                 output.dims,
                 output.w,
                 output.h,
@@ -121,7 +122,7 @@ bool ValidateOutput(JNIEnv* env, const ncnn::Mat& output, int status) {
         ThrowJava(
                 env,
                 "java/lang/IllegalStateException",
-                "ncnn PP-MattingV2 output does not match the compiled fixed graph");
+                "ncnn PP-MattingV2 output does not match the selected fixed graph");
         return false;
     }
     return true;
@@ -136,37 +137,50 @@ bool RunFromJavaInput(
         ThrowJava(env, "java/lang/IllegalStateException", "ncnn Vulkan PP-MattingV2 engine is not initialized");
         return false;
     }
-    if (env->GetArrayLength(inputArray) != kInputCount) {
+
+    auto* engine = reinterpret_cast<Engine*>(handle);
+    if (!IsSupportedModelSize(engine->modelSize)) {
+        ThrowJava(env, "java/lang/IllegalStateException", "PP-MattingV2 engine has an invalid model size");
+        return false;
+    }
+    const int plane = Plane(engine);
+    const int inputCount = plane * 3;
+    if (env->GetArrayLength(inputArray) != inputCount) {
         ThrowJava(
                 env,
                 "java/lang/IllegalArgumentException",
-                "PP-MattingV2 input tensor size does not match the compiled fixed graph");
+                "PP-MattingV2 input tensor size does not match the selected fixed graph");
         return false;
     }
 
-    auto* engine = reinterpret_cast<Engine*>(handle);
     jfloat* inputData = env->GetFloatArrayElements(inputArray, nullptr);
     if (inputData == nullptr) return false;
 
-    ncnn::Mat input(kModelSize, kModelSize, 3, static_cast<void*>(inputData), sizeof(float));
+    ncnn::Mat input(
+            engine->modelSize,
+            engine->modelSize,
+            3,
+            static_cast<void*>(inputData),
+            sizeof(float));
     const int status = RunInference(engine, input, output, &engine->lastInferenceMs);
     env->ReleaseFloatArrayElements(inputArray, inputData, JNI_ABORT);
-    return ValidateOutput(env, output, status);
+    return ValidateOutput(env, engine, output, status);
 }
 
 void WarmUp(Engine* engine) {
-    std::vector<float> zeros(kInputCount, 0.0f);
-    ncnn::Mat input(kModelSize, kModelSize, 3, zeros.data(), sizeof(float));
+    const int plane = Plane(engine);
+    std::vector<float> zeros(plane * 3, 0.0f);
+    ncnn::Mat input(engine->modelSize, engine->modelSize, 3, zeros.data(), sizeof(float));
     ncnn::Mat output;
     double warmupMs = -1.0;
     const int status = RunInference(engine, input, output, &warmupMs);
-    if (status == 0 && !output.empty()) {
+    if (status == 0 && !output.empty() && output.total() == static_cast<size_t>(plane)) {
         __android_log_print(
                 ANDROID_LOG_INFO,
                 kTag,
                 "PP-MattingV2 %dx%d Vulkan warm-up complete on %s in %.1f ms (out=%dx%dx%d)",
-                kModelSize,
-                kModelSize,
+                engine->modelSize,
+                engine->modelSize,
                 engine->gpuName.c_str(),
                 warmupMs,
                 output.w,
@@ -176,10 +190,11 @@ void WarmUp(Engine* engine) {
         __android_log_print(
                 ANDROID_LOG_WARN,
                 kTag,
-                "PP-MattingV2 %dx%d Vulkan warm-up failed with status=%d",
-                kModelSize,
-                kModelSize,
-                status);
+                "PP-MattingV2 %dx%d Vulkan warm-up failed with status=%d total=%zu",
+                engine->modelSize,
+                engine->modelSize,
+                status,
+                output.total());
     }
     engine->lastInferenceMs = -1.0;
 }
@@ -193,7 +208,17 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_isVulkanAva
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngine(
-        JNIEnv* env, jobject, jstring paramPath, jstring binPath, jint threads) {
+        JNIEnv* env,
+        jobject,
+        jstring paramPath,
+        jstring binPath,
+        jint threads,
+        jint requestedModelSize) {
+    const int modelSize = static_cast<int>(requestedModelSize);
+    if (!IsSupportedModelSize(modelSize)) {
+        ThrowJava(env, "java/lang/IllegalArgumentException", "PP-MattingV2 model size must be 256, 320, 384 or 512");
+        return 0;
+    }
     if (!EnsureVulkanRuntime()) {
         __android_log_print(ANDROID_LOG_ERROR, kTag, "No usable Vulkan compute device");
         return 0;
@@ -206,6 +231,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngin
     if (param.empty() || bin.empty()) return 0;
 
     auto engine = std::make_unique<Engine>();
+    engine->modelSize = modelSize;
     engine->gpuIndex = ncnn::get_default_gpu_index();
     if (engine->gpuIndex < 0) return 0;
 
@@ -254,8 +280,8 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngin
             ANDROID_LOG_INFO,
             kTag,
             "PP-MattingV2 fixed %dx%d Vulkan ready on %s (input=%d output=%d fp16-storage=%d fp16-arithmetic=%d)",
-            kModelSize,
-            kModelSize,
+            engine->modelSize,
+            engine->modelSize,
             engine->gpuName.c_str(),
             engine->inputIndex,
             engine->outputIndex,
@@ -268,8 +294,9 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngin
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_modelSize(
-        JNIEnv*, jobject, jlong) {
-    return kModelSize;
+        JNIEnv*, jobject, jlong handle) {
+    if (handle == 0) return 0;
+    return static_cast<jint>(reinterpret_cast<Engine*>(handle)->modelSize);
 }
 
 /** Legacy allocating entry point retained for ABI/backward compatibility. */
@@ -279,17 +306,16 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_run(
     ncnn::Mat output;
     if (!RunFromJavaInput(env, handle, inputArray, output)) return nullptr;
 
+    auto* engine = reinterpret_cast<Engine*>(handle);
+    const int plane = Plane(engine);
     const float* alpha = output;
-    jfloatArray result = env->NewFloatArray(kPlane);
+    jfloatArray result = env->NewFloatArray(plane);
     if (result == nullptr) return nullptr;
-    env->SetFloatArrayRegion(result, 0, kPlane, alpha);
+    env->SetFloatArrayRegion(result, 0, plane, alpha);
     return result;
 }
 
-/**
- * Steady-state path: copy the native result into a caller-owned reusable FloatArray instead of
- * allocating ~576 KiB of Java output for every 384x384 frame.
- */
+/** Steady-state path: copy into the caller-owned reusable FloatArray. */
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_runInto(
         JNIEnv* env,
@@ -297,17 +323,23 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_runInto(
         jlong handle,
         jfloatArray inputArray,
         jfloatArray outputArray) {
-    if (outputArray == nullptr || env->GetArrayLength(outputArray) < kPlane) {
+    if (handle == 0) {
+        ThrowJava(env, "java/lang/IllegalStateException", "ncnn Vulkan PP-MattingV2 engine is not initialized");
+        return JNI_FALSE;
+    }
+    auto* engine = reinterpret_cast<Engine*>(handle);
+    const int plane = Plane(engine);
+    if (outputArray == nullptr || env->GetArrayLength(outputArray) < plane) {
         ThrowJava(
                 env,
                 "java/lang/IllegalArgumentException",
-                "PP-MattingV2 reusable output array is smaller than the compiled fixed graph");
+                "PP-MattingV2 reusable output array is smaller than the selected fixed graph");
         return JNI_FALSE;
     }
 
     ncnn::Mat output;
     if (!RunFromJavaInput(env, handle, inputArray, output)) return JNI_FALSE;
-    env->SetFloatArrayRegion(outputArray, 0, kPlane, static_cast<const float*>(output));
+    env->SetFloatArrayRegion(outputArray, 0, plane, static_cast<const float*>(output));
     return env->ExceptionCheck() ? JNI_FALSE : JNI_TRUE;
 }
 

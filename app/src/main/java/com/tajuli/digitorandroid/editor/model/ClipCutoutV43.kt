@@ -10,6 +10,17 @@ enum class CutoutAnalysisQualityV47 {
     HIGH,
 }
 
+private val SUPPORTED_PPMATTING_SIZES_V69 = setOf(256, 320, 384, 512)
+
+/**
+ * V69 keeps PP-MattingV2 resolution separate from analysis cadence. A tight person ROI makes the
+ * smaller operating points useful on mobile GPUs while 384/512 remain available for creators who
+ * prefer maximum edge detail. Invalid/missing legacy persisted values normalize to the balanced
+ * 320 operating point instead of reaching native code.
+ */
+fun normalizedPpMattingSizeV69(value: Int): Int =
+    if (value in SUPPORTED_PPMATTING_SIZES_V69) value else 320
+
 /**
  * V50 Pro Cutout settings. The historical V43 type name is intentionally retained so projects
  * created while the experimental cutout branches were being tested remain readable.
@@ -23,6 +34,8 @@ data class ClipCutoutV43(
     val mode: CutoutModeV43 = CutoutModeV43.NONE,
     /** LOW=4 fps, MEDIUM=12 fps, HIGH=every decoded source frame. */
     val analysisQualityV47: CutoutAnalysisQualityV47 = CutoutAnalysisQualityV47.MEDIUM,
+    /** Fixed PP-MattingV2 square input applied only after the motion-safe person ROI crop. */
+    val mattingSizeV69: Int = 320,
     // Legacy controls retained for project compatibility. V46 maps them to matte alpha shaping.
     val personThreshold: Float = .50f,
     val personFeather: Float = .075f,
@@ -76,6 +89,7 @@ data class ClipCutoutV43(
         val tunedTemporal = if (untouchedQualityDefaults) .54f else temporalStabilityV44
 
         return copy(
+            mattingSizeV69 = normalizedPpMattingSizeV69(mattingSizeV69),
             personThreshold = tunedThreshold.coerceIn(.05f, .95f),
             personFeather = tunedFeather.coerceIn(.005f, .45f),
             keyRed = keyRed.coerceIn(0f, 1f),
