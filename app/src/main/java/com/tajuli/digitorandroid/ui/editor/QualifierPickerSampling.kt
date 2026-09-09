@@ -1,14 +1,40 @@
 package com.tajuli.digitorandroid.ui.editor
 
+import com.tajuli.digitorandroid.editor.model.CutoutModeV43
+import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import kotlin.math.max
 import kotlin.math.min
 
+private enum class PreviewColorPickerTarget {
+    QUALIFIER,
+    CHROMA_KEY,
+}
+
+private object PreviewColorPickerRoute {
+    @Volatile
+    var target: PreviewColorPickerTarget = PreviewColorPickerTarget.QUALIFIER
+}
+
+/** Starts preview sampling with the next picked color routed to the selected clip's Chroma Key. */
+internal fun startChromaKeyColorPicker(vm: EditorViewModelV4) {
+    PreviewColorPickerRoute.target = PreviewColorPickerTarget.CHROMA_KEY
+    vm.setQualifierPickerActive(true)
+}
+
+/** Cancels a pending Chroma Key pick and restores the preview picker to its qualifier default. */
+internal fun cancelChromaKeyColorPicker(vm: EditorViewModelV4) {
+    if (PreviewColorPickerRoute.target == PreviewColorPickerTarget.CHROMA_KEY) {
+        PreviewColorPickerRoute.target = PreviewColorPickerTarget.QUALIFIER
+        vm.setQualifierPickerActive(false)
+    }
+}
+
 /**
- * Applies an RGB sample taken from the already-visible preview to the selected node qualifier.
+ * Applies an RGB sample taken from the already-visible preview.
  *
- * The picker intentionally does not open a MediaMetadataRetriever/MediaCodec. The preview surface
- * is already showing the color the user tapped, so sampling that surface avoids a second decoder,
- * long-GOP seeks and vendor-codec contention while keeping the interaction instant.
+ * Chroma Key reuses the same preview-surface sampler as the HSL qualifier. The picker intentionally
+ * does not open a MediaMetadataRetriever/MediaCodec: sampling the visible preview avoids a second
+ * decoder, long-GOP seeks and vendor-codec contention while keeping the interaction instant.
  */
 internal fun applyQualifierPickedColor(
     vm: EditorViewModelV4,
@@ -16,6 +42,27 @@ internal fun applyQualifierPickedColor(
     green: Float,
     blue: Float,
 ) {
+    if (PreviewColorPickerRoute.target == PreviewColorPickerTarget.CHROMA_KEY) {
+        PreviewColorPickerRoute.target = PreviewColorPickerTarget.QUALIFIER
+        val state = vm.state.value
+        val clip = state.project.clip(state.selectedClipId)
+        if (clip != null) {
+            val settings = clip.resolvedCutoutV43()
+            vm.setSelectedCutoutV43(
+                settings.copy(
+                    mode = CutoutModeV43.CHROMA_KEY,
+                    keyRed = red.coerceIn(0f, 1f),
+                    keyGreen = green.coerceIn(0f, 1f),
+                    keyBlue = blue.coerceIn(0f, 1f),
+                ),
+                status = "Chroma key color picked from preview",
+                coalesce = false,
+            )
+        }
+        vm.setQualifierPickerActive(false)
+        return
+    }
+
     val hsl = qualifierRgbToHsl(red, green, blue)
     val hue = hsl[0] * 360f
     val sat = hsl[1]
