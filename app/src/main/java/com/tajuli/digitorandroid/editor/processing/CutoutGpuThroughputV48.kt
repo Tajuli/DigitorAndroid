@@ -146,14 +146,15 @@ internal class AsyncCutoutInferenceWorkerV48(
 
 /**
  * Matte persistence is the intentional CPU/file-I/O boundary. Completed PNGs are atomic durable
- * checkpoints. Normal devices use two encoders/eight slots; interruption-sensitive UNISOC devices
- * use one encoder/three slots to reduce bitmap memory pressure while Vulkan is active.
+ * checkpoints. Normal devices use two encoders/eight slots. The Z60/UNISOC path keeps exactly one
+ * pending matte so a slow PNG write cannot retain several full-frame native Bitmaps while the
+ * low-memory killer is already reclaiming the rest of the system.
  */
 internal class AsyncPersonCutoutMaskWriterV48(
     private val context: Context,
 ) : AutoCloseable {
     private val conservative = useInterruptionSafeSerialCutoutV66()
-    private val capacity = if (conservative) 3 else 8
+    private val capacity = if (conservative) 1 else 8
     private val executor = Executors.newFixedThreadPool(if (conservative) 1 else 2) { runnable ->
         Thread(runnable, "DigitorCutoutMaskIoV49").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
