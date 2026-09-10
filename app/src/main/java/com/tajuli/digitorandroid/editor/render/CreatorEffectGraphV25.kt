@@ -24,9 +24,10 @@ import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
  * V25 creator-effects renderer with V26 timed effect spans.
  *
  * Keeps Digitor's Resolve-style serial/parallel node topology while expanding the old four-effect
- * shader into a compact creator library: blur/sharpen/glow/grain plus lens, RGB split, VHS lines,
- * pixelation, waves, zoom blur, ghosting, flicker, vignette and warm-film response. Preview and
- * export use the same shader and source-time evaluation for parity on the GPU path.
+ * shader into a compact creator library: edge-aware video denoise, blur/sharpen/glow/grain plus
+ * lens, RGB split, VHS lines, pixelation, waves, zoom blur, ghosting, flicker, vignette and
+ * warm-film response. Preview and export use the same shader and source-time evaluation for parity
+ * on the GPU path.
  */
 @UnstableApi
 internal class CreatorEffectGraphV25 private constructor(
@@ -248,6 +249,7 @@ internal class CreatorEffectGraphV25 private constructor(
             program.setFloatUniform("uGhost", v.ghost)
             program.setFloatUniform("uFlicker", v.flicker)
             program.setFloatUniform("uWarm", v.warm)
+            program.setFloatUniform("uDenoise", v.denoise)
             program.setFloatUniform("uTime", (sourceUs % 10_000_000L).toFloat() / 1_000_000f)
             program.setFloatUniform("uSeed", ((nodeId.hashCode() ushr 1) % 10_000).toFloat() / 10_000f)
             program.bindAttributesAndUniforms()
@@ -332,6 +334,7 @@ internal class CreatorEffectGraphV25 private constructor(
                 uniform float uGhost;
                 uniform float uFlicker;
                 uniform float uWarm;
+                uniform float uDenoise;
                 uniform float uTime;
                 uniform float uSeed;
                 varying vec2 vTexCoord;
@@ -340,6 +343,15 @@ internal class CreatorEffectGraphV25 private constructor(
                     p = fract(p * vec2(123.34 + uSeed * 17.0, 345.45 + uSeed * 31.0));
                     p += dot(p, p + 34.345 + uTime * 0.173 + uSeed * 13.7);
                     return fract(p.x * p.y);
+                }
+
+                float lumaOf(vec3 c) {
+                    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+                }
+
+                float denoiseWeight(vec3 sampleRgb, float centerLuma, float sigma) {
+                    float delta = abs(lumaOf(sampleRgb) - centerLuma);
+                    return exp(-delta / max(sigma, 0.001));
                 }
 
                 vec2 creatorUv(vec2 uv) {
@@ -371,8 +383,33 @@ internal class CreatorEffectGraphV25 private constructor(
                     vec3 se = texture2D(uTexSampler, clamp(uv + vec2( o.x, -o.y), 0.001, 0.999)).rgb;
                     vec3 sw = texture2D(uTexSampler, clamp(uv + vec2(-o.x, -o.y), 0.001, 0.999)).rgb;
 
+                    vec3 denoiseBase = center.rgb;
+                    if (uDenoise > 0.001) {
+                        float strength = clamp(uDenoise, 0.0, 1.0);
+                        float centerLuma = lumaOf(center.rgb);
+                        float sigma = mix(0.022, 0.115, strength);
+                        float wc = 2.5;
+                        float wn = denoiseWeight(n, centerLuma, sigma);
+                        float ws = denoiseWeight(s, centerLuma, sigma);
+                        float we = denoiseWeight(e, centerLuma, sigma);
+                        float ww = denoiseWeight(w, centerLuma, sigma);
+                        float wne = denoiseWeight(ne, centerLuma, sigma) * 0.72;
+                        float wnw = denoiseWeight(nw, centerLuma, sigma) * 0.72;
+                        float wse = denoiseWeight(se, centerLuma, sigma) * 0.72;
+                        float wsw = denoiseWeight(sw, centerLuma, sigma) * 0.72;
+                        float weightSum = wc + wn + ws + we + ww + wne + wnw + wse + wsw;
+                        vec3 filtered = (
+                            center.rgb * wc + n * wn + s * ws + e * we + w * ww +
+                            ne * wne + nw * wnw + se * wse + sw * wsw
+                        ) / max(weightSum, 0.001);
+                        float centerChroma = max(center.r, max(center.g, center.b)) - min(center.r, min(center.g, center.b));
+                        float chromaProtection = 1.0 - smoothstep(0.22, 0.72, centerChroma);
+                        float mixAmount = strength * mix(0.52, 0.78, chromaProtection);
+                        denoiseBase = mix(center.rgb, filtered, mixAmount);
+                    }
+
                     vec3 blurred = (center.rgb * 4.0 + (n + s + e + w) * 2.0 + ne + nw + se + sw) / 16.0;
-                    vec3 rgb = mix(center.rgb, blurred, clamp(uBlur * 0.92, 0.0, 0.92));
+                    vec3 rgb = mix(denoiseBase, blurred, clamp(uBlur * 0.92, 0.0, 0.92));
 
                     vec3 crossAverage = (n + s + e + w) * 0.25;
                     rgb += (center.rgb - crossAverage) * uSharpen * 1.35;
