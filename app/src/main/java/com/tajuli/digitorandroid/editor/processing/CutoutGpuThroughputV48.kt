@@ -2,6 +2,7 @@ package com.tajuli.digitorandroid.editor.processing
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.Build
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
@@ -10,21 +11,50 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Bounded producer/consumer helpers used by V49 Cutout.
+ * UNISOC/T606 firmware on the target Z60 has already shown process-fatal vendor accelerator paths.
+ * During Cutout it also has to share Mali-G57 between MediaCodec/OES OpenGL, ncnn Vulkan and Android
+ * system composition (notification heads-up, charging UI, etc.). Serializing our GL->Vulkan stages
+ * on this family deliberately gives up some pipeline overlap in exchange for driver stability.
+ */
+internal fun useInterruptionSafeSerialCutoutV66(): Boolean {
+    val identity = buildList {
+        add(Build.MANUFACTURER)
+        add(Build.BRAND)
+        add(Build.MODEL)
+        add(Build.DEVICE)
+        add(Build.PRODUCT)
+        add(Build.BOARD)
+        add(Build.HARDWARE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            add(Build.SOC_MANUFACTURER)
+            add(Build.SOC_MODEL)
+        }
+    }.joinToString("|") { it.orEmpty() }.lowercase()
+    return ("symphony" in identity && "z60" in identity) ||
+        "t606" in identity ||
+        "unisoc" in identity ||
+        "spreadtrum" in identity ||
+        "sprd" in identity ||
+        "ums9230" in identity ||
+        "ums512" in identity
+}
+
+/**
+ * Bounded producer/consumer helpers used by V49/V66 Cutout.
  *
- * The GPU fast path transfers decoder Bitmap ownership directly into the inference queue. V48 made
- * a second full ARGB copy for every decoded frame before inference; at 720p High mode that extra
- * memory bandwidth was large enough to starve the GPU on mid-range phones. Decode can now stay up
- * to three frames ahead while the model is busy, with no duplicate frame copy in the hot path.
+ * Normal devices keep up to three frames of decode/inference overlap. Interruption-sensitive UNISOC
+ * devices use a one-frame queue plus an executor barrier after each enqueue, so the OES decoder does
+ * not render the next frame while ncnn Vulkan is still executing the previous PP-Matting frame.
  */
 internal class AsyncCutoutInferenceWorkerV48(
     private val process: (sourceTimeUs: Long, bitmap: Bitmap) -> Boolean,
     private val onCompleted: ((completedFrames: Int) -> Unit)? = null,
 ) : AutoCloseable {
+    private val serialGpuStages = useInterruptionSafeSerialCutoutV66()
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "DigitorCutoutGpuInferV49").apply { priority = Thread.NORM_PRIORITY + 1 }
     }
-    private val slots = Semaphore(3)
+    private val slots = Semaphore(if (serialGpuStages) 1 else 3)
     private val failure = AtomicReference<Throwable?>(null)
     private val completed = AtomicInteger(0)
     @Volatile private var closed = false
@@ -34,6 +64,10 @@ internal class AsyncCutoutInferenceWorkerV48(
      * Callers must not touch or recycle it after this method returns successfully.
      */
     fun enqueueOwned(sourceTimeUs: Long, owned: Bitmap) {
+        if (CutoutAnalysisRuntimeV66.isPauseRequested()) {
+            if (!owned.isRecycled) owned.recycle()
+            throw CutoutAnalysisPausedV66()
+        }
         failure.get()?.let {
             if (!owned.isRecycled) owned.recycle()
             throw it
@@ -57,9 +91,20 @@ internal class AsyncCutoutInferenceWorkerV48(
                     slots.release()
                 }
             }
+            if (serialGpuStages) {
+                // Same single-thread executor = hard ordering barrier: inference must finish before
+                // MediaCodec/OES is allowed to produce the next selected frame on this device.
+                executor.submit {}.get()
+                failure.get()?.let { throw it }
+                CutoutAnalysisRuntimeV66.throwIfPauseRequested()
+            }
         } catch (error: Throwable) {
-            slots.release()
-            if (!owned.isRecycled) owned.recycle()
+            // If executor.execute succeeded it owns/recycles the bitmap and releases the permit.
+            // Only recycle here when the task could not have been submitted.
+            if (error is java.util.concurrent.RejectedExecutionException) {
+                slots.release()
+                if (!owned.isRecycled) owned.recycle()
+            }
             throw error
         }
     }
@@ -100,18 +145,20 @@ internal class AsyncCutoutInferenceWorkerV48(
 }
 
 /**
- * Matte persistence is the intentional CPU/file-I/O boundary. Two low-priority encoders keep PNG
- * compression behind GPU inference instead of letting one encoder back-pressure High mode. Each
- * frame has a unique timestamp/file, so the writes are independent; the ready marker is still
- * published only after awaitIdle() drains both workers.
+ * Matte persistence is the intentional CPU/file-I/O boundary. Completed PNGs are atomic durable
+ * checkpoints. Normal devices use two encoders/eight slots. The Z60/UNISOC path keeps exactly one
+ * pending matte so a slow PNG write cannot retain several full-frame native Bitmaps while the
+ * low-memory killer is already reclaiming the rest of the system.
  */
 internal class AsyncPersonCutoutMaskWriterV48(
     private val context: Context,
 ) : AutoCloseable {
-    private val executor = Executors.newFixedThreadPool(2) { runnable ->
+    private val conservative = useInterruptionSafeSerialCutoutV66()
+    private val capacity = if (conservative) 1 else 8
+    private val executor = Executors.newFixedThreadPool(if (conservative) 1 else 2) { runnable ->
         Thread(runnable, "DigitorCutoutMaskIoV49").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
-    private val slots = Semaphore(8)
+    private val slots = Semaphore(capacity)
     private val failure = AtomicReference<Throwable?>(null)
     @Volatile private var closed = false
 
@@ -151,10 +198,9 @@ internal class AsyncPersonCutoutMaskWriterV48(
 
     fun awaitIdle() {
         // Every queued writer owns exactly one permit until its file is durable. Acquiring the whole
-        // pool is therefore a true drain barrier even with two workers; two no-op Futures are not,
-        // because one fast worker could execute both while the other still compresses a large PNG.
-        slots.acquire(8)
-        slots.release(8)
+        // pool is therefore a true drain barrier even with multiple workers.
+        slots.acquire(capacity)
+        slots.release(capacity)
         failure.get()?.let { throw it }
     }
 
@@ -172,6 +218,6 @@ internal class AsyncPersonCutoutMaskWriterV48(
 internal fun hairSemanticRefreshIntervalUsV48(quality: CutoutAnalysisQualityV47): Long =
     when (quality) {
         CutoutAnalysisQualityV47.LOW -> 250_000L      // 4 fps
-        CutoutAnalysisQualityV47.MEDIUM -> 250_000L   // 4 fps hair over 12 fps MODNet
-        CutoutAnalysisQualityV47.HIGH -> 125_000L     // 8 fps hair over every-frame MODNet
+        CutoutAnalysisQualityV47.MEDIUM -> 250_000L   // 4 fps hair over 12 fps PP-Matting
+        CutoutAnalysisQualityV47.HIGH -> 125_000L     // 8 fps hair over every-frame PP-Matting
     }

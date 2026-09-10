@@ -197,6 +197,17 @@ class MainActivity : ComponentActivity() {
                                     recentRefresh++
                                 }
                             },
+                            onDeleteRecent = { projectId ->
+                                val deleted = runCatching { projectStore.deleteProject(projectId) }.getOrDefault(false)
+                                if (!deleted) {
+                                    Toast.makeText(
+                                        this@MainActivity,
+                                        "Project could not be deleted",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                }
+                                recentRefresh++
+                            },
                             onShareApp = { shareApp() },
                         )
                     }

@@ -10,6 +10,17 @@ enum class CutoutAnalysisQualityV47 {
     HIGH,
 }
 
+private val SUPPORTED_PPMATTING_SIZES_V69 = setOf(256, 320, 384, 512)
+
+/**
+ * V69 keeps PP-MattingV2 resolution separate from analysis cadence. A tight person ROI makes the
+ * smaller operating points useful on mobile GPUs while 384/512 remain available for creators who
+ * prefer maximum edge detail. Invalid/missing legacy persisted values normalize to the balanced
+ * 320 operating point instead of reaching native code.
+ */
+fun normalizedPpMattingSizeV69(value: Int): Int =
+    if (value in SUPPORTED_PPMATTING_SIZES_V69) value else 320
+
 /**
  * V50 Pro Cutout settings. The historical V43 type name is intentionally retained so projects
  * created while the experimental cutout branches were being tested remain readable.
@@ -42,6 +53,10 @@ data class ClipCutoutV43(
     val hairDetailV44: Float = .62f,
     /** Local-flow previous-matte stabilization; 0 = none, 1 = strongest. */
     val temporalStabilityV44: Float = .54f,
+    /** Fixed PP-MattingV2 square input applied only after the motion-safe person ROI crop. */
+    val mattingSizeV69: Int = 320,
+    /** V71: Chroma stays visually inactive until a preview color sample has actually been accepted. */
+    val chromaKeyColorPickedV71: Boolean = false,
 ) {
     fun normalized(): ClipCutoutV43 {
         val legacyPersonDefaults = personThreshold == .42f && personFeather == .12f
@@ -76,6 +91,7 @@ data class ClipCutoutV43(
         val tunedTemporal = if (untouchedQualityDefaults) .54f else temporalStabilityV44
 
         return copy(
+            mattingSizeV69 = normalizedPpMattingSizeV69(mattingSizeV69),
             personThreshold = tunedThreshold.coerceIn(.05f, .95f),
             personFeather = tunedFeather.coerceIn(.005f, .45f),
             keyRed = keyRed.coerceIn(0f, 1f),
@@ -92,6 +108,10 @@ data class ClipCutoutV43(
         )
     }
 }
+
+/** Chroma must remain a no-op until the user has sampled a real screen/background color. */
+fun ClipCutoutV43.chromaKeyCanApplyV71(): Boolean =
+    mode != CutoutModeV43.CHROMA_KEY || chromaKeyColorPickedV71
 
 fun TimelineClip.resolvedCutoutV43(): ClipCutoutV43 =
     (cutoutV43 ?: ClipCutoutV43()).normalized()
