@@ -28,6 +28,9 @@ data class RecentProjectSummary(
     val width: Int,
     val height: Int,
     val updatedAtMs: Long,
+    /** First moving-video clip used only for the Home card thumbnail. */
+    val thumbnailUri: String? = null,
+    val thumbnailTimeUs: Long = 0L,
 )
 
 /**
@@ -91,8 +94,36 @@ class ProjectStore(context: Context) {
         return project.takeIf { committed }
     }
 
+    /**
+     * Home metadata is enriched from the stored project at read time so projects created by older
+     * app versions immediately gain a video thumbnail without requiring a migration or re-save.
+     */
     fun recentProjects(limit: Int = MAX_RECENTS): List<RecentProjectSummary> =
-        recentProjectsInternal().sortedByDescending { it.updatedAtMs }.take(limit.coerceAtLeast(0))
+        recentProjectsInternal()
+            .map(::enrichRecentThumbnail)
+            .sortedByDescending { it.updatedAtMs }
+            .take(limit.coerceAtLeast(0))
+
+    /**
+     * Removes only Digitor's internal project snapshot/recent entry. A user-visible backup previously
+     * written to Downloads/Documents remains untouched and can still be kept as an independent file.
+     */
+    fun deleteProject(id: String): Boolean {
+        if (id.isBlank() || !prefs.contains(projectKey(id))) return false
+        val nextRecents = recentProjectsInternal().filterNot { it.id == id }
+        val deletingCurrent = prefs.getString(KEY_CURRENT_PROJECT_ID, null) == id
+        val editor = prefs.edit()
+            .remove(projectKey(id))
+            .putString(KEY_RECENT_INDEX, gson.toJson(nextRecents))
+        if (deletingCurrent) {
+            editor
+                .remove(KEY_CURRENT_PROJECT_ID)
+                .remove(KEY_CURRENT_PROJECT_TITLE_OVERRIDE)
+                .remove(KEY_LAST_PROJECT)
+                .remove(KEY_LAST_PROJECT_URI)
+        }
+        return editor.commit()
+    }
 
     /**
      * Existing editor Save action lands here. Do not silently choose a name: emit a request for the
@@ -219,13 +250,44 @@ class ProjectStore(context: Context) {
             .filter { it.id.isNotBlank() && prefs.contains(projectKey(it.id)) }
     }
 
+    private fun enrichRecentThumbnail(summary: RecentProjectSummary): RecentProjectSummary {
+        if (!summary.thumbnailUri.isNullOrBlank()) return summary
+        val raw = prefs.getString(projectKey(summary.id), null)?.takeIf { it.isNotBlank() } ?: return summary
+        val project = runCatching { decode(raw) }.getOrNull() ?: return summary
+        val source = recentThumbnailSource(project) ?: return summary
+        return summary.copy(thumbnailUri = source.first, thumbnailTimeUs = source.second)
+    }
+
+    private fun recentThumbnailSource(project: TimelineProject): Pair<String, Long>? {
+        val clip = project.tracks.asSequence()
+            .filter { it.kind == TrackKind.VIDEO }
+            .flatMap { it.clips.asSequence() }
+            .filterNot { it.isImageV21 }
+            .minByOrNull { it.timelineStartUs }
+            ?: return null
+        val sourceStart = clip.sourceInUs.coerceAtLeast(0L)
+        val sourceEnd = (clip.sourceOutUs - 1L).coerceAtLeast(sourceStart)
+        val thumbnailTime = (sourceStart + minOf(500_000L, clip.durationUs / 2L))
+            .coerceIn(sourceStart, sourceEnd)
+        return clip.uri to thumbnailTime
+    }
+
     private fun upsertRecent(
         current: List<RecentProjectSummary>,
         id: String,
         project: TimelineProject,
         updatedAtMs: Long,
     ): List<RecentProjectSummary> {
-        val next = RecentProjectSummary(id, project.title, project.width, project.height, updatedAtMs)
+        val thumbnail = recentThumbnailSource(project)
+        val next = RecentProjectSummary(
+            id = id,
+            title = project.title,
+            width = project.width,
+            height = project.height,
+            updatedAtMs = updatedAtMs,
+            thumbnailUri = thumbnail?.first,
+            thumbnailTimeUs = thumbnail?.second ?: 0L,
+        )
         return (listOf(next) + current.filterNot { it.id == id })
             .sortedByDescending { it.updatedAtMs }
             .take(MAX_RECENTS)
