@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.first
 class ProcessingRouter(context: Context) {
     private val appContext = context.applicationContext.also(VisualOverlayRenderEnvironmentV19::install)
     private val capabilities = DeviceCapabilityProbe(appContext)
+    private val nativeHardware = NativeHardwareExportBackendV75(appContext)
     private val gpu = GpuExportBackend(appContext)
     private val cpu = CpuExportBackend(appContext)
 
@@ -57,9 +58,73 @@ class ProcessingRouter(context: Context) {
             CutoutAnalysisRuntimeV66.state.first { !it.busy }
         }
 
+        var nativeFailure: Throwable? = null
+        if (capabilities.supportsGpuEditing() && nativeHardware.plan(exportProject) != null) {
+            val gpuName = capabilities.gpuDescription()
+            onProgress(
+                ExportProgress.Stage(
+                    "Native HW export · MediaCodec + Digitor GPU · $gpuName · $formatLabel · ${quality.label}",
+                    0f,
+                ),
+            )
+            try {
+                return nativeHardware.export(exportProject, output, quality, onProgress)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (firstNativeFailure: Throwable) {
+                nativeFailure = firstNativeFailure
+                val retryProject = codecSafeGpuRetryProjectV73(exportProject)
+                val retryQuality = codecSafeGpuRetryQualityV73(quality)
+                val retryChangesRequest = retryProject.width != exportProject.width ||
+                    retryProject.height != exportProject.height ||
+                    retryProject.frameRate != exportProject.frameRate ||
+                    retryQuality != quality
+
+                if (retryChangesRequest && nativeHardware.plan(retryProject) != null) {
+                    val retryLabel = retryProject.exportFormatLabelV73()
+                    runCatching { if (output.exists()) output.delete() }
+                    onProgress(
+                        ExportProgress.Stage(
+                            "Native codec rejected requested format · retrying $retryLabel · ${retryQuality.label}",
+                            0f,
+                        ),
+                    )
+                    try {
+                        val result = nativeHardware.export(retryProject, output, retryQuality, onProgress)
+                        return result.copy(
+                            note = buildString {
+                                result.note?.takeIf { it.isNotBlank() }?.let {
+                                    append(it)
+                                    append(" · ")
+                                }
+                                append("native compatibility retry after ")
+                                append(firstNativeFailure.message ?: firstNativeFailure::class.java.simpleName)
+                            },
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (retryFailure: Throwable) {
+                        retryFailure.addSuppressed(firstNativeFailure)
+                        nativeFailure = retryFailure
+                    }
+                }
+
+                // Do not lose export for timelines/devices outside V75's first native envelope. The
+                // older Transformer exporter remains a compatibility path while native multitrack and
+                // audio scheduling are expanded. It is no longer the primary path for eligible clips.
+                runCatching { if (output.exists()) output.delete() }
+                onProgress(
+                    ExportProgress.Stage(
+                        "Native HW path unavailable · trying Media3 compatibility exporter",
+                        0f,
+                    ),
+                )
+            }
+        }
+
         if (capabilities.supportsGpuEditing()) {
             val gpuName = capabilities.gpuDescription()
-            onProgress(ExportProgress.Stage("GPU selected · $gpuName · $formatLabel · ${quality.label}", 0f))
+            onProgress(ExportProgress.Stage("GPU compatibility exporter · $gpuName · $formatLabel · ${quality.label}", 0f))
             try {
                 return gpu.export(exportProject, output, quality, onProgress)
             } catch (cancelled: CancellationException) {
@@ -107,8 +172,10 @@ class ProcessingRouter(context: Context) {
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (retryFailure: Throwable) {
+                        nativeFailure?.let(retryFailure::addSuppressed)
                         throw IllegalStateException(
-                            "GPU export failed on $gpuName. Requested decode: ${gpuFailure.media3DetailV73()}. " +
+                            "Export failed. Native: ${nativeFailure?.message ?: "not used"}. " +
+                                "Media3 requested decode: ${gpuFailure.media3DetailV73()}. " +
                                 "Software AVC retry ($retryLabel · ${retryQuality.label}) also failed: " +
                                 retryFailure.media3DetailV73(),
                             retryFailure,
@@ -143,8 +210,10 @@ class ProcessingRouter(context: Context) {
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (retryFailure: Throwable) {
+                        nativeFailure?.let(retryFailure::addSuppressed)
                         throw IllegalStateException(
-                            "GPU export failed on $gpuName. Requested: ${gpuFailure.media3DetailV73()}. " +
+                            "Export failed. Native: ${nativeFailure?.message ?: "not used"}. " +
+                                "Media3 requested: ${gpuFailure.media3DetailV73()}. " +
                                 "Compatibility retry ($retryLabel · ${retryQuality.label}) also failed: " +
                                 retryFailure.media3DetailV73(),
                             retryFailure,
@@ -152,8 +221,10 @@ class ProcessingRouter(context: Context) {
                     }
                 }
 
+                nativeFailure?.let(gpuFailure::addSuppressed)
                 throw IllegalStateException(
-                    "GPU export failed on $gpuName. ${gpuFailure.media3DetailV73()}",
+                    "Export failed. Native: ${nativeFailure?.message ?: "not used"}. " +
+                        "Media3: ${gpuFailure.media3DetailV73()}",
                     gpuFailure,
                 )
             }
