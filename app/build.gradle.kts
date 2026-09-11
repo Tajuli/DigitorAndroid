@@ -244,7 +244,10 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
-    val media3 = "1.11.0"
+    // Media3 1.11.0 has a Transformer decoder-format regression on some Android codecs where
+    // decoded output reports a non-positive frame rate. The same inputs export on 1.10.1; keep the
+    // whole Media3 stack aligned on the regression-free release until the upstream fix is tagged.
+    val media3 = "1.10.1"
     implementation("androidx.media3:media3-common:$media3")
     implementation("androidx.media3:media3-exoplayer:$media3")
     implementation("androidx.media3:media3-ui:$media3")
