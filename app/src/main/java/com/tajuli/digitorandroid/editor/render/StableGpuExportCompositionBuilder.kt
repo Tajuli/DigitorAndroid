@@ -37,10 +37,8 @@ import com.tajuli.digitorandroid.editor.model.resolvedVisualOverlaysV19
  * video ClippingConfiguration. This keeps single-V-track image projects on the stable path without
  * creating zero-byte exports.
  *
- * Composition overlays (text/images/stickers/shapes) render after the decoded video. Their V-track
- * assignment controls editor semantics without creating another decoder. If every overlay frame is
- * covered by the single real video stream, export stays on the stable single-input path. Otherwise
- * the shared compositor path supplies continuous blank frames through overlay-only timeline gaps.
+ * V72 applies project.frameRate to every exported video item. Media3 treats it as a maximum for
+ * moving video (dropping excess frames) and as the generated frame rate for still images.
  */
 @UnstableApi
 internal class StableGpuExportCompositionBuilder(
@@ -112,7 +110,7 @@ internal class StableGpuExportCompositionBuilder(
             require(!videoClip.isImageV21) { "Still images cannot carry embedded source audio" }
             val audioClip = videoClip.linkGroupId?.let(audioByGroup::get)
                 ?: error("Linked embedded audio mirror disappeared during export build")
-            builder.addItem(avItem(videoClip, audioClip))
+            builder.addItem(avItem(project, videoClip, audioClip))
             cursorUs = videoClip.timelineEndUs
         }
         if (project.durationUs > cursorUs) {
@@ -159,10 +157,15 @@ internal class StableGpuExportCompositionBuilder(
         return builder.build()
     }
 
-    private fun avItem(videoClip: TimelineClip, audioClip: TimelineClip): EditedMediaItem {
+    private fun avItem(
+        project: TimelineProject,
+        videoClip: TimelineClip,
+        audioClip: TimelineClip,
+    ): EditedMediaItem {
         val mediaItem = clippedMediaItem(videoClip)
         return EditedMediaItem.Builder(mediaItem)
             .setDurationUs(videoClip.durationUs)
+            .setFrameRate(project.frameRate.coerceIn(1, 120))
             .setEffects(
                 Effects(
                     audioProcessorsFor(audioClip),
@@ -175,9 +178,8 @@ internal class StableGpuExportCompositionBuilder(
     private fun videoItem(project: TimelineProject, clip: TimelineClip): EditedMediaItem {
         val mediaItem = if (clip.isImageV21) imageMediaItem(clip) else clippedMediaItem(clip)
         val builder = EditedMediaItem.Builder(mediaItem)
-        if (clip.isImageV21) {
-            builder.setFrameRate(project.frameRate.coerceAtLeast(1))
-        } else {
+            .setFrameRate(project.frameRate.coerceIn(1, 120))
+        if (!clip.isImageV21) {
             builder.setDurationUs(clip.durationUs)
         }
         return builder
