@@ -20,14 +20,33 @@ class ProcessingRouter(context: Context) {
         project: TimelineProject,
         output: File,
         onProgress: (ExportProgress) -> Unit,
-    ): ExportResult = export(project, output, ExportQuality.HIGH, onProgress)
+    ): ExportResult = export(project, output, ExportSettingsV72(), onProgress)
 
+    /** Compatibility overload retained for existing callers: quality changes, geometry/FPS stay Original. */
     suspend fun export(
         project: TimelineProject,
         output: File,
         quality: ExportQuality,
         onProgress: (ExportProgress) -> Unit,
+    ): ExportResult = export(
+        project,
+        output,
+        ExportSettingsV72(quality = quality),
+        onProgress,
+    )
+
+    suspend fun export(
+        project: TimelineProject,
+        output: File,
+        settings: ExportSettingsV72,
+        onProgress: (ExportProgress) -> Unit,
     ): ExportResult {
+        // Export settings are applied to a snapshot only. Timeline/source trims and the editor project
+        // remain untouched while render geometry, target FPS and bitrate all resolve consistently.
+        val exportProject = settings.applyTo(project)
+        val quality = settings.quality
+        val formatLabel = "${exportProject.width}×${exportProject.height} · ${exportProject.frameRate} fps"
+
         // Export is always allowed, even when Pro Cutout is incomplete or was cancelled. The render
         // stages use whatever durable matte frames already exist and pass through the original frame
         // wherever no sufficiently-near matte exists. If analysis is still running, pause it first
@@ -40,9 +59,9 @@ class ProcessingRouter(context: Context) {
 
         if (capabilities.supportsGpuEditing()) {
             val gpuName = capabilities.gpuDescription()
-            onProgress(ExportProgress.Stage("GPU selected · $gpuName · ${quality.label}", 0f))
+            onProgress(ExportProgress.Stage("GPU selected · $gpuName · $formatLabel · ${quality.label}", 0f))
             try {
-                return gpu.export(project, output, quality, onProgress)
+                return gpu.export(exportProject, output, quality, onProgress)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (gpuFailure: Throwable) {
@@ -64,7 +83,7 @@ class ProcessingRouter(context: Context) {
             }
         }
 
-        onProgress(ExportProgress.Stage("No compatible GPU · CPU fallback · ${quality.label}", 0f))
-        return cpu.export(project, output, quality, onProgress)
+        onProgress(ExportProgress.Stage("No compatible GPU · CPU fallback · $formatLabel · ${quality.label}", 0f))
+        return cpu.export(exportProject, output, quality, onProgress)
     }
 }
