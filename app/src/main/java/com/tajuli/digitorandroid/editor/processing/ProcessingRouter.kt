@@ -73,9 +73,52 @@ class ProcessingRouter(context: Context) {
                     retryProject.frameRate != exportProject.frameRate ||
                     retryQuality != quality
 
+                // Camera H.264 can be valid but still trigger runtime errors in a vendor hardware
+                // decoder (notably some UNISOC/SPRD stacks). Retry decoder failures once with Media3's
+                // software AVC preference. Also use the conservative output envelope so the retry does
+                // not immediately run into a second, unrelated encoder capability limit.
+                if (firstExportException?.isDecoderFailureV74() == true) {
+                    val retryLabel = retryProject.exportFormatLabelV73()
+                    runCatching { if (output.exists()) output.delete() }
+                    onProgress(
+                        ExportProgress.Stage(
+                            "AVC decoder failed · retrying software decode · $retryLabel · ${retryQuality.label}",
+                            0f,
+                        ),
+                    )
+                    try {
+                        val retryResult = gpu.export(
+                            project = retryProject,
+                            output = output,
+                            quality = retryQuality,
+                            forceSoftwareAvcDecoder = true,
+                            onProgress = onProgress,
+                        )
+                        return retryResult.copy(
+                            note = buildString {
+                                retryResult.note?.takeIf { it.isNotBlank() }?.let {
+                                    append(it)
+                                    append(" · ")
+                                }
+                                append("software AVC compatibility retry after ")
+                                append(gpuFailure.media3DetailV73())
+                            },
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (retryFailure: Throwable) {
+                        throw IllegalStateException(
+                            "GPU export failed on $gpuName. Requested decode: ${gpuFailure.media3DetailV73()}. " +
+                                "Software AVC retry ($retryLabel · ${retryQuality.label}) also failed: " +
+                                retryFailure.media3DetailV73(),
+                            retryFailure,
+                        )
+                    }
+                }
+
                 // High-resolution/high-FPS AVC requests can be valid editor settings but outside a
                 // particular phone's hardware encoder envelope. Retry only real encoder failures;
-                // decoder, shader, audio and project errors remain visible instead of being hidden.
+                // shader, audio and project errors remain visible instead of being hidden.
                 if (firstExportException?.isEncoderFailureV73() == true && retryChangesRequest) {
                     val retryLabel = retryProject.exportFormatLabelV73()
                     runCatching { if (output.exists()) output.delete() }
@@ -145,3 +188,8 @@ private fun ExportException.isEncoderFailureV73(): Boolean =
     errorCode == ExportException.ERROR_CODE_ENCODER_INIT_FAILED ||
         errorCode == ExportException.ERROR_CODE_ENCODING_FAILED ||
         errorCode == ExportException.ERROR_CODE_ENCODING_FORMAT_UNSUPPORTED
+
+private fun ExportException.isDecoderFailureV74(): Boolean =
+    errorCode == ExportException.ERROR_CODE_DECODER_INIT_FAILED ||
+        errorCode == ExportException.ERROR_CODE_DECODING_FAILED ||
+        errorCode == ExportException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED
