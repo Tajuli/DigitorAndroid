@@ -45,7 +45,7 @@ class ProcessingRouter(context: Context) {
         // remain untouched while render geometry, target FPS and bitrate all resolve consistently.
         val exportProject = settings.applyTo(project)
         val quality = settings.quality
-        val formatLabel = "${exportProject.width}×${exportProject.height} · ${exportProject.frameRate} fps"
+        val formatLabel = exportProject.exportFormatLabelV73()
 
         // Export is always allowed, even when Pro Cutout is incomplete or was cancelled. The render
         // stages use whatever durable matte frames already exist and pass through the original frame
@@ -65,19 +65,52 @@ class ProcessingRouter(context: Context) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (gpuFailure: Throwable) {
-                val exportException = generateSequence(gpuFailure as Throwable?) { it.cause }
-                    .filterIsInstance<ExportException>()
-                    .firstOrNull()
-                val detail = buildString {
-                    if (exportException != null) {
-                        append("Media3 code=")
-                        append(exportException.errorCode)
-                        append(" · ")
+                val firstExportException = gpuFailure.media3ExportExceptionV73()
+                val retryProject = codecSafeGpuRetryProjectV73(exportProject)
+                val retryQuality = codecSafeGpuRetryQualityV73(quality)
+                val retryChangesRequest = retryProject.width != exportProject.width ||
+                    retryProject.height != exportProject.height ||
+                    retryProject.frameRate != exportProject.frameRate ||
+                    retryQuality != quality
+
+                // High-resolution/high-FPS AVC requests can be valid editor settings but outside a
+                // particular phone's hardware encoder envelope. Retry only real encoder failures;
+                // decoder, shader, audio and project errors remain visible instead of being hidden.
+                if (firstExportException?.isEncoderFailureV73() == true && retryChangesRequest) {
+                    val retryLabel = retryProject.exportFormatLabelV73()
+                    runCatching { if (output.exists()) output.delete() }
+                    onProgress(
+                        ExportProgress.Stage(
+                            "Encoder rejected requested format · retrying $retryLabel · ${retryQuality.label}",
+                            0f,
+                        ),
+                    )
+                    try {
+                        val retryResult = gpu.export(retryProject, output, retryQuality, onProgress)
+                        return retryResult.copy(
+                            note = buildString {
+                                retryResult.note?.takeIf { it.isNotBlank() }?.let {
+                                    append(it)
+                                    append(" · ")
+                                }
+                                append("compatibility retry after ")
+                                append(gpuFailure.media3DetailV73())
+                            },
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (retryFailure: Throwable) {
+                        throw IllegalStateException(
+                            "GPU export failed on $gpuName. Requested: ${gpuFailure.media3DetailV73()}. " +
+                                "Compatibility retry ($retryLabel · ${retryQuality.label}) also failed: " +
+                                retryFailure.media3DetailV73(),
+                            retryFailure,
+                        )
                     }
-                    append(gpuFailure.message ?: gpuFailure::class.java.simpleName)
                 }
+
                 throw IllegalStateException(
-                    "GPU export failed on $gpuName. $detail",
+                    "GPU export failed on $gpuName. ${gpuFailure.media3DetailV73()}",
                     gpuFailure,
                 )
             }
@@ -87,3 +120,28 @@ class ProcessingRouter(context: Context) {
         return cpu.export(exportProject, output, quality, onProgress)
     }
 }
+
+private fun TimelineProject.exportFormatLabelV73(): String =
+    "${width}×${height} · ${frameRate} fps"
+
+private fun Throwable.media3ExportExceptionV73(): ExportException? =
+    generateSequence(this as Throwable?) { it.cause }
+        .filterIsInstance<ExportException>()
+        .firstOrNull()
+
+private fun Throwable.media3DetailV73(): String {
+    val exportException = media3ExportExceptionV73()
+    return buildString {
+        if (exportException != null) {
+            append("Media3 code=")
+            append(exportException.errorCode)
+            append(" · ")
+        }
+        append(message ?: this@media3DetailV73::class.java.simpleName)
+    }
+}
+
+private fun ExportException.isEncoderFailureV73(): Boolean =
+    errorCode == ExportException.ERROR_CODE_ENCODER_INIT_FAILED ||
+        errorCode == ExportException.ERROR_CODE_ENCODING_FAILED ||
+        errorCode == ExportException.ERROR_CODE_ENCODING_FORMAT_UNSUPPORTED

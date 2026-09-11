@@ -65,6 +65,36 @@ data class ExportSettingsV72(
     }
 }
 
+/**
+ * Conservative AVC retry envelope for phones whose hardware encoder rejects the requested export.
+ * Never upscales: it only constrains the frame inside a 1920×1080 box and caps output at 30 fps.
+ * The editor project itself is never mutated; ProcessingRouter uses this only after an encoder error.
+ */
+internal fun codecSafeGpuRetryProjectV73(project: TimelineProject): TimelineProject {
+    val sourceWidth = project.width.coerceAtLeast(2)
+    val sourceHeight = project.height.coerceAtLeast(2)
+    val longest = maxOf(sourceWidth, sourceHeight).toDouble()
+    val shortest = minOf(sourceWidth, sourceHeight).toDouble()
+    val scale = minOf(
+        1.0,
+        1920.0 / longest,
+        1080.0 / shortest,
+    )
+    val width = (sourceWidth * scale).roundToInt().evenV72()
+    val height = (sourceHeight * scale).roundToInt().evenV72()
+    return project.copy(
+        width = width,
+        height = height,
+        frameRate = project.frameRate.coerceIn(1, 30),
+    )
+}
+
+/** High is reduced to Medium on an encoder retry; user-selected Medium/Low are preserved. */
+internal fun codecSafeGpuRetryQualityV73(quality: ExportQuality): ExportQuality = when (quality) {
+    ExportQuality.HIGH -> ExportQuality.MEDIUM
+    else -> quality
+}
+
 private fun Int.evenV72(): Int {
     val safe = coerceAtLeast(2)
     return if (safe % 2 == 0) safe else safe - 1

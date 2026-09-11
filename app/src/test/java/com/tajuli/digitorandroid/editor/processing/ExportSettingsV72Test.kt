@@ -39,4 +39,33 @@ class ExportSettingsV72Test {
         val resolved = ExportSettingsV72(frameRate = ExportFrameRateV72.FPS_25).applyTo(project)
         assertEquals(25, resolved.frameRate)
     }
+
+    @Test
+    fun codecSafeRetryCaps1440p60To1080p30WithoutUpscaling() {
+        val requested = TimelineProject(width = 2560, height = 1440, frameRate = 60)
+        val retry = codecSafeGpuRetryProjectV73(requested)
+        assertEquals(1920, retry.width)
+        assertEquals(1080, retry.height)
+        assertEquals(30, retry.frameRate)
+        assertEquals(ExportQuality.MEDIUM, codecSafeGpuRetryQualityV73(ExportQuality.HIGH))
+    }
+
+    @Test
+    fun codecSafeRetryPreservesAlreadySafePortraitGeometry() {
+        val requested = TimelineProject(width = 1080, height = 1920, frameRate = 60)
+        val retry = codecSafeGpuRetryProjectV73(requested)
+        assertEquals(1080, retry.width)
+        assertEquals(1920, retry.height)
+        assertEquals(30, retry.frameRate)
+        assertEquals(ExportQuality.LOW, codecSafeGpuRetryQualityV73(ExportQuality.LOW))
+    }
+
+    @Test
+    fun codecSafeRetryFitsUltrawideInside1080pEncoderBox() {
+        val requested = TimelineProject(width = 3440, height = 1440, frameRate = 30)
+        val retry = codecSafeGpuRetryProjectV73(requested)
+        assertEquals(1920, retry.width)
+        assertEquals(804, retry.height)
+        assertEquals(30, retry.frameRate)
+    }
 }
