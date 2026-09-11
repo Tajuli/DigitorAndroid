@@ -41,7 +41,7 @@ import kotlinx.coroutines.withContext
  * scheduler/mixer lands; no editing feature is silently dropped just to claim native coverage.
  */
 @UnstableApi
-class NativeHardwareExportBackendV75(
+internal class NativeHardwareExportBackendV75(
     private val context: Context,
 ) {
 
