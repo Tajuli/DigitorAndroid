@@ -22,8 +22,9 @@ find_library(android-lib android)
 
 target_link_libraries(digitor_ppmatting_ncnn ncnn ${log-lib})
 
-# V80 Auto Caption: pin whisper.cpp so speech recognition stays fully on-device after the model's
-# first download. FetchContent happens only at build time; the app never sends user audio anywhere.
+# V80/V84 Auto Caption: pin whisper.cpp and build ggml's cross-vendor Vulkan backend. Android
+# phones with a usable Vulkan compute device offload Whisper tensors to the GPU; JNI keeps a CPU
+# fallback for devices/drivers where Vulkan cannot initialize.
 include(FetchContent)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build whisper.cpp statically inside Digitor JNI" FORCE)
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -33,6 +34,10 @@ set(WHISPER_CURL OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
+set(GGML_VULKAN ON CACHE BOOL "Enable Vulkan GPU inference for Auto Caption" FORCE)
+set(GGML_VULKAN_CHECK_RESULTS OFF CACHE BOOL "" FORCE)
+set(GGML_VULKAN_DEBUG OFF CACHE BOOL "" FORCE)
+set(GGML_VULKAN_VALIDATE OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     whisper_cpp
     GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
@@ -45,7 +50,7 @@ FetchContent_MakeAvailable(whisper_cpp)
 # The Android Gradle native build historically supplies -ffast-math for the PP-Matting path.
 # ggml deliberately relies on NaN/Infinity semantics and refuses to compile with finite-math-only.
 # Reset fast-math only for whisper/ggml targets while preserving the existing PP-Matting tuning.
-foreach(whisper_math_target whisper ggml ggml-base ggml-cpu)
+foreach(whisper_math_target whisper ggml ggml-base ggml-cpu ggml-vulkan)
     if(TARGET ${whisper_math_target})
         target_compile_options(${whisper_math_target} PRIVATE -fno-fast-math -fno-finite-math-only)
     endif()
