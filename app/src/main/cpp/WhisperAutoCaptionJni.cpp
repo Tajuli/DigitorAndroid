@@ -56,6 +56,26 @@ whisper_context * GetOrLoadContext(const std::string & modelPath) {
     return gContext;
 }
 
+std::string ResolveLanguage(
+    whisper_context * context,
+    const std::string & requested,
+    const std::vector<float> & samples,
+    int threads
+) {
+    if (!requested.empty() && requested != "auto") return requested;
+
+    // Detect first, then transcribe with an explicit language token. This makes Auto mode behave
+    // like a manual language selection after detection and gives the decoder the correct native
+    // writing-system prior instead of relying on a loosely resolved "auto" path.
+    if (whisper_pcm_to_mel(context, samples.data(), static_cast<int>(samples.size()), threads) != 0) {
+        return "auto";
+    }
+    const int languageId = whisper_lang_auto_detect(context, 0, threads, nullptr);
+    if (languageId < 0) return "auto";
+    const char * code = whisper_lang_str(languageId);
+    return code == nullptr ? std::string("auto") : std::string(code);
+}
+
 } // namespace
 
 extern "C" JNIEXPORT jobjectArray JNICALL
@@ -98,7 +118,7 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     }
 
     const std::string modelPath = JStringToUtf8(env, modelPathValue);
-    const std::string language = JStringToUtf8(env, languageValue);
+    const std::string requestedLanguage = JStringToUtf8(env, languageValue);
     const jsize sampleCount = env->GetArrayLength(samplesValue);
     if (sampleCount <= 0) {
         jclass stringClass = env->FindClass("java/lang/String");
@@ -116,9 +136,12 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
         return nullptr;
     }
 
-    whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     const unsigned int cores = std::max(1u, std::thread::hardware_concurrency());
-    params.n_threads = static_cast<int>(std::min(4u, cores));
+    const int threads = static_cast<int>(std::min(4u, cores));
+    const std::string resolvedLanguage = ResolveLanguage(context, requestedLanguage, samples, threads);
+
+    whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+    params.n_threads = threads;
     params.translate = false;
     params.no_context = true;
     params.no_timestamps = false;
@@ -127,16 +150,17 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     params.print_progress = false;
     params.print_realtime = false;
     params.print_timestamps = false;
-    params.token_timestamps = false;
-    params.max_len = 56;
+
+    // max_len/split_on_word only produce subtitle-sized boundaries when token timestamps are on.
+    // V80 left token timestamps disabled, allowing one hallucinated segment to remain on-screen for
+    // tens of seconds. V83 keeps captions short enough to edit/read while preserving word boundaries.
+    params.token_timestamps = true;
+    params.max_len = 42;
     params.split_on_word = true;
     params.suppress_blank = true;
+    params.suppress_nst = true;
 
-    const bool autoLanguage = language.empty() || language == "auto";
-    // In whisper.cpp, detect_language=true is a language-detection-only mode and returns before
-    // normal transcription. For Auto captions we instead pass language="auto" while keeping
-    // detect_language=false so whisper_full auto-detects the language and still emits segments.
-    params.language = autoLanguage ? "auto" : language.c_str();
+    params.language = resolvedLanguage.c_str();
     params.detect_language = false;
 
     const int status = whisper_full(context, params, samples.data(), static_cast<int>(samples.size()));
@@ -147,17 +171,16 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     }
 
     const int languageId = whisper_full_lang_id(context);
-    if (languageId >= 0) {
-        const char * detected = whisper_lang_str(languageId);
-        __android_log_print(
-            ANDROID_LOG_INFO,
-            kTag,
-            "transcription complete: requested=%s detected=%s samples=%d",
-            autoLanguage ? "auto" : language.c_str(),
-            detected == nullptr ? "unknown" : detected,
-            static_cast<int>(sampleCount)
-        );
-    }
+    const char * detected = languageId >= 0 ? whisper_lang_str(languageId) : nullptr;
+    __android_log_print(
+        ANDROID_LOG_INFO,
+        kTag,
+        "transcription complete: requested=%s resolved=%s detected=%s samples=%d",
+        requestedLanguage.empty() ? "auto" : requestedLanguage.c_str(),
+        resolvedLanguage.c_str(),
+        detected == nullptr ? "unknown" : detected,
+        static_cast<int>(sampleCount)
+    );
 
     const int segmentCount = whisper_full_n_segments(context);
     jclass stringClass = env->FindClass("java/lang/String");
