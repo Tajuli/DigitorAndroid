@@ -42,8 +42,17 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(whisper_cpp)
 
+# The Android Gradle native build historically supplies -ffast-math for the PP-Matting path.
+# ggml deliberately relies on NaN/Infinity semantics and refuses to compile with finite-math-only.
+# Reset fast-math only for whisper/ggml targets while preserving the existing PP-Matting tuning.
+foreach(whisper_math_target whisper ggml ggml-base ggml-cpu)
+    if(TARGET ${whisper_math_target})
+        target_compile_options(${whisper_math_target} PRIVATE -fno-fast-math -fno-finite-math-only)
+    endif()
+endforeach()
+
 add_library(digitor_whisper_jni SHARED WhisperAutoCaptionJni.cpp)
 target_compile_features(digitor_whisper_jni PRIVATE cxx_std_17)
-target_compile_options(digitor_whisper_jni PRIVATE -O3 -fvisibility=hidden)
+target_compile_options(digitor_whisper_jni PRIVATE -O3 -fno-fast-math -fno-finite-math-only -fvisibility=hidden)
 target_include_directories(digitor_whisper_jni PRIVATE ${whisper_cpp_SOURCE_DIR}/include)
 target_link_libraries(digitor_whisper_jni whisper ${log-lib} ${android-lib})
