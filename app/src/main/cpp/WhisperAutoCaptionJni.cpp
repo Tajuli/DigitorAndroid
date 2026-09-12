@@ -59,6 +59,32 @@ whisper_context * GetOrLoadContext(const std::string & modelPath) {
 } // namespace
 
 extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_tajuli_digitorandroid_editor_processing_WhisperLanguageNativeV82_supportedLanguages(
+    JNIEnv * env,
+    jobject
+) {
+    jclass stringClass = env->FindClass("java/lang/String");
+    if (stringClass == nullptr) return nullptr;
+
+    const int maxLanguageId = whisper_lang_max_id();
+    const int languageCount = std::max(0, maxLanguageId + 1);
+    jobjectArray result = env->NewObjectArray(languageCount, stringClass, nullptr);
+    if (result == nullptr) return nullptr;
+
+    for (int id = 0; id < languageCount; ++id) {
+        const char * code = whisper_lang_str(id);
+        const char * fullName = whisper_lang_str_full(id);
+        const std::string encoded = std::string(code == nullptr ? "" : code) + "\t" +
+            std::string(fullName == nullptr ? "" : fullName);
+        jstring item = env->NewStringUTF(encoded.c_str());
+        if (item == nullptr) return nullptr;
+        env->SetObjectArrayElement(result, id, item);
+        env->DeleteLocalRef(item);
+    }
+    return result;
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     JNIEnv * env,
     jobject,
