@@ -283,7 +283,12 @@ internal class NativeHardwareExportBackendV75(
                     didWork = true
                 }
 
-                val progressUs = maxTimelineUs.get().coerceIn(0L, project.durationUs.coerceAtLeast(1L))
+                // Input producers can queue a full-duration transparent sentinel almost instantly.
+                // That is useful for keeping the compositor clock alive, but it is not render
+                // progress. Report the maximum presentation timestamp that MediaCodec has actually
+                // encoded/muxed so the UI follows completed GPU+encoder work instead of queued input.
+                val progressUs = createdEncoder.maxEncodedPresentationTimeUs
+                    .coerceIn(0L, project.durationUs.coerceAtLeast(1L))
                 val completed = completedProducers.get()
                 if (progressUs != lastProgressUs || completed != lastCompleted) {
                     lastProgressUs = progressUs
@@ -948,6 +953,8 @@ private class NativeSurfaceAvcEncoderMuxV75(
         private set
     var outputEnded: Boolean = false
         private set
+    var maxEncodedPresentationTimeUs: Long = 0L
+        private set
     private var inputEnded = false
 
     init {
@@ -997,6 +1004,10 @@ private class NativeSurfaceAvcEncoderMuxV75(
                         encoded.position(info.offset)
                         encoded.limit(info.offset + info.size)
                         muxer.writeSampleData(videoTrack, encoded, info)
+                        maxEncodedPresentationTimeUs = maxOf(
+                            maxEncodedPresentationTimeUs,
+                            info.presentationTimeUs.coerceAtLeast(0L),
+                        )
                     }
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputEnded = true
                     codec.releaseOutputBuffer(outputIndex, false)
