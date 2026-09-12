@@ -19,6 +19,12 @@ class AutoCaptionV80Test {
     }
 
     @Test
+    fun bengaliManualHintUsesNativeWhisperCode() {
+        assertEquals("bn", AutoCaptionLanguageV80.BENGALI.whisperCode)
+        assertEquals("Bengali", AutoCaptionLanguageV80.BENGALI.label)
+    }
+
+    @Test
     fun normalizerTrimsTextAndRemovesLaneOverlap() {
         val result = normalizeAutoCaptionSegmentsV80(
             listOf(
