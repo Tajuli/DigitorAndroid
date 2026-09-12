@@ -7,12 +7,13 @@ import org.junit.Test
 
 class CreatorEffectV25Test {
     @Test
-    fun catalogHasFiftyUniqueCreatorEffects() {
+    fun catalogHasFiftyOneUniqueCreatorEffects() {
         val presets = CreatorEffectCatalogV25.presets
-        assertEquals(50, presets.size)
-        assertEquals(50, presets.map { it.name.lowercase() }.toSet().size)
+        assertEquals(51, presets.size)
+        assertEquals(51, presets.map { it.name.lowercase() }.toSet().size)
         assertEquals(listOf("Basic", "Glitch", "Retro", "Lens", "Motion"), CreatorEffectCatalogV25.categories)
-        CreatorEffectCatalogV25.categories.forEach { category ->
+        assertEquals(11, CreatorEffectCatalogV25.inCategory("Basic").size)
+        CreatorEffectCatalogV25.categories.filterNot { it == "Basic" }.forEach { category ->
             assertEquals(10, CreatorEffectCatalogV25.inCategory(category).size)
         }
     }
@@ -24,6 +25,22 @@ class CreatorEffectV25Test {
         assertTrue(full.rgbSplit > 0f)
         assertTrue(half.rgbSplit > 0f)
         assertTrue(half.rgbSplit < full.rgbSplit)
+    }
+
+    @Test
+    fun videoDenoiseScalesAndParticipatesInIdentity() {
+        val preset = CreatorEffectCatalogV25.find("Video Denoise")
+        assertTrue(preset != null)
+        assertEquals("Basic", preset!!.category)
+        assertTrue(preset.vector.denoise > 0f)
+
+        val off = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Video Denoise", amount = 0f)))
+        val half = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Video Denoise", amount = .5f)))
+        val full = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Video Denoise", amount = 1f)))
+        assertTrue(off.isIdentity)
+        assertFalse(half.isIdentity)
+        assertTrue(half.denoise > 0f)
+        assertTrue(half.denoise < full.denoise)
     }
 
     @Test

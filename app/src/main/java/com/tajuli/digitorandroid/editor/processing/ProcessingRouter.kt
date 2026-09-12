@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.first
 class ProcessingRouter(context: Context) {
     private val appContext = context.applicationContext.also(VisualOverlayRenderEnvironmentV19::install)
     private val capabilities = DeviceCapabilityProbe(appContext)
+    private val nativeHardware = NativeHardwareExportBackendV75(appContext)
     private val gpu = GpuExportBackend(appContext)
     private val cpu = CpuExportBackend(appContext)
 
@@ -20,14 +21,33 @@ class ProcessingRouter(context: Context) {
         project: TimelineProject,
         output: File,
         onProgress: (ExportProgress) -> Unit,
-    ): ExportResult = export(project, output, ExportQuality.HIGH, onProgress)
+    ): ExportResult = export(project, output, ExportSettingsV72(), onProgress)
 
+    /** Compatibility overload retained for existing callers: quality changes, geometry/FPS stay Original. */
     suspend fun export(
         project: TimelineProject,
         output: File,
         quality: ExportQuality,
         onProgress: (ExportProgress) -> Unit,
+    ): ExportResult = export(
+        project,
+        output,
+        ExportSettingsV72(quality = quality),
+        onProgress,
+    )
+
+    suspend fun export(
+        project: TimelineProject,
+        output: File,
+        settings: ExportSettingsV72,
+        onProgress: (ExportProgress) -> Unit,
     ): ExportResult {
+        // Export settings are applied to a snapshot only. Timeline/source trims and the editor project
+        // remain untouched while render geometry, target FPS and bitrate all resolve consistently.
+        val exportProject = settings.applyTo(project)
+        val quality = settings.quality
+        val formatLabel = exportProject.exportFormatLabelV73()
+
         // Export is always allowed, even when Pro Cutout is incomplete or was cancelled. The render
         // stages use whatever durable matte frames already exist and pass through the original frame
         // wherever no sufficiently-near matte exists. If analysis is still running, pause it first
@@ -38,33 +58,209 @@ class ProcessingRouter(context: Context) {
             CutoutAnalysisRuntimeV66.state.first { !it.busy }
         }
 
+        var nativeFailure: Throwable? = null
+        if (capabilities.supportsGpuEditing() && nativeHardware.plan(exportProject) != null) {
+            val gpuName = capabilities.gpuDescription()
+            onProgress(
+                ExportProgress.Stage(
+                    "Native HW export · MediaCodec + Digitor GPU · $gpuName · $formatLabel · ${quality.label}",
+                    0f,
+                ),
+            )
+            try {
+                return nativeHardware.export(exportProject, output, quality, onProgress)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (firstNativeFailure: Throwable) {
+                nativeFailure = firstNativeFailure
+                val retryProject = codecSafeGpuRetryProjectV73(exportProject)
+                val retryQuality = codecSafeGpuRetryQualityV73(quality)
+                val retryChangesRequest = retryProject.width != exportProject.width ||
+                    retryProject.height != exportProject.height ||
+                    retryProject.frameRate != exportProject.frameRate ||
+                    retryQuality != quality
+
+                if (retryChangesRequest && nativeHardware.plan(retryProject) != null) {
+                    val retryLabel = retryProject.exportFormatLabelV73()
+                    runCatching { if (output.exists()) output.delete() }
+                    onProgress(
+                        ExportProgress.Stage(
+                            "Native codec rejected requested format · retrying $retryLabel · ${retryQuality.label}",
+                            0f,
+                        ),
+                    )
+                    try {
+                        val result = nativeHardware.export(retryProject, output, retryQuality, onProgress)
+                        return result.copy(
+                            note = buildString {
+                                result.note?.takeIf { it.isNotBlank() }?.let {
+                                    append(it)
+                                    append(" · ")
+                                }
+                                append("native compatibility retry after ")
+                                append(firstNativeFailure.message ?: firstNativeFailure::class.java.simpleName)
+                            },
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (retryFailure: Throwable) {
+                        retryFailure.addSuppressed(firstNativeFailure)
+                        nativeFailure = retryFailure
+                    }
+                }
+
+                // Do not lose export for timelines/devices outside V75's first native envelope. The
+                // older Transformer exporter remains a compatibility path while native multitrack and
+                // audio scheduling are expanded. It is no longer the primary path for eligible clips.
+                runCatching { if (output.exists()) output.delete() }
+                onProgress(
+                    ExportProgress.Stage(
+                        "Native HW path unavailable · trying Media3 compatibility exporter",
+                        0f,
+                    ),
+                )
+            }
+        }
+
         if (capabilities.supportsGpuEditing()) {
             val gpuName = capabilities.gpuDescription()
-            onProgress(ExportProgress.Stage("GPU selected · $gpuName · ${quality.label}", 0f))
+            onProgress(ExportProgress.Stage("GPU compatibility exporter · $gpuName · $formatLabel · ${quality.label}", 0f))
             try {
-                return gpu.export(project, output, quality, onProgress)
+                return gpu.export(exportProject, output, quality, onProgress)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (gpuFailure: Throwable) {
-                val exportException = generateSequence(gpuFailure as Throwable?) { it.cause }
-                    .filterIsInstance<ExportException>()
-                    .firstOrNull()
-                val detail = buildString {
-                    if (exportException != null) {
-                        append("Media3 code=")
-                        append(exportException.errorCode)
-                        append(" · ")
+                val firstExportException = gpuFailure.media3ExportExceptionV73()
+                val retryProject = codecSafeGpuRetryProjectV73(exportProject)
+                val retryQuality = codecSafeGpuRetryQualityV73(quality)
+                val retryChangesRequest = retryProject.width != exportProject.width ||
+                    retryProject.height != exportProject.height ||
+                    retryProject.frameRate != exportProject.frameRate ||
+                    retryQuality != quality
+
+                // Camera H.264 can be valid but still trigger runtime errors in a vendor hardware
+                // decoder (notably some UNISOC/SPRD stacks). Retry decoder failures once with Media3's
+                // software AVC preference. Also use the conservative output envelope so the retry does
+                // not immediately run into a second, unrelated encoder capability limit.
+                if (firstExportException?.isDecoderFailureV74() == true) {
+                    val retryLabel = retryProject.exportFormatLabelV73()
+                    runCatching { if (output.exists()) output.delete() }
+                    onProgress(
+                        ExportProgress.Stage(
+                            "AVC decoder failed · retrying software decode · $retryLabel · ${retryQuality.label}",
+                            0f,
+                        ),
+                    )
+                    try {
+                        val retryResult = gpu.export(
+                            project = retryProject,
+                            output = output,
+                            quality = retryQuality,
+                            forceSoftwareAvcDecoder = true,
+                            onProgress = onProgress,
+                        )
+                        return retryResult.copy(
+                            note = buildString {
+                                retryResult.note?.takeIf { it.isNotBlank() }?.let {
+                                    append(it)
+                                    append(" · ")
+                                }
+                                append("software AVC compatibility retry after ")
+                                append(gpuFailure.media3DetailV73())
+                            },
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (retryFailure: Throwable) {
+                        nativeFailure?.let(retryFailure::addSuppressed)
+                        throw IllegalStateException(
+                            "Export failed. Native: ${nativeFailure?.message ?: "not used"}. " +
+                                "Media3 requested decode: ${gpuFailure.media3DetailV73()}. " +
+                                "Software AVC retry ($retryLabel · ${retryQuality.label}) also failed: " +
+                                retryFailure.media3DetailV73(),
+                            retryFailure,
+                        )
                     }
-                    append(gpuFailure.message ?: gpuFailure::class.java.simpleName)
                 }
+
+                // High-resolution/high-FPS AVC requests can be valid editor settings but outside a
+                // particular phone's hardware encoder envelope. Retry only real encoder failures;
+                // shader, audio and project errors remain visible instead of being hidden.
+                if (firstExportException?.isEncoderFailureV73() == true && retryChangesRequest) {
+                    val retryLabel = retryProject.exportFormatLabelV73()
+                    runCatching { if (output.exists()) output.delete() }
+                    onProgress(
+                        ExportProgress.Stage(
+                            "Encoder rejected requested format · retrying $retryLabel · ${retryQuality.label}",
+                            0f,
+                        ),
+                    )
+                    try {
+                        val retryResult = gpu.export(retryProject, output, retryQuality, onProgress)
+                        return retryResult.copy(
+                            note = buildString {
+                                retryResult.note?.takeIf { it.isNotBlank() }?.let {
+                                    append(it)
+                                    append(" · ")
+                                }
+                                append("compatibility retry after ")
+                                append(gpuFailure.media3DetailV73())
+                            },
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (retryFailure: Throwable) {
+                        nativeFailure?.let(retryFailure::addSuppressed)
+                        throw IllegalStateException(
+                            "Export failed. Native: ${nativeFailure?.message ?: "not used"}. " +
+                                "Media3 requested: ${gpuFailure.media3DetailV73()}. " +
+                                "Compatibility retry ($retryLabel · ${retryQuality.label}) also failed: " +
+                                retryFailure.media3DetailV73(),
+                            retryFailure,
+                        )
+                    }
+                }
+
+                nativeFailure?.let(gpuFailure::addSuppressed)
                 throw IllegalStateException(
-                    "GPU export failed on $gpuName. $detail",
+                    "Export failed. Native: ${nativeFailure?.message ?: "not used"}. " +
+                        "Media3: ${gpuFailure.media3DetailV73()}",
                     gpuFailure,
                 )
             }
         }
 
-        onProgress(ExportProgress.Stage("No compatible GPU · CPU fallback · ${quality.label}", 0f))
-        return cpu.export(project, output, quality, onProgress)
+        onProgress(ExportProgress.Stage("No compatible GPU · CPU fallback · $formatLabel · ${quality.label}", 0f))
+        return cpu.export(exportProject, output, quality, onProgress)
     }
 }
+
+private fun TimelineProject.exportFormatLabelV73(): String =
+    "${width}×${height} · ${frameRate} fps"
+
+private fun Throwable.media3ExportExceptionV73(): ExportException? =
+    generateSequence(this as Throwable?) { it.cause }
+        .filterIsInstance<ExportException>()
+        .firstOrNull()
+
+private fun Throwable.media3DetailV73(): String {
+    val exportException = media3ExportExceptionV73()
+    return buildString {
+        if (exportException != null) {
+            append("Media3 code=")
+            append(exportException.errorCode)
+            append(" · ")
+        }
+        append(message ?: this@media3DetailV73::class.java.simpleName)
+    }
+}
+
+private fun ExportException.isEncoderFailureV73(): Boolean =
+    errorCode == ExportException.ERROR_CODE_ENCODER_INIT_FAILED ||
+        errorCode == ExportException.ERROR_CODE_ENCODING_FAILED ||
+        errorCode == ExportException.ERROR_CODE_ENCODING_FORMAT_UNSUPPORTED
+
+private fun ExportException.isDecoderFailureV74(): Boolean =
+    errorCode == ExportException.ERROR_CODE_DECODER_INIT_FAILED ||
+        errorCode == ExportException.ERROR_CODE_DECODING_FAILED ||
+        errorCode == ExportException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED

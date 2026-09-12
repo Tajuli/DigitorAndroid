@@ -82,7 +82,7 @@ fun CreatorEffectsWorkspaceV25(
         ) {
             Text("Effects · ${node.label}", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
-            Text("50 presets · timed timeline bars", fontSize = 7.sp, color = Fx25Muted)
+            Text("${CreatorEffectCatalogV25.presets.size} presets · timed timeline bars", fontSize = 7.sp, color = Fx25Muted)
         }
         HorizontalDivider(color = Fx25Divider)
 
@@ -175,6 +175,14 @@ fun CreatorEffectsWorkspaceV25(
                                 Text("Delete", fontSize = 7.sp, color = Color(0xFFFF7777))
                             }
                         }
+                    }
+                    if (effect.name.equals("Video Denoise", ignoreCase = true)) {
+                        Text(
+                            "Edge-aware noise reduction. Higher strength smooths low-light grain while protecting strong edges.",
+                            fontSize = 7.sp,
+                            color = Fx25Muted,
+                            modifier = Modifier.padding(bottom = 2.dp),
+                        )
                     }
                     Slider(
                         value = effect.amount.coerceIn(0f, 1f),

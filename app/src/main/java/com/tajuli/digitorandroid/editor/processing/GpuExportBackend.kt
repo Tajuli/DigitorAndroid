@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.Clock
@@ -38,16 +39,26 @@ class GpuExportBackend(
         project: TimelineProject,
         output: File,
         onProgress: (ExportProgress) -> Unit,
-    ): ExportResult = export(project, output, ExportQuality.HIGH, onProgress)
+    ): ExportResult = export(project, output, ExportQuality.HIGH, forceSoftwareAvcDecoder = false, onProgress)
 
     suspend fun export(
         project: TimelineProject,
         output: File,
         quality: ExportQuality,
         onProgress: (ExportProgress) -> Unit,
+    ): ExportResult = export(project, output, quality, forceSoftwareAvcDecoder = false, onProgress)
+
+    suspend fun export(
+        project: TimelineProject,
+        output: File,
+        quality: ExportQuality,
+        forceSoftwareAvcDecoder: Boolean,
+        onProgress: (ExportProgress) -> Unit,
     ): ExportResult = suspendCancellableCoroutine { continuation ->
         val requestedBitrate = quality.videoBitrate(project.width, project.height, project.frameRate)
-        onProgress(ExportProgress.Stage("GPU: releasing preview resources · ${quality.label}", 0.01f))
+        val preferSoftwareAvcDecoder = forceSoftwareAvcDecoder || preferredAvcDecoderIsUnisocV74()
+        val decodeLabel = if (preferSoftwareAvcDecoder) "software AVC decode" else "default AVC decode"
+        onProgress(ExportProgress.Stage("GPU: releasing preview resources · ${quality.label} · $decodeLabel", 0.01f))
         val previewLease = runCatching { PreviewExportCoordinator.acquireExportLease() }
             .getOrElse { error ->
                 if (continuation.isActive) continuation.resumeWithException(error)
@@ -75,7 +86,7 @@ class GpuExportBackend(
         } else {
             "GPU: building multitrack composition"
         }
-        onProgress(ExportProgress.Stage("$compositionStage · ${quality.label}", 0.02f))
+        onProgress(ExportProgress.Stage("$compositionStage · ${quality.label} · $decodeLabel", 0.02f))
 
         // Text-only timeline regions need an actual video frame stream. Use a real cache PNG rather
         // than a data: URI: vendor Media3/DataSource stacks are not equally reliable with data-image
@@ -137,12 +148,10 @@ class GpuExportBackend(
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
                 .setEncoderFactory(encoderFactory)
 
-            // Some Unisoc AVC hardware decoders accept camera H.264 during configuration but then
-            // repeatedly return invalid-data errors while draining the stream. Prefer the software
-            // AVC decoder there, but preserve Media3's DefaultAssetLoaderFactory. A bare
-            // ExoPlayerAssetLoader.Factory cannot load still-image MediaItems, while the default
-            // factory dispatches images to ImageAssetLoader and normal A/V to ExoPlayerAssetLoader.
-            if (preferredAvcDecoderIsUnisoc()) {
+            // Prefer software AVC on known fragile UNISOC/SPRD stacks and on explicit decoder retry.
+            // Keep DefaultAssetLoaderFactory so still images and normal A/V continue to route through
+            // Media3's supported loaders instead of forcing every source through ExoPlayerAssetLoader.
+            if (preferSoftwareAvcDecoder) {
                 val selector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
                     val delegate = if (mimeType == MimeTypes.VIDEO_H264) {
                         MediaCodecSelector.PREFER_SOFTWARE
@@ -175,12 +184,12 @@ class GpuExportBackend(
                         stopCallbacks()
                         restorePreview()
                         if (continuation.isActive) {
-                            onProgress(ExportProgress.Stage("GPU: complete · ${quality.label}", 1f))
+                            onProgress(ExportProgress.Stage("GPU: complete · ${quality.label} · $decodeLabel", 1f))
                             continuation.resume(
                                 ExportResult(
                                     output = output,
                                     backend = Backend.GPU,
-                                    note = "GPU export complete · ${quality.label} · ${requestedBitrate / 1_000_000f} Mbps target",
+                                    note = "GPU export complete · ${quality.label} · ${requestedBitrate / 1_000_000f} Mbps target · $decodeLabel",
                                 ),
                             )
                         }
@@ -218,13 +227,13 @@ class GpuExportBackend(
                         val fraction = (progressHolder.progress / 100f).coerceIn(0f, 0.99f)
                         onProgress(
                             ExportProgress.Stage(
-                                "GPU: rendering ${progressHolder.progress}% · ${quality.label}",
+                                "GPU: rendering ${progressHolder.progress}% · ${quality.label} · $decodeLabel",
                                 fraction,
                             ),
                         )
                     }
                     Transformer.PROGRESS_STATE_WAITING_FOR_AVAILABILITY -> {
-                        onProgress(ExportProgress.Stage("GPU: preparing export · ${quality.label}", 0.04f))
+                        onProgress(ExportProgress.Stage("GPU: preparing export · ${quality.label} · $decodeLabel", 0.04f))
                     }
                 }
                 if (state != Transformer.PROGRESS_STATE_NOT_STARTED && continuation.isActive) {
@@ -240,7 +249,7 @@ class GpuExportBackend(
                 cleanupFailedOutput()
                 return@Runnable
             }
-            onProgress(ExportProgress.Stage("GPU: MediaCodec + OpenGL export · ${quality.label}", 0.05f))
+            onProgress(ExportProgress.Stage("GPU: MediaCodec + OpenGL export · ${quality.label} · $decodeLabel", 0.05f))
             runCatching {
                 transformer.start(composition, output.absolutePath)
                 transformerStarted.set(true)
@@ -271,7 +280,7 @@ class GpuExportBackend(
         // Some Android codec stacks release native decoder/GL resources asynchronously even after
         // MediaCodec.stop/release returns. Give Codec2/SurfaceFlinger a short quiescent window before
         // opening the export decoder + encoder pair.
-        onProgress(ExportProgress.Stage("GPU: waiting for codec release · ${quality.label}", 0.03f))
+        onProgress(ExportProgress.Stage("GPU: waiting for codec release · ${quality.label} · $decodeLabel", 0.03f))
         handler.postDelayed(starter, EXPORT_START_GRACE_MS)
     }
 
@@ -340,12 +349,23 @@ class GpuExportBackend(
         return Uri.fromFile(blankFile).toString()
     }
 
-    private fun preferredAvcDecoderIsUnisoc(): Boolean = runCatching {
-        MediaCodecSelector.DEFAULT
+    private fun preferredAvcDecoderIsUnisocV74(): Boolean = runCatching {
+        val decoderNames = MediaCodecSelector.DEFAULT
             .getDecoderInfos(MimeTypes.VIDEO_H264, false, false)
-            .firstOrNull()
-            ?.name
-            ?.contains("unisoc", ignoreCase = true) == true
+            .map { it.name }
+        val deviceHints = buildList {
+            add(Build.HARDWARE)
+            add(Build.BOARD)
+            add(Build.DEVICE)
+            add(Build.PRODUCT)
+            add(Build.MANUFACTURER)
+            add(Build.BRAND)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(Build.SOC_MANUFACTURER)
+                add(Build.SOC_MODEL)
+            }
+        }
+        shouldPreferSoftwareAvcDecoderV74(decoderNames, deviceHints)
     }.getOrDefault(false)
 
     private class PreparedImageProject(
@@ -364,5 +384,19 @@ class GpuExportBackend(
         const val EXPORT_START_GRACE_MS = 350L
         const val BLANK_FRAME_FILE_NAME = "blank_frame_v15.png"
         const val IMAGE_SOURCE_DIR = "digitor_export_images_v42"
+    }
+}
+
+internal fun shouldPreferSoftwareAvcDecoderV74(
+    decoderNames: List<String>,
+    deviceHints: List<String>,
+): Boolean {
+    val values = decoderNames + deviceHints
+    return values.any { value ->
+        val normalized = value.lowercase()
+        normalized.contains("unisoc") ||
+            normalized.contains("spreadtrum") ||
+            normalized.contains("sprd") ||
+            Regex("(^|[^a-z0-9])ums[0-9]").containsMatchIn(normalized)
     }
 }

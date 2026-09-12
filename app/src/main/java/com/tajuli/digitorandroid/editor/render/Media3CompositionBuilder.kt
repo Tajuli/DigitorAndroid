@@ -460,8 +460,10 @@ class Media3CompositionBuilder(
         val builder = EditedMediaItem.Builder(mediaItem)
             .setDurationUs(clip.durationUs)
         if (kind == TrackKind.VIDEO) {
-            if (clip.isImageV21) {
-                builder.setFrameRate(projectFrameRate.coerceAtLeast(1))
+            // Preserve realtime preview cadence for moving-video sources, but apply the selected
+            // export FPS to all export video items. Still images always need an explicit frame rate.
+            if (!forPreview || clip.isImageV21) {
+                builder.setFrameRate(projectFrameRate.coerceIn(1, 120))
             }
             // This is intentionally identical for image and video TimelineClip items. Corrections,
             // Resolve node color, effects, transform/keyframes and opacity therefore use one path.

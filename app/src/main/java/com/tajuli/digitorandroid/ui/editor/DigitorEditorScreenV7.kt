@@ -99,8 +99,11 @@ import com.tajuli.digitorandroid.editor.model.topmostVideoClipAt
 import com.tajuli.digitorandroid.editor.preview.DavinciFramePreviewEngine
 import com.tajuli.digitorandroid.editor.preview.GpuPreviewSurface
 import com.tajuli.digitorandroid.editor.preview.MultitrackAudioPreviewEngine
+import com.tajuli.digitorandroid.editor.processing.ExportFrameRateV72
 import com.tajuli.digitorandroid.editor.processing.ExportProgress
 import com.tajuli.digitorandroid.editor.processing.ExportQuality
+import com.tajuli.digitorandroid.editor.processing.ExportResolutionV72
+import com.tajuli.digitorandroid.editor.processing.ExportSettingsV72
 import com.tajuli.digitorandroid.editor.processing.ProcessingRouter
 import com.tajuli.digitorandroid.editor.render.Media3CompositionBuilder
 import java.io.File
@@ -172,6 +175,8 @@ fun DigitorEditorScreenV7(
     var showExportDialog by remember { mutableStateOf(false) }
     var exportName by remember { mutableStateOf("Digitor_${System.currentTimeMillis()}") }
     var exportQuality by remember { mutableStateOf(ExportQuality.HIGH) }
+    var exportResolution by remember { mutableStateOf(ExportResolutionV72.ORIGINAL) }
+    var exportFrameRate by remember { mutableStateOf(ExportFrameRateV72.ORIGINAL) }
     var exportFraction by remember { mutableStateOf<Float?>(null) }
     var exportStatus by remember { mutableStateOf<String?>(null) }
 
@@ -296,16 +301,21 @@ fun DigitorEditorScreenV7(
         if (state.project.durationUs <= 0L) { exportStatus = "Timeline is empty"; return }
         val exportProject = state.project
         val exportCursorUs = cursorUs
-        val exportQualitySnapshot = exportQuality
+        val exportSettingsSnapshot = ExportSettingsV72(
+            quality = exportQuality,
+            resolution = exportResolution,
+            frameRate = exportFrameRate,
+        )
+        val resolvedExport = exportSettingsSnapshot.applyTo(exportProject)
         val exportHasAudio = exportProject.tracks.any { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
         scope.launch {
             stopForEdit()
             runCatching { audioPreview.suspendForExternalWork() }
             exportFraction = 0f
-            exportStatus = "Preparing ${exportQualitySnapshot.label} export"
+            exportStatus = "Preparing ${resolvedExport.width}×${resolvedExport.height} · ${resolvedExport.frameRate} fps · ${exportSettingsSnapshot.quality.label}"
             val temp = File(context.cacheDir, "digitor_export_${System.currentTimeMillis()}.mp4")
             try {
-                val result = router.export(exportProject, temp, exportQualitySnapshot) { progress ->
+                val result = router.export(exportProject, temp, exportSettingsSnapshot) { progress ->
                     if (progress is ExportProgress.Stage) {
                         exportStatus = progress.name
                         progress.fraction?.let { exportFraction = it.coerceIn(0f, 1f) }
@@ -319,7 +329,7 @@ fun DigitorEditorScreenV7(
                     } ?: error("Could not open selected save location")
                 }
                 exportFraction = 1f
-                exportStatus = "Saved · ${result.backend} · ${exportQualitySnapshot.label}"
+                exportStatus = "Saved · ${result.backend} · ${exportSettingsSnapshot.description(exportProject)}"
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -347,23 +357,71 @@ fun DigitorEditorScreenV7(
     val saveDocument = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("video/mp4")) { uri: Uri? -> if (uri != null) startExport(uri) }
 
     if (showExportDialog) {
+        val exportSettingsPreview = ExportSettingsV72(
+            quality = exportQuality,
+            resolution = exportResolution,
+            frameRate = exportFrameRate,
+        )
+        val resolvedExport = exportSettingsPreview.applyTo(state.project)
+        val targetMbps = exportQuality.videoBitrate(
+            resolvedExport.width,
+            resolvedExport.height,
+            resolvedExport.frameRate,
+        ) / 1_000_000f
         AlertDialog(
             onDismissRequest = { showExportDialog = false },
             title = { Text("Export video") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(value = exportName, onValueChange = { exportName = it }, label = { Text("File name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+
+                    Text("Resolution", fontSize = 10.sp, color = E7Muted)
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        ExportResolutionV72.entries.forEach { resolution ->
+                            AssistChip(
+                                onClick = { exportResolution = resolution },
+                                label = { Text(if (exportResolution == resolution) "✓ ${resolution.label}" else resolution.label, fontSize = 9.sp) },
+                            )
+                        }
+                    }
+
+                    Text("Frame rate", fontSize = 10.sp, color = E7Muted)
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        ExportFrameRateV72.entries.forEach { frameRate ->
+                            AssistChip(
+                                onClick = { exportFrameRate = frameRate },
+                                label = { Text(if (exportFrameRate == frameRate) "✓ ${frameRate.label}" else frameRate.label, fontSize = 9.sp) },
+                            )
+                        }
+                    }
+
                     Text("Quality", fontSize = 10.sp, color = E7Muted)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
                         ExportQuality.entries.forEach { quality ->
                             AssistChip(onClick = { exportQuality = quality }, label = { Text(if (exportQuality == quality) "✓ ${quality.label}" else quality.label, fontSize = 9.sp) })
                         }
                     }
-                    val targetMbps = exportQuality.videoBitrate(state.project.width, state.project.height, state.project.frameRate) / 1_000_000f
-                    Text("${exportQualitySnapshotLabel(exportQuality)} · %.1f Mbps H.264 target".format(targetMbps), fontSize = 9.sp, color = E7Muted)
+                    Text(
+                        "${resolvedExport.width}×${resolvedExport.height} · ${resolvedExport.frameRate} fps · %.1f Mbps H.264 target".format(targetMbps),
+                        fontSize = 9.sp,
+                        color = E7Muted,
+                    )
                     Text("File type", fontSize = 10.sp, color = E7Muted)
                     AssistChip(onClick = {}, label = { Text("MP4 · H.264 / AAC") })
-                    Text("Quality changes encoder bitrate; canvas resolution and frame rate stay unchanged.", fontSize = 9.sp, color = E7Muted)
+                    Text(
+                        "For video sources, FPS is a maximum: higher-FPS footage is reduced cleanly; lower-FPS footage is not fake-interpolated.",
+                        fontSize = 8.sp,
+                        color = E7Muted,
+                    )
                 }
             },
             confirmButton = {
@@ -512,8 +570,6 @@ fun DigitorEditorScreenV7(
         }
     }
 }
-
-private fun exportQualitySnapshotLabel(quality: ExportQuality): String = quality.label
 
 @Composable
 private fun TopBarV7(
