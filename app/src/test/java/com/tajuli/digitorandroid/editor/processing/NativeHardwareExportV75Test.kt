@@ -7,6 +7,7 @@ import com.tajuli.digitorandroid.editor.model.TrackKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NativeHardwareExportV75Test {
@@ -24,7 +25,7 @@ class NativeHardwareExportV75Test {
     )
 
     @Test
-    fun singleVideoOnlyClipUsesNativeFastPath() {
+    fun singleVideoClipUsesNativeTimelineWithSentinel() {
         val video = clip()
         val project = TimelineProject(
             width = 2560,
@@ -37,11 +38,16 @@ class NativeHardwareExportV75Test {
         )
         val plan = nativeHardwareExportPlanV75(project)
         assertNotNull(plan)
-        assertEquals(video.id, plan!!.clip.id)
+        assertEquals(1, plan!!.videoTrackCount)
+        assertEquals(1, plan.videoClipCount)
+        assertEquals(0, plan.audioClipCount)
+        assertEquals(2, plan.inputs.size)
+        assertTrue(plan.inputs.first() is NativeGraphInputPlanV76.Track)
+        assertTrue(plan.inputs.last() is NativeGraphInputPlanV76.Blank)
     }
 
     @Test
-    fun activeAudioKeepsCompatibilityExporterUntilNativeMixerLands() {
+    fun activeAudioIsNativeMixdownEligible() {
         val video = clip()
         val audio = clip(id = "a1")
         val project = TimelineProject(
@@ -50,11 +56,14 @@ class NativeHardwareExportV75Test {
                 TimelineTrack(name = "A1", kind = TrackKind.AUDIO, clips = listOf(audio)),
             ),
         )
-        assertNull(nativeHardwareExportPlanV75(project))
+        val plan = nativeHardwareExportPlanV75(project)
+        assertNotNull(plan)
+        assertEquals(1, plan!!.audioClipCount)
+        assertTrue(project.hasActiveNativeAudioV76())
     }
 
     @Test
-    fun mutedAudioDoesNotBlockNativeVideoFastPath() {
+    fun mutedAudioIsIgnoredByNativeMixdown() {
         val video = clip()
         val audio = clip(id = "a1")
         val project = TimelineProject(
@@ -63,11 +72,14 @@ class NativeHardwareExportV75Test {
                 TimelineTrack(name = "A1", kind = TrackKind.AUDIO, clips = listOf(audio), muted = true),
             ),
         )
-        assertNotNull(nativeHardwareExportPlanV75(project))
+        val plan = nativeHardwareExportPlanV75(project)
+        assertNotNull(plan)
+        assertEquals(0, plan!!.audioClipCount)
+        assertTrue(!project.hasActiveNativeAudioV76())
     }
 
     @Test
-    fun multipleVideoClipsStayOnCompatibilityExporter() {
+    fun multipleSequentialVideoClipsUseNativeScheduler() {
         val first = clip(id = "v1", outUs = 5_000_000L)
         val second = TimelineClip(
             id = "v2",
@@ -81,14 +93,56 @@ class NativeHardwareExportV75Test {
                 TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(first, second)),
             ),
         )
+        val plan = nativeHardwareExportPlanV75(project)
+        assertNotNull(plan)
+        assertEquals(2, plan!!.videoClipCount)
+        assertEquals(2, plan.inputs.size)
+    }
+
+    @Test
+    fun multipleVideoTracksUseNativeCompositorInputs() {
+        val base = clip(id = "base")
+        val overlay = clip(id = "overlay", uri = "content://overlay", outUs = 8_000_000L)
+        val project = TimelineProject(
+            tracks = listOf(
+                TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(base)),
+                TimelineTrack(name = "V2", kind = TrackKind.VIDEO, clips = listOf(overlay)),
+            ),
+        )
+        val plan = nativeHardwareExportPlanV75(project)
+        assertNotNull(plan)
+        assertEquals(2, plan!!.videoTrackCount)
+        assertEquals(2, plan.videoClipCount)
+        assertEquals(3, plan.inputs.size)
+        assertEquals(2, plan.inputs.count { it is NativeGraphInputPlanV76.Track })
+    }
+
+    @Test
+    fun timelineGapUsesNativeBitmapGapScheduler() {
+        val delayed = clip(startUs = 1_000_000L, outUs = 5_000_000L)
+        val project = TimelineProject(
+            tracks = listOf(TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(delayed))),
+        )
+        val plan = nativeHardwareExportPlanV75(project)
+        assertNotNull(plan)
+        assertEquals(2, plan!!.inputs.size)
+    }
+
+    @Test
+    fun invalidOverlappingClipsRemainRejected() {
+        val first = clip(id = "v1", outUs = 6_000_000L)
+        val second = clip(id = "v2", uri = "content://video2", startUs = 5_000_000L, outUs = 5_000_000L)
+        val project = TimelineProject(
+            tracks = listOf(TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(first, second))),
+        )
         assertNull(nativeHardwareExportPlanV75(project))
     }
 
     @Test
-    fun timelineGapStaysOnCompatibilityExporter() {
-        val delayed = clip(startUs = 1_000_000L, outUs = 5_000_000L)
+    fun audioOnlyProjectStillNeedsVisualOutputForMp4EditorExport() {
+        val audio = clip(id = "a1")
         val project = TimelineProject(
-            tracks = listOf(TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(delayed))),
+            tracks = listOf(TimelineTrack(name = "A1", kind = TrackKind.AUDIO, clips = listOf(audio))),
         )
         assertNull(nativeHardwareExportPlanV75(project))
     }
