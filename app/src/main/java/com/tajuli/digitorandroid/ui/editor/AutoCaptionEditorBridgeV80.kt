@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.ui.editor
 
+import android.widget.Toast
 import androidx.lifecycle.viewModelScope
 import com.tajuli.digitorandroid.editor.model.AutoCaptionLanguageV80
 import com.tajuli.digitorandroid.editor.model.ProjectStore
@@ -12,34 +13,101 @@ import com.tajuli.digitorandroid.editor.model.visualOverlaysForVideoTrackV19
 import com.tajuli.digitorandroid.editor.processing.WhisperAutoCaptionV80
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private val autoCaptionRunningV80 = AtomicBoolean(false)
 private const val AUTO_CAPTION_TRACK_V80 = "Captions"
 
+internal data class AutoCaptionRunStateV80(
+    val running: Boolean = false,
+    val message: String = "Choose a language, then generate captions.",
+    val progressPercent: Int? = null,
+    val completedCount: Int? = null,
+    val failed: Boolean = false,
+)
+
+/** Shared UI state so progress remains visible even when the Auto Caption dialog is closed. */
+internal object AutoCaptionStatusV80 {
+    private val _state = MutableStateFlow(AutoCaptionRunStateV80())
+    val state: StateFlow<AutoCaptionRunStateV80> = _state.asStateFlow()
+
+    fun start() {
+        _state.value = AutoCaptionRunStateV80(
+            running = true,
+            message = "Auto Caption · preparing audio",
+        )
+    }
+
+    fun update(message: String) {
+        val percent = Regex("(\\d{1,3})%").find(message)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?.coerceIn(0, 100)
+        _state.value = _state.value.copy(
+            running = true,
+            message = message,
+            progressPercent = if (message.contains("model", ignoreCase = true)) percent else null,
+            completedCount = null,
+            failed = false,
+        )
+    }
+
+    fun success(count: Int, language: AutoCaptionLanguageV80) {
+        _state.value = AutoCaptionRunStateV80(
+            running = false,
+            message = "Created $count captions · ${language.label}",
+            completedCount = count,
+        )
+    }
+
+    fun failure(message: String) {
+        _state.value = AutoCaptionRunStateV80(
+            running = false,
+            message = message,
+            failed = true,
+        )
+    }
+}
+
 /** Generate editable TextOverlayClip captions with the existing project/timeline system. */
 fun EditorViewModelV4.generateAutoCaptionsV80(language: AutoCaptionLanguageV80) {
     if (!autoCaptionRunningV80.compareAndSet(false, true)) {
-        setEditorStatusV19("Auto Caption is already running")
+        val message = "Auto Caption is already running"
+        setEditorStatusV19(message)
+        AutoCaptionStatusV80.update(message)
         return
     }
 
     val sourceProject = state.value.project
+    AutoCaptionStatusV80.start()
     setEditorStatusV19("Auto Caption · preparing audio")
+
+    fun publishStatus(message: String) {
+        setEditorStatusV19(message)
+        AutoCaptionStatusV80.update(message)
+    }
+
     viewModelScope.launch(Dispatchers.Default) {
         try {
             val segments = WhisperAutoCaptionV80(getApplication()).transcribeProject(
                 project = sourceProject,
                 language = language,
-                onStatus = ::setEditorStatusV19,
+                onStatus = ::publishStatus,
             )
-            require(segments.isNotEmpty()) { "No speech was detected" }
+            require(segments.isNotEmpty()) { "No speech was detected in the project audio" }
 
             withContext(Dispatchers.Main) {
                 // Do not overwrite edits the user made while a long transcription was running.
                 if (state.value.project != sourceProject) {
-                    setEditorStatusV19("Auto Caption stopped · project changed during transcription")
+                    val message = "Auto Caption stopped · project changed during transcription"
+                    setEditorStatusV19(message)
+                    AutoCaptionStatusV80.failure(message)
+                    Toast.makeText(getApplication(), message, Toast.LENGTH_LONG).show()
                     return@withContext
                 }
 
@@ -57,17 +125,36 @@ fun EditorViewModelV4.generateAutoCaptionsV80(language: AutoCaptionLanguageV80) 
                     )
                 }
                 val nextProject = baseProject.copy(textOverlays = baseProject.textOverlays + overlays)
-                ProjectStore(getApplication()).autoSave(nextProject)
-                loadProject()
+
+                // V81 commits directly into the live editor state instead of saving then reloading the
+                // whole project. This makes generated captions appear immediately and gives Undo one
+                // clean Auto Caption history entry. Keep the recovery snapshot in sync afterwards.
+                commitProjectV19(
+                    label = "auto-caption",
+                    project = nextProject,
+                    status = "Auto Caption · ${overlays.size} captions · ${language.label}",
+                )
+                ProjectStore(getApplication()).autoSave(state.value.project)
+
                 selectTrack(captionTrack.id)
                 overlays.firstOrNull()?.let { first ->
                     selectTextOverlay(first.id)
                     TimelineTextSelectionBusV10.select(first.id)
                 }
-                setEditorStatusV19("Auto Caption · ${overlays.size} captions · ${language.label}")
+
+                val message = "Auto Caption · ${overlays.size} captions · ${language.label}"
+                setEditorStatusV19(message)
+                AutoCaptionStatusV80.success(overlays.size, language)
+                Toast.makeText(getApplication(), "Created ${overlays.size} captions", Toast.LENGTH_SHORT).show()
             }
         } catch (error: Throwable) {
-            setEditorStatusV19(error.message ?: "Auto Caption failed")
+            withContext(Dispatchers.Main) {
+                val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+                val message = "Auto Caption failed · $detail"
+                setEditorStatusV19(message)
+                AutoCaptionStatusV80.failure(message)
+                Toast.makeText(getApplication(), message, Toast.LENGTH_LONG).show()
+            }
         } finally {
             autoCaptionRunningV80.set(false)
         }
