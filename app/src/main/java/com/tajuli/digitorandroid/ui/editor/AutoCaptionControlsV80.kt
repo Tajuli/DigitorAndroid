@@ -40,7 +40,7 @@ import com.tajuli.digitorandroid.editor.processing.supportedAutoCaptionLanguages
  * Compact editor-level Auto Caption entry point.
  *
  * V81 keeps progress visible. V82 exposes the complete language catalog reported by the pinned
- * whisper.cpp runtime and keeps Auto Detect as the international default.
+ * whisper.cpp runtime. V83 moves multilingual recognition to the more accurate small-q5_1 model.
  */
 @Composable
 internal fun AutoCaptionControlsV80(
@@ -111,7 +111,7 @@ internal fun AutoCaptionControlsV80(
                     }
 
                     Text(
-                        "Whisper runs on-device. The first run downloads the speech model once; later runs can work offline.",
+                        "Whisper runs on-device. First use downloads the higher-accuracy multilingual model (~190 MB) once; later runs can work offline.",
                         fontSize = 9.sp,
                         color = Color.White.copy(alpha = .68f),
                     )
@@ -139,7 +139,7 @@ internal fun AutoCaptionControlsV80(
 
                     Text(
                         if (language.whisperCode == "auto") {
-                            "Auto Detect lets Whisper identify the spoken language and then transcribe it."
+                            "Auto Detect identifies the spoken language first, then transcribes using that language."
                         } else {
                             "Manual language selection can improve recognition when you already know the spoken language."
                         },
