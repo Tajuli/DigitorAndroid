@@ -231,7 +231,7 @@ internal class WhisperAutoCaptionV80(
             val sourceTimeUs = info.presentationTimeUs + frame.toLong() * 1_000_000L / sampleRate.toLong()
             if (sourceTimeUs < clip.sourceInUs) continue
             if (sourceTimeUs >= clip.sourceOutUs) break
-            val targetIndex = (sourceTimeUs - clip.sourceInUs) * TARGET_SAMPLE_RATE / 1_000_000L
+            val targetIndex = (sourceTimeUs - clip.sourceInUs) * TARGET_SAMPLE_RATE.toLong() / 1_000_000L
             if (targetIndex < next) continue
             val frameOffset = info.offset + frame * frameBytes
             var mono = 0f
@@ -275,7 +275,7 @@ internal class WhisperAutoCaptionV80(
         ((clip.durationUs / 1_000_000.0) * TARGET_SAMPLE_RATE).toLong().coerceIn(16_000L, 4_000_000L).toInt()
 
     companion object {
-        private const val TARGET_SAMPLE_RATE = 16_000L
+        private const val TARGET_SAMPLE_RATE = 16_000
     }
 }
 
