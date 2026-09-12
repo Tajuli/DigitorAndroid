@@ -105,14 +105,32 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     params.max_len = 56;
     params.split_on_word = true;
     params.suppress_blank = true;
-    params.language = (language.empty() || language == "auto") ? "auto" : language.c_str();
-    params.detect_language = language.empty() || language == "auto";
+
+    const bool autoLanguage = language.empty() || language == "auto";
+    // In whisper.cpp, detect_language=true is a language-detection-only mode and returns before
+    // normal transcription. For Auto captions we instead pass language="auto" while keeping
+    // detect_language=false so whisper_full auto-detects the language and still emits segments.
+    params.language = autoLanguage ? "auto" : language.c_str();
+    params.detect_language = false;
 
     const int status = whisper_full(context, params, samples.data(), static_cast<int>(samples.size()));
     if (status != 0) {
         __android_log_print(ANDROID_LOG_ERROR, kTag, "whisper_full failed: %d", status);
         ThrowJava(env, "java/lang/IllegalStateException", "Whisper transcription failed");
         return nullptr;
+    }
+
+    const int languageId = whisper_full_lang_id(context);
+    if (languageId >= 0) {
+        const char * detected = whisper_lang_str(languageId);
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            kTag,
+            "transcription complete: requested=%s detected=%s samples=%d",
+            autoLanguage ? "auto" : language.c_str(),
+            detected == nullptr ? "unknown" : detected,
+            static_cast<int>(sampleCount)
+        );
     }
 
     const int segmentCount = whisper_full_n_segments(context);
