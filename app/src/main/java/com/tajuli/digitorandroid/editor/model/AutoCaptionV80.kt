@@ -1,13 +1,21 @@
 package com.tajuli.digitorandroid.editor.model
 
-/** V80 on-device Whisper language choices exposed in the Text workspace. */
-enum class AutoCaptionLanguageV80(
+/**
+ * Runtime Whisper language selection.
+ *
+ * V82 intentionally uses a data class instead of a fixed enum so the editor can expose every
+ * language reported by the pinned whisper.cpp runtime without duplicating its language table in
+ * Kotlin. AUTO remains the default for international projects.
+ */
+data class AutoCaptionLanguageV80(
     val label: String,
     val whisperCode: String,
 ) {
-    AUTO("Auto", "auto"),
-    BENGALI("বাংলা", "bn"),
-    ENGLISH("English", "en"),
+    companion object {
+        val AUTO = AutoCaptionLanguageV80("Auto Detect", "auto")
+        val ENGLISH = AutoCaptionLanguageV80("English", "en")
+        val BENGALI = AutoCaptionLanguageV80("Bengali", "bn")
+    }
 }
 
 data class AutoCaptionSegmentV80(
