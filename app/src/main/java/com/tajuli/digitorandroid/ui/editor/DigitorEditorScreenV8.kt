@@ -9,7 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.media3.common.util.UnstableApi
 
-/** V80 shell: editor-level Auto Caption control backed by on-device whisper.cpp. */
+/** V81 shell: Auto Caption stays clear of the export/header controls and can report background work. */
 @UnstableApi
 @Composable
 fun DigitorEditorScreenV8(
@@ -21,8 +21,8 @@ fun DigitorEditorScreenV8(
         AutoCaptionControlsV80(
             vm = vm,
             modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(top = 52.dp, end = 8.dp),
+                .align(Alignment.BottomEnd)
+                .padding(end = 10.dp, bottom = 92.dp),
         )
     }
 }
