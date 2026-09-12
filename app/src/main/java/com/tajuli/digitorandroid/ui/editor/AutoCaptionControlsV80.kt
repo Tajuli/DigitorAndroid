@@ -1,7 +1,5 @@
 package com.tajuli.digitorandroid.ui.editor
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,7 +7,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Surface
@@ -66,35 +63,17 @@ internal fun AutoCaptionControlsV80(
                 fontSize = 7.sp,
                 color = Color.White.copy(alpha = .62f),
             )
-            Row(
-                Modifier.horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                AutoCaptionLanguageV80.entries.forEach { option ->
-                    Text(
-                        option.label,
-                        fontSize = 8.sp,
-                        color = if (option == language) Color(0xFF30E0C3) else Color.White.copy(alpha = .72f),
-                        modifier = Modifier
-                            .background(
-                                if (option == language) Color(0x2230E0C3) else Color(0xFF24242A),
-                                RoundedCornerShape(5.dp),
-                            )
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
-                            .then(
-                                Modifier,
-                            ),
-                    )
-                }
-            }
-            // Separate buttons keep the selection targets large on phones without adding a menu dependency.
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 AutoCaptionLanguageV80.entries.forEach { option ->
                     TextButton(
                         onClick = { language = option },
                         modifier = Modifier.height(28.dp),
                     ) {
-                        Text(if (option == language) "● ${option.label}" else option.label, fontSize = 7.sp)
+                        Text(
+                            if (option == language) "● ${option.label}" else option.label,
+                            fontSize = 7.sp,
+                            color = if (option == language) Color(0xFF30E0C3) else Color.White.copy(alpha = .72f),
+                        )
                     }
                 }
             }
