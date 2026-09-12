@@ -19,6 +19,7 @@ import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
+import kotlin.math.abs
 import kotlin.math.max
 
 /** JNI surface backed by the pinned whisper.cpp v1.9.4 native target. */
@@ -27,6 +28,9 @@ internal object WhisperNativeV80 {
         System.loadLibrary("digitor_whisper_jni")
     }
 
+    /** Loads the model once and reports whether Vulkan GPU or CPU fallback is active. */
+    external fun prepareBackend(modelPath: String): String
+
     external fun transcribe(
         modelPath: String,
         samples: FloatArray,
@@ -34,17 +38,29 @@ internal object WhisperNativeV80 {
     ): Array<String>
 }
 
+private data class CaptionSourceV84(
+    val trackId: String,
+    val clip: TimelineClip,
+)
+
+private data class CaptionBatchV84(
+    val sources: List<CaptionSourceV84>,
+) {
+    val timelineStartUs: Long get() = sources.first().clip.timelineStartUs
+    val timelineEndUs: Long get() = sources.last().clip.timelineEndUs
+    val durationUs: Long get() = (timelineEndUs - timelineStartUs).coerceAtLeast(1L)
+}
+
 /**
  * On-device, no-per-minute-cost auto captions.
  *
- * V83 uses the multilingual small-q5_1 model instead of tiny-q5_1. The tiny model was fast, but
- * real Bengali footage showed severe phonetic/romanized hallucinations and very long incorrect
- * segments. The ~190 MB small-q5_1 model is still quantized for mobile use but is materially more
- * reliable across international languages.
+ * V83 uses the multilingual small-q5_1 model instead of tiny-q5_1 for materially better
+ * international/Bengali recognition. V84 prefers whisper.cpp's Vulkan GPU backend on Android and
+ * falls back to CPU when a device/driver cannot initialize it.
  *
- * Project audio is decoded only with Android platform codecs. We preserve native PCM first, then
- * apply a speech-safe low-pass/downsample to Whisper's required 16 kHz mono input; user audio is
- * never uploaded.
+ * Split clips that are still contiguous pieces of the same source are batched back together before
+ * Whisper. Splitting a 60-second video into four 15-second clips therefore does not cause four full
+ * decoder/language-detection setup cycles.
  */
 internal class WhisperAutoCaptionV80(
     context: Context,
@@ -58,34 +74,84 @@ internal class WhisperAutoCaptionV80(
         onStatus: (String) -> Unit = {},
     ): List<AutoCaptionSegmentV80> {
         val model = modelStore.ensureModel(onStatus)
-        val audioClips = project.tracks
+        onStatus("Auto Caption · preparing GPU")
+        val backend = WhisperNativeV80.prepareBackend(model.absolutePath)
+        onStatus("Auto Caption · $backend ready")
+
+        val audioSources = project.tracks
             .filter { it.kind == TrackKind.AUDIO && !it.muted }
-            .flatMap { it.clips }
-            .sortedBy { it.timelineStartUs }
-        val sources = if (audioClips.isNotEmpty()) {
-            audioClips
+            .flatMap { track -> track.clips.map { clip -> CaptionSourceV84(track.id, clip) } }
+            .sortedBy { it.clip.timelineStartUs }
+        val sources = if (audioSources.isNotEmpty()) {
+            audioSources
         } else {
             // Legacy projects may contain video without the linked A-track introduced by V12.
-            project.tracks.filter { it.kind == TrackKind.VIDEO }.flatMap { it.clips }.sortedBy { it.timelineStartUs }
+            project.tracks
+                .filter { it.kind == TrackKind.VIDEO }
+                .flatMap { track -> track.clips.map { clip -> CaptionSourceV84(track.id, clip) } }
+                .sortedBy { it.clip.timelineStartUs }
         }
         require(sources.isNotEmpty()) { "No audio/video clips available for Auto Caption" }
 
+        val batches = buildCaptionBatchesV84(sources)
         val segments = mutableListOf<AutoCaptionSegmentV80>()
-        sources.forEachIndexed { index, clip ->
-            onStatus("Auto Caption · decoding audio ${index + 1}/${sources.size}")
-            val samples = decodeClipToMono16k(clip)
+        var decodedClipCount = 0
+
+        batches.forEachIndexed { batchIndex, batch ->
+            val pcm = FloatBuilderV80(
+                initialCapacity = ((batch.durationUs / 1_000_000.0) * TARGET_SAMPLE_RATE)
+                    .toLong()
+                    .coerceIn(16_000L, 4_000_000L)
+                    .toInt(),
+            )
+            batch.sources.forEach { source ->
+                decodedClipCount++
+                onStatus("Auto Caption · decoding $decodedClipCount/${sources.size} · $backend")
+                val clipSamples = decodeClipToMono16k(source.clip)
+                pcm.addAll(clipSamples)
+            }
+            val samples = pcm.toFloatArray()
             if (samples.isEmpty()) return@forEachIndexed
-            onStatus("Auto Caption · transcribing ${index + 1}/${sources.size} · ${language.label}")
+
+            onStatus(
+                "Auto Caption · transcribing ${batchIndex + 1}/${batches.size} · $backend · ${language.label}",
+            )
             val raw = WhisperNativeV80.transcribe(model.absolutePath, samples, language.whisperCode)
             raw.forEach { line ->
                 parseNativeSegment(line)?.let { local ->
-                    val start = clip.timelineStartUs + local.startUs.coerceIn(0L, clip.durationUs)
-                    val end = clip.timelineStartUs + local.endUs.coerceIn(0L, clip.durationUs)
+                    val start = batch.timelineStartUs + local.startUs.coerceIn(0L, batch.durationUs)
+                    val end = batch.timelineStartUs + local.endUs.coerceIn(0L, batch.durationUs)
                     if (end > start) segments += local.copy(startUs = start, endUs = end)
                 }
             }
         }
         return normalizeAutoCaptionSegmentsV80(segments)
+    }
+
+    private fun buildCaptionBatchesV84(sources: List<CaptionSourceV84>): List<CaptionBatchV84> {
+        if (sources.isEmpty()) return emptyList()
+        val result = mutableListOf<CaptionBatchV84>()
+        var current = mutableListOf(sources.first())
+
+        sources.drop(1).forEach { next ->
+            val previous = current.last()
+            val sameTrack = previous.trackId == next.trackId
+            val sameMedia = previous.clip.uri == next.clip.uri
+            val timelineContinuous = abs(previous.clip.timelineEndUs - next.clip.timelineStartUs) <= CONTIGUOUS_TOLERANCE_US
+            val sourceContinuous = abs(previous.clip.sourceOutUs - next.clip.sourceInUs) <= CONTIGUOUS_TOLERANCE_US
+            val proposedDuration = next.clip.timelineEndUs - current.first().clip.timelineStartUs
+            val canJoin = sameTrack && sameMedia && timelineContinuous && sourceContinuous &&
+                proposedDuration <= MAX_BATCH_DURATION_US
+
+            if (canJoin) {
+                current += next
+            } else {
+                result += CaptionBatchV84(current.toList())
+                current = mutableListOf(next)
+            }
+        }
+        result += CaptionBatchV84(current.toList())
+        return result
     }
 
     private fun parseNativeSegment(line: String): AutoCaptionSegmentV80? {
@@ -288,6 +354,8 @@ internal class WhisperAutoCaptionV80(
 
     companion object {
         private const val TARGET_SAMPLE_RATE = 16_000
+        private const val CONTIGUOUS_TOLERANCE_US = 25_000L
+        private const val MAX_BATCH_DURATION_US = 120_000_000L
     }
 }
 
@@ -296,8 +364,22 @@ private class FloatBuilderV80(initialCapacity: Int) {
     private var size = 0
 
     fun add(value: Float) {
-        if (size == values.size) values = values.copyOf((values.size * 2).coerceAtLeast(16))
+        ensureCapacity(size + 1)
         values[size++] = value
+    }
+
+    fun addAll(source: FloatArray) {
+        if (source.isEmpty()) return
+        ensureCapacity(size + source.size)
+        source.copyInto(values, destinationOffset = size)
+        size += source.size
+    }
+
+    private fun ensureCapacity(required: Int) {
+        if (required <= values.size) return
+        var next = values.size.coerceAtLeast(16)
+        while (next < required) next = (next * 2).coerceAtLeast(required)
+        values = values.copyOf(next)
     }
 
     fun toFloatArray(): FloatArray = values.copyOf(size)
