@@ -25,11 +25,12 @@ data class CreatorEffectVectorV25(
     val ghost: Float = 0f,
     val flicker: Float = 0f,
     val warm: Float = 0f,
+    val denoise: Float = 0f,
 ) {
     val isIdentity: Boolean
         get() = blur == 0f && sharpen == 0f && glow == 0f && grain == 0f && vignette == 0f &&
             rgbSplit == 0f && scanlines == 0f && pixelate == 0f && wave == 0f && lens == 0f &&
-            zoomBlur == 0f && ghost == 0f && flicker == 0f && warm == 0f
+            zoomBlur == 0f && ghost == 0f && flicker == 0f && warm == 0f && denoise == 0f
 }
 
 object CreatorEffectCatalogV25 {
@@ -39,6 +40,7 @@ object CreatorEffectCatalogV25 {
         // Basic
         p("Blur", "Basic", blur = 1.00f),
         p("Sharpen", "Basic", sharpen = 1.00f),
+        p("Video Denoise", "Basic", denoise = 1.00f),
         p("Glow", "Basic", glow = 1.00f, blur = .18f),
         p("Film Grain", "Basic", grain = 1.00f),
         p("Vignette", "Basic", vignette = 1.00f),
@@ -124,6 +126,7 @@ fun resolveCreatorEffectsV25(effects: List<NodeEffect>): CreatorEffectVectorV25 
             ghost = (out.ghost + v.ghost * a).coerceIn(0f, 1.5f),
             flicker = (out.flicker + v.flicker * a).coerceIn(0f, 1.5f),
             warm = (out.warm + v.warm * a).coerceIn(-1f, 1.5f),
+            denoise = (out.denoise + v.denoise * a).coerceIn(0f, 1.5f),
         )
     }
     return out
@@ -147,6 +150,7 @@ private fun p(
     ghost: Float = 0f,
     flicker: Float = 0f,
     warm: Float = 0f,
+    denoise: Float = 0f,
 ): CreatorEffectPresetV25 = CreatorEffectPresetV25(
     name = name,
     category = category,
@@ -165,5 +169,6 @@ private fun p(
         ghost = ghost,
         flicker = flicker,
         warm = warm,
+        denoise = denoise,
     ),
 )
