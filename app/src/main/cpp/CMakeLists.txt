@@ -61,6 +61,18 @@ if(ANDROID)
             set(Vulkan_GLSLC_EXECUTABLE "${DIGITOR_HOST_GLSLC}" CACHE FILEPATH "Host glslc for ggml Vulkan shaders" FORCE)
         endif()
     endif()
+
+    # The NDK exposes Vulkan C headers but not Vulkan-Hpp (`vulkan/vulkan.hpp`) required by ggml.
+    # Copy only the host's self-contained Vulkan header directory into the CMake build tree instead
+    # of adding /usr/include wholesale to an Android cross-compile.
+    foreach(_vulkan_hpp_root "/usr/include" "/usr/local/include")
+        if(EXISTS "${_vulkan_hpp_root}/vulkan/vulkan.hpp")
+            set(DIGITOR_VULKAN_HPP_INCLUDE "${CMAKE_BINARY_DIR}/digitor-vulkan-hpp")
+            file(MAKE_DIRECTORY "${DIGITOR_VULKAN_HPP_INCLUDE}")
+            file(COPY "${_vulkan_hpp_root}/vulkan" DESTINATION "${DIGITOR_VULKAN_HPP_INCLUDE}")
+            break()
+        endif()
+    endforeach()
 endif()
 
 FetchContent_Declare(
@@ -71,6 +83,10 @@ FetchContent_Declare(
     GIT_PROGRESS FALSE
 )
 FetchContent_MakeAvailable(whisper_cpp)
+
+if(TARGET ggml-vulkan AND DIGITOR_VULKAN_HPP_INCLUDE)
+    target_include_directories(ggml-vulkan PRIVATE "${DIGITOR_VULKAN_HPP_INCLUDE}")
+endif()
 
 # The Android Gradle native build historically supplies -ffast-math for the PP-Matting path.
 # ggml deliberately relies on NaN/Infinity semantics and refuses to compile with finite-math-only.
