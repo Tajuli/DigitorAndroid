@@ -37,9 +37,14 @@ internal object WhisperNativeV80 {
 /**
  * On-device, no-per-minute-cost auto captions.
  *
- * The 31 MiB multilingual tiny-q5_1 model is downloaded once, SHA-256 verified and then reused
- * offline. Project audio is decoded only with Android platform codecs, converted to 16 kHz mono
- * PCM, and passed to whisper.cpp in-process; user audio is never uploaded.
+ * V83 uses the multilingual small-q5_1 model instead of tiny-q5_1. The tiny model was fast, but
+ * real Bengali footage showed severe phonetic/romanized hallucinations and very long incorrect
+ * segments. The ~190 MB small-q5_1 model is still quantized for mobile use but is materially more
+ * reliable across international languages.
+ *
+ * Project audio is decoded only with Android platform codecs. We preserve native PCM first, then
+ * apply a speech-safe low-pass/downsample to Whisper's required 16 kHz mono input; user audio is
+ * never uploaded.
  */
 internal class WhisperAutoCaptionV80(
     context: Context,
@@ -67,10 +72,10 @@ internal class WhisperAutoCaptionV80(
 
         val segments = mutableListOf<AutoCaptionSegmentV80>()
         sources.forEachIndexed { index, clip ->
-            onStatus("Auto Caption · audio ${index + 1}/${sources.size}")
+            onStatus("Auto Caption · decoding audio ${index + 1}/${sources.size}")
             val samples = decodeClipToMono16k(clip)
             if (samples.isEmpty()) return@forEachIndexed
-            onStatus("Auto Caption · transcribing ${index + 1}/${sources.size}")
+            onStatus("Auto Caption · transcribing ${index + 1}/${sources.size} · ${language.label}")
             val raw = WhisperNativeV80.transcribe(model.absolutePath, samples, language.whisperCode)
             raw.forEach { line ->
                 parseNativeSegment(line)?.let { local ->
@@ -124,11 +129,10 @@ internal class WhisperAutoCaptionV80(
             var sampleRate = format.intValue(MediaFormat.KEY_SAMPLE_RATE, TARGET_SAMPLE_RATE).coerceAtLeast(1)
             var channelCount = format.intValue(MediaFormat.KEY_CHANNEL_COUNT, 2).coerceAtLeast(1)
             var pcmEncoding = format.intValue(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
-            val output = FloatBuilderV80(initialCapacity = minOf(262_144, estimatedTargetSamples(clip)))
+            val nativePcm = FloatBuilderV80(initialCapacity = minOf(524_288, estimatedNativeSamples(clip, sampleRate)))
             val info = MediaCodec.BufferInfo()
             var inputEnded = false
             var outputEnded = false
-            var nextTargetIndex = 0L
             var idleLoops = 0
 
             while (!outputEnded) {
@@ -140,12 +144,24 @@ internal class WhisperAutoCaptionV80(
                         input.clear()
                         val sampleTimeUs = extractor.sampleTime
                         if (sampleTimeUs < 0L || sampleTimeUs >= clip.sourceOutUs) {
-                            codec.queueInputBuffer(inputIndex, 0, 0, max(0L, clip.sourceOutUs), MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            codec.queueInputBuffer(
+                                inputIndex,
+                                0,
+                                0,
+                                max(0L, clip.sourceOutUs),
+                                MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                            )
                             inputEnded = true
                         } else {
                             val size = extractor.readSampleData(input, 0)
                             if (size < 0) {
-                                codec.queueInputBuffer(inputIndex, 0, 0, max(0L, sampleTimeUs), MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                codec.queueInputBuffer(
+                                    inputIndex,
+                                    0,
+                                    0,
+                                    max(0L, sampleTimeUs),
+                                    MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                                )
                                 inputEnded = true
                             } else {
                                 codec.queueInputBuffer(inputIndex, 0, size, sampleTimeUs, 0)
@@ -162,17 +178,15 @@ internal class WhisperAutoCaptionV80(
                     when {
                         outputIndex >= 0 -> {
                             if (info.size > 0) {
-                                val buffer = codec.getOutputBuffer(outputIndex)
-                                if (buffer != null) {
-                                    nextTargetIndex = appendDecodedBuffer(
+                                codec.getOutputBuffer(outputIndex)?.let { buffer ->
+                                    appendDecodedNativeMono(
                                         clip = clip,
                                         decoded = buffer,
                                         info = info,
                                         sampleRate = sampleRate,
                                         channelCount = channelCount,
                                         pcmEncoding = pcmEncoding,
-                                        output = output,
-                                        nextTargetIndex = nextTargetIndex,
+                                        output = nativePcm,
                                     )
                                 }
                             }
@@ -199,7 +213,10 @@ internal class WhisperAutoCaptionV80(
                     Thread.sleep(1L)
                 }
             }
-            return output.toFloatArray()
+
+            val decoded = nativePcm.toFloatArray()
+            if (decoded.isEmpty()) return decoded
+            return resampleMonoForWhisperV83(decoded, inputRate = sampleRate, outputRate = TARGET_SAMPLE_RATE)
         } finally {
             runCatching { decoder?.stop() }
             runCatching { decoder?.release() }
@@ -207,7 +224,8 @@ internal class WhisperAutoCaptionV80(
         }
     }
 
-    private fun appendDecodedBuffer(
+    /** Keep the decoded stream at its native rate; resampling happens once after decode. */
+    private fun appendDecodedNativeMono(
         clip: TimelineClip,
         decoded: ByteBuffer,
         info: MediaCodec.BufferInfo,
@@ -215,36 +233,27 @@ internal class WhisperAutoCaptionV80(
         channelCount: Int,
         pcmEncoding: Int,
         output: FloatBuilderV80,
-        nextTargetIndex: Long,
-    ): Long {
+    ) {
         val bytesPerSample = bytesPerSample(pcmEncoding)
         val frameBytes = bytesPerSample * channelCount
-        if (frameBytes <= 0 || info.size < frameBytes) return nextTargetIndex
+        if (frameBytes <= 0 || info.size < frameBytes) return
         val frames = info.size / frameBytes
         val source = decoded.duplicate().order(ByteOrder.LITTLE_ENDIAN).apply {
             position(info.offset)
             limit(info.offset + info.size)
         }
-        var next = nextTargetIndex
 
         for (frame in 0 until frames) {
             val sourceTimeUs = info.presentationTimeUs + frame.toLong() * 1_000_000L / sampleRate.toLong()
             if (sourceTimeUs < clip.sourceInUs) continue
             if (sourceTimeUs >= clip.sourceOutUs) break
-            val targetIndex = (sourceTimeUs - clip.sourceInUs) * TARGET_SAMPLE_RATE.toLong() / 1_000_000L
-            if (targetIndex < next) continue
             val frameOffset = info.offset + frame * frameBytes
             var mono = 0f
             for (channel in 0 until channelCount) {
                 mono += readSample(source, frameOffset + channel * bytesPerSample, pcmEncoding)
             }
-            mono = (mono / channelCount.toFloat()).coerceIn(-1f, 1f)
-            while (next <= targetIndex) {
-                output.add(mono)
-                next++
-            }
+            output.add((mono / channelCount.toFloat()).coerceIn(-1f, 1f))
         }
-        return next
     }
 
     private fun readSample(buffer: ByteBuffer, offset: Int, encoding: Int): Float = when (encoding) {
@@ -271,8 +280,11 @@ internal class WhisperAutoCaptionV80(
     private fun MediaFormat.intValue(key: String, fallback: Int): Int =
         runCatching { if (containsKey(key)) getInteger(key) else fallback }.getOrDefault(fallback)
 
-    private fun estimatedTargetSamples(clip: TimelineClip): Int =
-        ((clip.durationUs / 1_000_000.0) * TARGET_SAMPLE_RATE).toLong().coerceIn(16_000L, 4_000_000L).toInt()
+    private fun estimatedNativeSamples(clip: TimelineClip, sampleRate: Int): Int =
+        ((clip.durationUs / 1_000_000.0) * sampleRate.toDouble())
+            .toLong()
+            .coerceIn(16_000L, 8_000_000L)
+            .toInt()
 
     companion object {
         private const val TARGET_SAMPLE_RATE = 16_000
@@ -297,7 +309,10 @@ private class WhisperModelStoreV80(
     fun ensureModel(onStatus: (String) -> Unit): File {
         val directory = File(context.filesDir, "speech/whisper").apply { mkdirs() }
         val model = File(directory, MODEL_NAME)
-        if (model.isFile && model.length() >= MIN_MODEL_BYTES && sha256(model) == MODEL_SHA256) return model
+        if (model.isFile && model.length() >= MIN_MODEL_BYTES && sha256(model) == MODEL_SHA256) {
+            deleteLegacyTinyModel(directory)
+            return model
+        }
         if (model.exists()) model.delete()
 
         val partial = File(directory, "$MODEL_NAME.download")
@@ -306,11 +321,11 @@ private class WhisperModelStoreV80(
         for (attempt in 1..3) {
             var connection: HttpURLConnection? = null
             try {
-                onStatus("Auto Caption · downloading speech model${if (attempt > 1) " (retry $attempt)" else ""}")
+                onStatus("Auto Caption · downloading accuracy model${if (attempt > 1) " (retry $attempt)" else ""}")
                 connection = URI(MODEL_URL).toURL().openConnection() as HttpURLConnection
                 connection.instanceFollowRedirects = true
                 connection.connectTimeout = 30_000
-                connection.readTimeout = 180_000
+                connection.readTimeout = 300_000
                 connection.setRequestProperty("User-Agent", "DigitorAndroid/0.1")
                 connection.setRequestProperty("Accept", "application/octet-stream,*/*")
                 val code = connection.responseCode
@@ -329,7 +344,7 @@ private class WhisperModelStoreV80(
                             copied += read
                             if (total > 0L) {
                                 val percent = (copied * 100L / total).coerceIn(0L, 100L)
-                                onStatus("Auto Caption · model $percent%")
+                                onStatus("Auto Caption · accuracy model $percent%")
                             }
                         }
                     }
@@ -341,6 +356,7 @@ private class WhisperModelStoreV80(
                     partial.copyTo(model, overwrite = true)
                     partial.delete()
                 }
+                deleteLegacyTinyModel(directory)
                 return model
             } catch (error: Throwable) {
                 lastError = error
@@ -350,6 +366,10 @@ private class WhisperModelStoreV80(
             }
         }
         throw IllegalStateException("Could not download the free Whisper speech model", lastError)
+    }
+
+    private fun deleteLegacyTinyModel(directory: File) {
+        runCatching { File(directory, LEGACY_TINY_MODEL_NAME).delete() }
     }
 
     private fun sha256(file: File): String {
@@ -366,9 +386,10 @@ private class WhisperModelStoreV80(
     }
 
     companion object {
-        private const val MODEL_NAME = "ggml-tiny-q5_1.bin"
-        private const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin?download=true"
-        private const val MODEL_SHA256 = "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7"
-        private const val MIN_MODEL_BYTES = 30_000_000L
+        private const val MODEL_NAME = "ggml-small-q5_1.bin"
+        private const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin?download=true"
+        private const val MODEL_SHA256 = "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb"
+        private const val MIN_MODEL_BYTES = 185_000_000L
+        private const val LEGACY_TINY_MODEL_NAME = "ggml-tiny-q5_1.bin"
     }
 }
