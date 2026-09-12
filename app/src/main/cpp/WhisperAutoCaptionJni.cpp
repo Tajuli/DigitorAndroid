@@ -15,6 +15,7 @@ constexpr const char * kTag = "DigitorWhisperV80";
 std::mutex gWhisperMutex;
 whisper_context * gContext = nullptr;
 std::string gModelPath;
+bool gUsingGpu = false;
 
 std::string JStringToUtf8(JNIEnv * env, jstring value) {
     if (value == nullptr) return {};
@@ -38,22 +39,48 @@ std::string Trim(const char * raw) {
     return text;
 }
 
-whisper_context * GetOrLoadContext(const std::string & modelPath) {
-    if (gContext != nullptr && gModelPath == modelPath) return gContext;
+void FreeContext() {
     if (gContext != nullptr) {
         whisper_free(gContext);
         gContext = nullptr;
-        gModelPath.clear();
     }
+    gModelPath.clear();
+    gUsingGpu = false;
+}
+
+whisper_context * LoadContext(const std::string & modelPath, bool preferGpu) {
+    if (gContext != nullptr && gModelPath == modelPath && gUsingGpu == preferGpu) return gContext;
+    FreeContext();
 
     whisper_context_params contextParams = whisper_context_default_params();
-    // CPU inference is the most portable Android path. The app's Vulkan backend remains dedicated
-    // to video processing; using it here would compete with preview/cutout for device GPU memory.
-    contextParams.use_gpu = false;
-    contextParams.flash_attn = false;
+    contextParams.use_gpu = preferGpu;
+    // Flash attention is beneficial on the Vulkan path. Keep it off for the conservative CPU
+    // fallback because some low-memory Android devices otherwise spend more time preparing it.
+    contextParams.flash_attn = preferGpu;
     gContext = whisper_init_from_file_with_params(modelPath.c_str(), contextParams);
-    if (gContext != nullptr) gModelPath = modelPath;
+    if (gContext != nullptr) {
+        gModelPath = modelPath;
+        gUsingGpu = preferGpu;
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            kTag,
+            "Whisper model loaded with %s backend preference",
+            preferGpu ? "Vulkan GPU" : "CPU"
+        );
+    }
     return gContext;
+}
+
+whisper_context * GetOrLoadContext(const std::string & modelPath) {
+    if (gContext != nullptr && gModelPath == modelPath) return gContext;
+
+    // V84: prefer cross-vendor Vulkan GPU inference on Android. If the device/driver cannot create
+    // a usable GPU context, transparently fall back to CPU so Auto Caption still works.
+    whisper_context * context = LoadContext(modelPath, true);
+    if (context != nullptr) return context;
+
+    __android_log_print(ANDROID_LOG_WARN, kTag, "Vulkan Whisper init failed; retrying on CPU");
+    return LoadContext(modelPath, false);
 }
 
 std::string ResolveLanguage(
@@ -74,6 +101,41 @@ std::string ResolveLanguage(
     if (languageId < 0) return "auto";
     const char * code = whisper_lang_str(languageId);
     return code == nullptr ? std::string("auto") : std::string(code);
+}
+
+whisper_full_params BuildParams(const std::string & language, int threads) {
+    whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+    params.n_threads = threads;
+    params.translate = false;
+    params.no_context = true;
+    params.no_timestamps = false;
+    params.single_segment = false;
+    params.print_special = false;
+    params.print_progress = false;
+    params.print_realtime = false;
+    params.print_timestamps = false;
+
+    // max_len/split_on_word only produce subtitle-sized boundaries when token timestamps are on.
+    params.token_timestamps = true;
+    params.max_len = 42;
+    params.split_on_word = true;
+    params.suppress_blank = true;
+    params.suppress_nst = true;
+    params.language = language.c_str();
+    params.detect_language = false;
+    return params;
+}
+
+int RunWhisper(
+    whisper_context * context,
+    const std::string & requestedLanguage,
+    const std::vector<float> & samples,
+    int threads,
+    std::string & resolvedLanguage
+) {
+    resolvedLanguage = ResolveLanguage(context, requestedLanguage, samples, threads);
+    whisper_full_params params = BuildParams(resolvedLanguage, threads);
+    return whisper_full(context, params, samples.data(), static_cast<int>(samples.size()));
 }
 
 } // namespace
@@ -102,6 +164,27 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperLanguageNativeV82_suppor
         env->DeleteLocalRef(item);
     }
     return result;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_prepareBackend(
+    JNIEnv * env,
+    jobject,
+    jstring modelPathValue
+) {
+    if (modelPathValue == nullptr) {
+        ThrowJava(env, "java/lang/IllegalArgumentException", "Whisper model path is required");
+        return nullptr;
+    }
+    const std::string modelPath = JStringToUtf8(env, modelPathValue);
+    std::lock_guard<std::mutex> guard(gWhisperMutex);
+    whisper_context * context = GetOrLoadContext(modelPath);
+    if (context == nullptr) {
+        ThrowJava(env, "java/lang/IllegalStateException", "Could not load the Whisper model");
+        return nullptr;
+    }
+    const char * label = gUsingGpu ? "Vulkan GPU" : "CPU fallback";
+    return env->NewStringUTF(label);
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL
@@ -138,32 +221,24 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
 
     const unsigned int cores = std::max(1u, std::thread::hardware_concurrency());
     const int threads = static_cast<int>(std::min(4u, cores));
-    const std::string resolvedLanguage = ResolveLanguage(context, requestedLanguage, samples, threads);
+    std::string resolvedLanguage;
+    int status = RunWhisper(context, requestedLanguage, samples, threads, resolvedLanguage);
 
-    whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    params.n_threads = threads;
-    params.translate = false;
-    params.no_context = true;
-    params.no_timestamps = false;
-    params.single_segment = false;
-    params.print_special = false;
-    params.print_progress = false;
-    params.print_realtime = false;
-    params.print_timestamps = false;
+    // A flaky/low-memory Vulkan driver should not make captioning unusable. Retry the same request
+    // once on CPU if GPU inference itself fails after a successful model initialization.
+    if (status != 0 && gUsingGpu) {
+        __android_log_print(
+            ANDROID_LOG_WARN,
+            kTag,
+            "Vulkan whisper_full failed: %d; retrying transcription on CPU",
+            status
+        );
+        context = LoadContext(modelPath, false);
+        if (context != nullptr) {
+            status = RunWhisper(context, requestedLanguage, samples, threads, resolvedLanguage);
+        }
+    }
 
-    // max_len/split_on_word only produce subtitle-sized boundaries when token timestamps are on.
-    // V80 left token timestamps disabled, allowing one hallucinated segment to remain on-screen for
-    // tens of seconds. V83 keeps captions short enough to edit/read while preserving word boundaries.
-    params.token_timestamps = true;
-    params.max_len = 42;
-    params.split_on_word = true;
-    params.suppress_blank = true;
-    params.suppress_nst = true;
-
-    params.language = resolvedLanguage.c_str();
-    params.detect_language = false;
-
-    const int status = whisper_full(context, params, samples.data(), static_cast<int>(samples.size()));
     if (status != 0) {
         __android_log_print(ANDROID_LOG_ERROR, kTag, "whisper_full failed: %d", status);
         ThrowJava(env, "java/lang/IllegalStateException", "Whisper transcription failed");
@@ -175,7 +250,8 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     __android_log_print(
         ANDROID_LOG_INFO,
         kTag,
-        "transcription complete: requested=%s resolved=%s detected=%s samples=%d",
+        "transcription complete: backend=%s requested=%s resolved=%s detected=%s samples=%d",
+        gUsingGpu ? "vulkan" : "cpu",
         requestedLanguage.empty() ? "auto" : requestedLanguage.c_str(),
         resolvedLanguage.c_str(),
         detected == nullptr ? "unknown" : detected,
