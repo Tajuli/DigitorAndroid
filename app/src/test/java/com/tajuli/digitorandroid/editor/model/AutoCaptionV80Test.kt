@@ -6,6 +6,19 @@ import org.junit.Test
 
 class AutoCaptionV80Test {
     @Test
+    fun autoLanguageUsesWhisperAutoCode() {
+        assertEquals("auto", AutoCaptionLanguageV80.AUTO.whisperCode)
+        assertEquals("Auto Detect", AutoCaptionLanguageV80.AUTO.label)
+    }
+
+    @Test
+    fun runtimeLanguageCanRepresentAnyWhisperCode() {
+        val spanish = AutoCaptionLanguageV80("Spanish", "es")
+        assertEquals("Spanish", spanish.label)
+        assertEquals("es", spanish.whisperCode)
+    }
+
+    @Test
     fun normalizerTrimsTextAndRemovesLaneOverlap() {
         val result = normalizeAutoCaptionSegmentsV80(
             listOf(
