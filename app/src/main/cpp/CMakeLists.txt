@@ -38,6 +38,31 @@ set(GGML_VULKAN ON CACHE BOOL "Enable Vulkan GPU inference for Auto Caption" FOR
 set(GGML_VULKAN_CHECK_RESULTS OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN_DEBUG OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN_VALIDATE OFF CACHE BOOL "" FORCE)
+
+# ggml-vulkan cross-compiles the Android runtime but compiles its shader generator on the host.
+# Android's toolchain normally searches packages inside the NDK sysroot, so explicitly expose the
+# host SPIR-V headers and glslc when they are installed by CI / Linux developer environments.
+if(ANDROID)
+    if(NOT DEFINED SPIRV-Headers_DIR)
+        foreach(_spirv_dir
+            "/usr/share/cmake/SPIRV-Headers"
+            "/usr/local/share/cmake/SPIRV-Headers"
+        )
+            if(EXISTS "${_spirv_dir}/SPIRV-HeadersConfig.cmake")
+                set(SPIRV-Headers_DIR "${_spirv_dir}" CACHE PATH "Host SPIR-V headers package" FORCE)
+                break()
+            endif()
+        endforeach()
+    endif()
+
+    if(NOT Vulkan_GLSLC_EXECUTABLE)
+        find_program(DIGITOR_HOST_GLSLC NAMES glslc NO_CMAKE_FIND_ROOT_PATH)
+        if(DIGITOR_HOST_GLSLC)
+            set(Vulkan_GLSLC_EXECUTABLE "${DIGITOR_HOST_GLSLC}" CACHE FILEPATH "Host glslc for ggml Vulkan shaders" FORCE)
+        endif()
+    endif()
+endif()
+
 FetchContent_Declare(
     whisper_cpp
     GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
