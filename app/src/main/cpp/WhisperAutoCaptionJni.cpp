@@ -54,7 +54,9 @@ const char * FirstGpuDeviceName() {
     for (size_t index = 0; index < deviceCount; ++index) {
         ggml_backend_dev_t device = ggml_backend_dev_get(index);
         if (device == nullptr) continue;
-        const ggml_backend_dev_type type = ggml_backend_dev_type(device);
+        // ggml exposes both an enum tag and a function named ggml_backend_dev_type. Using auto
+        // avoids C++ name hiding on Clang/NDK while preserving the exact enum value returned.
+        const auto type = ggml_backend_dev_type(device);
         if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
             const char * name = ggml_backend_dev_name(device);
             return name == nullptr ? "Vulkan GPU" : name;
@@ -69,7 +71,10 @@ whisper_context * LoadContext(const std::string & modelPath, bool preferGpu) {
 
     whisper_context_params contextParams = whisper_context_default_params();
     contextParams.use_gpu = preferGpu;
-    contextParams.flash_attn = preferGpu;
+    // First make the Vulkan path broadly compatible across Android drivers. GPU tensor offload is
+    // still enabled; flash-attention can be added later after device qualification instead of
+    // making basic GPU captioning depend on an extra driver-sensitive kernel path.
+    contextParams.flash_attn = false;
     gContext = whisper_init_from_file_with_params(modelPath.c_str(), contextParams);
     if (gContext == nullptr) return nullptr;
 
