@@ -2,12 +2,18 @@
 #include <android/log.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gpu.h>
@@ -25,11 +31,14 @@ constexpr int kTokenLangFirst = 50259;
 constexpr int kTokenLangLast = 50357;
 constexpr int kTokenTranscribe = 50359;
 constexpr int kTokenNoCaptions = 50362;
-constexpr int kTokenTimestampFirst = 50364;
-constexpr int kTokenTimestampLast = 51864;
+constexpr int kTokenNoTimestamps = 50363;
 constexpr int kMaxDecodedTokens = 448;
+constexpr int kBeamSize = 5;
+constexpr int kMaxFinishedBeams = 5;
+constexpr int kTopK = 5;
 
-// Token order is defined by OpenAI Whisper and mirrored by Tencent ncnn's official whisper example.
+// Token order is defined by the multilingual OpenAI Whisper tokenizer and matches Tencent ncnn's
+// official examples/whisper.cpp implementation.
 constexpr const char* kLanguageCodes[] = {
     "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv",
     "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no",
@@ -95,7 +104,7 @@ public:
 
     std::string decodeText(const std::vector<int>& tokens) const {
         std::string encoded;
-        for (int token : tokens) {
+        for (const int token : tokens) {
             if (token >= 0 && token < kTokenEndOfText && token < static_cast<int>(reverseVocab.size())) {
                 encoded += reverseVocab[static_cast<size_t>(token)];
             }
@@ -105,7 +114,7 @@ public:
         const std::vector<uint32_t> codepoints = utf8ToCodepoints(encoded);
         std::string bytes;
         bytes.reserve(codepoints.size());
-        for (uint32_t cp : codepoints) {
+        for (const uint32_t cp : codepoints) {
             if (cp < 512) bytes.push_back(static_cast<char>(byteDecoder[cp]));
         }
         return Trim(bytes);
@@ -116,7 +125,7 @@ private:
     uint8_t byteDecoder[512]{};
 
     void generateByteDecoder() {
-        std::fill(std::begin(byteDecoder), std::end(byteDecoder), 0);
+        std::fill(byteDecoder, byteDecoder + 512, 0);
         auto printable = [](int b) {
             return (b >= '!' && b <= '~') || (b >= 161 && b <= 172) || (b >= 174 && b <= 255);
         };
@@ -168,6 +177,69 @@ struct CaptionSegment {
     std::string text;
 };
 
+struct BeamResult {
+    std::vector<int> ids;
+    float score = 0.f;
+    std::vector<ncnn::Mat> kvcache;
+};
+
+void LogSoftmaxInPlace(ncnn::Mat& logits) {
+    ncnn::Option option;
+    option.use_packing_layout = false;
+    option.use_fp16_storage = false;
+
+    std::unique_ptr<ncnn::Layer> softmax(ncnn::create_layer_cpu("Softmax"));
+    if (softmax) {
+        ncnn::ParamDict params;
+        params.set(0, 0);
+        softmax->load_param(params);
+        softmax->forward_inplace(logits, option);
+    }
+
+    std::unique_ptr<ncnn::Layer> log(ncnn::create_layer_cpu("UnaryOp"));
+    if (log) {
+        ncnn::ParamDict params;
+        params.set(0, 8);
+        log->load_param(params);
+        log->forward_inplace(logits, option);
+    }
+}
+
+std::vector<CaptionSegment> SplitTranscriptAcrossDuration(
+    const std::string& transcript,
+    int64_t chunkOffsetUs,
+    int64_t durationUs
+) {
+    const std::string clean = Trim(transcript);
+    if (clean.empty() || durationUs <= 0) return {};
+
+    std::istringstream stream(clean);
+    std::vector<std::string> words;
+    std::string word;
+    while (stream >> word) words.push_back(word);
+    if (words.empty()) return {{chunkOffsetUs, chunkOffsetUs + durationUs, clean}};
+
+    constexpr size_t kWordsPerCaption = 8;
+    std::vector<CaptionSegment> result;
+    size_t wordStart = 0;
+    while (wordStart < words.size()) {
+        const size_t wordEnd = std::min(words.size(), wordStart + kWordsPerCaption);
+        std::string text;
+        for (size_t i = wordStart; i < wordEnd; ++i) {
+            if (!text.empty()) text.push_back(' ');
+            text += words[i];
+        }
+        const int64_t localStart = durationUs * static_cast<int64_t>(wordStart) / static_cast<int64_t>(words.size());
+        int64_t localEnd = durationUs * static_cast<int64_t>(wordEnd) / static_cast<int64_t>(words.size());
+        if (localEnd <= localStart) localEnd = std::min(durationUs, localStart + 180000LL);
+        if (!text.empty() && localEnd > localStart) {
+            result.push_back({chunkOffsetUs + localStart, chunkOffsetUs + localEnd, text});
+        }
+        wordStart = wordEnd;
+    }
+    return result;
+}
+
 struct WhisperNcnnEngine {
     ncnn::Net fbank;
     ncnn::Net encoder;
@@ -204,7 +276,6 @@ struct WhisperNcnnEngine {
         configureGpuNet(encoder);
         configureGpuNet(decoder);
         configureGpuNet(projOut);
-        // Embedding lookups are tiny and Tencent's reference implementation keeps them on CPU.
         embedToken.opt.num_threads = 2;
         embedPosition.opt.num_threads = 2;
 
@@ -213,8 +284,7 @@ struct WhisperNcnnEngine {
         if (!loadNet(embedToken, "whisper_base_embed_token.ncnn.param", "whisper_base_embed_token.ncnn.bin", error)) return false;
         if (!loadNet(embedPosition, "whisper_base_embed_position.ncnn.param", "whisper_base_embed_position.ncnn.bin", error)) return false;
         if (!loadNet(decoder, "whisper_base_decoder.ncnn.param", "whisper_base_decoder.ncnn.bin", error)) return false;
-        // The official release ships proj_out and embed_token with byte-identical weight blobs.
-        // Reusing the verified embed-token binary saves ~53 MB of first-download/storage cost.
+        // The official release has byte-identical proj_out and embed_token weight blobs.
         if (!loadNet(projOut, "whisper_base_proj_out.ncnn.param", "whisper_base_embed_token.ncnn.bin", error)) return false;
         if (!tokenizer.load(path("whisper_vocab.txt"))) {
             error = "Could not load Whisper vocabulary";
@@ -249,15 +319,27 @@ struct WhisperNcnnEngine {
         return true;
     }
 
-    int detectLanguage(const float* samples, int sampleCount) const {
+    int detectLanguage(const float* samples, int sampleCount, std::string& error) const {
         ncnn::Mat features;
-        if (extractFbank(samples, sampleCount, features) != 0) return -1;
+        int status = extractFbank(samples, sampleCount, features);
+        if (status != 0) {
+            error = "fbank failed during language detection (status=" + std::to_string(status) + ")";
+            return -1;
+        }
         ncnn::Mat encoded;
-        if (runEncoder(features, encoded) != 0) return -1;
+        status = runEncoder(features, encoded);
+        if (status != 0) {
+            error = "encoder failed during language detection (status=" + std::to_string(status) + ")";
+            return -1;
+        }
         ncnn::Mat logits;
         std::vector<ncnn::Mat> cache;
-        if (runDecoderPrefill({kTokenStartOfTranscript}, encoded, logits, cache) != 0) return -1;
-        if (logits.empty() || logits.w <= kTokenLangLast) return -1;
+        status = runDecoderPrefill({kTokenStartOfTranscript}, encoded, logits, cache);
+        if (status != 0 || logits.empty() || logits.w <= kTokenLangLast) {
+            error = "decoder failed during language detection (status=" + std::to_string(status) + ")";
+            return -1;
+        }
+
         int best = kTokenLangFirst;
         float bestScore = logits[kTokenLangFirst];
         for (int token = kTokenLangFirst + 1; token <= kTokenLangLast; ++token) {
@@ -270,90 +352,136 @@ struct WhisperNcnnEngine {
         return best - kTokenLangFirst;
     }
 
-    std::vector<CaptionSegment> transcribeChunk(
+    bool transcribeChunk(
         const float* samples,
         int sampleCount,
         int languageIndex,
-        int64_t chunkOffsetUs
+        int64_t chunkOffsetUs,
+        std::vector<CaptionSegment>& result,
+        std::string& error
     ) const {
-        std::vector<CaptionSegment> result;
-        if (languageIndex < 0 || languageIndex >= kLanguageCount || sampleCount <= 0) return result;
+        if (languageIndex < 0 || languageIndex >= kLanguageCount || sampleCount <= 0) {
+            error = "invalid Whisper chunk or language";
+            return false;
+        }
 
         ncnn::Mat features;
-        if (extractFbank(samples, sampleCount, features) != 0) return result;
+        int status = extractFbank(samples, sampleCount, features);
+        if (status != 0) {
+            error = "fbank failed (status=" + std::to_string(status) + ")";
+            return false;
+        }
         ncnn::Mat encoded;
-        if (runEncoder(features, encoded) != 0) return result;
+        status = runEncoder(features, encoded);
+        if (status != 0) {
+            error = "encoder failed (status=" + std::to_string(status) + ")";
+            return false;
+        }
 
-        std::vector<int> tokens = {
+        // Mirror Tencent ncnn examples/whisper.cpp exactly: the fourth prompt token explicitly asks
+        // for text without timestamp tokens. This avoids the previous custom greedy/timestamp path
+        // accidentally choosing a functional token and returning an empty transcript.
+        const std::vector<int> prompt = {
             kTokenStartOfTranscript,
             kTokenLangFirst + languageIndex,
             kTokenTranscribe,
+            kTokenNoTimestamps,
         };
-        std::vector<ncnn::Mat> cache;
-        for (int step = 0; step < kMaxDecodedTokens; ++step) {
-            ncnn::Mat logits;
-            std::vector<ncnn::Mat> nextCache;
-            const int status = step == 0
-                ? runDecoderPrefill(tokens, encoded, logits, nextCache)
-                : runDecoderStep(tokens, encoded, logits, cache, nextCache);
-            if (status != 0 || logits.empty()) break;
 
-            const int next = argmax(logits);
-            if (next < 0 || next == kTokenEndOfText || next == kTokenNoCaptions) break;
-            tokens.push_back(next);
-            cache.swap(nextCache);
-        }
+        std::vector<BeamResult> finished;
+        std::vector<BeamResult> beams(1);
+        beams[0].ids = prompt;
+        beams[0].score = 0.f;
 
-        const int64_t durationUs = static_cast<int64_t>(sampleCount) * 1000000LL / kSampleRate;
-        std::vector<int> textTokens;
-        int64_t startUs = -1;
-        bool sawTimestamp = false;
-
-        for (size_t i = 3; i < tokens.size(); ++i) {
-            const int token = tokens[i];
-            if (token >= kTokenTimestampFirst && token <= kTokenTimestampLast) {
-                const int64_t timestampUs = static_cast<int64_t>(token - kTokenTimestampFirst) * 20000LL;
-                if (startUs < 0) {
-                    startUs = timestampUs;
-                    textTokens.clear();
-                } else {
-                    sawTimestamp = true;
-                    const int64_t localStart = std::clamp<int64_t>(startUs, 0, durationUs);
-                    const int64_t localEnd = std::clamp<int64_t>(timestampUs, 0, durationUs);
-                    const std::string text = tokenizer.decodeText(textTokens);
-                    if (!text.empty() && localEnd > localStart) {
-                        result.push_back({chunkOffsetUs + localStart, chunkOffsetUs + localEnd, text});
-                    }
-                    startUs = -1;
-                    textTokens.clear();
+        for (int step = 0; step < kMaxDecodedTokens && !beams.empty() &&
+                           static_cast<int>(finished.size()) < kMaxFinishedBeams; ++step) {
+            std::vector<BeamResult> candidates;
+            for (const BeamResult& beam : beams) {
+                ncnn::Mat logits;
+                std::vector<ncnn::Mat> outCache;
+                status = step == 0
+                    ? runDecoderPrefill(beam.ids, encoded, logits, outCache)
+                    : runDecoderStep(beam.ids, encoded, logits, beam.kvcache, outCache);
+                if (status != 0 || logits.empty()) {
+                    error = "decoder failed at token " + std::to_string(step) +
+                            " (status=" + std::to_string(status) + ")";
+                    return false;
                 }
-            } else if (token >= 0 && token < kTokenEndOfText) {
-                textTokens.push_back(token);
+
+                LogSoftmaxInPlace(logits);
+                const int topk = std::min(kTopK, logits.w);
+                std::vector<std::pair<float, int>> ranked(static_cast<size_t>(logits.w));
+                for (int token = 0; token < logits.w; ++token) {
+                    ranked[static_cast<size_t>(token)] = {logits[token], token};
+                }
+                std::partial_sort(
+                    ranked.begin(), ranked.begin() + topk, ranked.end(),
+                    std::greater<std::pair<float, int>>()
+                );
+
+                for (int i = 0; i < topk; ++i) {
+                    BeamResult candidate;
+                    candidate.ids = beam.ids;
+                    candidate.ids.push_back(ranked[static_cast<size_t>(i)].second);
+                    candidate.score = beam.score + ranked[static_cast<size_t>(i)].first;
+                    candidate.kvcache = outCache;
+                    candidates.push_back(std::move(candidate));
+                }
+            }
+
+            std::sort(candidates.begin(), candidates.end(), [](const BeamResult& a, const BeamResult& b) {
+                return a.score > b.score;
+            });
+
+            beams.clear();
+            for (BeamResult& candidate : candidates) {
+                if (candidate.ids.back() == kTokenEndOfText) {
+                    finished.push_back(std::move(candidate));
+                } else if (static_cast<int>(beams.size()) < kBeamSize) {
+                    beams.push_back(std::move(candidate));
+                }
             }
         }
 
-        // Some devices/models may emit text without timestamp token pairs under greedy decoding.
-        // Keep the transcript rather than losing it; timing is then bounded to the decoded chunk.
-        if (result.empty()) {
-            std::vector<int> plainTokens;
-            for (size_t i = 3; i < tokens.size(); ++i) {
-                const int token = tokens[i];
-                if (token >= 0 && token < kTokenEndOfText) plainTokens.push_back(token);
-            }
-            const std::string text = tokenizer.decodeText(plainTokens);
-            if (!text.empty()) result.push_back({chunkOffsetUs, chunkOffsetUs + durationUs, text});
+        // If the token cap is reached without EOT, preserve the best live beam. It is more useful to
+        // return the recognized text than to misreport audible speech as "No speech detected".
+        if (finished.empty() && !beams.empty()) finished.push_back(beams.front());
+        if (finished.empty()) {
+            error = "decoder produced no beam";
+            return false;
         }
+
+        size_t bestIndex = 0;
+        float bestAverage = -FLT_MAX;
+        for (size_t i = 0; i < finished.size(); ++i) {
+            const BeamResult& candidate = finished[i];
+            const float average = candidate.ids.empty()
+                ? -FLT_MAX
+                : candidate.score / static_cast<float>(candidate.ids.size());
+            if (average > bestAverage) {
+                bestAverage = average;
+                bestIndex = i;
+            }
+        }
+
+        const std::string transcript = tokenizer.decodeText(finished[bestIndex].ids);
+        const int64_t durationUs = static_cast<int64_t>(sampleCount) * 1000000LL / kSampleRate;
+        const std::vector<CaptionSegment> split =
+            SplitTranscriptAcrossDuration(transcript, chunkOffsetUs, durationUs);
+        result.insert(result.end(), split.begin(), split.end());
 
         __android_log_print(
             ANDROID_LOG_INFO,
             kTag,
-            "GPU chunk done: samples=%d lang=%s timestamped=%d segments=%zu",
+            "GPU chunk done: samples=%d lang=%s textBytes=%zu captions=%zu bestAvg=%.4f nocaptionsToken=%d",
             sampleCount,
             kLanguageCodes[languageIndex],
-            sawTimestamp ? 1 : 0,
-            result.size()
+            transcript.size(),
+            split.size(),
+            bestAverage,
+            kTokenNoCaptions
         );
-        return result;
+        return true;
     }
 
 private:
@@ -364,8 +492,7 @@ private:
     void configureGpuNet(ncnn::Net& net) {
         net.opt.use_vulkan_compute = true;
         net.opt.num_threads = 2;
-        // Match Tencent's official Whisper ncnn reference: keep storage/arithmetic FP32 for stable
-        // multilingual recognition across Mali/Adreno/PowerVR Vulkan drivers.
+        // Match Tencent's official Whisper ncnn reference: stable FP32 storage/arithmetic.
         net.opt.use_fp16_packed = false;
         net.opt.use_fp16_storage = false;
         net.opt.use_fp16_arithmetic = false;
@@ -375,12 +502,14 @@ private:
     bool loadNet(ncnn::Net& net, const char* paramName, const char* binName, std::string& error) {
         const std::string param = path(paramName);
         const std::string bin = path(binName);
-        if (net.load_param(param.c_str()) != 0) {
-            error = std::string("Could not load ") + paramName;
+        const int paramStatus = net.load_param(param.c_str());
+        if (paramStatus != 0) {
+            error = std::string("Could not load ") + paramName + " (status=" + std::to_string(paramStatus) + ")";
             return false;
         }
-        if (net.load_model(bin.c_str()) != 0) {
-            error = std::string("Could not load ") + binName;
+        const int modelStatus = net.load_model(bin.c_str());
+        if (modelStatus != 0) {
+            error = std::string("Could not load ") + binName + " (status=" + std::to_string(modelStatus) + ")";
             return false;
         }
         return true;
@@ -399,6 +528,7 @@ private:
         status = ex.extract("out0", features);
         if (status != 0 || features.empty() || features.w <= 1) return status != 0 ? status : -1;
 
+        // Exact Tencent ncnn Whisper reference behavior: fbank produces 3001 frames; encoder expects 3000.
         ncnn::Mat trimmed(features.w - 1, features.h);
         for (int row = 0; row < features.h; ++row) {
             std::memcpy(trimmed.row(row), features.row(row), static_cast<size_t>(features.w - 1) * sizeof(float));
@@ -527,6 +657,7 @@ private:
         const float* positionPtr = positionEmbeds;
         for (size_t i = 0; i < inputEmbeds.total(); ++i) inputPtr[i] = tokenPtr[i] + positionPtr[i];
 
+        // Exact Tencent reference behavior: one cached decoder token needs only a 1x1 zero mask.
         ncnn::Mat attentionMask(1, 1);
         attentionMask.fill(0.f);
         ncnn::Mat outputStates;
@@ -560,20 +691,6 @@ private:
         lastLogits = lastLogits.reshape(lastLogits.w);
         return 0;
     }
-
-    static int argmax(const ncnn::Mat& logits) {
-        if (logits.empty() || logits.w <= 0) return -1;
-        const float* values = logits;
-        int best = 0;
-        float bestValue = values[0];
-        for (int i = 1; i < logits.w; ++i) {
-            if (values[i] > bestValue) {
-                bestValue = values[i];
-                best = i;
-            }
-        }
-        return best;
-    }
 };
 
 std::unique_ptr<WhisperNcnnEngine> gEngine;
@@ -590,28 +707,27 @@ std::string BackendLabel() {
     return std::string("ncnn Vulkan GPU · ") + gEngine->gpuName;
 }
 
-bool HasSpeechEnergy(const float* samples, int count) {
-    if (samples == nullptr || count <= 0) return false;
-    double absoluteSum = 0.0;
-    float peak = 0.f;
-    const int stride = std::max(1, count / 8000);
-    int measured = 0;
-    for (int i = 0; i < count; i += stride) {
-        const float value = std::fabs(samples[i]);
-        absoluteSum += value;
-        peak = std::max(peak, value);
-        ++measured;
-    }
-    const double meanAbs = measured > 0 ? absoluteSum / measured : 0.0;
-    return peak >= 0.008f && meanAbs >= 0.0008;
-}
-
 bool EnsureEngine(const std::string& modelDir, std::string& error) {
     if (gEngine && gEngine->modelDir == modelDir) return true;
     auto engine = std::make_unique<WhisperNcnnEngine>();
     if (!engine->load(modelDir, error)) return false;
     gEngine = std::move(engine);
     return true;
+}
+
+void MeasurePcm(const std::vector<float>& samples, float& peak, double& rms) {
+    peak = 0.f;
+    double squares = 0.0;
+    if (samples.empty()) {
+        rms = 0.0;
+        return;
+    }
+    for (const float sample : samples) {
+        const float value = std::fabs(sample);
+        peak = std::max(peak, value);
+        squares += static_cast<double>(sample) * static_cast<double>(sample);
+    }
+    rms = std::sqrt(squares / static_cast<double>(samples.size()));
 }
 
 } // namespace
@@ -679,12 +795,26 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
         ThrowJava(env, "java/lang/IllegalArgumentException", "Whisper model directory and PCM samples are required");
         return nullptr;
     }
+
     const std::string modelDir = JStringToString(env, modelPathValue);
     const std::string requestedLanguage = JStringToString(env, languageValue);
     const jsize sampleCount = env->GetArrayLength(samplesValue);
     std::vector<float> samples(static_cast<size_t>(std::max<jsize>(0, sampleCount)));
     if (sampleCount > 0) env->GetFloatArrayRegion(samplesValue, 0, sampleCount, samples.data());
     if (env->ExceptionCheck()) return nullptr;
+
+    float peak = 0.f;
+    double rms = 0.0;
+    MeasurePcm(samples, peak, rms);
+    __android_log_print(
+        ANDROID_LOG_INFO,
+        kTag,
+        "PCM received: samples=%d duration=%.2fs peak=%.6f rms=%.6f",
+        static_cast<int>(sampleCount),
+        static_cast<double>(sampleCount) / kSampleRate,
+        peak,
+        rms
+    );
 
     std::lock_guard<std::mutex> guard(gEngineMutex);
     std::string error;
@@ -693,7 +823,6 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
         return nullptr;
     }
 
-    std::vector<CaptionSegment> segments;
     int languageIndex = requestedLanguage.empty() || requestedLanguage == "auto"
         ? -1
         : FindLanguageIndex(requestedLanguage);
@@ -702,17 +831,21 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
         return nullptr;
     }
 
+    std::vector<CaptionSegment> segments;
     int offset = 0;
     while (offset < sampleCount) {
         const int count = std::min(kMaxChunkSamples, static_cast<int>(sampleCount) - offset);
         const float* chunk = samples.data() + offset;
-        if (!HasSpeechEnergy(chunk, count)) {
-            offset += count;
-            continue;
-        }
+
+        // V88 intentionally does not pre-reject low-level PCM. The previous hand-written energy gate
+        // could classify a real but quiet voice as silence before Whisper ever saw it. Whisper's own
+        // decoder now decides whether the chunk contains transcribable speech.
         if (languageIndex < 0) {
-            languageIndex = gEngine->detectLanguage(chunk, count);
-            if (languageIndex < 0 || languageIndex >= kLanguageCount) languageIndex = FindLanguageIndex("en");
+            languageIndex = gEngine->detectLanguage(chunk, count, error);
+            if (languageIndex < 0 || languageIndex >= kLanguageCount) {
+                ThrowJava(env, "java/lang/IllegalStateException", "ncnn Whisper language detection failed · " + error);
+                return nullptr;
+            }
             __android_log_print(
                 ANDROID_LOG_INFO,
                 kTag,
@@ -720,10 +853,28 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
                 kLanguageCodes[languageIndex]
             );
         }
+
         const int64_t offsetUs = static_cast<int64_t>(offset) * 1000000LL / kSampleRate;
-        std::vector<CaptionSegment> local = gEngine->transcribeChunk(chunk, count, languageIndex, offsetUs);
-        segments.insert(segments.end(), local.begin(), local.end());
+        if (!gEngine->transcribeChunk(chunk, count, languageIndex, offsetUs, segments, error)) {
+            ThrowJava(env, "java/lang/IllegalStateException", "ncnn Whisper GPU inference failed · " + error);
+            return nullptr;
+        }
         offset += count;
+    }
+
+    if (segments.empty()) {
+        char detail[256];
+        std::snprintf(
+            detail,
+            sizeof(detail),
+            "ncnn Whisper GPU produced no transcript · PCM %.2fs · peak %.5f · RMS %.5f · %s",
+            static_cast<double>(sampleCount) / kSampleRate,
+            peak,
+            rms,
+            BackendLabel().c_str()
+        );
+        ThrowJava(env, "java/lang/IllegalStateException", detail);
+        return nullptr;
     }
 
     jclass stringClass = env->FindClass("java/lang/String");
@@ -742,10 +893,12 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     __android_log_print(
         ANDROID_LOG_INFO,
         kTag,
-        "GPU transcription complete: backend=%s samples=%d segments=%zu",
+        "GPU transcription complete: backend=%s samples=%d segments=%zu peak=%.6f rms=%.6f",
         BackendLabel().c_str(),
         static_cast<int>(sampleCount),
-        segments.size()
+        segments.size(),
+        peak,
+        rms
     );
     return result;
 }
