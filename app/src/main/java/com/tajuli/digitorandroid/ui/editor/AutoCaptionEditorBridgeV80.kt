@@ -10,6 +10,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.resolvedVideoTrackIdV3
 import com.tajuli.digitorandroid.editor.model.visualOverlaysForVideoTrackV19
+import com.tajuli.digitorandroid.editor.processing.AutoCaptionGpuUnavailableException
 import com.tajuli.digitorandroid.editor.processing.WhisperAutoCaptionV80
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
@@ -28,6 +29,7 @@ internal data class AutoCaptionRunStateV80(
     val progressPercent: Int? = null,
     val completedCount: Int? = null,
     val failed: Boolean = false,
+    val cpuFallbackAvailable: Boolean = false,
 )
 
 /** Shared UI state so progress remains visible even when the Auto Caption dialog is closed. */
@@ -35,10 +37,14 @@ internal object AutoCaptionStatusV80 {
     private val _state = MutableStateFlow(AutoCaptionRunStateV80())
     val state: StateFlow<AutoCaptionRunStateV80> = _state.asStateFlow()
 
-    fun start() {
+    fun start(allowCpuFallback: Boolean) {
         _state.value = AutoCaptionRunStateV80(
             running = true,
-            message = "Auto Caption · preparing audio",
+            message = if (allowCpuFallback) {
+                "Auto Caption · trying GPUs, then approved CPU mode"
+            } else {
+                "Auto Caption · preparing GPU"
+            },
         )
     }
 
@@ -54,6 +60,7 @@ internal object AutoCaptionStatusV80 {
             progressPercent = if (message.contains("model", ignoreCase = true)) percent else null,
             completedCount = null,
             failed = false,
+            cpuFallbackAvailable = false,
         )
     }
 
@@ -65,17 +72,21 @@ internal object AutoCaptionStatusV80 {
         )
     }
 
-    fun failure(message: String) {
+    fun failure(message: String, cpuFallbackAvailable: Boolean = false) {
         _state.value = AutoCaptionRunStateV80(
             running = false,
             message = message,
             failed = true,
+            cpuFallbackAvailable = cpuFallbackAvailable,
         )
     }
 }
 
 /** Generate editable TextOverlayClip captions with the existing project/timeline system. */
-fun EditorViewModelV4.generateAutoCaptionsV80(language: AutoCaptionLanguageV80) {
+fun EditorViewModelV4.generateAutoCaptionsV80(
+    language: AutoCaptionLanguageV80,
+    allowCpuFallback: Boolean = false,
+) {
     if (!autoCaptionRunningV80.compareAndSet(false, true)) {
         val message = "Auto Caption is already running"
         setEditorStatusV19(message)
@@ -84,8 +95,10 @@ fun EditorViewModelV4.generateAutoCaptionsV80(language: AutoCaptionLanguageV80) 
     }
 
     val sourceProject = state.value.project
-    AutoCaptionStatusV80.start()
-    setEditorStatusV19("Auto Caption · preparing audio")
+    AutoCaptionStatusV80.start(allowCpuFallback)
+    setEditorStatusV19(
+        if (allowCpuFallback) "Auto Caption · GPU first, CPU approved" else "Auto Caption · preparing GPU",
+    )
 
     fun publishStatus(message: String) {
         setEditorStatusV19(message)
@@ -97,6 +110,7 @@ fun EditorViewModelV4.generateAutoCaptionsV80(language: AutoCaptionLanguageV80) 
             val segments = WhisperAutoCaptionV80(getApplication()).transcribeProject(
                 project = sourceProject,
                 language = language,
+                allowCpuFallback = allowCpuFallback,
                 onStatus = ::publishStatus,
             )
             require(segments.isNotEmpty()) { "No speech was detected in the project audio" }
@@ -126,9 +140,6 @@ fun EditorViewModelV4.generateAutoCaptionsV80(language: AutoCaptionLanguageV80) 
                 }
                 val nextProject = baseProject.copy(textOverlays = baseProject.textOverlays + overlays)
 
-                // V81 commits directly into the live editor state instead of saving then reloading the
-                // whole project. This makes generated captions appear immediately and gives Undo one
-                // clean Auto Caption history entry. Keep the recovery snapshot in sync afterwards.
                 commitProjectV19(
                     label = "auto-caption",
                     project = nextProject,
@@ -151,8 +162,9 @@ fun EditorViewModelV4.generateAutoCaptionsV80(language: AutoCaptionLanguageV80) 
             withContext(Dispatchers.Main) {
                 val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
                 val message = "Auto Caption failed · $detail"
+                val canOfferCpu = error is AutoCaptionGpuUnavailableException && !allowCpuFallback
                 setEditorStatusV19(message)
-                AutoCaptionStatusV80.failure(message)
+                AutoCaptionStatusV80.failure(message, cpuFallbackAvailable = canOfferCpu)
                 Toast.makeText(getApplication(), message, Toast.LENGTH_LONG).show()
             }
         } finally {
