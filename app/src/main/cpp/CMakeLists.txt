@@ -62,9 +62,9 @@ if(ANDROID)
         endif()
     endif()
 
-    # The NDK exposes Vulkan C headers but not Vulkan-Hpp (`vulkan/vulkan.hpp`) required by ggml.
-    # Copy only the host's self-contained Vulkan header directory into the CMake build tree instead
-    # of adding /usr/include wholesale to an Android cross-compile.
+    # NDK Vulkan C headers do not include Vulkan-Hpp (`vulkan/vulkan.hpp`), which ggml-vulkan uses.
+    # Prefer an already-installed host Vulkan-Hpp directory, but never add /usr/include wholesale to
+    # the Android cross-compile because that can leak host libc headers into the target build.
     foreach(_vulkan_hpp_root "/usr/include" "/usr/local/include")
         if(EXISTS "${_vulkan_hpp_root}/vulkan/vulkan.hpp")
             set(DIGITOR_VULKAN_HPP_INCLUDE "${CMAKE_BINARY_DIR}/digitor-vulkan-hpp")
@@ -73,6 +73,24 @@ if(ANDROID)
             break()
         endif()
     endforeach()
+
+    # CI/Android Studio hosts do not always ship Vulkan-Hpp. Fetch a pinned Khronos header snapshot
+    # as a portable fallback. Only headers are consumed; the Android Vulkan loader still comes from
+    # the NDK/runtime, so this does not add a second Vulkan implementation to the APK.
+    if(NOT DIGITOR_VULKAN_HPP_INCLUDE)
+        FetchContent_Declare(
+            digitor_vulkan_headers
+            GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
+            GIT_TAG v1.4.321
+            GIT_SHALLOW TRUE
+            GIT_PROGRESS FALSE
+        )
+        FetchContent_GetProperties(digitor_vulkan_headers)
+        if(NOT digitor_vulkan_headers_POPULATED)
+            FetchContent_Populate(digitor_vulkan_headers)
+        endif()
+        set(DIGITOR_VULKAN_HPP_INCLUDE "${digitor_vulkan_headers_SOURCE_DIR}/include")
+    endif()
 endif()
 
 FetchContent_Declare(
