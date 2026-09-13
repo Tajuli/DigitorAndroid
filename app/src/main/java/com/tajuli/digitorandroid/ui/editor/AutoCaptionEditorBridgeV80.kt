@@ -41,7 +41,7 @@ internal object AutoCaptionStatusV80 {
         _state.value = AutoCaptionRunStateV80(
             running = true,
             message = if (allowCpuFallback) {
-                "Auto Caption · trying GPUs, then approved CPU mode"
+                "Auto Caption · selecting best local backend"
             } else {
                 "Auto Caption · preparing GPU"
             },
@@ -85,7 +85,7 @@ internal object AutoCaptionStatusV80 {
 /** Generate editable TextOverlayClip captions with the existing project/timeline system. */
 fun EditorViewModelV4.generateAutoCaptionsV80(
     language: AutoCaptionLanguageV80,
-    allowCpuFallback: Boolean = false,
+    allowCpuFallback: Boolean = true,
 ) {
     if (!autoCaptionRunningV80.compareAndSet(false, true)) {
         val message = "Auto Caption is already running"
@@ -97,7 +97,7 @@ fun EditorViewModelV4.generateAutoCaptionsV80(
     val sourceProject = state.value.project
     AutoCaptionStatusV80.start(allowCpuFallback)
     setEditorStatusV19(
-        if (allowCpuFallback) "Auto Caption · GPU first, CPU approved" else "Auto Caption · preparing GPU",
+        if (allowCpuFallback) "Auto Caption · selecting best local backend" else "Auto Caption · preparing GPU",
     )
 
     fun publishStatus(message: String) {
