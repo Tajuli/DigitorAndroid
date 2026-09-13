@@ -25,8 +25,9 @@ target_link_libraries(digitor_ppmatting_ncnn ncnn ${log-lib})
 
 # Auto Caption prefers Vulkan, then OpenCL on the production 64-bit phone build. Compatibility/test
 # ABIs stay CPU-only so x86 emulators and 32-bit Android builds do not inherit mobile GPU toolchain
-# requirements. The JNI bridge chooses between the compiled GPU devices at runtime and never starts
-# a slow CPU transcription on arm64 unless the user explicitly asks for CPU mode.
+# requirements. V86 also enables Arm KleidiAI on arm64 so the CPU compatibility path uses runtime-
+# selected dot-product/i8mm kernels when the SoC supports them instead of relying only on generic
+# ggml matrix kernels.
 include(FetchContent)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build whisper.cpp statically inside Digitor JNI" FORCE)
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -39,11 +40,14 @@ set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
 
 set(DIGITOR_WHISPER_VULKAN OFF)
 set(DIGITOR_WHISPER_OPENCL OFF)
+set(DIGITOR_WHISPER_KLEIDIAI OFF)
 if(ANDROID AND ANDROID_ABI STREQUAL "arm64-v8a")
     set(DIGITOR_WHISPER_VULKAN ON)
     set(DIGITOR_WHISPER_OPENCL ON)
+    set(DIGITOR_WHISPER_KLEIDIAI ON)
 endif()
 
+set(GGML_CPU_KLEIDIAI ${DIGITOR_WHISPER_KLEIDIAI} CACHE BOOL "Enable Arm KleidiAI CPU kernels for Auto Caption fallback" FORCE)
 set(GGML_VULKAN ${DIGITOR_WHISPER_VULKAN} CACHE BOOL "Enable Vulkan GPU inference for Auto Caption" FORCE)
 set(GGML_VULKAN_CHECK_RESULTS OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN_DEBUG OFF CACHE BOOL "" FORCE)
@@ -56,7 +60,7 @@ set(GGML_OPENCL_PROFILING OFF CACHE BOOL "" FORCE)
 set(GGML_OPENCL_EMBED_KERNELS ON CACHE BOOL "Embed OpenCL kernels in the JNI library" FORCE)
 set(GGML_OPENCL_USE_ADRENO_KERNELS OFF CACHE BOOL "Use portable OpenCL kernels across Android GPUs" FORCE)
 set(GGML_OPENCL_USE_ADRENO_BIN_KERNELS OFF CACHE BOOL "" FORCE)
-message(STATUS "Digitor Whisper backends for ${ANDROID_ABI}: Vulkan=${DIGITOR_WHISPER_VULKAN}, OpenCL=${DIGITOR_WHISPER_OPENCL}")
+message(STATUS "Digitor Whisper backends for ${ANDROID_ABI}: Vulkan=${DIGITOR_WHISPER_VULKAN}, OpenCL=${DIGITOR_WHISPER_OPENCL}, KleidiAI=${DIGITOR_WHISPER_KLEIDIAI}")
 
 # ggml-vulkan cross-compiles the Android runtime but compiles its shader generator on the host.
 if(DIGITOR_WHISPER_VULKAN)
@@ -195,7 +199,7 @@ endif()
 # The Android Gradle native build historically supplies -ffast-math for the PP-Matting path.
 # ggml deliberately relies on NaN/Infinity semantics and refuses to compile with finite-math-only.
 # Reset fast-math only for Whisper/ggml targets while preserving PP-Matting's tuning.
-foreach(whisper_math_target whisper ggml ggml-base ggml-cpu ggml-vulkan ggml-opencl)
+foreach(whisper_math_target whisper ggml ggml-base ggml-cpu ggml-vulkan ggml-opencl kleidiai)
     if(TARGET ${whisper_math_target})
         target_compile_options(${whisper_math_target} PRIVATE -fno-fast-math -fno-finite-math-only)
     endif()
