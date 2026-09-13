@@ -22,11 +22,10 @@ find_library(android-lib android)
 
 target_link_libraries(digitor_ppmatting_ncnn ncnn ${log-lib})
 
-# Auto Caption uses ggml's cross-vendor Vulkan backend on the 64-bit phone build. whisper.cpp
-# v1.9.4's Vulkan-Hpp path does not compile correctly for Android's 32-bit non-dispatchable Vulkan
-# handles (armeabi-v7a). Keep those compatibility ABIs on the already-supported CPU backend rather
-# than making the entire app fail to build. Modern phone releases are arm64-v8a and retain GPU
-# inference; the JNI layer also keeps its runtime CPU fallback for unsupported/flaky GPU drivers.
+# Auto Caption prefers Vulkan, then OpenCL on the production 64-bit phone build. Compatibility/test
+# ABIs stay CPU-only so x86 emulators and 32-bit Android builds do not inherit mobile GPU toolchain
+# requirements. The JNI bridge chooses between the compiled GPU devices at runtime and never starts
+# a slow CPU transcription on arm64 unless the user explicitly asks for CPU mode.
 include(FetchContent)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build whisper.cpp statically inside Digitor JNI" FORCE)
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -38,18 +37,27 @@ set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
 
 set(DIGITOR_WHISPER_VULKAN OFF)
+set(DIGITOR_WHISPER_OPENCL OFF)
 if(ANDROID AND ANDROID_ABI STREQUAL "arm64-v8a")
     set(DIGITOR_WHISPER_VULKAN ON)
+    set(DIGITOR_WHISPER_OPENCL ON)
 endif()
+
 set(GGML_VULKAN ${DIGITOR_WHISPER_VULKAN} CACHE BOOL "Enable Vulkan GPU inference for Auto Caption" FORCE)
 set(GGML_VULKAN_CHECK_RESULTS OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN_DEBUG OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN_VALIDATE OFF CACHE BOOL "" FORCE)
-message(STATUS "Digitor Whisper backend for ${ANDROID_ABI}: Vulkan=${DIGITOR_WHISPER_VULKAN}")
+
+# Generic OpenCL kernels are intentionally used instead of the Adreno-only optimized path so Mali,
+# Adreno and other Android OpenCL implementations can be tried as the second GPU backend.
+set(GGML_OPENCL ${DIGITOR_WHISPER_OPENCL} CACHE BOOL "Enable OpenCL GPU fallback for Auto Caption" FORCE)
+set(GGML_OPENCL_PROFILING OFF CACHE BOOL "" FORCE)
+set(GGML_OPENCL_EMBED_KERNELS ON CACHE BOOL "Embed OpenCL kernels in the JNI library" FORCE)
+set(GGML_OPENCL_USE_ADRENO_KERNELS OFF CACHE BOOL "Use portable OpenCL kernels across Android GPUs" FORCE)
+set(GGML_OPENCL_USE_ADRENO_BIN_KERNELS OFF CACHE BOOL "" FORCE)
+message(STATUS "Digitor Whisper backends for ${ANDROID_ABI}: Vulkan=${DIGITOR_WHISPER_VULKAN}, OpenCL=${DIGITOR_WHISPER_OPENCL}")
 
 # ggml-vulkan cross-compiles the Android runtime but compiles its shader generator on the host.
-# Only the arm64 build needs the host Vulkan/SPIR-V toolchain; CPU-only compatibility ABIs must not
-# configure or compile ggml-vulkan at all.
 if(DIGITOR_WHISPER_VULKAN)
     if(NOT DEFINED SPIRV-Headers_DIR)
         foreach(_spirv_dir
@@ -89,8 +97,6 @@ if(DIGITOR_WHISPER_VULKAN)
         endif()
     endforeach()
 
-    # CI/Android Studio hosts do not always ship Vulkan-Hpp. Fetch a pinned Khronos header snapshot
-    # as a portable fallback. Only headers are consumed; Android still uses the platform Vulkan loader.
     if(NOT DIGITOR_VULKAN_HPP_INCLUDE)
         FetchContent_Declare(
             digitor_vulkan_headers
@@ -107,7 +113,6 @@ if(DIGITOR_WHISPER_VULKAN)
     endif()
 
     # ggml-vulkan.cpp also includes SPIR-V's generated C++ enums (`spirv/unified1/spirv.hpp`).
-    # Stage only the `spirv/` directory to keep host libc/C++ headers out of the target build.
     foreach(_spirv_include_root "/usr/include" "/usr/local/include")
         if(EXISTS "${_spirv_include_root}/spirv/unified1/spirv.hpp")
             set(DIGITOR_SPIRV_INCLUDE "${CMAKE_BINARY_DIR}/digitor-spirv-headers")
@@ -118,8 +123,47 @@ if(DIGITOR_WHISPER_VULKAN)
     endforeach()
 endif()
 
-# The API-24 Vulkan compatibility source patch is only relevant to the arm64 GPU build. Keeping it
-# out of 32-bit CPU builds makes the ABI split explicit and avoids touching unused Vulkan sources.
+# Android does not ship OpenCL headers or a public NDK import library. Build the Khronos ICD loader
+# statically into Digitor and let it discover the phone vendor ICD at runtime. Khronos' Android
+# loader searches /system/vendor/Khronos/OpenCL/vendors by default. If the OEM does not expose an
+# ICD there, the OpenCL backend simply registers no usable device and JNI reports the GPU failure.
+if(DIGITOR_WHISPER_OPENCL)
+    FetchContent_Declare(
+        digitor_opencl_headers
+        GIT_REPOSITORY https://github.com/KhronosGroup/OpenCL-Headers.git
+        GIT_TAG v2025.07.22
+        GIT_SHALLOW TRUE
+        GIT_PROGRESS FALSE
+    )
+    FetchContent_GetProperties(digitor_opencl_headers)
+    if(NOT digitor_opencl_headers_POPULATED)
+        FetchContent_Populate(digitor_opencl_headers)
+    endif()
+
+    set(OPENCL_ICD_LOADER_HEADERS_DIR "${digitor_opencl_headers_SOURCE_DIR}" CACHE PATH "Pinned Khronos OpenCL headers" FORCE)
+    set(OPENCL_ICD_LOADER_BUILD_SHARED_LIBS OFF CACHE BOOL "Embed Khronos OpenCL ICD loader" FORCE)
+    set(OPENCL_ICD_LOADER_PIC ON CACHE BOOL "OpenCL loader must link into Digitor JNI" FORCE)
+    set(ENABLE_OPENCL_LAYERS OFF CACHE BOOL "" FORCE)
+    set(ENABLE_OPENCL_LAYERINFO OFF CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(
+        digitor_opencl_loader
+        GIT_REPOSITORY https://github.com/KhronosGroup/OpenCL-ICD-Loader.git
+        GIT_TAG v2025.07.22
+        GIT_SHALLOW TRUE
+        GIT_PROGRESS FALSE
+    )
+    FetchContent_MakeAvailable(digitor_opencl_loader)
+
+    # whisper.cpp's ggml-opencl CMake invokes find_package(OpenCL). Preseed the module variables with
+    # our in-tree Khronos target so it links the static loader instead of searching the Android NDK.
+    set(OpenCL_INCLUDE_DIR "${digitor_opencl_headers_SOURCE_DIR}" CACHE PATH "Digitor OpenCL headers" FORCE)
+    set(OpenCL_INCLUDE_DIRS "${digitor_opencl_headers_SOURCE_DIR}")
+    set(OpenCL_LIBRARY OpenCL CACHE STRING "Digitor embedded Khronos OpenCL loader" FORCE)
+    set(OpenCL_LIBRARIES OpenCL)
+endif()
+
+# The API-24 Vulkan compatibility source patch is only relevant to the arm64 GPU build.
 set(DIGITOR_WHISPER_PATCH_ARGS)
 if(DIGITOR_WHISPER_VULKAN)
     list(APPEND DIGITOR_WHISPER_PATCH_ARGS
@@ -149,7 +193,7 @@ endif()
 # The Android Gradle native build historically supplies -ffast-math for the PP-Matting path.
 # ggml deliberately relies on NaN/Infinity semantics and refuses to compile with finite-math-only.
 # Reset fast-math only for Whisper/ggml targets while preserving PP-Matting's tuning.
-foreach(whisper_math_target whisper ggml ggml-base ggml-cpu ggml-vulkan)
+foreach(whisper_math_target whisper ggml ggml-base ggml-cpu ggml-vulkan ggml-opencl)
     if(TARGET ${whisper_math_target})
         target_compile_options(${whisper_math_target} PRIVATE -fno-fast-math -fno-finite-math-only)
     endif()
