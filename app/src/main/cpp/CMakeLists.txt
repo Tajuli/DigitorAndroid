@@ -29,7 +29,18 @@ target_link_libraries(digitor_ppmatting_ncnn PRIVATE ncnn ${log-lib})
 # the same VulkanDevice family as PP-MattingV2. No CPU/OpenCL fallback is linked into this path.
 add_library(digitor_whisper_jni SHARED WhisperAutoCaptionJni.cpp)
 target_compile_features(digitor_whisper_jni PRIVATE cxx_std_17)
-# WhisperAutoCaptionJni.cpp uses std::memcpy for ncnn tensor/token transfers. Preinclude the standard
-# C++ string header explicitly so the NDK build never depends on an indirect ncnn header include.
-target_compile_options(digitor_whisper_jni PRIVATE -O3 -ffast-math -fvisibility=hidden -include cstring)
+# PP-Matting's Gradle configuration supplies -ffast-math globally, but Whisper's causal attention
+# mask relies on negative infinity exactly like Tencent's reference implementation. Override the
+# inherited fast-math flags only for the Whisper JNI target so the Vulkan model sees the correct mask.
+# Preinclude cstring because WhisperAutoCaptionJni.cpp uses std::memcpy for ncnn tensor transfers.
+target_compile_options(
+    digitor_whisper_jni
+    PRIVATE
+        -O3
+        -fno-fast-math
+        -fno-finite-math-only
+        -fvisibility=hidden
+        -include
+        cstring
+)
 target_link_libraries(digitor_whisper_jni PRIVATE ncnn ${log-lib} ${android-lib})
