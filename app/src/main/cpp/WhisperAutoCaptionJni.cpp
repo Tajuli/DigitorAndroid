@@ -2,528 +2,654 @@
 #include <android/log.h>
 
 #include <algorithm>
-#include <cctype>
-#include <cstdlib>
-#include <dlfcn.h>
+#include <cmath>
+#include <cstdint>
+#include <fstream>
+#include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include <ggml-backend.h>
-#if defined(DIGITOR_WHISPER_HAS_VULKAN)
-#include <ggml-vulkan.h>
-#endif
-#if defined(DIGITOR_WHISPER_HAS_OPENCL)
-#include <ggml-opencl.h>
-#endif
-#include <whisper.h>
+#include <gpu.h>
+#include <layer.h>
+#include <layer_type.h>
+#include <net.h>
 
 namespace {
-constexpr const char * kTag = "DigitorWhisperV80";
-constexpr const char * kGpuUnavailablePrefix = "GPU_BACKENDS_UNAVAILABLE: ";
+constexpr const char* kTag = "DigitorWhisperNcnn";
+constexpr int kSampleRate = 16000;
+constexpr int kMaxChunkSamples = 480000; // 30 seconds, matching the exported Whisper graph.
+constexpr int kTokenEndOfText = 50257;
+constexpr int kTokenStartOfTranscript = 50258;
+constexpr int kTokenLangFirst = 50259;
+constexpr int kTokenLangLast = 50357;
+constexpr int kTokenTranscribe = 50359;
+constexpr int kTokenNoCaptions = 50362;
+constexpr int kTokenTimestampFirst = 50364;
+constexpr int kTokenTimestampLast = 51864;
+constexpr int kMaxDecodedTokens = 448;
 
-enum class RuntimeBackend {
-    None,
-    Vulkan,
-    OpenCL,
-    Cpu,
+// Token order is defined by OpenAI Whisper and mirrored by Tencent ncnn's official whisper example.
+constexpr const char* kLanguageCodes[] = {
+    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv",
+    "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no",
+    "th", "ur", "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr",
+    "az", "sl", "kn", "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw",
+    "gl", "mr", "pa", "si", "km", "sn", "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu",
+    "am", "yi", "lo", "uz", "fo", "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl",
+    "mg", "as", "tt", "haw", "ln", "ha", "ba", "jw", "su"
 };
+constexpr int kLanguageCount = sizeof(kLanguageCodes) / sizeof(kLanguageCodes[0]);
 
-struct GpuCandidate {
-    RuntimeBackend kind = RuntimeBackend::None;
-    int gpuOrdinal = -1;
-    std::string backendName;
-    std::string deviceName;
-    std::string description;
-};
+std::once_flag gGpuInitOnce;
+int gGpuInitResult = -1;
+std::mutex gEngineMutex;
 
-std::mutex gWhisperMutex;
-std::once_flag gGpuBackendPrimeOnce;
-whisper_context * gContext = nullptr;
-std::string gModelPath;
-RuntimeBackend gBackend = RuntimeBackend::None;
-std::string gBackendDevice;
-std::string gLastGpuFailure;
-size_t gVulkanReportedDevices = 0;
-size_t gOpenClReportedDevices = 0;
-std::string gOpenClIcdStatus = "not probed";
-
-std::string JStringToUtf8(JNIEnv * env, jstring value) {
+std::string JStringToString(JNIEnv* env, jstring value) {
     if (value == nullptr) return {};
-    const char * chars = env->GetStringUTFChars(value, nullptr);
+    const char* chars = env->GetStringUTFChars(value, nullptr);
     if (chars == nullptr) return {};
     std::string result(chars);
     env->ReleaseStringUTFChars(value, chars);
     return result;
 }
 
-void ThrowJava(JNIEnv * env, const char * type, const std::string & message) {
+void ThrowJava(JNIEnv* env, const char* type, const std::string& message) {
     jclass klass = env->FindClass(type);
     if (klass != nullptr) env->ThrowNew(klass, message.c_str());
 }
 
-std::string Trim(const char * raw) {
-    std::string text = raw == nullptr ? std::string() : std::string(raw);
-    auto notSpace = [](unsigned char c) { return !std::isspace(c); };
-    text.erase(text.begin(), std::find_if(text.begin(), text.end(), notSpace));
-    text.erase(std::find_if(text.rbegin(), text.rend(), notSpace).base(), text.end());
-    return text;
+std::string Trim(std::string text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
 }
 
-std::string Lower(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
+bool EnsureVulkanRuntime() {
+    std::call_once(gGpuInitOnce, [] {
+        gGpuInitResult = ncnn::create_gpu_instance();
+        if (gGpuInitResult == 0 && ncnn::get_gpu_count() <= 0) gGpuInitResult = -2;
     });
-    return value;
+    if (gGpuInitResult != 0 || ncnn::get_gpu_count() <= 0) return false;
+    const int gpuIndex = ncnn::get_default_gpu_index();
+    if (gpuIndex < 0) return false;
+    ncnn::VulkanDevice* device = ncnn::get_gpu_device(gpuIndex);
+    return device != nullptr && device->is_valid();
 }
 
-const char * BackendKindName(RuntimeBackend backend) {
-    switch (backend) {
-        case RuntimeBackend::Vulkan: return "Vulkan GPU";
-        case RuntimeBackend::OpenCL: return "OpenCL GPU";
-        case RuntimeBackend::Cpu: return "CPU (slow)";
-        default: return "none";
+class Tokenizer {
+public:
+    bool load(const std::string& path) {
+        std::ifstream input(path);
+        if (!input.is_open()) return false;
+        reverseVocab.clear();
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            reverseVocab.push_back(line);
+        }
+        generateByteDecoder();
+        return !reverseVocab.empty();
     }
+
+    std::string decodeText(const std::vector<int>& tokens) const {
+        std::string encoded;
+        for (int token : tokens) {
+            if (token >= 0 && token < kTokenEndOfText && token < static_cast<int>(reverseVocab.size())) {
+                encoded += reverseVocab[static_cast<size_t>(token)];
+            }
+        }
+        if (encoded.empty()) return {};
+
+        const std::vector<uint32_t> codepoints = utf8ToCodepoints(encoded);
+        std::string bytes;
+        bytes.reserve(codepoints.size());
+        for (uint32_t cp : codepoints) {
+            if (cp < 512) bytes.push_back(static_cast<char>(byteDecoder[cp]));
+        }
+        return Trim(bytes);
+    }
+
+private:
+    std::vector<std::string> reverseVocab;
+    uint8_t byteDecoder[512]{};
+
+    void generateByteDecoder() {
+        std::fill(std::begin(byteDecoder), std::end(byteDecoder), 0);
+        auto printable = [](int b) {
+            return (b >= '!' && b <= '~') || (b >= 161 && b <= 172) || (b >= 174 && b <= 255);
+        };
+        for (int b = 0; b < 256; ++b) {
+            if (printable(b)) byteDecoder[b] = static_cast<uint8_t>(b);
+        }
+        int n = 0;
+        for (int b = 0; b < 256; ++b) {
+            if (!printable(b)) byteDecoder[256 + n++] = static_cast<uint8_t>(b);
+        }
+    }
+
+    static std::vector<uint32_t> utf8ToCodepoints(const std::string& text) {
+        std::vector<uint32_t> result;
+        for (size_t i = 0; i < text.size();) {
+            const unsigned char c = static_cast<unsigned char>(text[i]);
+            uint32_t cp = 0;
+            size_t len = 1;
+            if (c < 0x80) {
+                cp = c;
+            } else if ((c & 0xE0) == 0xC0 && i + 1 < text.size()) {
+                cp = ((c & 0x1F) << 6) | (static_cast<unsigned char>(text[i + 1]) & 0x3F);
+                len = 2;
+            } else if ((c & 0xF0) == 0xE0 && i + 2 < text.size()) {
+                cp = ((c & 0x0F) << 12) |
+                     ((static_cast<unsigned char>(text[i + 1]) & 0x3F) << 6) |
+                     (static_cast<unsigned char>(text[i + 2]) & 0x3F);
+                len = 3;
+            } else if ((c & 0xF8) == 0xF0 && i + 3 < text.size()) {
+                cp = ((c & 0x07) << 18) |
+                     ((static_cast<unsigned char>(text[i + 1]) & 0x3F) << 12) |
+                     ((static_cast<unsigned char>(text[i + 2]) & 0x3F) << 6) |
+                     (static_cast<unsigned char>(text[i + 3]) & 0x3F);
+                len = 4;
+            } else {
+                ++i;
+                continue;
+            }
+            result.push_back(cp);
+            i += len;
+        }
+        return result;
+    }
+};
+
+struct CaptionSegment {
+    int64_t startUs = 0;
+    int64_t endUs = 0;
+    std::string text;
+};
+
+struct WhisperNcnnEngine {
+    ncnn::Net fbank;
+    ncnn::Net encoder;
+    ncnn::Net embedToken;
+    ncnn::Net embedPosition;
+    ncnn::Net decoder;
+    ncnn::Net projOut;
+    Tokenizer tokenizer;
+    std::vector<int> kvCacheIndexes;
+    std::vector<int> outKvCacheIndexes;
+    ncnn::VulkanDevice* vkdev = nullptr;
+    int gpuIndex = -1;
+    std::string gpuName;
+    std::string modelDir;
+
+    bool load(const std::string& directory, std::string& error) {
+        if (!EnsureVulkanRuntime()) {
+            error = "ncnn Vulkan GPU unavailable on this device";
+            return false;
+        }
+        gpuIndex = ncnn::get_default_gpu_index();
+        vkdev = ncnn::get_gpu_device(gpuIndex);
+        if (vkdev == nullptr || !vkdev->is_valid()) {
+            error = "ncnn Vulkan device could not be initialized";
+            return false;
+        }
+
+        const ncnn::GpuInfo& gpuInfo = ncnn::get_gpu_info(gpuIndex);
+        const char* name = gpuInfo.device_name();
+        gpuName = (name != nullptr && name[0] != '\0') ? name : "Vulkan GPU";
+        modelDir = directory;
+
+        configureGpuNet(fbank);
+        configureGpuNet(encoder);
+        configureGpuNet(decoder);
+        configureGpuNet(projOut);
+        // Embedding lookups are tiny and Tencent's reference implementation keeps them on CPU.
+        embedToken.opt.num_threads = 2;
+        embedPosition.opt.num_threads = 2;
+
+        if (!loadNet(fbank, "whisper_base_fbank.ncnn.param", "whisper_base_fbank.ncnn.bin", error)) return false;
+        if (!loadNet(encoder, "whisper_base_encoder.ncnn.param", "whisper_base_encoder.ncnn.bin", error)) return false;
+        if (!loadNet(embedToken, "whisper_base_embed_token.ncnn.param", "whisper_base_embed_token.ncnn.bin", error)) return false;
+        if (!loadNet(embedPosition, "whisper_base_embed_position.ncnn.param", "whisper_base_embed_position.ncnn.bin", error)) return false;
+        if (!loadNet(decoder, "whisper_base_decoder.ncnn.param", "whisper_base_decoder.ncnn.bin", error)) return false;
+        // The official release ships proj_out and embed_token with byte-identical weight blobs.
+        // Reusing the verified embed-token binary saves ~53 MB of first-download/storage cost.
+        if (!loadNet(projOut, "whisper_base_proj_out.ncnn.param", "whisper_base_embed_token.ncnn.bin", error)) return false;
+        if (!tokenizer.load(path("whisper_vocab.txt"))) {
+            error = "Could not load Whisper vocabulary";
+            return false;
+        }
+
+        kvCacheIndexes.clear();
+        outKvCacheIndexes.clear();
+        for (const ncnn::Layer* layer : decoder.layers()) {
+            if (layer == nullptr || layer->typeindex != ncnn::LayerType::MultiHeadAttention) continue;
+            const size_t inputCount = layer->bottoms.size();
+            const size_t outputCount = layer->tops.size();
+            if (inputCount >= 2 && outputCount == 3) {
+                kvCacheIndexes.push_back(layer->bottoms[inputCount - 2]);
+                kvCacheIndexes.push_back(layer->bottoms[inputCount - 1]);
+                outKvCacheIndexes.push_back(layer->tops[outputCount - 2]);
+                outKvCacheIndexes.push_back(layer->tops[outputCount - 1]);
+            }
+        }
+        if (kvCacheIndexes.empty() || kvCacheIndexes.size() != outKvCacheIndexes.size()) {
+            error = "Whisper decoder KV-cache graph is incompatible";
+            return false;
+        }
+
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            kTag,
+            "ncnn Whisper base ready on %s (Vulkan, kv=%zu)",
+            gpuName.c_str(),
+            kvCacheIndexes.size()
+        );
+        return true;
+    }
+
+    int detectLanguage(const float* samples, int sampleCount) const {
+        ncnn::Mat features;
+        if (extractFbank(samples, sampleCount, features) != 0) return -1;
+        ncnn::Mat encoded;
+        if (runEncoder(features, encoded) != 0) return -1;
+        ncnn::Mat logits;
+        std::vector<ncnn::Mat> cache;
+        if (runDecoderPrefill({kTokenStartOfTranscript}, encoded, logits, cache) != 0) return -1;
+        if (logits.empty() || logits.w <= kTokenLangLast) return -1;
+        int best = kTokenLangFirst;
+        float bestScore = logits[kTokenLangFirst];
+        for (int token = kTokenLangFirst + 1; token <= kTokenLangLast; ++token) {
+            const float score = logits[token];
+            if (score > bestScore) {
+                bestScore = score;
+                best = token;
+            }
+        }
+        return best - kTokenLangFirst;
+    }
+
+    std::vector<CaptionSegment> transcribeChunk(
+        const float* samples,
+        int sampleCount,
+        int languageIndex,
+        int64_t chunkOffsetUs
+    ) const {
+        std::vector<CaptionSegment> result;
+        if (languageIndex < 0 || languageIndex >= kLanguageCount || sampleCount <= 0) return result;
+
+        ncnn::Mat features;
+        if (extractFbank(samples, sampleCount, features) != 0) return result;
+        ncnn::Mat encoded;
+        if (runEncoder(features, encoded) != 0) return result;
+
+        std::vector<int> tokens = {
+            kTokenStartOfTranscript,
+            kTokenLangFirst + languageIndex,
+            kTokenTranscribe,
+        };
+        std::vector<ncnn::Mat> cache;
+        for (int step = 0; step < kMaxDecodedTokens; ++step) {
+            ncnn::Mat logits;
+            std::vector<ncnn::Mat> nextCache;
+            const int status = step == 0
+                ? runDecoderPrefill(tokens, encoded, logits, nextCache)
+                : runDecoderStep(tokens, encoded, logits, cache, nextCache);
+            if (status != 0 || logits.empty()) break;
+
+            const int next = argmax(logits);
+            if (next < 0 || next == kTokenEndOfText || next == kTokenNoCaptions) break;
+            tokens.push_back(next);
+            cache.swap(nextCache);
+        }
+
+        const int64_t durationUs = static_cast<int64_t>(sampleCount) * 1000000LL / kSampleRate;
+        std::vector<int> textTokens;
+        int64_t startUs = -1;
+        bool sawTimestamp = false;
+
+        for (size_t i = 3; i < tokens.size(); ++i) {
+            const int token = tokens[i];
+            if (token >= kTokenTimestampFirst && token <= kTokenTimestampLast) {
+                const int64_t timestampUs = static_cast<int64_t>(token - kTokenTimestampFirst) * 20000LL;
+                if (startUs < 0) {
+                    startUs = timestampUs;
+                    textTokens.clear();
+                } else {
+                    sawTimestamp = true;
+                    const int64_t localStart = std::clamp<int64_t>(startUs, 0, durationUs);
+                    const int64_t localEnd = std::clamp<int64_t>(timestampUs, 0, durationUs);
+                    const std::string text = tokenizer.decodeText(textTokens);
+                    if (!text.empty() && localEnd > localStart) {
+                        result.push_back({chunkOffsetUs + localStart, chunkOffsetUs + localEnd, text});
+                    }
+                    startUs = -1;
+                    textTokens.clear();
+                }
+            } else if (token >= 0 && token < kTokenEndOfText) {
+                textTokens.push_back(token);
+            }
+        }
+
+        // Some devices/models may emit text without timestamp token pairs under greedy decoding.
+        // Keep the transcript rather than losing it; timing is then bounded to the decoded chunk.
+        if (result.empty()) {
+            std::vector<int> plainTokens;
+            for (size_t i = 3; i < tokens.size(); ++i) {
+                const int token = tokens[i];
+                if (token >= 0 && token < kTokenEndOfText) plainTokens.push_back(token);
+            }
+            const std::string text = tokenizer.decodeText(plainTokens);
+            if (!text.empty()) result.push_back({chunkOffsetUs, chunkOffsetUs + durationUs, text});
+        }
+
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            kTag,
+            "GPU chunk done: samples=%d lang=%s timestamped=%d segments=%zu",
+            sampleCount,
+            kLanguageCodes[languageIndex],
+            sawTimestamp ? 1 : 0,
+            result.size()
+        );
+        return result;
+    }
+
+private:
+    std::string path(const char* name) const {
+        return modelDir + "/" + name;
+    }
+
+    void configureGpuNet(ncnn::Net& net) {
+        net.opt.use_vulkan_compute = true;
+        net.opt.num_threads = 2;
+        // Match Tencent's official Whisper ncnn reference: keep storage/arithmetic FP32 for stable
+        // multilingual recognition across Mali/Adreno/PowerVR Vulkan drivers.
+        net.opt.use_fp16_packed = false;
+        net.opt.use_fp16_storage = false;
+        net.opt.use_fp16_arithmetic = false;
+        net.set_vulkan_device(vkdev);
+    }
+
+    bool loadNet(ncnn::Net& net, const char* paramName, const char* binName, std::string& error) {
+        const std::string param = path(paramName);
+        const std::string bin = path(binName);
+        if (net.load_param(param.c_str()) != 0) {
+            error = std::string("Could not load ") + paramName;
+            return false;
+        }
+        if (net.load_model(bin.c_str()) != 0) {
+            error = std::string("Could not load ") + binName;
+            return false;
+        }
+        return true;
+    }
+
+    int extractFbank(const float* samples, int sampleCount, ncnn::Mat& features) const {
+        ncnn::Mat waveform(kMaxChunkSamples);
+        waveform.fill(0.f);
+        const int copyCount = std::min(sampleCount, kMaxChunkSamples);
+        float* dst = waveform;
+        for (int i = 0; i < copyCount; ++i) dst[i] = std::clamp(samples[i], -1.f, 1.f);
+
+        ncnn::Extractor ex = fbank.create_extractor();
+        int status = ex.input("in0", waveform);
+        if (status != 0) return status;
+        status = ex.extract("out0", features);
+        if (status != 0 || features.empty() || features.w <= 1) return status != 0 ? status : -1;
+
+        ncnn::Mat trimmed(features.w - 1, features.h);
+        for (int row = 0; row < features.h; ++row) {
+            std::memcpy(trimmed.row(row), features.row(row), static_cast<size_t>(features.w - 1) * sizeof(float));
+        }
+        features = trimmed;
+        return 0;
+    }
+
+    int runEncoder(const ncnn::Mat& features, ncnn::Mat& states) const {
+        ncnn::Extractor ex = encoder.create_extractor();
+        int status = ex.input("in0", features);
+        if (status != 0) return status;
+        return ex.extract("out0", states);
+    }
+
+    int runDecoderPrefill(
+        const std::vector<int>& tokens,
+        const ncnn::Mat& encoderStates,
+        ncnn::Mat& lastLogits,
+        std::vector<ncnn::Mat>& outCache
+    ) const {
+        const int seqLen = static_cast<int>(tokens.size());
+        ncnn::Mat inputTokens(seqLen);
+        std::memcpy(static_cast<int*>(inputTokens), tokens.data(), tokens.size() * sizeof(int));
+
+        ncnn::Mat tokenEmbeds;
+        {
+            ncnn::Extractor ex = embedToken.create_extractor();
+            int status = ex.input("in0", inputTokens);
+            if (status != 0) return status;
+            status = ex.extract("out0", tokenEmbeds);
+            if (status != 0) return status;
+        }
+
+        ncnn::Mat positions(seqLen);
+        int* positionData = positions;
+        for (int i = 0; i < seqLen; ++i) positionData[i] = i;
+        ncnn::Mat positionEmbeds;
+        {
+            ncnn::Extractor ex = embedPosition.create_extractor();
+            int status = ex.input("in0", positions);
+            if (status != 0) return status;
+            status = ex.extract("out0", positionEmbeds);
+            if (status != 0) return status;
+        }
+
+        if (tokenEmbeds.total() != positionEmbeds.total()) return -1;
+        ncnn::Mat inputEmbeds;
+        inputEmbeds.create_like(tokenEmbeds);
+        float* inputPtr = inputEmbeds;
+        const float* tokenPtr = tokenEmbeds;
+        const float* positionPtr = positionEmbeds;
+        for (size_t i = 0; i < inputEmbeds.total(); ++i) inputPtr[i] = tokenPtr[i] + positionPtr[i];
+
+        ncnn::Mat attentionMask(seqLen, seqLen);
+        attentionMask.fill(0.f);
+        for (int i = 0; i < seqLen; ++i) {
+            float* row = attentionMask.row(i);
+            for (int j = i + 1; j < seqLen; ++j) row[j] = -INFINITY;
+        }
+
+        ncnn::Mat outputStates;
+        {
+            ncnn::Extractor ex = decoder.create_extractor();
+            int status = ex.input("in0", inputEmbeds);
+            if (status != 0) return status;
+            status = ex.input("in1", encoderStates);
+            if (status != 0) return status;
+            status = ex.input("in2", attentionMask);
+            if (status != 0) return status;
+
+            outCache.resize(outKvCacheIndexes.size());
+            for (size_t i = 0; i < outKvCacheIndexes.size(); ++i) {
+                status = ex.extract(outKvCacheIndexes[i], outCache[i], 1);
+                if (status != 0) return status;
+            }
+            status = ex.extract("out0", outputStates);
+            if (status != 0) return status;
+        }
+
+        ncnn::Mat lastState = outputStates.row_range(seqLen - 1, 1).clone();
+        ncnn::Extractor projection = projOut.create_extractor();
+        int status = projection.input("in0", lastState);
+        if (status != 0) return status;
+        status = projection.extract("out0", lastLogits);
+        if (status != 0) return status;
+        lastLogits = lastLogits.reshape(lastLogits.w);
+        return 0;
+    }
+
+    int runDecoderStep(
+        const std::vector<int>& tokens,
+        const ncnn::Mat& encoderStates,
+        ncnn::Mat& lastLogits,
+        const std::vector<ncnn::Mat>& cache,
+        std::vector<ncnn::Mat>& outCache
+    ) const {
+        if (cache.size() != kvCacheIndexes.size()) return -1;
+        ncnn::Mat inputTokens(1);
+        static_cast<int*>(inputTokens)[0] = tokens.back();
+
+        ncnn::Mat tokenEmbeds;
+        {
+            ncnn::Extractor ex = embedToken.create_extractor();
+            int status = ex.input("in0", inputTokens);
+            if (status != 0) return status;
+            status = ex.extract("out0", tokenEmbeds);
+            if (status != 0) return status;
+        }
+
+        ncnn::Mat positions(1);
+        static_cast<int*>(positions)[0] = static_cast<int>(tokens.size()) - 1;
+        ncnn::Mat positionEmbeds;
+        {
+            ncnn::Extractor ex = embedPosition.create_extractor();
+            int status = ex.input("in0", positions);
+            if (status != 0) return status;
+            status = ex.extract("out0", positionEmbeds);
+            if (status != 0) return status;
+        }
+
+        ncnn::Mat inputEmbeds;
+        inputEmbeds.create_like(tokenEmbeds);
+        float* inputPtr = inputEmbeds;
+        const float* tokenPtr = tokenEmbeds;
+        const float* positionPtr = positionEmbeds;
+        for (size_t i = 0; i < inputEmbeds.total(); ++i) inputPtr[i] = tokenPtr[i] + positionPtr[i];
+
+        ncnn::Mat attentionMask(1, 1);
+        attentionMask.fill(0.f);
+        ncnn::Mat outputStates;
+        {
+            ncnn::Extractor ex = decoder.create_extractor();
+            int status = ex.input("in0", inputEmbeds);
+            if (status != 0) return status;
+            status = ex.input("in1", encoderStates);
+            if (status != 0) return status;
+            status = ex.input("in2", attentionMask);
+            if (status != 0) return status;
+            for (size_t i = 0; i < kvCacheIndexes.size(); ++i) {
+                status = ex.input(kvCacheIndexes[i], cache[i]);
+                if (status != 0) return status;
+            }
+            outCache.resize(outKvCacheIndexes.size());
+            for (size_t i = 0; i < outKvCacheIndexes.size(); ++i) {
+                status = ex.extract(outKvCacheIndexes[i], outCache[i], 1);
+                if (status != 0) return status;
+            }
+            status = ex.extract("out0", outputStates);
+            if (status != 0) return status;
+        }
+
+        ncnn::Mat lastState = outputStates.row_range(0, 1).clone();
+        ncnn::Extractor projection = projOut.create_extractor();
+        int status = projection.input("in0", lastState);
+        if (status != 0) return status;
+        status = projection.extract("out0", lastLogits);
+        if (status != 0) return status;
+        lastLogits = lastLogits.reshape(lastLogits.w);
+        return 0;
+    }
+
+    static int argmax(const ncnn::Mat& logits) {
+        if (logits.empty() || logits.w <= 0) return -1;
+        const float* values = logits;
+        int best = 0;
+        float bestValue = values[0];
+        for (int i = 1; i < logits.w; ++i) {
+            if (values[i] > bestValue) {
+                bestValue = values[i];
+                best = i;
+            }
+        }
+        return best;
+    }
+};
+
+std::unique_ptr<WhisperNcnnEngine> gEngine;
+
+int FindLanguageIndex(const std::string& code) {
+    for (int i = 0; i < kLanguageCount; ++i) {
+        if (code == kLanguageCodes[i]) return i;
+    }
+    return -1;
 }
 
 std::string BackendLabel() {
-    std::string label = BackendKindName(gBackend);
-    if ((gBackend == RuntimeBackend::Vulkan || gBackend == RuntimeBackend::OpenCL) && !gBackendDevice.empty()) {
-        label += " · ";
-        label += gBackendDevice;
-    }
-    return label;
+    if (!gEngine) return "ncnn Vulkan GPU";
+    return std::string("ncnn Vulkan GPU · ") + gEngine->gpuName;
 }
 
-void FreeContext() {
-    if (gContext != nullptr) {
-        whisper_free(gContext);
-        gContext = nullptr;
+bool HasSpeechEnergy(const float* samples, int count) {
+    if (samples == nullptr || count <= 0) return false;
+    double absoluteSum = 0.0;
+    float peak = 0.f;
+    const int stride = std::max(1, count / 8000);
+    int measured = 0;
+    for (int i = 0; i < count; i += stride) {
+        const float value = std::fabs(samples[i]);
+        absoluteSum += value;
+        peak = std::max(peak, value);
+        ++measured;
     }
-    gModelPath.clear();
-    gBackend = RuntimeBackend::None;
-    gBackendDevice.clear();
+    const double meanAbs = measured > 0 ? absoluteSum / measured : 0.0;
+    return peak >= 0.008f && meanAbs >= 0.0008;
 }
 
-#if defined(DIGITOR_WHISPER_HAS_OPENCL)
-bool IsUsableOpenClIcdLibrary(const char * libraryName) {
-    void * library = dlopen(libraryName, RTLD_NOW | RTLD_LOCAL);
-    if (library == nullptr) {
-        __android_log_print(ANDROID_LOG_INFO, kTag, "OpenCL ICD probe: %s is not app-visible", libraryName);
-        return false;
-    }
-
-    using ExtensionAddressFn = void * (*)(const char *);
-    auto extensionAddress = reinterpret_cast<ExtensionAddressFn>(dlsym(library, "clGetExtensionFunctionAddress"));
-    void * icdEntry = extensionAddress == nullptr ? nullptr : extensionAddress("clIcdGetPlatformIDsKHR");
-    const bool usable = extensionAddress != nullptr && icdEntry != nullptr;
-    __android_log_print(
-        usable ? ANDROID_LOG_INFO : ANDROID_LOG_WARN,
-        kTag,
-        "OpenCL ICD probe: %s %s cl_khr_icd",
-        libraryName,
-        usable ? "exports" : "does not export"
-    );
-    dlclose(library);
-    return usable;
-}
-
-void PrepareAndroidOpenClIcd() {
-    const char * configured = std::getenv("OCL_ICD_FILENAMES");
-    if (configured != nullptr && configured[0] != '\0') {
-        gOpenClIcdStatus = "OCL_ICD_FILENAMES supplied";
-        __android_log_print(ANDROID_LOG_INFO, kTag, "OpenCL ICD: honoring existing OCL_ICD_FILENAMES");
-        return;
-    }
-
-    // Android OEMs often ship an OpenCL implementation without an ICD file in Khronos' default
-    // /system/vendor/Khronos/OpenCL/vendors directory. Probe only libraries that the app linker
-    // namespace is actually allowed to open, and only accept implementations that expose the
-    // cl_khr_icd entry point required by the Khronos loader.
-    constexpr const char * kAndroidIcdCandidates[] = {
-        "libOpenCL.so",
-        "libGLES_mali.so",
-        "libPVROCL.so",
-    };
-    for (const char * candidate : kAndroidIcdCandidates) {
-        if (!IsUsableOpenClIcdLibrary(candidate)) continue;
-        if (setenv("OCL_ICD_FILENAMES", candidate, 1) == 0) {
-            gOpenClIcdStatus = std::string("ICD ") + candidate;
-            __android_log_print(ANDROID_LOG_INFO, kTag, "OpenCL ICD: selected %s", candidate);
-            return;
-        }
-        __android_log_print(ANDROID_LOG_WARN, kTag, "OpenCL ICD: could not set OCL_ICD_FILENAMES for %s", candidate);
-    }
-
-    gOpenClIcdStatus = "no app-visible Android ICD library";
-}
-#endif
-
-void PrimeCompiledGpuBackends() {
-    std::call_once(gGpuBackendPrimeOnce, [] {
-#if defined(DIGITOR_WHISPER_HAS_OPENCL)
-        // This must happen before the first OpenCL API call or ggml global registry access because
-        // the Khronos loader enumerates OCL_ICD_FILENAMES only during its one-time initialization.
-        PrepareAndroidOpenClIcd();
-#endif
-
-        ggml_backend_reg_t vulkanReg = nullptr;
-        ggml_backend_reg_t openclReg = nullptr;
-
-#if defined(DIGITOR_WHISPER_HAS_VULKAN)
-        vulkanReg = ggml_backend_vk_reg();
-        if (vulkanReg != nullptr) {
-            gVulkanReportedDevices = ggml_backend_reg_dev_count(vulkanReg);
-        }
-        __android_log_print(
-            ANDROID_LOG_INFO,
-            kTag,
-            "direct Vulkan registry: %zu device(s)",
-            gVulkanReportedDevices
-        );
-#endif
-
-#if defined(DIGITOR_WHISPER_HAS_OPENCL)
-        openclReg = ggml_backend_opencl_reg();
-        if (openclReg != nullptr) {
-            gOpenClReportedDevices = ggml_backend_reg_dev_count(openclReg);
-        }
-        __android_log_print(
-            ANDROID_LOG_INFO,
-            kTag,
-            "direct OpenCL registry: %zu device(s), %s",
-            gOpenClReportedDevices,
-            gOpenClIcdStatus.c_str()
-        );
-#endif
-
-        // Force the statically linked backends into the same global registry Whisper queries.
-        // ggml_backend_register de-duplicates a backend already registered by ggml itself.
-        if (vulkanReg != nullptr) ggml_backend_register(vulkanReg);
-        if (openclReg != nullptr) ggml_backend_register(openclReg);
-    });
-}
-
-std::vector<GpuCandidate> EnumerateGpuCandidates() {
-    PrimeCompiledGpuBackends();
-
-    std::vector<GpuCandidate> result;
-    int gpuOrdinal = 0;
-    const size_t deviceCount = ggml_backend_dev_count();
-    __android_log_print(ANDROID_LOG_INFO, kTag, "ggml registered devices: %zu", deviceCount);
-
-    for (size_t index = 0; index < deviceCount; ++index) {
-        ggml_backend_dev_t device = ggml_backend_dev_get(index);
-        if (device == nullptr) continue;
-        const auto type = ggml_backend_dev_type(device);
-        const char * rawDeviceName = ggml_backend_dev_name(device);
-        const char * rawDescription = ggml_backend_dev_description(device);
-        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(device);
-        const char * rawBackendName = reg == nullptr ? nullptr : ggml_backend_reg_name(reg);
-        const std::string deviceName = rawDeviceName == nullptr ? "unknown" : rawDeviceName;
-        const std::string description = rawDescription == nullptr ? "" : rawDescription;
-        const std::string backendName = rawBackendName == nullptr ? "unknown" : rawBackendName;
-
-        __android_log_print(
-            ANDROID_LOG_INFO,
-            kTag,
-            "device[%zu]: backend=%s name=%s description=%s type=%d",
-            index,
-            backendName.c_str(),
-            deviceName.c_str(),
-            description.c_str(),
-            static_cast<int>(type)
-        );
-
-        if (type != GGML_BACKEND_DEVICE_TYPE_GPU && type != GGML_BACKEND_DEVICE_TYPE_IGPU) continue;
-
-        const std::string haystack = Lower(backendName + " " + deviceName + " " + description);
-        RuntimeBackend kind = RuntimeBackend::None;
-        if (haystack.find("vulkan") != std::string::npos) {
-            kind = RuntimeBackend::Vulkan;
-        } else if (haystack.find("opencl") != std::string::npos) {
-            kind = RuntimeBackend::OpenCL;
-        }
-
-        if (kind != RuntimeBackend::None) {
-            result.push_back(GpuCandidate{
-                kind,
-                gpuOrdinal,
-                backendName,
-                deviceName,
-                description,
-            });
-        }
-        ++gpuOrdinal;
-    }
-    return result;
-}
-
-const GpuCandidate * FindCandidate(const std::vector<GpuCandidate> & candidates, RuntimeBackend kind) {
-    auto it = std::find_if(candidates.begin(), candidates.end(), [kind](const GpuCandidate & candidate) {
-        return candidate.kind == kind;
-    });
-    return it == candidates.end() ? nullptr : &*it;
-}
-
-whisper_context * LoadGpuContext(const std::string & modelPath, const GpuCandidate & candidate) {
-    FreeContext();
-
-    whisper_context_params contextParams = whisper_context_default_params();
-    contextParams.use_gpu = true;
-    contextParams.flash_attn = false;
-    contextParams.gpu_device = candidate.gpuOrdinal;
-
-    __android_log_print(
-        ANDROID_LOG_INFO,
-        kTag,
-        "trying %s: ordinal=%d backend=%s device=%s",
-        BackendKindName(candidate.kind),
-        candidate.gpuOrdinal,
-        candidate.backendName.c_str(),
-        candidate.deviceName.c_str()
-    );
-
-    gContext = whisper_init_from_file_with_params(modelPath.c_str(), contextParams);
-    if (gContext == nullptr) {
-        __android_log_print(
-            ANDROID_LOG_WARN,
-            kTag,
-            "%s model initialization failed on %s",
-            BackendKindName(candidate.kind),
-            candidate.deviceName.c_str()
-        );
-        return nullptr;
-    }
-
-    gModelPath = modelPath;
-    gBackend = candidate.kind;
-    gBackendDevice = candidate.deviceName;
-    __android_log_print(ANDROID_LOG_INFO, kTag, "Whisper ready: %s", BackendLabel().c_str());
-    return gContext;
-}
-
-whisper_context * LoadCpuContext(const std::string & modelPath) {
-    FreeContext();
-    whisper_context_params contextParams = whisper_context_default_params();
-    contextParams.use_gpu = false;
-    contextParams.flash_attn = false;
-    gContext = whisper_init_from_file_with_params(modelPath.c_str(), contextParams);
-    if (gContext == nullptr) return nullptr;
-    gModelPath = modelPath;
-    gBackend = RuntimeBackend::Cpu;
-    gBackendDevice.clear();
-    __android_log_print(ANDROID_LOG_WARN, kTag, "Whisper ready in explicit CPU mode");
-    return gContext;
-}
-
-std::string MissingVulkanDetail() {
-#if defined(DIGITOR_WHISPER_HAS_VULKAN)
-    if (gVulkanReportedDevices == 0) {
-        return "0 compatible devices (Vulkan 1.2/driver unavailable)";
-    }
-    return "registered but not selectable";
-#else
-    return "backend not packaged";
-#endif
-}
-
-std::string MissingOpenClDetail() {
-#if defined(DIGITOR_WHISPER_HAS_OPENCL)
-    if (gOpenClReportedDevices == 0) {
-        return std::string("0 compatible devices (") + gOpenClIcdStatus + ")";
-    }
-    return "registered but not selectable";
-#else
-    return "backend not packaged";
-#endif
-}
-
-whisper_context * PreparePreferredBackend(const std::string & modelPath, bool allowCpu) {
-    if (gContext != nullptr && gModelPath == modelPath) {
-        if (gBackend != RuntimeBackend::Cpu || allowCpu) return gContext;
-        // A previous explicit slow-CPU run must never make the next normal Generate silently CPU.
-        FreeContext();
-    }
-
-    const std::vector<GpuCandidate> candidates = EnumerateGpuCandidates();
-    const GpuCandidate * vulkan = FindCandidate(candidates, RuntimeBackend::Vulkan);
-    const GpuCandidate * opencl = FindCandidate(candidates, RuntimeBackend::OpenCL);
-    bool vulkanInitFailed = false;
-    bool openclInitFailed = false;
-
-    if (vulkan != nullptr) {
-        if (whisper_context * context = LoadGpuContext(modelPath, *vulkan)) return context;
-        vulkanInitFailed = true;
-    }
-    if (opencl != nullptr) {
-        if (whisper_context * context = LoadGpuContext(modelPath, *opencl)) return context;
-        openclInitFailed = true;
-    }
-
-    gLastGpuFailure = "Vulkan ";
-    gLastGpuFailure += vulkan == nullptr ? MissingVulkanDetail() : (vulkanInitFailed ? "initialization failed" : "unavailable");
-    gLastGpuFailure += "; OpenCL ";
-    gLastGpuFailure += opencl == nullptr ? MissingOpenClDetail() : (openclInitFailed ? "initialization failed" : "unavailable");
-
-    if (allowCpu) {
-        __android_log_print(
-            ANDROID_LOG_WARN,
-            kTag,
-            "GPU backends unavailable (%s); user allowed slow CPU mode",
-            gLastGpuFailure.c_str()
-        );
-        return LoadCpuContext(modelPath);
-    }
-
-    __android_log_print(ANDROID_LOG_ERROR, kTag, "GPU backends unavailable: %s", gLastGpuFailure.c_str());
-    return nullptr;
-}
-
-std::string ResolveLanguage(
-    whisper_context * context,
-    const std::string & requested,
-    const std::vector<float> & samples,
-    int threads
-) {
-    if (!requested.empty() && requested != "auto") return requested;
-
-    if (whisper_pcm_to_mel(context, samples.data(), static_cast<int>(samples.size()), threads) != 0) {
-        return "auto";
-    }
-    const int languageId = whisper_lang_auto_detect(context, 0, threads, nullptr);
-    if (languageId < 0) return "auto";
-    const char * code = whisper_lang_str(languageId);
-    return code == nullptr ? std::string("auto") : std::string(code);
-}
-
-whisper_full_params BuildParams(const std::string & language, int threads) {
-    whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    params.n_threads = threads;
-    params.translate = false;
-    params.no_context = true;
-    params.no_timestamps = false;
-    params.single_segment = false;
-    params.print_special = false;
-    params.print_progress = false;
-    params.print_realtime = false;
-    params.print_timestamps = false;
-    params.token_timestamps = true;
-    params.max_len = 42;
-    params.split_on_word = true;
-    params.suppress_blank = true;
-    params.suppress_nst = true;
-    params.language = language.c_str();
-    params.detect_language = false;
-    return params;
-}
-
-int RunWhisper(
-    whisper_context * context,
-    const std::string & requestedLanguage,
-    const std::vector<float> & samples,
-    int threads,
-    std::string & resolvedLanguage
-) {
-    resolvedLanguage = ResolveLanguage(context, requestedLanguage, samples, threads);
-    whisper_full_params params = BuildParams(resolvedLanguage, threads);
-    return whisper_full(context, params, samples.data(), static_cast<int>(samples.size()));
-}
-
-int RetryAfterGpuFailure(
-    const std::string & modelPath,
-    const std::string & requestedLanguage,
-    const std::vector<float> & samples,
-    int threads,
-    bool allowCpu,
-    std::string & resolvedLanguage,
-    int previousStatus
-) {
-    int status = previousStatus;
-    const RuntimeBackend failedBackend = gBackend;
-    __android_log_print(
-        ANDROID_LOG_WARN,
-        kTag,
-        "%s inference failed: %d",
-        BackendKindName(failedBackend),
-        status
-    );
-
-    // If Vulkan initialized but its driver fails during the actual graph, retry the same request on
-    // OpenCL before considering CPU. This is the important fallback for phones with incomplete
-    // Vulkan compute drivers but a working OEM OpenCL ICD.
-    if (failedBackend == RuntimeBackend::Vulkan) {
-        const std::vector<GpuCandidate> candidates = EnumerateGpuCandidates();
-        const GpuCandidate * opencl = FindCandidate(candidates, RuntimeBackend::OpenCL);
-        if (opencl != nullptr) {
-            whisper_context * openclContext = LoadGpuContext(modelPath, *opencl);
-            if (openclContext != nullptr) {
-                status = RunWhisper(openclContext, requestedLanguage, samples, threads, resolvedLanguage);
-                if (status == 0) return 0;
-                __android_log_print(ANDROID_LOG_WARN, kTag, "OpenCL retry failed: %d", status);
-            }
-        }
-    }
-
-    if (allowCpu && gBackend != RuntimeBackend::Cpu) {
-        whisper_context * cpuContext = LoadCpuContext(modelPath);
-        if (cpuContext != nullptr) {
-            status = RunWhisper(cpuContext, requestedLanguage, samples, threads, resolvedLanguage);
-        }
-    }
-    return status;
-}
-
-std::string GpuFailureMessage() {
-    std::string detail = gLastGpuFailure.empty() ? "Vulkan and OpenCL could not run this Whisper model" : gLastGpuFailure;
-    return std::string(kGpuUnavailablePrefix) + detail + ". CPU mode is available but can be much slower.";
+bool EnsureEngine(const std::string& modelDir, std::string& error) {
+    if (gEngine && gEngine->modelDir == modelDir) return true;
+    auto engine = std::make_unique<WhisperNcnnEngine>();
+    if (!engine->load(modelDir, error)) return false;
+    gEngine = std::move(engine);
+    return true;
 }
 
 } // namespace
 
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_WhisperLanguageNativeV82_supportedLanguages(
-    JNIEnv * env,
+    JNIEnv* env,
     jobject
 ) {
     jclass stringClass = env->FindClass("java/lang/String");
     if (stringClass == nullptr) return nullptr;
-
-    const int maxLanguageId = whisper_lang_max_id();
-    const int languageCount = std::max(0, maxLanguageId + 1);
-    jobjectArray result = env->NewObjectArray(languageCount, stringClass, nullptr);
+    jobjectArray result = env->NewObjectArray(kLanguageCount, stringClass, nullptr);
     if (result == nullptr) return nullptr;
-
-    for (int id = 0; id < languageCount; ++id) {
-        const char * code = whisper_lang_str(id);
-        const char * fullName = whisper_lang_str_full(id);
-        const std::string encoded = std::string(code == nullptr ? "" : code) + "\t" +
-            std::string(fullName == nullptr ? "" : fullName);
-        jstring item = env->NewStringUTF(encoded.c_str());
-        if (item == nullptr) return nullptr;
-        env->SetObjectArrayElement(result, id, item);
-        env->DeleteLocalRef(item);
+    for (int i = 0; i < kLanguageCount; ++i) {
+        const std::string encoded = std::string(kLanguageCodes[i]) + "\t" + kLanguageCodes[i];
+        jstring value = env->NewStringUTF(encoded.c_str());
+        env->SetObjectArrayElement(result, i, value);
+        env->DeleteLocalRef(value);
     }
     return result;
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_prepareBackend(
-    JNIEnv * env,
+    JNIEnv* env,
     jobject,
     jstring modelPathValue,
-    jboolean allowCpuFallback
+    jboolean
 ) {
-    if (modelPathValue == nullptr) {
-        ThrowJava(env, "java/lang/IllegalArgumentException", "Whisper model path is required");
+    const std::string modelDir = JStringToString(env, modelPathValue);
+    if (modelDir.empty()) {
+        ThrowJava(env, "java/lang/IllegalArgumentException", "Whisper ncnn model directory is required");
         return nullptr;
     }
-    const std::string modelPath = JStringToUtf8(env, modelPathValue);
-    std::lock_guard<std::mutex> guard(gWhisperMutex);
-    whisper_context * context = PreparePreferredBackend(modelPath, allowCpuFallback == JNI_TRUE);
-    if (context == nullptr) {
-        ThrowJava(env, "java/lang/IllegalStateException", GpuFailureMessage());
+    std::lock_guard<std::mutex> guard(gEngineMutex);
+    std::string error;
+    if (!EnsureEngine(modelDir, error)) {
+        ThrowJava(env, "java/lang/IllegalStateException", "GPU_BACKENDS_UNAVAILABLE: " + error);
         return nullptr;
     }
     const std::string label = BackendLabel();
@@ -532,102 +658,94 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_prepareBackend
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_activeBackend(
-    JNIEnv * env,
+    JNIEnv* env,
     jobject
 ) {
-    std::lock_guard<std::mutex> guard(gWhisperMutex);
+    std::lock_guard<std::mutex> guard(gEngineMutex);
     const std::string label = BackendLabel();
     return env->NewStringUTF(label.c_str());
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
-    JNIEnv * env,
+    JNIEnv* env,
     jobject,
     jstring modelPathValue,
     jfloatArray samplesValue,
     jstring languageValue,
-    jboolean allowCpuFallback
+    jboolean
 ) {
     if (modelPathValue == nullptr || samplesValue == nullptr) {
-        ThrowJava(env, "java/lang/IllegalArgumentException", "Whisper model path and PCM samples are required");
+        ThrowJava(env, "java/lang/IllegalArgumentException", "Whisper model directory and PCM samples are required");
         return nullptr;
     }
-
-    const std::string modelPath = JStringToUtf8(env, modelPathValue);
-    const std::string requestedLanguage = JStringToUtf8(env, languageValue);
-    const bool allowCpu = allowCpuFallback == JNI_TRUE;
+    const std::string modelDir = JStringToString(env, modelPathValue);
+    const std::string requestedLanguage = JStringToString(env, languageValue);
     const jsize sampleCount = env->GetArrayLength(samplesValue);
-    if (sampleCount <= 0) {
-        jclass stringClass = env->FindClass("java/lang/String");
-        return env->NewObjectArray(0, stringClass, nullptr);
-    }
-
-    std::vector<float> samples(static_cast<size_t>(sampleCount));
-    env->GetFloatArrayRegion(samplesValue, 0, sampleCount, samples.data());
+    std::vector<float> samples(static_cast<size_t>(std::max<jsize>(0, sampleCount)));
+    if (sampleCount > 0) env->GetFloatArrayRegion(samplesValue, 0, sampleCount, samples.data());
     if (env->ExceptionCheck()) return nullptr;
 
-    std::lock_guard<std::mutex> guard(gWhisperMutex);
-    whisper_context * context = PreparePreferredBackend(modelPath, allowCpu);
-    if (context == nullptr) {
-        ThrowJava(env, "java/lang/IllegalStateException", GpuFailureMessage());
+    std::lock_guard<std::mutex> guard(gEngineMutex);
+    std::string error;
+    if (!EnsureEngine(modelDir, error)) {
+        ThrowJava(env, "java/lang/IllegalStateException", "GPU_BACKENDS_UNAVAILABLE: " + error);
         return nullptr;
     }
 
-    const unsigned int cores = std::max(1u, std::thread::hardware_concurrency());
-    const int threads = static_cast<int>(std::min(4u, cores));
-    std::string resolvedLanguage;
-    int status = RunWhisper(context, requestedLanguage, samples, threads, resolvedLanguage);
-
-    if (status != 0 && gBackend != RuntimeBackend::Cpu) {
-        status = RetryAfterGpuFailure(
-            modelPath,
-            requestedLanguage,
-            samples,
-            threads,
-            allowCpu,
-            resolvedLanguage,
-            status
-        );
+    std::vector<CaptionSegment> segments;
+    int languageIndex = requestedLanguage.empty() || requestedLanguage == "auto"
+        ? -1
+        : FindLanguageIndex(requestedLanguage);
+    if (languageIndex < 0 && !(requestedLanguage.empty() || requestedLanguage == "auto")) {
+        ThrowJava(env, "java/lang/IllegalArgumentException", "Unsupported Whisper language: " + requestedLanguage);
+        return nullptr;
     }
 
-    if (status != 0) {
-        __android_log_print(ANDROID_LOG_ERROR, kTag, "whisper_full failed after backend fallback: %d", status);
-        if (!allowCpu && gBackend != RuntimeBackend::Cpu) {
-            gLastGpuFailure = "Vulkan/OpenCL inference failed";
-            ThrowJava(env, "java/lang/IllegalStateException", GpuFailureMessage());
-        } else {
-            ThrowJava(env, "java/lang/IllegalStateException", "Whisper transcription failed");
+    int offset = 0;
+    while (offset < sampleCount) {
+        const int count = std::min(kMaxChunkSamples, static_cast<int>(sampleCount) - offset);
+        const float* chunk = samples.data() + offset;
+        if (!HasSpeechEnergy(chunk, count)) {
+            offset += count;
+            continue;
         }
-        return nullptr;
+        if (languageIndex < 0) {
+            languageIndex = gEngine->detectLanguage(chunk, count);
+            if (languageIndex < 0 || languageIndex >= kLanguageCount) languageIndex = FindLanguageIndex("en");
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                kTag,
+                "Auto Detect resolved language=%s",
+                kLanguageCodes[languageIndex]
+            );
+        }
+        const int64_t offsetUs = static_cast<int64_t>(offset) * 1000000LL / kSampleRate;
+        std::vector<CaptionSegment> local = gEngine->transcribeChunk(chunk, count, languageIndex, offsetUs);
+        segments.insert(segments.end(), local.begin(), local.end());
+        offset += count;
     }
 
-    const int languageId = whisper_full_lang_id(gContext);
-    const char * detected = languageId >= 0 ? whisper_lang_str(languageId) : nullptr;
+    jclass stringClass = env->FindClass("java/lang/String");
+    if (stringClass == nullptr) return nullptr;
+    jobjectArray result = env->NewObjectArray(static_cast<jsize>(segments.size()), stringClass, nullptr);
+    if (result == nullptr) return nullptr;
+    for (size_t i = 0; i < segments.size(); ++i) {
+        const CaptionSegment& segment = segments[i];
+        const std::string encoded = std::to_string(segment.startUs) + "\t" +
+            std::to_string(segment.endUs) + "\t" + segment.text;
+        jstring value = env->NewStringUTF(encoded.c_str());
+        env->SetObjectArrayElement(result, static_cast<jsize>(i), value);
+        env->DeleteLocalRef(value);
+    }
+
     __android_log_print(
         ANDROID_LOG_INFO,
         kTag,
-        "transcription complete: backend=%s requested=%s resolved=%s detected=%s samples=%d",
+        "GPU transcription complete: backend=%s samples=%d segments=%zu",
         BackendLabel().c_str(),
-        requestedLanguage.empty() ? "auto" : requestedLanguage.c_str(),
-        resolvedLanguage.c_str(),
-        detected == nullptr ? "unknown" : detected,
-        static_cast<int>(sampleCount)
+        static_cast<int>(sampleCount),
+        segments.size()
     );
-
-    const int segmentCount = whisper_full_n_segments(gContext);
-    jclass stringClass = env->FindClass("java/lang/String");
-    jobjectArray result = env->NewObjectArray(segmentCount, stringClass, nullptr);
-    if (result == nullptr) return nullptr;
-
-    for (int index = 0; index < segmentCount; ++index) {
-        const int64_t startUs = whisper_full_get_segment_t0(gContext, index) * 10'000LL;
-        const int64_t endUs = whisper_full_get_segment_t1(gContext, index) * 10'000LL;
-        const std::string text = Trim(whisper_full_get_segment_text(gContext, index));
-        const std::string encoded = std::to_string(startUs) + "\t" + std::to_string(endUs) + "\t" + text;
-        jstring line = env->NewStringUTF(encoded.c_str());
-        env->SetObjectArrayElement(result, index, line);
-        env->DeleteLocalRef(line);
-    }
     return result;
 }
