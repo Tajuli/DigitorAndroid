@@ -10,7 +10,6 @@ import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.resolvedVideoTrackIdV3
 import com.tajuli.digitorandroid.editor.model.visualOverlaysForVideoTrackV19
-import com.tajuli.digitorandroid.editor.processing.AutoCaptionGpuUnavailableException
 import com.tajuli.digitorandroid.editor.processing.WhisperAutoCaptionV80
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
@@ -25,11 +24,10 @@ private const val AUTO_CAPTION_TRACK_V80 = "Captions"
 
 internal data class AutoCaptionRunStateV80(
     val running: Boolean = false,
-    val message: String = "Choose a language, then generate captions.",
+    val message: String = "Choose a language, then generate captions on GPU.",
     val progressPercent: Int? = null,
     val completedCount: Int? = null,
     val failed: Boolean = false,
-    val cpuFallbackAvailable: Boolean = false,
 )
 
 /** Shared UI state so progress remains visible even when the Auto Caption dialog is closed. */
@@ -37,14 +35,10 @@ internal object AutoCaptionStatusV80 {
     private val _state = MutableStateFlow(AutoCaptionRunStateV80())
     val state: StateFlow<AutoCaptionRunStateV80> = _state.asStateFlow()
 
-    fun start(allowCpuFallback: Boolean) {
+    fun start() {
         _state.value = AutoCaptionRunStateV80(
             running = true,
-            message = if (allowCpuFallback) {
-                "Auto Caption · selecting best local backend"
-            } else {
-                "Auto Caption · preparing GPU"
-            },
+            message = "Auto Caption · preparing ncnn Vulkan GPU",
         )
     }
 
@@ -60,33 +54,28 @@ internal object AutoCaptionStatusV80 {
             progressPercent = if (message.contains("model", ignoreCase = true)) percent else null,
             completedCount = null,
             failed = false,
-            cpuFallbackAvailable = false,
         )
     }
 
     fun success(count: Int, language: AutoCaptionLanguageV80) {
         _state.value = AutoCaptionRunStateV80(
             running = false,
-            message = "Created $count captions · ${language.label}",
+            message = "Created $count captions · ${language.label} · GPU",
             completedCount = count,
         )
     }
 
-    fun failure(message: String, cpuFallbackAvailable: Boolean = false) {
+    fun failure(message: String) {
         _state.value = AutoCaptionRunStateV80(
             running = false,
             message = message,
             failed = true,
-            cpuFallbackAvailable = cpuFallbackAvailable,
         )
     }
 }
 
 /** Generate editable TextOverlayClip captions with the existing project/timeline system. */
-fun EditorViewModelV4.generateAutoCaptionsV80(
-    language: AutoCaptionLanguageV80,
-    allowCpuFallback: Boolean = true,
-) {
+fun EditorViewModelV4.generateAutoCaptionsV80(language: AutoCaptionLanguageV80) {
     if (!autoCaptionRunningV80.compareAndSet(false, true)) {
         val message = "Auto Caption is already running"
         setEditorStatusV19(message)
@@ -95,10 +84,8 @@ fun EditorViewModelV4.generateAutoCaptionsV80(
     }
 
     val sourceProject = state.value.project
-    AutoCaptionStatusV80.start(allowCpuFallback)
-    setEditorStatusV19(
-        if (allowCpuFallback) "Auto Caption · selecting best local backend" else "Auto Caption · preparing GPU",
-    )
+    AutoCaptionStatusV80.start()
+    setEditorStatusV19("Auto Caption · preparing ncnn Vulkan GPU")
 
     fun publishStatus(message: String) {
         setEditorStatusV19(message)
@@ -110,7 +97,6 @@ fun EditorViewModelV4.generateAutoCaptionsV80(
             val segments = WhisperAutoCaptionV80(getApplication()).transcribeProject(
                 project = sourceProject,
                 language = language,
-                allowCpuFallback = allowCpuFallback,
                 onStatus = ::publishStatus,
             )
             require(segments.isNotEmpty()) { "No speech was detected in the project audio" }
@@ -143,7 +129,7 @@ fun EditorViewModelV4.generateAutoCaptionsV80(
                 commitProjectV19(
                     label = "auto-caption",
                     project = nextProject,
-                    status = "Auto Caption · ${overlays.size} captions · ${language.label}",
+                    status = "Auto Caption · ${overlays.size} captions · ${language.label} · GPU",
                 )
                 ProjectStore(getApplication()).autoSave(state.value.project)
 
@@ -153,18 +139,17 @@ fun EditorViewModelV4.generateAutoCaptionsV80(
                     TimelineTextSelectionBusV10.select(first.id)
                 }
 
-                val message = "Auto Caption · ${overlays.size} captions · ${language.label}"
+                val message = "Auto Caption · ${overlays.size} captions · ${language.label} · GPU"
                 setEditorStatusV19(message)
                 AutoCaptionStatusV80.success(overlays.size, language)
-                Toast.makeText(getApplication(), "Created ${overlays.size} captions", Toast.LENGTH_SHORT).show()
+                Toast.makeText(getApplication(), "Created ${overlays.size} captions on GPU", Toast.LENGTH_SHORT).show()
             }
         } catch (error: Throwable) {
             withContext(Dispatchers.Main) {
                 val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
                 val message = "Auto Caption failed · $detail"
-                val canOfferCpu = error is AutoCaptionGpuUnavailableException && !allowCpuFallback
                 setEditorStatusV19(message)
-                AutoCaptionStatusV80.failure(message, cpuFallbackAvailable = canOfferCpu)
+                AutoCaptionStatusV80.failure(message)
                 Toast.makeText(getApplication(), message, Toast.LENGTH_LONG).show()
             }
         } finally {
