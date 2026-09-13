@@ -36,7 +36,7 @@ import androidx.compose.ui.window.Dialog
 import com.tajuli.digitorandroid.editor.model.AutoCaptionLanguageV80
 import com.tajuli.digitorandroid.editor.processing.supportedAutoCaptionLanguagesV82
 
-/** Compact GPU-only Auto Caption entry point. */
+/** Compact GPU-first Auto Caption entry point. */
 @Composable
 internal fun AutoCaptionControlsV80(
     vm: EditorViewModelV4,
@@ -106,12 +106,12 @@ internal fun AutoCaptionControlsV80(
                     }
 
                     Text(
-                        "Auto Caption now uses Digitor's ncnn Vulkan GPU runtime directly. It does not automatically switch to CPU or OpenCL.",
+                        "Auto Caption uses Digitor's ncnn Vulkan GPU for Whisper encoder/decoder inference. Audio feature preprocessing is CPU-side for wider mobile GPU compatibility.",
                         fontSize = 9.sp,
                         color = Color.White.copy(alpha = .68f),
                     )
                     Text(
-                        "First use downloads the multilingual ncnn Whisper base GPU model pack (~147 MB) once; later runs work offline.",
+                        "First use downloads the multilingual ncnn Whisper tiny mobile model (~77 MB) once; later runs work offline. There is no CPU transcription fallback.",
                         fontSize = 8.sp,
                         color = Color.White.copy(alpha = .55f),
                     )
@@ -139,7 +139,7 @@ internal fun AutoCaptionControlsV80(
 
                     Text(
                         if (language.whisperCode == "auto") {
-                            "Auto Detect identifies the spoken language on-device, then transcribes it on the Vulkan GPU."
+                            "Auto Detect identifies the spoken language on-device, then transcribes it with the mobile Vulkan profile."
                         } else {
                             "Manual language selection can improve recognition when you already know the spoken language."
                         },
