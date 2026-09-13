@@ -3,12 +3,20 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
+#include <dlfcn.h>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <ggml-backend.h>
+#if defined(DIGITOR_WHISPER_HAS_VULKAN)
+#include <ggml-vulkan.h>
+#endif
+#if defined(DIGITOR_WHISPER_HAS_OPENCL)
+#include <ggml-opencl.h>
+#endif
 #include <whisper.h>
 
 namespace {
@@ -31,11 +39,15 @@ struct GpuCandidate {
 };
 
 std::mutex gWhisperMutex;
+std::once_flag gGpuBackendPrimeOnce;
 whisper_context * gContext = nullptr;
 std::string gModelPath;
 RuntimeBackend gBackend = RuntimeBackend::None;
 std::string gBackendDevice;
 std::string gLastGpuFailure;
+size_t gVulkanReportedDevices = 0;
+size_t gOpenClReportedDevices = 0;
+std::string gOpenClIcdStatus = "not probed";
 
 std::string JStringToUtf8(JNIEnv * env, jstring value) {
     if (value == nullptr) return {};
@@ -94,7 +106,108 @@ void FreeContext() {
     gBackendDevice.clear();
 }
 
+#if defined(DIGITOR_WHISPER_HAS_OPENCL)
+bool IsUsableOpenClIcdLibrary(const char * libraryName) {
+    void * library = dlopen(libraryName, RTLD_NOW | RTLD_LOCAL);
+    if (library == nullptr) {
+        __android_log_print(ANDROID_LOG_INFO, kTag, "OpenCL ICD probe: %s is not app-visible", libraryName);
+        return false;
+    }
+
+    using ExtensionAddressFn = void * (*)(const char *);
+    auto extensionAddress = reinterpret_cast<ExtensionAddressFn>(dlsym(library, "clGetExtensionFunctionAddress"));
+    void * icdEntry = extensionAddress == nullptr ? nullptr : extensionAddress("clIcdGetPlatformIDsKHR");
+    const bool usable = extensionAddress != nullptr && icdEntry != nullptr;
+    __android_log_print(
+        usable ? ANDROID_LOG_INFO : ANDROID_LOG_WARN,
+        kTag,
+        "OpenCL ICD probe: %s %s cl_khr_icd",
+        libraryName,
+        usable ? "exports" : "does not export"
+    );
+    dlclose(library);
+    return usable;
+}
+
+void PrepareAndroidOpenClIcd() {
+    const char * configured = std::getenv("OCL_ICD_FILENAMES");
+    if (configured != nullptr && configured[0] != '\0') {
+        gOpenClIcdStatus = "OCL_ICD_FILENAMES supplied";
+        __android_log_print(ANDROID_LOG_INFO, kTag, "OpenCL ICD: honoring existing OCL_ICD_FILENAMES");
+        return;
+    }
+
+    // Android OEMs often ship an OpenCL implementation without an ICD file in Khronos' default
+    // /system/vendor/Khronos/OpenCL/vendors directory. Probe only libraries that the app linker
+    // namespace is actually allowed to open, and only accept implementations that expose the
+    // cl_khr_icd entry point required by the Khronos loader.
+    constexpr const char * kAndroidIcdCandidates[] = {
+        "libOpenCL.so",
+        "libGLES_mali.so",
+        "libPVROCL.so",
+    };
+    for (const char * candidate : kAndroidIcdCandidates) {
+        if (!IsUsableOpenClIcdLibrary(candidate)) continue;
+        if (setenv("OCL_ICD_FILENAMES", candidate, 1) == 0) {
+            gOpenClIcdStatus = std::string("ICD ") + candidate;
+            __android_log_print(ANDROID_LOG_INFO, kTag, "OpenCL ICD: selected %s", candidate);
+            return;
+        }
+        __android_log_print(ANDROID_LOG_WARN, kTag, "OpenCL ICD: could not set OCL_ICD_FILENAMES for %s", candidate);
+    }
+
+    gOpenClIcdStatus = "no app-visible Android ICD library";
+}
+#endif
+
+void PrimeCompiledGpuBackends() {
+    std::call_once(gGpuBackendPrimeOnce, [] {
+#if defined(DIGITOR_WHISPER_HAS_OPENCL)
+        // This must happen before the first OpenCL API call or ggml global registry access because
+        // the Khronos loader enumerates OCL_ICD_FILENAMES only during its one-time initialization.
+        PrepareAndroidOpenClIcd();
+#endif
+
+        ggml_backend_reg_t vulkanReg = nullptr;
+        ggml_backend_reg_t openclReg = nullptr;
+
+#if defined(DIGITOR_WHISPER_HAS_VULKAN)
+        vulkanReg = ggml_backend_vk_reg();
+        if (vulkanReg != nullptr) {
+            gVulkanReportedDevices = ggml_backend_reg_dev_count(vulkanReg);
+        }
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            kTag,
+            "direct Vulkan registry: %zu device(s)",
+            gVulkanReportedDevices
+        );
+#endif
+
+#if defined(DIGITOR_WHISPER_HAS_OPENCL)
+        openclReg = ggml_backend_opencl_reg();
+        if (openclReg != nullptr) {
+            gOpenClReportedDevices = ggml_backend_reg_dev_count(openclReg);
+        }
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            kTag,
+            "direct OpenCL registry: %zu device(s), %s",
+            gOpenClReportedDevices,
+            gOpenClIcdStatus.c_str()
+        );
+#endif
+
+        // Force the statically linked backends into the same global registry Whisper queries.
+        // ggml_backend_register de-duplicates a backend already registered by ggml itself.
+        if (vulkanReg != nullptr) ggml_backend_register(vulkanReg);
+        if (openclReg != nullptr) ggml_backend_register(openclReg);
+    });
+}
+
 std::vector<GpuCandidate> EnumerateGpuCandidates() {
+    PrimeCompiledGpuBackends();
+
     std::vector<GpuCandidate> result;
     int gpuOrdinal = 0;
     const size_t deviceCount = ggml_backend_dev_count();
@@ -205,6 +318,28 @@ whisper_context * LoadCpuContext(const std::string & modelPath) {
     return gContext;
 }
 
+std::string MissingVulkanDetail() {
+#if defined(DIGITOR_WHISPER_HAS_VULKAN)
+    if (gVulkanReportedDevices == 0) {
+        return "0 compatible devices (Vulkan 1.2/driver unavailable)";
+    }
+    return "registered but not selectable";
+#else
+    return "backend not packaged";
+#endif
+}
+
+std::string MissingOpenClDetail() {
+#if defined(DIGITOR_WHISPER_HAS_OPENCL)
+    if (gOpenClReportedDevices == 0) {
+        return std::string("0 compatible devices (") + gOpenClIcdStatus + ")";
+    }
+    return "registered but not selectable";
+#else
+    return "backend not packaged";
+#endif
+}
+
 whisper_context * PreparePreferredBackend(const std::string & modelPath, bool allowCpu) {
     if (gContext != nullptr && gModelPath == modelPath) {
         if (gBackend != RuntimeBackend::Cpu || allowCpu) return gContext;
@@ -228,9 +363,9 @@ whisper_context * PreparePreferredBackend(const std::string & modelPath, bool al
     }
 
     gLastGpuFailure = "Vulkan ";
-    gLastGpuFailure += vulkan == nullptr ? "not exposed" : (vulkanInitFailed ? "initialization failed" : "unavailable");
+    gLastGpuFailure += vulkan == nullptr ? MissingVulkanDetail() : (vulkanInitFailed ? "initialization failed" : "unavailable");
     gLastGpuFailure += "; OpenCL ";
-    gLastGpuFailure += opencl == nullptr ? "not exposed" : (openclInitFailed ? "initialization failed" : "unavailable");
+    gLastGpuFailure += opencl == nullptr ? MissingOpenClDetail() : (openclInitFailed ? "initialization failed" : "unavailable");
 
     if (allowCpu) {
         __android_log_print(
