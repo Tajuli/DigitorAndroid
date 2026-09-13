@@ -24,7 +24,7 @@ import kotlin.math.max
 
 private const val GPU_UNAVAILABLE_PREFIX_V85 = "GPU_BACKENDS_UNAVAILABLE:"
 
-/** Raised when Vulkan and OpenCL are unavailable and the user has not opted into slow CPU mode. */
+/** Raised when Vulkan and OpenCL are unavailable and the caller did not allow the local CPU path. */
 internal class AutoCaptionGpuUnavailableException(
     message: String,
     cause: Throwable? = null,
@@ -36,7 +36,7 @@ internal object WhisperNativeV80 {
         System.loadLibrary("digitor_whisper_jni")
     }
 
-    /** Tries Vulkan -> OpenCL -> optional user-approved CPU and reports the active native backend. */
+    /** Tries Vulkan -> OpenCL -> optional CPU and reports the active native backend. */
     external fun prepareBackend(modelPath: String, allowCpuFallback: Boolean): String
 
     external fun activeBackend(): String
@@ -76,9 +76,15 @@ private data class CaptionBatchV84(
 /**
  * On-device, no-per-minute-cost auto captions.
  *
- * V83 uses the multilingual small-q5_1 model instead of tiny-q5_1 for materially better
- * international/Bengali recognition. V85 tries Vulkan GPU first and OpenCL GPU second. CPU is never
- * entered silently: it is available only after the UI asks the user to opt into the slower mode.
+ * V86 uses the multilingual base-q8_0 model as the Android mobile profile. The previous small-q5_1
+ * model was accurate, but it made the only universally available fallback far too expensive on
+ * mid-range phones whose Android GPU driver cannot satisfy whisper.cpp's Vulkan 1.2 requirement.
+ * Base-q8_0 keeps a much stronger multilingual model than the old tiny profile while cutting model
+ * size and compute enough for the local CPU compatibility path to be usable.
+ *
+ * Runtime order remains Vulkan -> OpenCL -> CPU. The caller decides whether CPU fallback is allowed;
+ * the editor V86 UI allows it by default so a phone with an incompatible Vulkan/OpenCL stack no
+ * longer stops at a backend error.
  *
  * Split clips that are still contiguous pieces of the same source are batched back together before
  * Whisper and decoded through one MediaExtractor/MediaCodec pass. Splitting a 60-second video into
@@ -97,7 +103,13 @@ internal class WhisperAutoCaptionV80(
         onStatus: (String) -> Unit = {},
     ): List<AutoCaptionSegmentV80> {
         val model = modelStore.ensureModel(onStatus)
-        onStatus("Auto Caption · preparing Vulkan / OpenCL GPU")
+        onStatus(
+            if (allowCpuFallback) {
+                "Auto Caption · selecting Vulkan / OpenCL / local CPU"
+            } else {
+                "Auto Caption · preparing Vulkan / OpenCL GPU"
+            },
+        )
         var backend = translateGpuFailureV85 {
             WhisperNativeV80.prepareBackend(model.absolutePath, allowCpuFallback)
         }
@@ -432,7 +444,7 @@ private class WhisperModelStoreV80(
         val directory = File(context.filesDir, "speech/whisper").apply { mkdirs() }
         val model = File(directory, MODEL_NAME)
         if (model.isFile && model.length() >= MIN_MODEL_BYTES && sha256(model) == MODEL_SHA256) {
-            deleteLegacyTinyModel(directory)
+            deleteObsoleteModels(directory)
             return model
         }
         if (model.exists()) model.delete()
@@ -443,7 +455,7 @@ private class WhisperModelStoreV80(
         for (attempt in 1..3) {
             var connection: HttpURLConnection? = null
             try {
-                onStatus("Auto Caption · downloading accuracy model${if (attempt > 1) " (retry $attempt)" else ""}")
+                onStatus("Auto Caption · downloading mobile multilingual model${if (attempt > 1) " (retry $attempt)" else ""}")
                 connection = URI(MODEL_URL).toURL().openConnection() as HttpURLConnection
                 connection.instanceFollowRedirects = true
                 connection.connectTimeout = 30_000
@@ -466,7 +478,7 @@ private class WhisperModelStoreV80(
                             copied += read
                             if (total > 0L) {
                                 val percent = (copied * 100L / total).coerceIn(0L, 100L)
-                                onStatus("Auto Caption · accuracy model $percent%")
+                                onStatus("Auto Caption · mobile model $percent%")
                             }
                         }
                     }
@@ -478,7 +490,7 @@ private class WhisperModelStoreV80(
                     partial.copyTo(model, overwrite = true)
                     partial.delete()
                 }
-                deleteLegacyTinyModel(directory)
+                deleteObsoleteModels(directory)
                 return model
             } catch (error: Throwable) {
                 lastError = error
@@ -490,8 +502,9 @@ private class WhisperModelStoreV80(
         throw IllegalStateException("Could not download the free Whisper speech model", lastError)
     }
 
-    private fun deleteLegacyTinyModel(directory: File) {
+    private fun deleteObsoleteModels(directory: File) {
         runCatching { File(directory, LEGACY_TINY_MODEL_NAME).delete() }
+        runCatching { File(directory, LEGACY_SMALL_MODEL_NAME).delete() }
     }
 
     private fun sha256(file: File): String {
@@ -508,10 +521,11 @@ private class WhisperModelStoreV80(
     }
 
     companion object {
-        private const val MODEL_NAME = "ggml-small-q5_1.bin"
-        private const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin?download=true"
-        private const val MODEL_SHA256 = "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb"
-        private const val MIN_MODEL_BYTES = 185_000_000L
+        private const val MODEL_NAME = "ggml-base-q8_0.bin"
+        private const val MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q8_0.bin?download=true"
+        private const val MODEL_SHA256 = "c577b9a86e7e048a0b7eada054f4dd79a56bbfa911fbdacf900ac5b567cbb7d9"
+        private const val MIN_MODEL_BYTES = 80_000_000L
         private const val LEGACY_TINY_MODEL_NAME = "ggml-tiny-q5_1.bin"
+        private const val LEGACY_SMALL_MODEL_NAME = "ggml-small-q5_1.bin"
     }
 }
