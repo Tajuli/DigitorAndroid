@@ -19,6 +19,7 @@ endif()
 find_package(ncnn REQUIRED)
 find_library(log-lib log)
 find_library(android-lib android)
+find_library(dl-lib dl)
 
 target_link_libraries(digitor_ppmatting_ncnn ncnn ${log-lib})
 
@@ -124,9 +125,10 @@ if(DIGITOR_WHISPER_VULKAN)
 endif()
 
 # Android does not ship OpenCL headers or a public NDK import library. Build the Khronos ICD loader
-# statically into Digitor and let it discover the phone vendor ICD at runtime. Khronos' Android
-# loader searches /system/vendor/Khronos/OpenCL/vendors by default. If the OEM does not expose an
-# ICD there, the OpenCL backend simply registers no usable device and JNI reports the GPU failure.
+# statically into Digitor. The JNI bridge first honors OCL_ICD_FILENAMES, then probes common Android
+# vendor library names before the ggml registry is initialized; the Khronos vendor-directory scan is
+# retained as a final fallback. This lets phones that expose an app-visible OEM ICD use OpenCL even
+# when they do not install a /system/vendor/Khronos/OpenCL/vendors/*.icd file.
 if(DIGITOR_WHISPER_OPENCL)
     FetchContent_Declare(
         digitor_opencl_headers
@@ -208,4 +210,16 @@ target_include_directories(
         ${whisper_cpp_SOURCE_DIR}/include
         ${whisper_cpp_SOURCE_DIR}/ggml/include
 )
-target_link_libraries(digitor_whisper_jni whisper ${log-lib} ${android-lib})
+target_link_libraries(digitor_whisper_jni PRIVATE whisper ${log-lib} ${android-lib} ${dl-lib})
+
+# Keep explicit references from the JNI shared object to both GPU backends. ggml already links them
+# when enabled, but the direct edges make the production APK robust against static archive/dead-code
+# elimination and give JNI a supported way to prime/register each backend before enumeration.
+if(DIGITOR_WHISPER_VULKAN AND TARGET ggml-vulkan)
+    target_compile_definitions(digitor_whisper_jni PRIVATE DIGITOR_WHISPER_HAS_VULKAN=1)
+    target_link_libraries(digitor_whisper_jni PRIVATE ggml-vulkan)
+endif()
+if(DIGITOR_WHISPER_OPENCL AND TARGET ggml-opencl)
+    target_compile_definitions(digitor_whisper_jni PRIVATE DIGITOR_WHISPER_HAS_OPENCL=1)
+    target_link_libraries(digitor_whisper_jni PRIVATE ggml-opencl)
+endif()
