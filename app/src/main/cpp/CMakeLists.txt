@@ -91,6 +91,19 @@ if(ANDROID)
         endif()
         set(DIGITOR_VULKAN_HPP_INCLUDE "${digitor_vulkan_headers_SOURCE_DIR}/include")
     endif()
+
+    # ggml-vulkan.cpp also includes SPIR-V's generated C++ enums (`spirv/unified1/spirv.hpp`).
+    # The Ubuntu/CI package installs them under /usr/include, which the Android toolchain correctly
+    # excludes from its sysroot. Stage only the self-contained `spirv/` directory so host libc/C++
+    # headers cannot leak into the Android target compilation.
+    foreach(_spirv_include_root "/usr/include" "/usr/local/include")
+        if(EXISTS "${_spirv_include_root}/spirv/unified1/spirv.hpp")
+            set(DIGITOR_SPIRV_INCLUDE "${CMAKE_BINARY_DIR}/digitor-spirv-headers")
+            file(MAKE_DIRECTORY "${DIGITOR_SPIRV_INCLUDE}")
+            file(COPY "${_spirv_include_root}/spirv" DESTINATION "${DIGITOR_SPIRV_INCLUDE}")
+            break()
+        endif()
+    endforeach()
 endif()
 
 FetchContent_Declare(
@@ -104,6 +117,9 @@ FetchContent_MakeAvailable(whisper_cpp)
 
 if(TARGET ggml-vulkan AND DIGITOR_VULKAN_HPP_INCLUDE)
     target_include_directories(ggml-vulkan PRIVATE "${DIGITOR_VULKAN_HPP_INCLUDE}")
+endif()
+if(TARGET ggml-vulkan AND DIGITOR_SPIRV_INCLUDE)
+    target_include_directories(ggml-vulkan PRIVATE "${DIGITOR_SPIRV_INCLUDE}")
 endif()
 
 # The Android Gradle native build historically supplies -ffast-math for the PP-Matting path.
