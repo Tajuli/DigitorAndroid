@@ -113,7 +113,92 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
     GIT_PROGRESS FALSE
 )
-FetchContent_MakeAvailable(whisper_cpp)
+
+# Populate first so the pinned source can receive a tiny Android loader compatibility patch before
+# whisper/ggml targets are created. Android API 24's libvulkan.so exports Vulkan 1.0 symbols only;
+# ggml-vulkan v1.9.4 still makes three raw vkGetPhysicalDeviceFeatures2 calls (Vulkan 1.1 core),
+# even though the same file already initializes Vulkan-Hpp's dynamic dispatcher. Calling those raw
+# symbols makes the final JNI link fail at minSdk 24. Route them through the dispatcher instead and
+# fall back to the KHR alias when a Vulkan 1.0 driver exposes VK_KHR_get_physical_device_properties2.
+FetchContent_GetProperties(whisper_cpp)
+if(NOT whisper_cpp_POPULATED)
+    FetchContent_Populate(whisper_cpp)
+endif()
+
+if(ANDROID)
+    set(_digitor_ggml_vk_source "${whisper_cpp_SOURCE_DIR}/ggml/src/ggml-vulkan/ggml-vulkan.cpp")
+    if(NOT EXISTS "${_digitor_ggml_vk_source}")
+        message(FATAL_ERROR "Pinned whisper.cpp ggml-vulkan source missing: ${_digitor_ggml_vk_source}")
+    endif()
+
+    file(READ "${_digitor_ggml_vk_source}" _digitor_ggml_vk_text)
+    if(NOT _digitor_ggml_vk_text MATCHES "digitor_vkGetPhysicalDeviceFeatures2")
+        string(REGEX MATCHALL "vkGetPhysicalDeviceFeatures2\\(" _digitor_vk_feature2_matches "${_digitor_ggml_vk_text}")
+        list(LENGTH _digitor_vk_feature2_matches _digitor_vk_feature2_count)
+        if(NOT _digitor_vk_feature2_count EQUAL 3)
+            message(FATAL_ERROR "Unexpected whisper.cpp v1.9.4 vkGetPhysicalDeviceFeatures2 call count: ${_digitor_vk_feature2_count}")
+        endif()
+
+        # Replace raw link-time calls before injecting the helper so the helper's dispatcher members
+        # themselves are not rewritten by this string replacement.
+        string(REPLACE
+            "vkGetPhysicalDeviceFeatures2("
+            "digitor_vkGetPhysicalDeviceFeatures2("
+            _digitor_ggml_vk_text
+            "${_digitor_ggml_vk_text}"
+        )
+
+        set(_digitor_vk_helper [=[
+
+// Digitor Android compatibility: API 24's Vulkan loader does not export the Vulkan 1.1 core
+// vkGetPhysicalDeviceFeatures2 symbol. Vulkan-Hpp's dispatcher is initialized with the instance
+// before ggml enumerates devices, so use its proc-address table and accept the Vulkan 1.0 KHR alias.
+static void digitor_vkGetPhysicalDeviceFeatures2(
+    VkPhysicalDevice physical_device,
+    VkPhysicalDeviceFeatures2 * features) {
+    auto & dispatcher = ggml_vk_default_dispatcher();
+    if (dispatcher.vkGetPhysicalDeviceFeatures2 != nullptr) {
+        dispatcher.vkGetPhysicalDeviceFeatures2(physical_device, features);
+        return;
+    }
+#if defined(VK_KHR_get_physical_device_properties2)
+    if (dispatcher.vkGetPhysicalDeviceFeatures2KHR != nullptr) {
+        dispatcher.vkGetPhysicalDeviceFeatures2KHR(physical_device, features);
+        return;
+    }
+#endif
+    // Extremely old Vulkan 1.0 implementations without the KHR feature-query extension cannot
+    // populate extension feature chains. Fill only base 1.0 features; ggml will reject unavailable
+    // advanced capabilities and Whisper's JNI layer can retry on its CPU backend.
+    if (features != nullptr) {
+        vkGetPhysicalDeviceFeatures(physical_device, &features->features);
+    }
+}
+]=])
+
+        string(REPLACE
+            "#include <vulkan/vulkan.hpp>\n"
+            "#include <vulkan/vulkan.hpp>\n${_digitor_vk_helper}\n"
+            _digitor_ggml_vk_text
+            "${_digitor_ggml_vk_text}"
+        )
+
+        # Vulkan-Hpp documents a second dispatcher init with the created VkDevice for device-level
+        # extension pointers. This also matches the Android fix proposed upstream for ggml-vulkan.
+        string(REPLACE
+            "        device->device = device->physical_device.createDevice(device_create_info);\n"
+            "        device->device = device->physical_device.createDevice(device_create_info);\n        VULKAN_HPP_DEFAULT_DISPATCHER.init(device->device);\n"
+            _digitor_ggml_vk_text
+            "${_digitor_ggml_vk_text}"
+        )
+
+        file(WRITE "${_digitor_ggml_vk_source}" "${_digitor_ggml_vk_text}")
+        message(STATUS "Applied Digitor Android Vulkan dispatcher patch to whisper.cpp v1.9.4")
+    endif()
+endif()
+
+# Equivalent to FetchContent_MakeAvailable after the pre-add_subdirectory compatibility patch.
+add_subdirectory("${whisper_cpp_SOURCE_DIR}" "${whisper_cpp_BINARY_DIR}")
 
 if(TARGET ggml-vulkan AND DIGITOR_VULKAN_HPP_INCLUDE)
     target_include_directories(ggml-vulkan PRIVATE "${DIGITOR_VULKAN_HPP_INCLUDE}")
