@@ -54,8 +54,6 @@ const char * FirstGpuDeviceName() {
     for (size_t index = 0; index < deviceCount; ++index) {
         ggml_backend_dev_t device = ggml_backend_dev_get(index);
         if (device == nullptr) continue;
-        // ggml exposes both an enum tag and a function named ggml_backend_dev_type. Using auto
-        // avoids C++ name hiding on Clang/NDK while preserving the exact enum value returned.
         const auto type = ggml_backend_dev_type(device);
         if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
             const char * name = ggml_backend_dev_name(device);
@@ -71,18 +69,12 @@ whisper_context * LoadContext(const std::string & modelPath, bool preferGpu) {
 
     whisper_context_params contextParams = whisper_context_default_params();
     contextParams.use_gpu = preferGpu;
-    // First make the Vulkan path broadly compatible across Android drivers. GPU tensor offload is
-    // still enabled; flash-attention can be added later after device qualification instead of
-    // making basic GPU captioning depend on an extra driver-sensitive kernel path.
     contextParams.flash_attn = false;
     gContext = whisper_init_from_file_with_params(modelPath.c_str(), contextParams);
     if (gContext == nullptr) return nullptr;
 
     const char * gpuDevice = preferGpu ? FirstGpuDeviceName() : nullptr;
     if (preferGpu && gpuDevice == nullptr) {
-        // whisper.cpp can create a CPU-backed context when no GPU device was registered even when
-        // use_gpu=true. Reject that context here and recreate it with explicit CPU parameters so
-        // both the UI backend label and the execution path are truthful.
         __android_log_print(
             ANDROID_LOG_WARN,
             kTag,
@@ -108,13 +100,24 @@ whisper_context * LoadContext(const std::string & modelPath, bool preferGpu) {
 whisper_context * GetOrLoadContext(const std::string & modelPath) {
     if (gContext != nullptr && gModelPath == modelPath) return gContext;
 
-    // Prefer cross-vendor Vulkan compute. If the device loader/driver cannot expose a usable
-    // Vulkan backend, retry with the CPU path so Auto Caption remains available on older phones.
     whisper_context * context = LoadContext(modelPath, true);
     if (context != nullptr) return context;
 
-    __android_log_print(ANDROID_LOG_WARN, kTag, "Vulkan Whisper init unavailable; retrying on CPU");
+#if defined(__aarch64__)
+    // The production phone APK is arm64 and Auto Caption is intentionally GPU-only there.
+    // Never hide a Vulkan failure by silently starting a minutes-long CPU transcription.
+    __android_log_print(
+        ANDROID_LOG_ERROR,
+        kTag,
+        "Vulkan Whisper unavailable on arm64; CPU fallback is disabled"
+    );
+    return nullptr;
+#else
+    // Non-phone compatibility/test ABIs can still use the CPU backend. The distributed phone APK
+    // is built with -PdigitorAbi=arm64-v8a, so users never hit this branch on supported phones.
+    __android_log_print(ANDROID_LOG_WARN, kTag, "Vulkan Whisper unavailable on compatibility ABI; using CPU");
     return LoadContext(modelPath, false);
+#endif
 }
 
 std::string ResolveLanguage(
@@ -125,9 +128,6 @@ std::string ResolveLanguage(
 ) {
     if (!requested.empty() && requested != "auto") return requested;
 
-    // Detect first, then transcribe with an explicit language token. This makes Auto mode behave
-    // like a manual language selection after detection and gives the decoder the correct native
-    // writing-system prior instead of relying on a loosely resolved "auto" path.
     if (whisper_pcm_to_mel(context, samples.data(), static_cast<int>(samples.size()), threads) != 0) {
         return "auto";
     }
@@ -148,8 +148,6 @@ whisper_full_params BuildParams(const std::string & language, int threads) {
     params.print_progress = false;
     params.print_realtime = false;
     params.print_timestamps = false;
-
-    // max_len/split_on_word only produce subtitle-sized boundaries when token timestamps are on.
     params.token_timestamps = true;
     params.max_len = 42;
     params.split_on_word = true;
@@ -214,10 +212,18 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_prepareBackend
     std::lock_guard<std::mutex> guard(gWhisperMutex);
     whisper_context * context = GetOrLoadContext(modelPath);
     if (context == nullptr) {
+#if defined(__aarch64__)
+        ThrowJava(
+            env,
+            "java/lang/IllegalStateException",
+            "GPU Auto Caption could not start. A compatible Vulkan 1.2 GPU/driver is required; CPU fallback is disabled."
+        );
+#else
         ThrowJava(env, "java/lang/IllegalStateException", "Could not load the Whisper model");
+#endif
         return nullptr;
     }
-    return env->NewStringUTF(gUsingGpu ? "Vulkan GPU" : "CPU fallback");
+    return env->NewStringUTF(gUsingGpu ? "Vulkan GPU" : "CPU compatibility mode");
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL
@@ -248,7 +254,15 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     std::lock_guard<std::mutex> guard(gWhisperMutex);
     whisper_context * context = GetOrLoadContext(modelPath);
     if (context == nullptr) {
+#if defined(__aarch64__)
+        ThrowJava(
+            env,
+            "java/lang/IllegalStateException",
+            "GPU Auto Caption is unavailable on this phone; CPU fallback is disabled."
+        );
+#else
         ThrowJava(env, "java/lang/IllegalStateException", "Could not load the Whisper model");
+#endif
         return nullptr;
     }
 
@@ -257,13 +271,13 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     std::string resolvedLanguage;
     int status = RunWhisper(context, requestedLanguage, samples, threads, resolvedLanguage);
 
-    // A flaky/low-memory Vulkan driver should not make captioning unusable. Retry the same request
-    // once on CPU if GPU inference itself fails after a successful GPU model initialization.
+#if !defined(__aarch64__)
+    // Keep a CPU retry only for test/compatibility ABIs. Production arm64 phone builds are GPU-only.
     if (status != 0 && gUsingGpu) {
         __android_log_print(
             ANDROID_LOG_WARN,
             kTag,
-            "Vulkan whisper_full failed: %d; retrying transcription on CPU",
+            "Vulkan whisper_full failed on compatibility ABI: %d; retrying on CPU",
             status
         );
         context = LoadContext(modelPath, false);
@@ -271,10 +285,15 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
             status = RunWhisper(context, requestedLanguage, samples, threads, resolvedLanguage);
         }
     }
+#endif
 
     if (status != 0) {
         __android_log_print(ANDROID_LOG_ERROR, kTag, "whisper_full failed: %d", status);
+#if defined(__aarch64__)
+        ThrowJava(env, "java/lang/IllegalStateException", "GPU Whisper transcription failed; CPU fallback is disabled.");
+#else
         ThrowJava(env, "java/lang/IllegalStateException", "Whisper transcription failed");
+#endif
         return nullptr;
     }
 
