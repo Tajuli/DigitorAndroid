@@ -22,20 +22,42 @@ import java.security.MessageDigest
 import kotlin.math.abs
 import kotlin.math.max
 
+private const val GPU_UNAVAILABLE_PREFIX_V85 = "GPU_BACKENDS_UNAVAILABLE:"
+
+/** Raised when Vulkan and OpenCL are unavailable and the user has not opted into slow CPU mode. */
+internal class AutoCaptionGpuUnavailableException(
+    message: String,
+    cause: Throwable? = null,
+) : IllegalStateException(message, cause)
+
 /** JNI surface backed by the pinned whisper.cpp v1.9.4 native target. */
 internal object WhisperNativeV80 {
     init {
         System.loadLibrary("digitor_whisper_jni")
     }
 
-    /** Loads the model once and reports the active native backend. */
-    external fun prepareBackend(modelPath: String): String
+    /** Tries Vulkan -> OpenCL -> optional user-approved CPU and reports the active native backend. */
+    external fun prepareBackend(modelPath: String, allowCpuFallback: Boolean): String
+
+    external fun activeBackend(): String
 
     external fun transcribe(
         modelPath: String,
         samples: FloatArray,
         language: String,
+        allowCpuFallback: Boolean,
     ): Array<String>
+}
+
+private inline fun <T> translateGpuFailureV85(block: () -> T): T = try {
+    block()
+} catch (error: IllegalStateException) {
+    val raw = error.message.orEmpty()
+    if (raw.startsWith(GPU_UNAVAILABLE_PREFIX_V85)) {
+        val detail = raw.removePrefix(GPU_UNAVAILABLE_PREFIX_V85).trim()
+        throw AutoCaptionGpuUnavailableException(detail, error)
+    }
+    throw error
 }
 
 private data class CaptionSourceV84(
@@ -55,8 +77,8 @@ private data class CaptionBatchV84(
  * On-device, no-per-minute-cost auto captions.
  *
  * V83 uses the multilingual small-q5_1 model instead of tiny-q5_1 for materially better
- * international/Bengali recognition. V84 uses whisper.cpp's Vulkan GPU backend on the production
- * arm64 phone build; that build no longer silently falls back to CPU.
+ * international/Bengali recognition. V85 tries Vulkan GPU first and OpenCL GPU second. CPU is never
+ * entered silently: it is available only after the UI asks the user to opt into the slower mode.
  *
  * Split clips that are still contiguous pieces of the same source are batched back together before
  * Whisper and decoded through one MediaExtractor/MediaCodec pass. Splitting a 60-second video into
@@ -71,11 +93,14 @@ internal class WhisperAutoCaptionV80(
     fun transcribeProject(
         project: TimelineProject,
         language: AutoCaptionLanguageV80,
+        allowCpuFallback: Boolean = false,
         onStatus: (String) -> Unit = {},
     ): List<AutoCaptionSegmentV80> {
         val model = modelStore.ensureModel(onStatus)
-        onStatus("Auto Caption · preparing GPU")
-        val backend = WhisperNativeV80.prepareBackend(model.absolutePath)
+        onStatus("Auto Caption · preparing Vulkan / OpenCL GPU")
+        var backend = translateGpuFailureV85 {
+            WhisperNativeV80.prepareBackend(model.absolutePath, allowCpuFallback)
+        }
         onStatus("Auto Caption · $backend ready")
 
         val audioSources = project.tracks
@@ -119,7 +144,19 @@ internal class WhisperAutoCaptionV80(
             onStatus(
                 "Auto Caption · transcribing ${batchIndex + 1}/${batches.size} · $backend · ${language.label}",
             )
-            val raw = WhisperNativeV80.transcribe(model.absolutePath, samples, language.whisperCode)
+            val raw = translateGpuFailureV85 {
+                WhisperNativeV80.transcribe(
+                    model.absolutePath,
+                    samples,
+                    language.whisperCode,
+                    allowCpuFallback,
+                )
+            }
+            val activeBackend = WhisperNativeV80.activeBackend()
+            if (activeBackend != backend) {
+                backend = activeBackend
+                onStatus("Auto Caption · switched to $backend")
+            }
             raw.forEach { line ->
                 parseNativeSegment(line)?.let { local ->
                     val start = batch.timelineStartUs + local.startUs.coerceIn(0L, batch.durationUs)
