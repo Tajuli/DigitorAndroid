@@ -28,7 +28,7 @@ internal object WhisperNativeV80 {
         System.loadLibrary("digitor_whisper_jni")
     }
 
-    /** Loads the model once and reports whether Vulkan GPU or CPU fallback is active. */
+    /** Loads the model once and reports the active native backend. */
     external fun prepareBackend(modelPath: String): String
 
     external fun transcribe(
@@ -55,12 +55,12 @@ private data class CaptionBatchV84(
  * On-device, no-per-minute-cost auto captions.
  *
  * V83 uses the multilingual small-q5_1 model instead of tiny-q5_1 for materially better
- * international/Bengali recognition. V84 prefers whisper.cpp's Vulkan GPU backend on Android and
- * falls back to CPU when a device/driver cannot initialize it.
+ * international/Bengali recognition. V84 uses whisper.cpp's Vulkan GPU backend on the production
+ * arm64 phone build; that build no longer silently falls back to CPU.
  *
  * Split clips that are still contiguous pieces of the same source are batched back together before
- * Whisper. Splitting a 60-second video into four 15-second clips therefore does not cause four full
- * decoder/language-detection setup cycles.
+ * Whisper and decoded through one MediaExtractor/MediaCodec pass. Splitting a 60-second video into
+ * four 15-second clips therefore does not cause four decoder/model setup cycles.
  */
 internal class WhisperAutoCaptionV80(
     context: Context,
@@ -98,19 +98,22 @@ internal class WhisperAutoCaptionV80(
         var decodedClipCount = 0
 
         batches.forEachIndexed { batchIndex, batch ->
-            val pcm = FloatBuilderV80(
-                initialCapacity = ((batch.durationUs / 1_000_000.0) * TARGET_SAMPLE_RATE)
-                    .toLong()
-                    .coerceIn(16_000L, 4_000_000L)
-                    .toInt(),
-            )
-            batch.sources.forEach { source ->
+            val samples = if (batch.sources.size == 1) {
                 decodedClipCount++
                 onStatus("Auto Caption · decoding $decodedClipCount/${sources.size} · $backend")
-                val clipSamples = decodeClipToMono16k(source.clip)
-                pcm.addAll(clipSamples)
+                decodeClipToMono16k(batch.sources.first().clip)
+            } else {
+                // buildCaptionBatchesV84 only joins same-track, same-URI, source-contiguous pieces.
+                // Decode that source range once instead of reopening MediaExtractor/MediaCodec for
+                // every user split. This is especially important for short split-clip Auto CC.
+                val first = batch.sources.first().clip
+                val last = batch.sources.last().clip
+                decodedClipCount += batch.sources.size
+                onStatus(
+                    "Auto Caption · decoding split batch $decodedClipCount/${sources.size} · $backend",
+                )
+                decodeClipToMono16k(first.copy(sourceOutUs = last.sourceOutUs))
             }
-            val samples = pcm.toFloatArray()
             if (samples.isEmpty()) return@forEachIndexed
 
             onStatus(
