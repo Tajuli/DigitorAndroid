@@ -12,13 +12,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Vulkan shader toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends glslc spirv-headers
-          command -v glslc
-          test -f /usr/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -124,12 +117,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Vulkan shader toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends glslc spirv-headers
-          command -v glslc
-          test -f /usr/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake
       - name: Download fixed PP-MattingV2 ONNX graphs
         uses: actions/download-artifact@v4
         with:
