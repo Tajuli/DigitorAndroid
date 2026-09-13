@@ -40,8 +40,9 @@ import com.tajuli.digitorandroid.editor.processing.supportedAutoCaptionLanguages
 /**
  * Compact editor-level Auto Caption entry point.
  *
- * V85 tries Vulkan GPU first, OpenCL GPU second, and never enters slow CPU mode without an explicit
- * user action after both GPU paths are unavailable.
+ * V86 prefers Vulkan/OpenCL when whisper.cpp can actually use them, but automatically keeps the
+ * feature working through the local CPU backend when an Android GPU stack cannot satisfy those
+ * requirements. This avoids presenting a permanent GPU error on otherwise supported phones.
  */
 @Composable
 internal fun AutoCaptionControlsV80(
@@ -112,12 +113,12 @@ internal fun AutoCaptionControlsV80(
                     }
 
                     Text(
-                        "On-device Whisper uses Vulkan GPU first, then OpenCL GPU. CPU is never started automatically because it can be much slower.",
+                        "On-device Whisper prefers Vulkan/OpenCL GPU when compatible. If the phone's Android GPU driver cannot run Whisper, Digitor automatically continues on the local CPU instead of failing.",
                         fontSize = 9.sp,
                         color = Color.White.copy(alpha = .68f),
                     )
                     Text(
-                        "First use downloads the multilingual accuracy model (~190 MB) once; later runs can work offline.",
+                        "First use downloads the multilingual mobile model (~82 MB) once; later runs can work offline.",
                         fontSize = 8.sp,
                         color = Color.White.copy(alpha = .55f),
                     )
@@ -185,7 +186,7 @@ internal fun AutoCaptionControlsV80(
 
                         if (runState.cpuFallbackAvailable) {
                             Text(
-                                "Both GPU paths failed. CPU mode is optional and may take several minutes on a long video.",
+                                "The GPU path failed unexpectedly. The local CPU backend can still be tried.",
                                 fontSize = 8.sp,
                                 color = Color(0xFFFFC66D),
                             )
@@ -194,18 +195,18 @@ internal fun AutoCaptionControlsV80(
                                 enabled = !runState.running,
                                 modifier = Modifier.fillMaxWidth().height(36.dp),
                             ) {
-                                Text("Use CPU anyway (slow)", fontSize = 9.sp)
+                                Text("Try local CPU", fontSize = 9.sp)
                             }
                         }
                     }
 
                     FilledTonalButton(
-                        onClick = { vm.generateAutoCaptionsV80(language, allowCpuFallback = false) },
+                        onClick = { vm.generateAutoCaptionsV80(language, allowCpuFallback = true) },
                         enabled = !runState.running,
                         modifier = Modifier.fillMaxWidth().height(36.dp),
                     ) {
                         Text(
-                            if (runState.failed) "Retry GPU" else "Generate captions",
+                            if (runState.failed) "Retry" else "Generate captions",
                             fontSize = 9.sp,
                         )
                     }
