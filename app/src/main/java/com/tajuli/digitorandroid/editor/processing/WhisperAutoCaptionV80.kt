@@ -69,19 +69,19 @@ private data class CaptionBatchV84(
 /**
  * Fully on-device Auto Caption using Digitor's existing ncnn Vulkan runtime.
  *
- * V87 deliberately stops using ggml-vulkan/OpenCL/CPU fallback. ggml-vulkan v1.9.4 requires a
- * Vulkan 1.2 device and therefore rejected the target UNISOC T606 phone even though Digitor's ncnn
- * Vulkan PP-Matting path already runs on that GPU. Auto Caption now uses the same ncnn Android
- * Vulkan runtime and Tencent's Whisper graph layout instead.
+ * V89 uses the official multilingual Whisper tiny ncnn graph pack for the mobile profile. The base
+ * graph proved too slow and unstable on the target Mali-G57: a ~22 second clip could spend about
+ * 20 minutes in inference and then return an ncnn stage failure. Tiny keeps Bengali/international
+ * language support while materially reducing model memory and decoder work on low-end mobile GPUs.
  *
- * The base multilingual model is downloaded once into app-private storage. Audio never leaves the
- * device. Split clips that are contiguous pieces of the same source are still batched before decode.
+ * The model is downloaded once into app-private storage. Audio never leaves the device. Split clips
+ * that are contiguous pieces of the same source are still batched before decode.
  */
 internal class WhisperAutoCaptionV80(
     context: Context,
 ) {
     private val appContext = context.applicationContext
-    private val modelStore = WhisperNcnnModelStoreV87(appContext)
+    private val modelStore = WhisperNcnnModelStoreV89(appContext)
 
     fun transcribeProject(
         project: TimelineProject,
@@ -397,19 +397,19 @@ private class FloatBuilderV80(initialCapacity: Int) {
     fun toFloatArray(): FloatArray = values.copyOf(size)
 }
 
-private data class NcnnWhisperAssetV87(
+private data class NcnnWhisperAssetV89(
     val name: String,
     val bytes: Long,
     val sha256: String,
     val label: String,
 )
 
-/** Downloads the official ncnn Whisper base graph pack once and verifies every file by SHA-256. */
-private class WhisperNcnnModelStoreV87(
+/** Downloads the official ncnn Whisper tiny multilingual graph pack once and verifies every file. */
+private class WhisperNcnnModelStoreV89(
     private val context: Context,
 ) {
     fun ensureModel(onStatus: (String) -> Unit): File {
-        val directory = File(context.filesDir, "speech/whisper-ncnn-base-v1").apply { mkdirs() }
+        val directory = File(context.filesDir, "speech/whisper-ncnn-tiny-v2").apply { mkdirs() }
         val marker = File(directory, VERIFIED_MARKER)
         if (marker.isFile && ASSETS.all { File(directory, it.name).length() == it.bytes }) {
             return directory
@@ -426,17 +426,18 @@ private class WhisperNcnnModelStoreV87(
             }
             completedBytes += asset.bytes
             val percent = (completedBytes * 100L / totalBytes).coerceIn(0L, 100L)
-            onStatus("Auto Caption · GPU model $percent% · ${asset.label}")
+            onStatus("Auto Caption · mobile GPU model $percent% · ${asset.label}")
         }
 
-        marker.writeText("ncnn-whisper-base-v1\n")
-        // Reclaim obsolete ggml model storage only after the complete ncnn pack is verified.
+        marker.writeText("ncnn-whisper-tiny-v2\n")
+        // Reclaim older packs only after the complete tiny pack is verified.
+        runCatching { File(context.filesDir, "speech/whisper-ncnn-base-v1").deleteRecursively() }
         runCatching { File(context.filesDir, "speech/whisper").deleteRecursively() }
         return directory
     }
 
     private fun downloadAsset(
-        asset: NcnnWhisperAssetV87,
+        asset: NcnnWhisperAssetV89,
         target: File,
         completedBytes: Long,
         totalBytes: Long,
@@ -450,7 +451,7 @@ private class WhisperNcnnModelStoreV87(
             var connection: HttpURLConnection? = null
             try {
                 onStatus(
-                    "Auto Caption · downloading GPU model · ${asset.label}" +
+                    "Auto Caption · downloading mobile GPU model · ${asset.label}" +
                         if (attempt > 1) " · retry $attempt" else "",
                 )
                 connection = URI("$MODEL_BASE_URL/${asset.name}").toURL().openConnection() as HttpURLConnection
@@ -475,7 +476,7 @@ private class WhisperNcnnModelStoreV87(
                             copied += read
                             val overall = ((completedBytes + copied.coerceAtMost(asset.bytes)) * 100L / totalBytes)
                                 .coerceIn(0L, 100L)
-                            onStatus("Auto Caption · GPU model $overall% · ${asset.label}")
+                            onStatus("Auto Caption · mobile GPU model $overall% · ${asset.label}")
                         }
                     }
                 }
@@ -498,7 +499,7 @@ private class WhisperNcnnModelStoreV87(
                 connection?.disconnect()
             }
         }
-        throw IllegalStateException("Could not download ncnn Whisper GPU model (${asset.label})", lastError)
+        throw IllegalStateException("Could not download ncnn Whisper mobile GPU model (${asset.label})", lastError)
     }
 
     private fun sha256(file: File): String {
@@ -517,22 +518,22 @@ private class WhisperNcnnModelStoreV87(
     companion object {
         private const val MODEL_BASE_URL =
             "https://github.com/nihui/ncnn-android-whisper/releases/download/models"
-        private const val VERIFIED_MARKER = ".verified-v1"
+        private const val VERIFIED_MARKER = ".verified-v2"
 
         private val ASSETS = listOf(
-            NcnnWhisperAssetV87("whisper_base_decoder.ncnn.bin", 50_538_784L, "a892f6f89aa4d17adc1fbad0fea47e4ad730c221435a0eb2db83f6d667dcacbc", "decoder"),
-            NcnnWhisperAssetV87("whisper_base_decoder.ncnn.param", 7_912L, "b8a2d23a3c44a835a7ddd25ffc2317bbd1c9a8a178ffd3a4d3daa5eebbebedef", "decoder graph"),
-            NcnnWhisperAssetV87("whisper_base_embed_position.ncnn.bin", 458_756L, "de9392e58e1ea902497cd2fdfcb1e981c316c9190f9c3cc2b715fde1e536ca15", "position embedding"),
-            NcnnWhisperAssetV87("whisper_base_embed_position.ncnn.param", 158L, "88cf524641be3ce1f15d87f44f7e3efd67432d0a452b499b15c5376b88c08611", "position graph"),
-            NcnnWhisperAssetV87("whisper_base_embed_token.ncnn.bin", 53_109_764L, "d1d47f708da292fea6df66eedf4375ca32c4adf1828e9c926d9484869a449fd9", "token embedding"),
-            NcnnWhisperAssetV87("whisper_base_embed_token.ncnn.param", 162L, "f1e71b56ff024410dbf836483939e3f4d8fd9f48bb15669e9da6c257fd057a73", "token graph"),
-            NcnnWhisperAssetV87("whisper_base_encoder.ncnn.bin", 42_776_776L, "917b373b1de47c6666584ffc19df6a65553e1bf67aa45584e39bb7a829b98a5f", "encoder"),
-            NcnnWhisperAssetV87("whisper_base_encoder.ncnn.param", 5_399L, "222cf40eb94d2afe4e38d2035caa058d09a19e2214aad4b41a3b88f6ea5dc381", "encoder graph"),
-            NcnnWhisperAssetV87("whisper_base_fbank.ncnn.bin", 64_320L, "2150c30cbbeb6029f52002ffa666c1c72d83dbf53f463cb8462052055806e891", "audio features"),
-            NcnnWhisperAssetV87("whisper_base_fbank.ncnn.param", 869L, "9ff0d0da904ea62c9c4d1e806f943df31209bb4df36cebb1a3fea955eaca3ac4", "audio graph"),
-            // proj_out weights are byte-identical to embed_token weights, so only its graph is needed.
-            NcnnWhisperAssetV87("whisper_base_proj_out.ncnn.param", 177L, "7fdc69c8bff1fb3b1d35d0b2e0e5f801e741b72993180bd380802ceb73bcb59c", "projection graph"),
-            NcnnWhisperAssetV87("whisper_vocab.txt", 444_530L, "c3e28c60daa5956c08e02a08e82dc6ef4c8882805db4940d59343638234b6c6e", "vocabulary"),
+            NcnnWhisperAssetV89("whisper_tiny_decoder.ncnn.bin", 18_979_008L, "8b5be3db26af79c8d0408e7a07affae07e5464af3e9f5cf1eba503b63cab4dec", "decoder"),
+            NcnnWhisperAssetV89("whisper_tiny_decoder.ncnn.param", 5_390L, "371cc62f8ea86d24ee170732e848dfc9a15a16ba7a3e22a175cb3ceefac3757b", "decoder graph"),
+            NcnnWhisperAssetV89("whisper_tiny_embed_position.ncnn.bin", 344_068L, "02d1ce594b3917847f0cc333337af4999787bae77823d0655fd5df40177a64f9", "position embedding"),
+            NcnnWhisperAssetV89("whisper_tiny_embed_position.ncnn.param", 158L, "b5fbfba5ea5c294258bf5cb9f4b6704f459099921e2cdbd1dfdef2c0c14085b4", "position graph"),
+            NcnnWhisperAssetV89("whisper_tiny_embed_token.ncnn.bin", 39_832_324L, "e33c7db8ebb73eafc2cc791ae77b0e710c9cf54bd14321ae28277cb86b0f4968", "token embedding"),
+            NcnnWhisperAssetV89("whisper_tiny_embed_token.ncnn.param", 162L, "c1917f8b90e81cede6fe8b82cab7d05d7d6461f9ff04ad58932bd7a62ec38627", "token graph"),
+            NcnnWhisperAssetV89("whisper_tiny_encoder.ncnn.bin", 17_599_624L, "14b8d453780ca0df7971d12134b4826bb6206624e4217236204183f793dae74a", "encoder"),
+            NcnnWhisperAssetV89("whisper_tiny_encoder.ncnn.param", 3_816L, "675a3141db1ed515f1d08d722ddeb31e2a556b1a7baf35c3dd14a2adf575c058", "encoder graph"),
+            NcnnWhisperAssetV89("whisper_tiny_fbank.ncnn.bin", 64_320L, "2150c30cbbeb6029f52002ffa666c1c72d83dbf53f463cb8462052055806e891", "audio features"),
+            NcnnWhisperAssetV89("whisper_tiny_fbank.ncnn.param", 869L, "9ff0d0da904ea62c9c4d1e806f943df31209bb4df36cebb1a3fea955eaca3ac4", "audio graph"),
+            // Tiny proj_out weights are byte-identical to tiny embed_token weights.
+            NcnnWhisperAssetV89("whisper_tiny_proj_out.ncnn.param", 177L, "428368e792a833f6efa5905c21e977e7c44ee917ed3a826db1ac67fc7a8bb3c7", "projection graph"),
+            NcnnWhisperAssetV89("whisper_vocab.txt", 444_530L, "c3e28c60daa5956c08e02a08e82dc6ef4c8882805db4940d59343638234b6c6e", "vocabulary"),
         )
     }
 }
