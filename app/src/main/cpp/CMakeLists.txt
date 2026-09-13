@@ -43,21 +43,41 @@ string(REPLACE "${_digitor_android_i64_old}" "${_digitor_android_i64_new}" _digi
 # lightweight fbank preprocessing on CPU for broad driver compatibility, and keep the expensive
 # encoder/decoder/projection stages on Vulkan. Greedy top-1 decoding reduces decoder invocations by
 # roughly 5x versus the reference beam-5 search and bounds runaway mobile latency.
-foreach(_pair
-    "constexpr int kMaxDecodedTokens = 448;|constexpr int kMaxDecodedTokens = 192;"
-    "constexpr int kBeamSize = 5;|constexpr int kBeamSize = 1;"
-    "constexpr int kMaxFinishedBeams = 5;|constexpr int kMaxFinishedBeams = 1;"
-    "constexpr int kTopK = 5;|constexpr int kTopK = 1;"
-)
-    string(REPLACE "|" ";" _parts "${_pair}")
-    list(GET _parts 0 _old)
-    list(GET _parts 1 _new)
-    string(FIND "${_digitor_whisper_source}" "${_old}" _pos)
-    if(_pos LESS 0)
-        message(FATAL_ERROR "Whisper mobile decoder profile source changed: ${_old}")
-    endif()
-    string(REPLACE "${_old}" "${_new}" _digitor_whisper_source "${_digitor_whisper_source}")
-endforeach()
+#
+# Keep these replacements explicit instead of packing C++ statements into a CMake list. CMake treats
+# semicolons as list separators, which previously stripped these constant declarations from the
+# generated Android translation unit and caused undeclared-identifier compile errors.
+set(_digitor_mobile_old "constexpr int kMaxDecodedTokens = 448;")
+set(_digitor_mobile_new "constexpr int kMaxDecodedTokens = 192;")
+string(FIND "${_digitor_whisper_source}" "${_digitor_mobile_old}" _digitor_mobile_pos)
+if(_digitor_mobile_pos LESS 0)
+    message(FATAL_ERROR "Whisper mobile decoder profile source changed: ${_digitor_mobile_old}")
+endif()
+string(REPLACE "${_digitor_mobile_old}" "${_digitor_mobile_new}" _digitor_whisper_source "${_digitor_whisper_source}")
+
+set(_digitor_mobile_old "constexpr int kBeamSize = 5;")
+set(_digitor_mobile_new "constexpr int kBeamSize = 1;")
+string(FIND "${_digitor_whisper_source}" "${_digitor_mobile_old}" _digitor_mobile_pos)
+if(_digitor_mobile_pos LESS 0)
+    message(FATAL_ERROR "Whisper mobile decoder profile source changed: ${_digitor_mobile_old}")
+endif()
+string(REPLACE "${_digitor_mobile_old}" "${_digitor_mobile_new}" _digitor_whisper_source "${_digitor_whisper_source}")
+
+set(_digitor_mobile_old "constexpr int kMaxFinishedBeams = 5;")
+set(_digitor_mobile_new "constexpr int kMaxFinishedBeams = 1;")
+string(FIND "${_digitor_whisper_source}" "${_digitor_mobile_old}" _digitor_mobile_pos)
+if(_digitor_mobile_pos LESS 0)
+    message(FATAL_ERROR "Whisper mobile decoder profile source changed: ${_digitor_mobile_old}")
+endif()
+string(REPLACE "${_digitor_mobile_old}" "${_digitor_mobile_new}" _digitor_whisper_source "${_digitor_whisper_source}")
+
+set(_digitor_mobile_old "constexpr int kTopK = 5;")
+set(_digitor_mobile_new "constexpr int kTopK = 1;")
+string(FIND "${_digitor_whisper_source}" "${_digitor_mobile_old}" _digitor_mobile_pos)
+if(_digitor_mobile_pos LESS 0)
+    message(FATAL_ERROR "Whisper mobile decoder profile source changed: ${_digitor_mobile_old}")
+endif()
+string(REPLACE "${_digitor_mobile_old}" "${_digitor_mobile_new}" _digitor_whisper_source "${_digitor_whisper_source}")
 
 set(_digitor_fbank_gpu_old "        configureGpuNet(fbank);")
 set(_digitor_fbank_cpu_new "        fbank.opt.use_vulkan_compute = false;\n        fbank.opt.num_threads = 2;\n        fbank.opt.use_fp16_packed = false;\n        fbank.opt.use_fp16_storage = false;\n        fbank.opt.use_fp16_arithmetic = false;")
