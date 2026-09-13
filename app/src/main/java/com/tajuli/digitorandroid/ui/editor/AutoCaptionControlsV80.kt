@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -39,8 +40,8 @@ import com.tajuli.digitorandroid.editor.processing.supportedAutoCaptionLanguages
 /**
  * Compact editor-level Auto Caption entry point.
  *
- * V81 keeps progress visible. V82 exposes the complete language catalog reported by the pinned
- * whisper.cpp runtime. V83 moves multilingual recognition to the more accurate small-q5_1 model.
+ * V85 tries Vulkan GPU first, OpenCL GPU second, and never enters slow CPU mode without an explicit
+ * user action after both GPU paths are unavailable.
  */
 @Composable
 internal fun AutoCaptionControlsV80(
@@ -111,9 +112,14 @@ internal fun AutoCaptionControlsV80(
                     }
 
                     Text(
-                        "Whisper runs on-device. First use downloads the higher-accuracy multilingual model (~190 MB) once; later runs can work offline.",
+                        "On-device Whisper uses Vulkan GPU first, then OpenCL GPU. CPU is never started automatically because it can be much slower.",
                         fontSize = 9.sp,
                         color = Color.White.copy(alpha = .68f),
+                    )
+                    Text(
+                        "First use downloads the multilingual accuracy model (~190 MB) once; later runs can work offline.",
+                        fontSize = 8.sp,
+                        color = Color.White.copy(alpha = .55f),
                     )
 
                     Row(
@@ -176,15 +182,30 @@ internal fun AutoCaptionControlsV80(
                             else -> Color.White.copy(alpha = .66f)
                         }
                         Text(runState.message, fontSize = 8.sp, color = messageColor)
+
+                        if (runState.cpuFallbackAvailable) {
+                            Text(
+                                "Both GPU paths failed. CPU mode is optional and may take several minutes on a long video.",
+                                fontSize = 8.sp,
+                                color = Color(0xFFFFC66D),
+                            )
+                            OutlinedButton(
+                                onClick = { vm.generateAutoCaptionsV80(language, allowCpuFallback = true) },
+                                enabled = !runState.running,
+                                modifier = Modifier.fillMaxWidth().height(36.dp),
+                            ) {
+                                Text("Use CPU anyway (slow)", fontSize = 9.sp)
+                            }
+                        }
                     }
 
                     FilledTonalButton(
-                        onClick = { vm.generateAutoCaptionsV80(language) },
+                        onClick = { vm.generateAutoCaptionsV80(language, allowCpuFallback = false) },
                         enabled = !runState.running,
                         modifier = Modifier.fillMaxWidth().height(36.dp),
                     ) {
                         Text(
-                            if (runState.failed) "Retry" else "Generate captions",
+                            if (runState.failed) "Retry GPU" else "Generate captions",
                             fontSize = 9.sp,
                         )
                     }
