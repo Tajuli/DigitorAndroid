@@ -13,10 +13,29 @@
 
 namespace {
 constexpr const char * kTag = "DigitorWhisperV80";
+constexpr const char * kGpuUnavailablePrefix = "GPU_BACKENDS_UNAVAILABLE: ";
+
+enum class RuntimeBackend {
+    None,
+    Vulkan,
+    OpenCL,
+    Cpu,
+};
+
+struct GpuCandidate {
+    RuntimeBackend kind = RuntimeBackend::None;
+    int gpuOrdinal = -1;
+    std::string backendName;
+    std::string deviceName;
+    std::string description;
+};
+
 std::mutex gWhisperMutex;
 whisper_context * gContext = nullptr;
 std::string gModelPath;
-bool gUsingGpu = false;
+RuntimeBackend gBackend = RuntimeBackend::None;
+std::string gBackendDevice;
+std::string gLastGpuFailure;
 
 std::string JStringToUtf8(JNIEnv * env, jstring value) {
     if (value == nullptr) return {};
@@ -40,84 +59,191 @@ std::string Trim(const char * raw) {
     return text;
 }
 
+std::string Lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+const char * BackendKindName(RuntimeBackend backend) {
+    switch (backend) {
+        case RuntimeBackend::Vulkan: return "Vulkan GPU";
+        case RuntimeBackend::OpenCL: return "OpenCL GPU";
+        case RuntimeBackend::Cpu: return "CPU (slow)";
+        default: return "none";
+    }
+}
+
+std::string BackendLabel() {
+    std::string label = BackendKindName(gBackend);
+    if ((gBackend == RuntimeBackend::Vulkan || gBackend == RuntimeBackend::OpenCL) && !gBackendDevice.empty()) {
+        label += " · ";
+        label += gBackendDevice;
+    }
+    return label;
+}
+
 void FreeContext() {
     if (gContext != nullptr) {
         whisper_free(gContext);
         gContext = nullptr;
     }
     gModelPath.clear();
-    gUsingGpu = false;
+    gBackend = RuntimeBackend::None;
+    gBackendDevice.clear();
 }
 
-const char * FirstGpuDeviceName() {
+std::vector<GpuCandidate> EnumerateGpuCandidates() {
+    std::vector<GpuCandidate> result;
+    int gpuOrdinal = 0;
     const size_t deviceCount = ggml_backend_dev_count();
+    __android_log_print(ANDROID_LOG_INFO, kTag, "ggml registered devices: %zu", deviceCount);
+
     for (size_t index = 0; index < deviceCount; ++index) {
         ggml_backend_dev_t device = ggml_backend_dev_get(index);
         if (device == nullptr) continue;
         const auto type = ggml_backend_dev_type(device);
-        if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
-            const char * name = ggml_backend_dev_name(device);
-            return name == nullptr ? "Vulkan GPU" : name;
+        const char * rawDeviceName = ggml_backend_dev_name(device);
+        const char * rawDescription = ggml_backend_dev_description(device);
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(device);
+        const char * rawBackendName = reg == nullptr ? nullptr : ggml_backend_reg_name(reg);
+        const std::string deviceName = rawDeviceName == nullptr ? "unknown" : rawDeviceName;
+        const std::string description = rawDescription == nullptr ? "" : rawDescription;
+        const std::string backendName = rawBackendName == nullptr ? "unknown" : rawBackendName;
+
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            kTag,
+            "device[%zu]: backend=%s name=%s description=%s type=%d",
+            index,
+            backendName.c_str(),
+            deviceName.c_str(),
+            description.c_str(),
+            static_cast<int>(type)
+        );
+
+        if (type != GGML_BACKEND_DEVICE_TYPE_GPU && type != GGML_BACKEND_DEVICE_TYPE_IGPU) continue;
+
+        const std::string haystack = Lower(backendName + " " + deviceName + " " + description);
+        RuntimeBackend kind = RuntimeBackend::None;
+        if (haystack.find("vulkan") != std::string::npos) {
+            kind = RuntimeBackend::Vulkan;
+        } else if (haystack.find("opencl") != std::string::npos) {
+            kind = RuntimeBackend::OpenCL;
         }
+
+        if (kind != RuntimeBackend::None) {
+            result.push_back(GpuCandidate{
+                kind,
+                gpuOrdinal,
+                backendName,
+                deviceName,
+                description,
+            });
+        }
+        ++gpuOrdinal;
     }
-    return nullptr;
+    return result;
 }
 
-whisper_context * LoadContext(const std::string & modelPath, bool preferGpu) {
-    if (gContext != nullptr && gModelPath == modelPath && gUsingGpu == preferGpu) return gContext;
+const GpuCandidate * FindCandidate(const std::vector<GpuCandidate> & candidates, RuntimeBackend kind) {
+    auto it = std::find_if(candidates.begin(), candidates.end(), [kind](const GpuCandidate & candidate) {
+        return candidate.kind == kind;
+    });
+    return it == candidates.end() ? nullptr : &*it;
+}
+
+whisper_context * LoadGpuContext(const std::string & modelPath, const GpuCandidate & candidate) {
     FreeContext();
 
     whisper_context_params contextParams = whisper_context_default_params();
-    contextParams.use_gpu = preferGpu;
+    contextParams.use_gpu = true;
     contextParams.flash_attn = false;
-    gContext = whisper_init_from_file_with_params(modelPath.c_str(), contextParams);
-    if (gContext == nullptr) return nullptr;
+    contextParams.gpu_device = candidate.gpuOrdinal;
 
-    const char * gpuDevice = preferGpu ? FirstGpuDeviceName() : nullptr;
-    if (preferGpu && gpuDevice == nullptr) {
+    __android_log_print(
+        ANDROID_LOG_INFO,
+        kTag,
+        "trying %s: ordinal=%d backend=%s device=%s",
+        BackendKindName(candidate.kind),
+        candidate.gpuOrdinal,
+        candidate.backendName.c_str(),
+        candidate.deviceName.c_str()
+    );
+
+    gContext = whisper_init_from_file_with_params(modelPath.c_str(), contextParams);
+    if (gContext == nullptr) {
         __android_log_print(
             ANDROID_LOG_WARN,
             kTag,
-            "Whisper GPU was requested but no usable ggml GPU device is registered"
+            "%s model initialization failed on %s",
+            BackendKindName(candidate.kind),
+            candidate.deviceName.c_str()
         );
-        FreeContext();
         return nullptr;
     }
 
     gModelPath = modelPath;
-    gUsingGpu = preferGpu;
-    __android_log_print(
-        ANDROID_LOG_INFO,
-        kTag,
-        "Whisper model loaded with %s backend%s%s",
-        gUsingGpu ? "Vulkan GPU" : "CPU",
-        gUsingGpu ? ": " : "",
-        gUsingGpu ? gpuDevice : ""
-    );
+    gBackend = candidate.kind;
+    gBackendDevice = candidate.deviceName;
+    __android_log_print(ANDROID_LOG_INFO, kTag, "Whisper ready: %s", BackendLabel().c_str());
     return gContext;
 }
 
-whisper_context * GetOrLoadContext(const std::string & modelPath) {
-    if (gContext != nullptr && gModelPath == modelPath) return gContext;
+whisper_context * LoadCpuContext(const std::string & modelPath) {
+    FreeContext();
+    whisper_context_params contextParams = whisper_context_default_params();
+    contextParams.use_gpu = false;
+    contextParams.flash_attn = false;
+    gContext = whisper_init_from_file_with_params(modelPath.c_str(), contextParams);
+    if (gContext == nullptr) return nullptr;
+    gModelPath = modelPath;
+    gBackend = RuntimeBackend::Cpu;
+    gBackendDevice.clear();
+    __android_log_print(ANDROID_LOG_WARN, kTag, "Whisper ready in explicit CPU mode");
+    return gContext;
+}
 
-    whisper_context * context = LoadContext(modelPath, true);
-    if (context != nullptr) return context;
+whisper_context * PreparePreferredBackend(const std::string & modelPath, bool allowCpu) {
+    if (gContext != nullptr && gModelPath == modelPath) {
+        if (gBackend != RuntimeBackend::Cpu || allowCpu) return gContext;
+        // A previous explicit slow-CPU run must never make the next normal Generate silently CPU.
+        FreeContext();
+    }
 
-#if defined(__aarch64__)
-    // The production phone APK is arm64 and Auto Caption is intentionally GPU-only there.
-    // Never hide a Vulkan failure by silently starting a minutes-long CPU transcription.
-    __android_log_print(
-        ANDROID_LOG_ERROR,
-        kTag,
-        "Vulkan Whisper unavailable on arm64; CPU fallback is disabled"
-    );
+    const std::vector<GpuCandidate> candidates = EnumerateGpuCandidates();
+    const GpuCandidate * vulkan = FindCandidate(candidates, RuntimeBackend::Vulkan);
+    const GpuCandidate * opencl = FindCandidate(candidates, RuntimeBackend::OpenCL);
+    bool vulkanInitFailed = false;
+    bool openclInitFailed = false;
+
+    if (vulkan != nullptr) {
+        if (whisper_context * context = LoadGpuContext(modelPath, *vulkan)) return context;
+        vulkanInitFailed = true;
+    }
+    if (opencl != nullptr) {
+        if (whisper_context * context = LoadGpuContext(modelPath, *opencl)) return context;
+        openclInitFailed = true;
+    }
+
+    gLastGpuFailure = "Vulkan ";
+    gLastGpuFailure += vulkan == nullptr ? "not exposed" : (vulkanInitFailed ? "initialization failed" : "unavailable");
+    gLastGpuFailure += "; OpenCL ";
+    gLastGpuFailure += opencl == nullptr ? "not exposed" : (openclInitFailed ? "initialization failed" : "unavailable");
+
+    if (allowCpu) {
+        __android_log_print(
+            ANDROID_LOG_WARN,
+            kTag,
+            "GPU backends unavailable (%s); user allowed slow CPU mode",
+            gLastGpuFailure.c_str()
+        );
+        return LoadCpuContext(modelPath);
+    }
+
+    __android_log_print(ANDROID_LOG_ERROR, kTag, "GPU backends unavailable: %s", gLastGpuFailure.c_str());
     return nullptr;
-#else
-    // Non-phone compatibility/test ABIs can still use the CPU backend. The distributed phone APK
-    // is built with -PdigitorAbi=arm64-v8a, so users never hit this branch on supported phones.
-    __android_log_print(ANDROID_LOG_WARN, kTag, "Vulkan Whisper unavailable on compatibility ABI; using CPU");
-    return LoadContext(modelPath, false);
-#endif
 }
 
 std::string ResolveLanguage(
@@ -170,6 +296,55 @@ int RunWhisper(
     return whisper_full(context, params, samples.data(), static_cast<int>(samples.size()));
 }
 
+int RetryAfterGpuFailure(
+    const std::string & modelPath,
+    const std::string & requestedLanguage,
+    const std::vector<float> & samples,
+    int threads,
+    bool allowCpu,
+    std::string & resolvedLanguage,
+    int previousStatus
+) {
+    int status = previousStatus;
+    const RuntimeBackend failedBackend = gBackend;
+    __android_log_print(
+        ANDROID_LOG_WARN,
+        kTag,
+        "%s inference failed: %d",
+        BackendKindName(failedBackend),
+        status
+    );
+
+    // If Vulkan initialized but its driver fails during the actual graph, retry the same request on
+    // OpenCL before considering CPU. This is the important fallback for phones with incomplete
+    // Vulkan compute drivers but a working OEM OpenCL ICD.
+    if (failedBackend == RuntimeBackend::Vulkan) {
+        const std::vector<GpuCandidate> candidates = EnumerateGpuCandidates();
+        const GpuCandidate * opencl = FindCandidate(candidates, RuntimeBackend::OpenCL);
+        if (opencl != nullptr) {
+            whisper_context * openclContext = LoadGpuContext(modelPath, *opencl);
+            if (openclContext != nullptr) {
+                status = RunWhisper(openclContext, requestedLanguage, samples, threads, resolvedLanguage);
+                if (status == 0) return 0;
+                __android_log_print(ANDROID_LOG_WARN, kTag, "OpenCL retry failed: %d", status);
+            }
+        }
+    }
+
+    if (allowCpu && gBackend != RuntimeBackend::Cpu) {
+        whisper_context * cpuContext = LoadCpuContext(modelPath);
+        if (cpuContext != nullptr) {
+            status = RunWhisper(cpuContext, requestedLanguage, samples, threads, resolvedLanguage);
+        }
+    }
+    return status;
+}
+
+std::string GpuFailureMessage() {
+    std::string detail = gLastGpuFailure.empty() ? "Vulkan and OpenCL could not run this Whisper model" : gLastGpuFailure;
+    return std::string(kGpuUnavailablePrefix) + detail + ". CPU mode is available but can be much slower.";
+}
+
 } // namespace
 
 extern "C" JNIEXPORT jobjectArray JNICALL
@@ -202,7 +377,8 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_prepareBackend(
     JNIEnv * env,
     jobject,
-    jstring modelPathValue
+    jstring modelPathValue,
+    jboolean allowCpuFallback
 ) {
     if (modelPathValue == nullptr) {
         ThrowJava(env, "java/lang/IllegalArgumentException", "Whisper model path is required");
@@ -210,20 +386,23 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_prepareBackend
     }
     const std::string modelPath = JStringToUtf8(env, modelPathValue);
     std::lock_guard<std::mutex> guard(gWhisperMutex);
-    whisper_context * context = GetOrLoadContext(modelPath);
+    whisper_context * context = PreparePreferredBackend(modelPath, allowCpuFallback == JNI_TRUE);
     if (context == nullptr) {
-#if defined(__aarch64__)
-        ThrowJava(
-            env,
-            "java/lang/IllegalStateException",
-            "GPU Auto Caption could not start. A compatible Vulkan 1.2 GPU/driver is required; CPU fallback is disabled."
-        );
-#else
-        ThrowJava(env, "java/lang/IllegalStateException", "Could not load the Whisper model");
-#endif
+        ThrowJava(env, "java/lang/IllegalStateException", GpuFailureMessage());
         return nullptr;
     }
-    return env->NewStringUTF(gUsingGpu ? "Vulkan GPU" : "CPU compatibility mode");
+    const std::string label = BackendLabel();
+    return env->NewStringUTF(label.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_activeBackend(
+    JNIEnv * env,
+    jobject
+) {
+    std::lock_guard<std::mutex> guard(gWhisperMutex);
+    const std::string label = BackendLabel();
+    return env->NewStringUTF(label.c_str());
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL
@@ -232,7 +411,8 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     jobject,
     jstring modelPathValue,
     jfloatArray samplesValue,
-    jstring languageValue
+    jstring languageValue,
+    jboolean allowCpuFallback
 ) {
     if (modelPathValue == nullptr || samplesValue == nullptr) {
         ThrowJava(env, "java/lang/IllegalArgumentException", "Whisper model path and PCM samples are required");
@@ -241,6 +421,7 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
 
     const std::string modelPath = JStringToUtf8(env, modelPathValue);
     const std::string requestedLanguage = JStringToUtf8(env, languageValue);
+    const bool allowCpu = allowCpuFallback == JNI_TRUE;
     const jsize sampleCount = env->GetArrayLength(samplesValue);
     if (sampleCount <= 0) {
         jclass stringClass = env->FindClass("java/lang/String");
@@ -252,17 +433,9 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     if (env->ExceptionCheck()) return nullptr;
 
     std::lock_guard<std::mutex> guard(gWhisperMutex);
-    whisper_context * context = GetOrLoadContext(modelPath);
+    whisper_context * context = PreparePreferredBackend(modelPath, allowCpu);
     if (context == nullptr) {
-#if defined(__aarch64__)
-        ThrowJava(
-            env,
-            "java/lang/IllegalStateException",
-            "GPU Auto Caption is unavailable on this phone; CPU fallback is disabled."
-        );
-#else
-        ThrowJava(env, "java/lang/IllegalStateException", "Could not load the Whisper model");
-#endif
+        ThrowJava(env, "java/lang/IllegalStateException", GpuFailureMessage());
         return nullptr;
     }
 
@@ -271,54 +444,51 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     std::string resolvedLanguage;
     int status = RunWhisper(context, requestedLanguage, samples, threads, resolvedLanguage);
 
-#if !defined(__aarch64__)
-    // Keep a CPU retry only for test/compatibility ABIs. Production arm64 phone builds are GPU-only.
-    if (status != 0 && gUsingGpu) {
-        __android_log_print(
-            ANDROID_LOG_WARN,
-            kTag,
-            "Vulkan whisper_full failed on compatibility ABI: %d; retrying on CPU",
+    if (status != 0 && gBackend != RuntimeBackend::Cpu) {
+        status = RetryAfterGpuFailure(
+            modelPath,
+            requestedLanguage,
+            samples,
+            threads,
+            allowCpu,
+            resolvedLanguage,
             status
         );
-        context = LoadContext(modelPath, false);
-        if (context != nullptr) {
-            status = RunWhisper(context, requestedLanguage, samples, threads, resolvedLanguage);
-        }
     }
-#endif
 
     if (status != 0) {
-        __android_log_print(ANDROID_LOG_ERROR, kTag, "whisper_full failed: %d", status);
-#if defined(__aarch64__)
-        ThrowJava(env, "java/lang/IllegalStateException", "GPU Whisper transcription failed; CPU fallback is disabled.");
-#else
-        ThrowJava(env, "java/lang/IllegalStateException", "Whisper transcription failed");
-#endif
+        __android_log_print(ANDROID_LOG_ERROR, kTag, "whisper_full failed after backend fallback: %d", status);
+        if (!allowCpu && gBackend != RuntimeBackend::Cpu) {
+            gLastGpuFailure = "Vulkan/OpenCL inference failed";
+            ThrowJava(env, "java/lang/IllegalStateException", GpuFailureMessage());
+        } else {
+            ThrowJava(env, "java/lang/IllegalStateException", "Whisper transcription failed");
+        }
         return nullptr;
     }
 
-    const int languageId = whisper_full_lang_id(context);
+    const int languageId = whisper_full_lang_id(gContext);
     const char * detected = languageId >= 0 ? whisper_lang_str(languageId) : nullptr;
     __android_log_print(
         ANDROID_LOG_INFO,
         kTag,
         "transcription complete: backend=%s requested=%s resolved=%s detected=%s samples=%d",
-        gUsingGpu ? "vulkan" : "cpu",
+        BackendLabel().c_str(),
         requestedLanguage.empty() ? "auto" : requestedLanguage.c_str(),
         resolvedLanguage.c_str(),
         detected == nullptr ? "unknown" : detected,
         static_cast<int>(sampleCount)
     );
 
-    const int segmentCount = whisper_full_n_segments(context);
+    const int segmentCount = whisper_full_n_segments(gContext);
     jclass stringClass = env->FindClass("java/lang/String");
     jobjectArray result = env->NewObjectArray(segmentCount, stringClass, nullptr);
     if (result == nullptr) return nullptr;
 
     for (int index = 0; index < segmentCount; ++index) {
-        const int64_t startUs = whisper_full_get_segment_t0(context, index) * 10'000LL;
-        const int64_t endUs = whisper_full_get_segment_t1(context, index) * 10'000LL;
-        const std::string text = Trim(whisper_full_get_segment_text(context, index));
+        const int64_t startUs = whisper_full_get_segment_t0(gContext, index) * 10'000LL;
+        const int64_t endUs = whisper_full_get_segment_t1(gContext, index) * 10'000LL;
+        const std::string text = Trim(whisper_full_get_segment_text(gContext, index));
         const std::string encoded = std::to_string(startUs) + "\t" + std::to_string(endUs) + "\t" + text;
         jstring line = env->NewStringUTF(encoded.c_str());
         env->SetObjectArrayElement(result, index, line);
