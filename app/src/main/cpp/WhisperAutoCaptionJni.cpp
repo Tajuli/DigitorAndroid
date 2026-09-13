@@ -15,7 +15,6 @@ constexpr const char * kTag = "DigitorWhisperV80";
 std::mutex gWhisperMutex;
 whisper_context * gContext = nullptr;
 std::string gModelPath;
-bool gUsingGpu = false;
 
 std::string JStringToUtf8(JNIEnv * env, jstring value) {
     if (value == nullptr) return {};
@@ -45,42 +44,28 @@ void FreeContext() {
         gContext = nullptr;
     }
     gModelPath.clear();
-    gUsingGpu = false;
 }
 
-whisper_context * LoadContext(const std::string & modelPath, bool preferGpu) {
-    if (gContext != nullptr && gModelPath == modelPath && gUsingGpu == preferGpu) return gContext;
+whisper_context * LoadContext(const std::string & modelPath) {
+    if (gContext != nullptr && gModelPath == modelPath) return gContext;
     FreeContext();
 
     whisper_context_params contextParams = whisper_context_default_params();
-    contextParams.use_gpu = preferGpu;
-    // Flash attention is beneficial on the Vulkan path. Keep it off for the conservative CPU
-    // fallback because some low-memory Android devices otherwise spend more time preparing it.
-    contextParams.flash_attn = preferGpu;
+    // Keep Auto Caption CPU-only. Digitor's video/PP-Matting pipeline already uses Vulkan, while
+    // tiny-q5_1 Whisper is small enough for the conservative Android CPU backend and avoids a
+    // second Vulkan runtime competing with rendering or depending on newer loader symbols.
+    contextParams.use_gpu = false;
+    contextParams.flash_attn = false;
     gContext = whisper_init_from_file_with_params(modelPath.c_str(), contextParams);
     if (gContext != nullptr) {
         gModelPath = modelPath;
-        gUsingGpu = preferGpu;
-        __android_log_print(
-            ANDROID_LOG_INFO,
-            kTag,
-            "Whisper model loaded with %s backend preference",
-            preferGpu ? "Vulkan GPU" : "CPU"
-        );
+        __android_log_print(ANDROID_LOG_INFO, kTag, "Whisper model loaded with CPU backend");
     }
     return gContext;
 }
 
 whisper_context * GetOrLoadContext(const std::string & modelPath) {
-    if (gContext != nullptr && gModelPath == modelPath) return gContext;
-
-    // V84: prefer cross-vendor Vulkan GPU inference on Android. If the device/driver cannot create
-    // a usable GPU context, transparently fall back to CPU so Auto Caption still works.
-    whisper_context * context = LoadContext(modelPath, true);
-    if (context != nullptr) return context;
-
-    __android_log_print(ANDROID_LOG_WARN, kTag, "Vulkan Whisper init failed; retrying on CPU");
-    return LoadContext(modelPath, false);
+    return LoadContext(modelPath);
 }
 
 std::string ResolveLanguage(
@@ -183,8 +168,7 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_prepareBackend
         ThrowJava(env, "java/lang/IllegalStateException", "Could not load the Whisper model");
         return nullptr;
     }
-    const char * label = gUsingGpu ? "Vulkan GPU" : "CPU fallback";
-    return env->NewStringUTF(label);
+    return env->NewStringUTF("CPU");
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL
@@ -222,22 +206,7 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     const unsigned int cores = std::max(1u, std::thread::hardware_concurrency());
     const int threads = static_cast<int>(std::min(4u, cores));
     std::string resolvedLanguage;
-    int status = RunWhisper(context, requestedLanguage, samples, threads, resolvedLanguage);
-
-    // A flaky/low-memory Vulkan driver should not make captioning unusable. Retry the same request
-    // once on CPU if GPU inference itself fails after a successful model initialization.
-    if (status != 0 && gUsingGpu) {
-        __android_log_print(
-            ANDROID_LOG_WARN,
-            kTag,
-            "Vulkan whisper_full failed: %d; retrying transcription on CPU",
-            status
-        );
-        context = LoadContext(modelPath, false);
-        if (context != nullptr) {
-            status = RunWhisper(context, requestedLanguage, samples, threads, resolvedLanguage);
-        }
-    }
+    const int status = RunWhisper(context, requestedLanguage, samples, threads, resolvedLanguage);
 
     if (status != 0) {
         __android_log_print(ANDROID_LOG_ERROR, kTag, "whisper_full failed: %d", status);
@@ -250,8 +219,7 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
     __android_log_print(
         ANDROID_LOG_INFO,
         kTag,
-        "transcription complete: backend=%s requested=%s resolved=%s detected=%s samples=%d",
-        gUsingGpu ? "vulkan" : "cpu",
+        "transcription complete: backend=cpu requested=%s resolved=%s detected=%s samples=%d",
         requestedLanguage.empty() ? "auto" : requestedLanguage.c_str(),
         resolvedLanguage.c_str(),
         detected == nullptr ? "unknown" : detected,
