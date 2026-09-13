@@ -16,7 +16,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -37,13 +36,7 @@ import androidx.compose.ui.window.Dialog
 import com.tajuli.digitorandroid.editor.model.AutoCaptionLanguageV80
 import com.tajuli.digitorandroid.editor.processing.supportedAutoCaptionLanguagesV82
 
-/**
- * Compact editor-level Auto Caption entry point.
- *
- * V86 prefers Vulkan/OpenCL when whisper.cpp can actually use them, but automatically keeps the
- * feature working through the local CPU backend when an Android GPU stack cannot satisfy those
- * requirements. This avoids presenting a permanent GPU error on otherwise supported phones.
- */
+/** Compact GPU-only Auto Caption entry point. */
 @Composable
 internal fun AutoCaptionControlsV80(
     vm: EditorViewModelV4,
@@ -113,12 +106,12 @@ internal fun AutoCaptionControlsV80(
                     }
 
                     Text(
-                        "On-device Whisper prefers Vulkan/OpenCL GPU when compatible. If the phone's Android GPU driver cannot run Whisper, Digitor automatically continues on the local CPU instead of failing.",
+                        "Auto Caption now uses Digitor's ncnn Vulkan GPU runtime directly. It does not automatically switch to CPU or OpenCL.",
                         fontSize = 9.sp,
                         color = Color.White.copy(alpha = .68f),
                     )
                     Text(
-                        "First use downloads the multilingual mobile model (~82 MB) once; later runs can work offline.",
+                        "First use downloads the multilingual ncnn Whisper base GPU model pack (~147 MB) once; later runs work offline.",
                         fontSize = 8.sp,
                         color = Color.White.copy(alpha = .55f),
                     )
@@ -146,7 +139,7 @@ internal fun AutoCaptionControlsV80(
 
                     Text(
                         if (language.whisperCode == "auto") {
-                            "Auto Detect identifies the spoken language first, then transcribes using that language."
+                            "Auto Detect identifies the spoken language on-device, then transcribes it on the Vulkan GPU."
                         } else {
                             "Manual language selection can improve recognition when you already know the spoken language."
                         },
@@ -163,7 +156,7 @@ internal fun AutoCaptionControlsV80(
                             )
                             Spacer(Modifier.width(9.dp))
                             Column {
-                                Text("Creating captions…", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                                Text("Creating captions on GPU…", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                                 Text(
                                     runState.message,
                                     fontSize = 8.sp,
@@ -183,30 +176,15 @@ internal fun AutoCaptionControlsV80(
                             else -> Color.White.copy(alpha = .66f)
                         }
                         Text(runState.message, fontSize = 8.sp, color = messageColor)
-
-                        if (runState.cpuFallbackAvailable) {
-                            Text(
-                                "The GPU path failed unexpectedly. The local CPU backend can still be tried.",
-                                fontSize = 8.sp,
-                                color = Color(0xFFFFC66D),
-                            )
-                            OutlinedButton(
-                                onClick = { vm.generateAutoCaptionsV80(language, allowCpuFallback = true) },
-                                enabled = !runState.running,
-                                modifier = Modifier.fillMaxWidth().height(36.dp),
-                            ) {
-                                Text("Try local CPU", fontSize = 9.sp)
-                            }
-                        }
                     }
 
                     FilledTonalButton(
-                        onClick = { vm.generateAutoCaptionsV80(language, allowCpuFallback = true) },
+                        onClick = { vm.generateAutoCaptionsV80(language) },
                         enabled = !runState.running,
                         modifier = Modifier.fillMaxWidth().height(36.dp),
                     ) {
                         Text(
-                            if (runState.failed) "Retry" else "Generate captions",
+                            if (runState.failed) "Retry GPU" else "Generate captions",
                             fontSize = 9.sp,
                         )
                     }
@@ -249,7 +227,7 @@ private fun LanguagePickerV82(
         }
 
         Text(
-            "Choose Auto Detect for mixed international use, or select a known spoken language for a more explicit recognition hint.",
+            "Choose Auto Detect for mixed international use, or select the known spoken language for a stronger recognition hint.",
             fontSize = 8.sp,
             color = Color.White.copy(alpha = .62f),
         )
