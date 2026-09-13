@@ -44,4 +44,4 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-Model: ggml-small-q5_1.bin, downloaded from the ggerganov/whisper.cpp model repository and SHA-256 verified by Digitor before use.
+Model: ggml-base-q8_0.bin, downloaded from the official ggerganov/whisper.cpp model repository and SHA-256 verified by Digitor before use.
