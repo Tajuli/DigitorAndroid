@@ -22,9 +22,11 @@ find_library(android-lib android)
 
 target_link_libraries(digitor_ppmatting_ncnn ncnn ${log-lib})
 
-# Auto Caption uses ggml's cross-vendor Vulkan backend first. The JNI layer keeps a CPU fallback
-# for phones/drivers where Vulkan compute cannot initialize. PP-Matting's ncnn Vulkan path above is
-# independent and remains unchanged.
+# Auto Caption uses ggml's cross-vendor Vulkan backend on the 64-bit phone build. whisper.cpp
+# v1.9.4's Vulkan-Hpp path does not compile correctly for Android's 32-bit non-dispatchable Vulkan
+# handles (armeabi-v7a). Keep those compatibility ABIs on the already-supported CPU backend rather
+# than making the entire app fail to build. Modern phone releases are arm64-v8a and retain GPU
+# inference; the JNI layer also keeps its runtime CPU fallback for unsupported/flaky GPU drivers.
 include(FetchContent)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build whisper.cpp statically inside Digitor JNI" FORCE)
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -34,15 +36,21 @@ set(WHISPER_CURL OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
-set(GGML_VULKAN ON CACHE BOOL "Enable Vulkan GPU inference for Auto Caption" FORCE)
+
+set(DIGITOR_WHISPER_VULKAN OFF)
+if(ANDROID AND ANDROID_ABI STREQUAL "arm64-v8a")
+    set(DIGITOR_WHISPER_VULKAN ON)
+endif()
+set(GGML_VULKAN ${DIGITOR_WHISPER_VULKAN} CACHE BOOL "Enable Vulkan GPU inference for Auto Caption" FORCE)
 set(GGML_VULKAN_CHECK_RESULTS OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN_DEBUG OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN_VALIDATE OFF CACHE BOOL "" FORCE)
+message(STATUS "Digitor Whisper backend for ${ANDROID_ABI}: Vulkan=${DIGITOR_WHISPER_VULKAN}")
 
 # ggml-vulkan cross-compiles the Android runtime but compiles its shader generator on the host.
-# Android's toolchain normally searches packages inside the NDK sysroot, so explicitly expose the
-# host SPIR-V headers and glslc installed by CI / Linux development environments.
-if(ANDROID)
+# Only the arm64 build needs the host Vulkan/SPIR-V toolchain; CPU-only compatibility ABIs must not
+# configure or compile ggml-vulkan at all.
+if(DIGITOR_WHISPER_VULKAN)
     if(NOT DEFINED SPIRV-Headers_DIR)
         foreach(_spirv_dir
             "/usr/share/cmake/SPIRV-Headers"
@@ -110,18 +118,24 @@ if(ANDROID)
     endforeach()
 endif()
 
+# The API-24 Vulkan compatibility source patch is only relevant to the arm64 GPU build. Keeping it
+# out of 32-bit CPU builds makes the ABI split explicit and avoids touching unused Vulkan sources.
+set(DIGITOR_WHISPER_PATCH_ARGS)
+if(DIGITOR_WHISPER_VULKAN)
+    list(APPEND DIGITOR_WHISPER_PATCH_ARGS
+        PATCH_COMMAND ${CMAKE_COMMAND}
+            -DGGML_VULKAN_SOURCE=<SOURCE_DIR>/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+            -P ${CMAKE_CURRENT_LIST_DIR}/PatchWhisperVulkanAndroid.cmake
+    )
+endif()
+
 FetchContent_Declare(
     whisper_cpp
     GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
     GIT_TAG v1.9.4
     GIT_SHALLOW TRUE
     GIT_PROGRESS FALSE
-    # whisper.cpp v1.9.4 directly links vkGetPhysicalDeviceFeatures2. Android API 24's NDK
-    # Vulkan stub does not export that Vulkan 1.1 symbol, so route the pinned calls through
-    # Vulkan-Hpp's already-initialized dynamic dispatcher instead of raising Digitor's minSdk.
-    PATCH_COMMAND ${CMAKE_COMMAND}
-        -DGGML_VULKAN_SOURCE=<SOURCE_DIR>/ggml/src/ggml-vulkan/ggml-vulkan.cpp
-        -P ${CMAKE_CURRENT_LIST_DIR}/PatchWhisperVulkanAndroid.cmake
+    ${DIGITOR_WHISPER_PATCH_ARGS}
 )
 FetchContent_MakeAvailable(whisper_cpp)
 
