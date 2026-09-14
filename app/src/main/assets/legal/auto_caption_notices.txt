@@ -44,6 +44,13 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+Qualcomm QNN Runtime / LiteRT delegate 2.34.0
+Digitor includes com.qualcomm.qti:qnn-runtime and qnn-litert-delegate because the
+published WhisperKit Android native binary requires libQnnTFLiteDelegate.so at load
+time. These Qualcomm components are proprietary and are governed by Qualcomm's own
+license terms; they are not covered by the MIT notices above. Retain Qualcomm notices
+and review the exact redistribution terms before Play Store production release.
+
 FFmpeg notice
 WhisperKit Android links FFmpeg avformat, avcodec, avutil and swresample as shared
 libraries. The upstream WhisperKit build script configures FFmpeg with
