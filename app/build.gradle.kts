@@ -217,7 +217,7 @@ android {
     }
 
     // Native editor engines are packaged as real app .so libraries. sherpa-onnx and the existing
-    // ONNX Runtime fallback both carry libonnxruntime.so; they use the same C ABI, so package one copy.
+    // ONNX Runtime fallback both carry libonnxruntime.so, so their native ABI versions must match.
     packaging {
         jniLibs {
             useLegacyPackaging = true
@@ -268,15 +268,15 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // Auto CC V79: Android AAR already contains the Kotlin API classes. JitPack also declares its
-    // JVM artifact transitively; exclude that duplicate or Android's phone/release packaging sees
-    // every com.k2fsa.sherpa.onnx class twice.
-    implementation("com.github.k2-fsa:sherpa-onnx:v1.13.8") {
+    // Auto CC V79: keep sherpa and the app's ONNX Runtime on the same native ABI generation.
+    // sherpa-onnx 1.13.8 moved to unpublished ORT 1.28.2; mixing it with Maven ORT 1.29.0 makes
+    // libsherpa-onnx-jni.so fail at class initialization. v1.13.7 uses the published ORT 1.27 line.
+    implementation("com.github.k2-fsa:sherpa-onnx:v1.13.7") {
         exclude(group = "com.github.k2-fsa.sherpa-onnx", module = "sherpa-onnx-jvm")
     }
 
-    // Lazy CPU reliability fallback. Primary PP-MattingV2 inference is ncnn Vulkan GPU.
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
+    // Lazy CPU reliability fallback. Primary PP-MattingV2 inference is ncnn Vulkan GPU. Match sherpa.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.27.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
