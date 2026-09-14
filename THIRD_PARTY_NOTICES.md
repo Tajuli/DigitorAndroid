@@ -6,7 +6,7 @@ It is not legal advice; release packaging should retain the applicable notices a
 ## WhisperKit Android 0.3.3
 
 - Project: `argmaxinc/WhisperKitAndroid`
-- Purpose: on-device automatic speech recognition and generic LiteRT/TFLite GPU delegate
+- Purpose: on-device automatic speech recognition
 - License: MIT
 - Copyright: Copyright (c) 2024 argmax, inc.
 
@@ -56,6 +56,23 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Qualcomm QNN Runtime / LiteRT delegate 2.34.0
+
+Digitor packages `com.qualcomm.qti:qnn-runtime:2.34.0` and
+`com.qualcomm.qti:qnn-litert-delegate:2.34.0` because the published WhisperKit Android
+native binary has a hard dynamic-library dependency on `libQnnTFLiteDelegate.so`.
+Without those AARs, `System.loadLibrary("whisperkit_jni")` fails before Digitor can
+select either the GPU or CPU inference backend.
+
+These Qualcomm runtime components are **not MIT/open-source software**. Maven Central
+identifies them under Qualcomm's license terms. Keep Qualcomm's copyright/proprietary
+notices and review the exact redistribution terms before a Play Store production
+release. They must not be described as part of Digitor's MIT/open-source dependency set.
+
+If Digitor's release policy requires every Auto CC runtime component to be OSI-style
+open source, this WhisperKit binary path should be replaced rather than shipping the
+Qualcomm runtime.
 
 ## FFmpeg libraries used inside WhisperKit Android
 
