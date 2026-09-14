@@ -7,9 +7,6 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import android.os.Build
-import com.argmaxinc.whisperkit.ExperimentalWhisperKit
-import com.argmaxinc.whisperkit.TranscriptionResult
-import com.argmaxinc.whisperkit.WhisperKit
 import com.tajuli.digitorandroid.editor.model.TextAlignmentV2
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TextStyleV2
@@ -18,13 +15,16 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.util.Collections
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.withContext
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
@@ -35,11 +35,11 @@ private const val AUTO_CC_TRACK_NAME_V77 = "CC"
 private const val TARGET_SAMPLE_RATE_V77 = 16_000
 private const val MIN_CAPTION_US_V77 = 180_000L
 private const val MAX_CAPTION_CHARS_V77 = 42
+private const val WHISPER_TIME_UNIT_US_V78 = 10_000L // whisper.cpp segment times are centiseconds
 
-/** Creator-facing choice: tiny is the default because mobile turnaround matters more than benchmark WER. */
 enum class AutoCaptionQualityV77(val label: String, val detail: String) {
-    FAST("Fast", "Tiny multilingual · fastest GPU path"),
-    ACCURATE("Accurate", "Base multilingual · better accuracy"),
+    FAST("Fast", "Tiny Q5 multilingual · fastest Vulkan path"),
+    ACCURATE("Accurate", "Base Q5 multilingual · better accuracy"),
 }
 
 data class AutoCaptionProgressV77(
@@ -59,36 +59,34 @@ data class AutoCaptionResultV77(
     val model: String,
 )
 
-private data class StreamMapV77(
-    val streamStartUs: Long,
-    val streamEndUs: Long,
-    val timelineStartUs: Long,
+private data class WhisperModelSpecV78(
+    val fileName: String,
+    val url: String,
+    val minimumBytes: Long,
+    val displayName: String,
+    val bestOf: Int,
 )
 
-private data class ParsedWhisperSegmentV77(
+private data class NativeSegmentV78(
     val text: String,
-    val streamStartUs: Long,
-    val streamEndUs: Long,
+    val startCentiseconds: Long,
+    val endCentiseconds: Long,
 )
 
 /**
- * GPU-first, on-device ASR for the editor.
+ * V78 Auto CC engine.
  *
- * The pinned WhisperKit Android runtime uses the generic LiteRT/TFLite GPU delegate on supported
- * Android devices. Audio never leaves the device; only the selected speech model is downloaded on
- * first use and then cached in app storage. If the GPU runtime throws a recoverable Java exception,
- * the same cached model is retried on CPU so a driver quirk does not destroy the edit session.
- *
- * WhisperKit currently exposes timestamp markers only in the raw callback text. We intentionally
- * parse those markers here instead of throwing them away, which gives Auto CC real segment timing
- * instead of evenly-spaced guessed captions.
+ * This deliberately does not use WhisperKit. The previous Android artifact could load only when a
+ * proprietary Qualcomm QNN delegate was packaged and its multilingual path produced unreliable text
+ * on the target phone. V78 uses pinned MIT-licensed whisper.cpp/ggml, requests Vulkan first, retains
+ * ggml CPU fallback, lets whisper.cpp auto-detect Bangla/English, and consumes whisper.cpp's own
+ * segment timestamps.
  */
-@OptIn(ExperimentalWhisperKit::class)
 class WhisperGpuAutoCaptionEngineV77(private val context: Context) {
 
     companion object {
         fun supportedOnThisDevice(): Boolean =
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
                 Build.SUPPORTED_ABIS.any { it == "arm64-v8a" }
     }
 
@@ -99,7 +97,7 @@ class WhisperGpuAutoCaptionEngineV77(private val context: Context) {
         onProgress: (AutoCaptionProgressV77) -> Unit = {},
     ): AutoCaptionResultV77 {
         check(supportedOnThisDevice()) {
-            "Auto CC requires Android 8.0+ on a 64-bit ARM phone"
+            "Auto CC requires a 64-bit ARM Android phone"
         }
         val track = project.track(audioTrackId)
             ?.takeIf { it.kind == TrackKind.AUDIO && !it.muted }
@@ -107,148 +105,191 @@ class WhisperGpuAutoCaptionEngineV77(private val context: Context) {
         val clips = track.sortedClips()
         require(clips.isNotEmpty()) { "${track.name} has no audio clips" }
 
-        val model = when (quality) {
-            AutoCaptionQualityV77.FAST -> WhisperKit.Builder.OPENAI_TINY
-            AutoCaptionQualityV77.ACCURATE -> WhisperKit.Builder.OPENAI_BASE
+        val spec = when (quality) {
+            AutoCaptionQualityV77.FAST -> WhisperModelSpecV78(
+                fileName = "ggml-tiny-q5_1.bin",
+                url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin",
+                minimumBytes = 20_000_000L,
+                displayName = "Whisper Tiny Q5 multilingual",
+                bestOf = 1,
+            )
+            AutoCaptionQualityV77.ACCURATE -> WhisperModelSpecV78(
+                fileName = "ggml-base-q5_1.bin",
+                url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin",
+                minimumBytes = 45_000_000L,
+                displayName = "Whisper Base Q5 multilingual",
+                bestOf = 3,
+            )
         }
 
+        val model = ensureWhisperModelV78(spec, onProgress)
         return try {
-            runBackend(
+            runBackendV78(
                 clips = clips,
                 model = model,
-                backend = WhisperKit.Builder.CPU_AND_GPU,
-                backendLabel = "GPU",
+                spec = spec,
+                useGpu = true,
+                backendLabel = "Vulkan GPU",
                 onProgress = onProgress,
             )
         } catch (gpuError: Throwable) {
             currentCoroutineContext().ensureActive()
-            onProgress(AutoCaptionProgressV77(.03f, "GPU unavailable · retrying safe CPU path"))
+            onProgress(AutoCaptionProgressV77(.18f, "Vulkan unavailable · retrying CPU fallback"))
             runCatching {
-                runBackend(
+                runBackendV78(
                     clips = clips,
                     model = model,
-                    backend = WhisperKit.Builder.CPU_ONLY,
+                    spec = spec,
+                    useGpu = false,
                     backendLabel = "CPU fallback",
                     onProgress = onProgress,
                 )
             }.getOrElse { cpuError ->
                 throw IllegalStateException(
-                    "Auto CC failed on GPU (${gpuError.message ?: "unknown"}) and CPU (${cpuError.message ?: "unknown"})",
+                    "Auto CC failed on Vulkan (${gpuError.message ?: "unknown"}) and CPU (${cpuError.message ?: "unknown"})",
                     cpuError,
                 )
             }
         }
     }
 
-    private suspend fun runBackend(
+    private suspend fun runBackendV78(
         clips: List<TimelineClip>,
-        model: String,
-        backend: Int,
+        model: File,
+        spec: WhisperModelSpecV78,
+        useGpu: Boolean,
         backendLabel: String,
         onProgress: (AutoCaptionProgressV77) -> Unit,
-    ): AutoCaptionResultV77 {
-        var latestResult: TranscriptionResult? = null
-        val callbackLock = Any()
-        val whisper = WhisperKit.Builder()
-            .setModel(model)
-            .setApplicationContext(context.applicationContext)
-            .setEncoderBackend(backend)
-            .setDecoderBackend(backend)
-            .setCallback { what, result ->
-                if (
-                    what == WhisperKit.TextOutputCallback.MSG_TEXT_OUT ||
-                    what == WhisperKit.TextOutputCallback.MSG_CLOSE
-                ) {
-                    synchronized(callbackLock) { latestResult = result }
-                }
-            }
-            .build()
+    ): AutoCaptionResultV77 = withContext(Dispatchers.Default) {
+        currentCoroutineContext().ensureActive()
+        onProgress(AutoCaptionProgressV77(.17f, "Loading ${spec.displayName} · $backendLabel"))
 
-        var initialized = false
+        var nativeContext = 0L
         try {
-            onProgress(AutoCaptionProgressV77(.01f, "Preparing speech model · $backendLabel"))
-            whisper.loadModel().collect { download ->
-                val p = (.01f + download.fractionCompleted.coerceIn(0f, 1f) * .14f).coerceAtMost(.15f)
-                onProgress(AutoCaptionProgressV77(p, "Speech model ${((download.fractionCompleted * 100f).roundToInt()).coerceIn(0, 100)}%"))
-            }
-            currentCoroutineContext().ensureActive()
-            whisper.init(frequency = TARGET_SAMPLE_RATE_V77, channels = 1, duration = 0L)
-            initialized = true
+            nativeContext = WhisperCppNativeV78.createContext(model.absolutePath, useGpu)
+            check(nativeContext != 0L) { "whisper.cpp context initialization returned null" }
 
-            val plannedUs = clips.sumOf { it.durationUs }.coerceAtLeast(1L)
-            var decodedUs = 0L
-            var streamCursorUs = 0L
-            val maps = mutableListOf<StreamMapV77>()
+            val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
+            val drafts = mutableListOf<AutoCaptionDraftV77>()
+            val totalDuration = clips.sumOf { it.durationUs }.coerceAtLeast(1L)
+            var completedDuration = 0L
 
             clips.forEachIndexed { index, clip ->
                 currentCoroutineContext().ensureActive()
-                val beforeSamples = streamCursorUs * TARGET_SAMPLE_RATE_V77 / US_PER_SECOND
-                val fedSamples = decodeClipToWhisperV77(clip) { pcm16Mono ->
-                    if (pcm16Mono.isNotEmpty()) {
-                        whisper.transcribe(pcm16Mono)
-                    }
-                }
-                val actualUs = fedSamples * US_PER_SECOND / TARGET_SAMPLE_RATE_V77
-                if (actualUs > 0L) {
-                    maps += StreamMapV77(
-                        streamStartUs = streamCursorUs,
-                        streamEndUs = streamCursorUs + actualUs,
-                        timelineStartUs = clip.timelineStartUs,
-                    )
-                    streamCursorUs += actualUs
-                }
-                decodedUs += min(clip.durationUs, actualUs.coerceAtLeast(0L))
-                val mediaFraction = (decodedUs.toDouble() / plannedUs.toDouble()).toFloat().coerceIn(0f, 1f)
                 onProgress(
                     AutoCaptionProgressV77(
-                        fraction = .15f + mediaFraction * .82f,
-                        message = "${backendLabel} transcribing · ${index + 1}/${clips.size}",
+                        .20f + .70f * (completedDuration.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f),
+                        "$backendLabel · decoding ${index + 1}/${clips.size}",
                     ),
                 )
-                @Suppress("UNUSED_VARIABLE")
-                val ignoredForReadableDebug = beforeSamples
+                val audio = decodeClipToFloatV78(clip)
+                if (audio.isNotEmpty()) {
+                    currentCoroutineContext().ensureActive()
+                    val encodedSegments = WhisperCppNativeV78.transcribeSegments(
+                        contextPtr = nativeContext,
+                        audioData = audio,
+                        threadCount = threads,
+                        bestOf = spec.bestOf,
+                    )
+                    encodedSegments
+                        .mapNotNull(::parseNativeSegmentV78)
+                        .mapNotNull { segment -> segment.toTimelineDraftV78(clip) }
+                        .flatMap(::splitCaptionForReadabilityV77)
+                        .let(drafts::addAll)
+                }
+                completedDuration += clip.durationUs
+                onProgress(
+                    AutoCaptionProgressV77(
+                        .20f + .76f * (completedDuration.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f),
+                        "$backendLabel transcribing · ${index + 1}/${clips.size}",
+                    ),
+                )
             }
 
-            currentCoroutineContext().ensureActive()
-            onProgress(AutoCaptionProgressV77(.98f, "Finalizing caption timing"))
-            whisper.deinitialize()
-            initialized = false
-
-            val finalResult = synchronized(callbackLock) { latestResult }
-                ?: error("Speech model returned no transcription")
-            val parsed = parseWhisperTimestampTextV77(finalResult.text)
-            val drafts = parsed
-                .mapNotNull { it.toTimelineDraftV77(maps) }
-                .flatMap(::splitCaptionForReadabilityV77)
-                .normalizeCaptionOrderV77()
-
-            require(drafts.isNotEmpty()) {
+            val normalized = drafts.normalizeCaptionOrderV77()
+            require(normalized.isNotEmpty()) {
                 "No speech was detected on the selected audio track"
             }
-            onProgress(AutoCaptionProgressV77(1f, "${drafts.size} captions ready · $backendLabel"))
-            return AutoCaptionResultV77(
-                captions = drafts,
+            onProgress(AutoCaptionProgressV77(1f, "${normalized.size} captions ready · $backendLabel"))
+            AutoCaptionResultV77(
+                captions = normalized,
                 backend = backendLabel,
-                model = if (qualityNameV77(model).contains("tiny")) "Whisper Tiny multilingual" else "Whisper Base multilingual",
+                model = spec.displayName,
             )
         } finally {
-            if (initialized) runCatching { whisper.deinitialize() }
+            if (nativeContext != 0L) runCatching { WhisperCppNativeV78.freeContext(nativeContext) }
         }
     }
 
-    /**
-     * Decode one timeline clip with Android's platform decoder, down-mix to mono, resample to 16 kHz
-     * PCM16, and stream blocks straight into WhisperKit. Nothing is rendered and no temporary WAV is
-     * created, which keeps long-form caption generation memory-friendly.
-     */
-    private suspend fun decodeClipToWhisperV77(
-        clip: TimelineClip,
-        consume: (ByteArray) -> Unit,
-    ): Long {
+    private suspend fun ensureWhisperModelV78(
+        spec: WhisperModelSpecV78,
+        onProgress: (AutoCaptionProgressV77) -> Unit,
+    ): File = withContext(Dispatchers.IO) {
+        val directory = File(context.filesDir, "auto_cc_models_v78").apply { mkdirs() }
+        val target = File(directory, spec.fileName)
+        if (target.isFile && target.length() > spec.minimumBytes) {
+            onProgress(AutoCaptionProgressV77(.15f, "Speech model cached · ${spec.displayName}"))
+            return@withContext target
+        }
+
+        val temp = File(directory, "${spec.fileName}.download")
+        if (temp.exists()) temp.delete()
+        var connection: HttpURLConnection? = null
+        try {
+            onProgress(AutoCaptionProgressV77(.01f, "Downloading ${spec.displayName}"))
+            connection = URI(spec.url).toURL().openConnection() as HttpURLConnection
+            connection.instanceFollowRedirects = true
+            connection.connectTimeout = 30_000
+            connection.readTimeout = 300_000
+            connection.setRequestProperty("User-Agent", "DigitorAndroid-AutoCC/1.0")
+            connection.setRequestProperty("Accept", "application/octet-stream,*/*")
+            val response = connection.responseCode
+            require(response in 200..299) { "Speech model download returned HTTP $response" }
+            val expected = connection.contentLengthLong.takeIf { it > 0L }
+            var copied = 0L
+            connection.inputStream.buffered().use { input ->
+                temp.outputStream().buffered().use { output ->
+                    val buffer = ByteArray(1024 * 1024)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val read = input.read(buffer)
+                        if (read <= 0) break
+                        output.write(buffer, 0, read)
+                        copied += read
+                        val downloadFraction = if (expected != null) {
+                            (copied.toDouble() / expected.toDouble()).toFloat().coerceIn(0f, 1f)
+                        } else {
+                            (copied.toDouble() / max(spec.minimumBytes, copied).toDouble()).toFloat().coerceIn(0f, 1f)
+                        }
+                        onProgress(
+                            AutoCaptionProgressV77(
+                                .01f + downloadFraction * .13f,
+                                "Speech model ${(downloadFraction * 100f).roundToInt()}%",
+                            ),
+                        )
+                    }
+                }
+            }
+            require(temp.length() > spec.minimumBytes) {
+                "Downloaded speech model is incomplete (${temp.length()} bytes)"
+            }
+            if (target.exists()) target.delete()
+            check(temp.renameTo(target)) { "Could not install ${spec.fileName}" }
+            onProgress(AutoCaptionProgressV77(.15f, "Speech model ready · ${spec.displayName}"))
+            target
+        } finally {
+            connection?.disconnect()
+            if (temp.exists() && (!target.exists() || target.length() <= spec.minimumBytes)) temp.delete()
+        }
+    }
+
+    /** Decode only the selected timeline range to 16 kHz mono float PCM expected by whisper.cpp. */
+    private suspend fun decodeClipToFloatV78(clip: TimelineClip): FloatArray {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         var codecStarted = false
-        var producedTargetSamples = 0L
+        val chunks = mutableListOf<ShortArray>()
+        var totalSamples = 0
         try {
             val sourceUri = Uri.parse(clip.uri)
             if (sourceUri.scheme.isNullOrBlank()) {
@@ -287,7 +328,6 @@ class WhisperGpuAutoCaptionEngineV77(private val context: Context) {
 
             while (!outputDone) {
                 currentCoroutineContext().ensureActive()
-
                 if (!inputDone) {
                     val inputIndex = codec.dequeueInputBuffer(10_000L)
                     if (inputIndex >= 0) {
@@ -337,9 +377,8 @@ class WhisperGpuAutoCaptionEngineV77(private val context: Context) {
                             val mono = bytes.toMonoPcm16V77(outputChannels, outputEncoding)
                             val target = resampleMonoV77(mono, outputRate, TARGET_SAMPLE_RATE_V77)
                             if (target.isNotEmpty()) {
-                                val pcm = target.toLittleEndianBytesV77()
-                                consume(pcm)
-                                producedTargetSamples += target.size
+                                chunks += target
+                                totalSamples += target.size
                             }
                         }
                         outputDone = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
@@ -354,11 +393,39 @@ class WhisperGpuAutoCaptionEngineV77(private val context: Context) {
                 runCatching { decoder.release() }
             }
         }
-        return producedTargetSamples
+
+        if (totalSamples <= 0) return FloatArray(0)
+        val output = FloatArray(totalSamples)
+        var offset = 0
+        chunks.forEach { chunk ->
+            chunk.forEach { sample ->
+                output[offset++] = (sample.toInt() / 32768f).coerceIn(-1f, 1f)
+            }
+        }
+        return output
     }
 }
 
-private fun qualityNameV77(model: String): String = model.substringAfterLast('/').lowercase()
+private fun parseNativeSegmentV78(encoded: String): NativeSegmentV78? {
+    val parts = encoded.split('\t', limit = 3)
+    if (parts.size < 3) return null
+    val t0 = parts[0].toLongOrNull() ?: return null
+    val t1 = parts[1].toLongOrNull() ?: return null
+    val text = parts[2].replace(Regex("\\s+"), " ").trim()
+    if (text.isBlank() || t1 <= t0) return null
+    return NativeSegmentV78(text, t0, t1)
+}
+
+private fun NativeSegmentV78.toTimelineDraftV78(clip: TimelineClip): AutoCaptionDraftV77? {
+    val localStartUs = (startCentiseconds * WHISPER_TIME_UNIT_US_V78).coerceIn(0L, clip.durationUs)
+    val localEndUs = (endCentiseconds * WHISPER_TIME_UNIT_US_V78).coerceIn(localStartUs, clip.durationUs)
+    if (localEndUs - localStartUs < MIN_CAPTION_US_V77 || text.isBlank()) return null
+    return AutoCaptionDraftV77(
+        text = text,
+        timelineStartUs = clip.timelineStartUs + localStartUs,
+        timelineEndUs = clip.timelineStartUs + localEndUs,
+    )
+}
 
 private fun ByteBuffer.toMonoPcm16V77(channels: Int, encoding: Int): ShortArray {
     val ch = channels.coerceAtLeast(1)
@@ -408,56 +475,6 @@ private fun resampleMonoV77(input: ShortArray, sourceRate: Int, targetRate: Int)
             .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
             .toShort()
     }
-}
-
-private fun ShortArray.toLittleEndianBytesV77(): ByteArray {
-    val output = ByteArray(size * 2)
-    var offset = 0
-    forEach { sample ->
-        val value = sample.toInt()
-        output[offset++] = (value and 0xFF).toByte()
-        output[offset++] = ((value ushr 8) and 0xFF).toByte()
-    }
-    return output
-}
-
-private val WHISPER_TIMESTAMP_V77 = "<\\|(\\d+(?:\\.\\d+)?)\\|>".toRegex()
-private val WHISPER_CONTROL_TOKEN_V77 = "<\\|[^>]+\\|>".toRegex()
-
-private fun parseWhisperTimestampTextV77(raw: String): List<ParsedWhisperSegmentV77> {
-    val matches = WHISPER_TIMESTAMP_V77.findAll(raw).toList()
-    if (matches.size < 2) return emptyList()
-    val output = mutableListOf<ParsedWhisperSegmentV77>()
-    for (i in 0 until matches.lastIndex) {
-        val left = matches[i]
-        val right = matches[i + 1]
-        val text = raw.substring(left.range.last + 1, right.range.first)
-            .replace(WHISPER_CONTROL_TOKEN_V77, "")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-        if (text.isEmpty()) continue
-        val startSeconds = left.groupValues[1].toDoubleOrNull() ?: continue
-        val endSeconds = right.groupValues[1].toDoubleOrNull() ?: continue
-        if (endSeconds <= startSeconds) continue
-        output += ParsedWhisperSegmentV77(
-            text = text,
-            streamStartUs = (startSeconds * US_PER_SECOND).toLong(),
-            streamEndUs = (endSeconds * US_PER_SECOND).toLong(),
-        )
-    }
-    return output.distinctBy { Triple(it.streamStartUs, it.streamEndUs, it.text) }
-}
-
-private fun ParsedWhisperSegmentV77.toTimelineDraftV77(maps: List<StreamMapV77>): AutoCaptionDraftV77? {
-    val map = maps.firstOrNull { streamStartUs >= it.streamStartUs && streamStartUs < it.streamEndUs }
-        ?: maps.lastOrNull { streamStartUs >= it.streamStartUs }
-        ?: return null
-    val localStart = (streamStartUs - map.streamStartUs).coerceIn(0L, map.streamEndUs - map.streamStartUs)
-    val localEnd = (streamEndUs - map.streamStartUs).coerceIn(localStart, map.streamEndUs - map.streamStartUs)
-    val start = map.timelineStartUs + localStart
-    val end = map.timelineStartUs + localEnd
-    if (end - start < MIN_CAPTION_US_V77 || text.isBlank()) return null
-    return AutoCaptionDraftV77(text = text.trim(), timelineStartUs = start, timelineEndUs = end)
 }
 
 private fun splitCaptionForReadabilityV77(source: AutoCaptionDraftV77): List<AutoCaptionDraftV77> {
