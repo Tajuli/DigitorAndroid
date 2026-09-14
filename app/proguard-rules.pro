@@ -7,6 +7,11 @@
 # JNI entry points use this exact Kotlin object/class name.
 -keep class com.tajuli.digitorandroid.editor.processing.NcnnVulkanNativeV52 { *; }
 
+# WhisperKit's published AAR currently ships an empty consumer-rules.pro. Its native JNI bridge
+# resolves WhisperKitImpl/onTextOutput and native methods by their Java/Kotlin names, so R8 must not
+# rename or remove these classes/members in phone/release builds.
+-keep class com.argmaxinc.whisperkit.** { *; }
+
 # AndroidX ViewModelProvider creates this AndroidViewModel through its Application constructor.
 # Keep the class/constructor so opening a freshly-created project cannot fail only in minified APKs.
 -keep class com.tajuli.digitorandroid.ui.editor.EditorViewModelV4 { *; }
