@@ -268,10 +268,10 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // Auto CC V79: keep sherpa and the app's ONNX Runtime on the same native ABI generation.
-    // sherpa-onnx 1.13.8 moved to unpublished ORT 1.28.2; mixing it with Maven ORT 1.29.0 makes
-    // libsherpa-onnx-jni.so fail at class initialization. v1.13.7 uses the published ORT 1.27 line.
-    implementation("com.github.k2-fsa:sherpa-onnx:v1.13.7") {
+    // Auto CC V79: exact native ABI pairing matters because libonnxruntime.so has versioned symbols.
+    // sherpa-onnx v1.13.4 is the release that upgraded to ONNX Runtime 1.27.0, which is also an
+    // official Maven Android artifact. Keep both on 1.27.0 so OnlineRecognizer can load reliably.
+    implementation("com.github.k2-fsa:sherpa-onnx:v1.13.4") {
         exclude(group = "com.github.k2-fsa.sherpa-onnx", module = "sherpa-onnx-jvm")
     }
 
