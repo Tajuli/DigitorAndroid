@@ -268,9 +268,12 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // Auto CC V79: official Apache-2.0 sherpa-onnx Android runtime. Speech models are downloaded
-    // lazily and remain outside the APK so a ~90 MB Bengali model is not paid by every install.
-    implementation("com.github.k2-fsa:sherpa-onnx:v1.13.8")
+    // Auto CC V79: Android AAR already contains the Kotlin API classes. JitPack also declares its
+    // JVM artifact transitively; exclude that duplicate or Android's phone/release packaging sees
+    // every com.k2fsa.sherpa.onnx class twice.
+    implementation("com.github.k2-fsa:sherpa-onnx:v1.13.8") {
+        exclude(group = "com.github.k2-fsa.sherpa-onnx", module = "sherpa-onnx-jvm")
+    }
 
     // Lazy CPU reliability fallback. Primary PP-MattingV2 inference is ncnn Vulkan GPU.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
