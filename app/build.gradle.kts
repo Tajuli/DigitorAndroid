@@ -111,7 +111,7 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
         val output = faceSkinSegmenterModelFile.get().asFile
         downloadGeneratedAssetWithRetry(
             urls = listOf(
-                "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/hair_segmenter.tflite",
+                "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite",
             ),
             output = output,
             minimumBytes = 200_000L,
