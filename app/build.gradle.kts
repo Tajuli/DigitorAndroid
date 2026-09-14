@@ -150,8 +150,8 @@ val downloadPpMattingV2Model by tasks.registering {
         val output = ppMattingV2ModelFile.get().asFile
         downloadGeneratedAssetWithRetry(
             urls = listOf(
-                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2-stdc1-human_512.onnx",
-                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2-stdc1-human_512.onnx?download=true",
+                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2_stdc1_human_512.onnx",
+                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2_stdc1_human_512.onnx?download=true",
             ),
             output = output,
             minimumBytes = 30_000_000L,
@@ -267,9 +267,12 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // Auto CC: MIT-licensed on-device Whisper runtime. Generic LiteRT/TFLite GPU path is used;
-    // Qualcomm QNN dependencies are intentionally not bundled so the Play Store build stays generic.
+    // Auto CC. WhisperKit's published Android native package has a DT_NEEDED dependency on the
+    // Qualcomm LiteRT delegate even when Digitor requests the generic GPU backend. Without these
+    // runtime AARs System.loadLibrary("whisperkit_jni") fails before GPU/CPU backend selection.
     implementation("com.argmaxinc:whisperkit:0.3.3")
+    implementation("com.qualcomm.qti:qnn-runtime:2.34.0")
+    implementation("com.qualcomm.qti:qnn-litert-delegate:2.34.0")
 
     // Lazy CPU reliability fallback. Primary PP-MattingV2 inference is ncnn Vulkan GPU.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
