@@ -109,6 +109,92 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(digitor_whispercpp)
 
+# Android API 24's libvulkan.so exposes the Vulkan 1.0 loader surface and therefore cannot satisfy
+# a hard ELF import of the Vulkan 1.1 core symbol vkGetPhysicalDeviceFeatures2. ggml already uses
+# Vulkan-Hpp's DispatchLoaderDynamic, which resolves instance commands through vkGetInstanceProcAddr.
+# Patch the three pinned v1.9.4 direct calls to use that dispatcher instead, with the KHR alias as a
+# fallback for Vulkan 1.0 devices exposing VK_KHR_get_physical_device_properties2. This keeps the
+# app's minSdk at 24 and avoids raising the native API level merely to satisfy a link-time symbol.
+set(DIGITOR_GGML_VULKAN_SOURCE "${digitor_whispercpp_SOURCE_DIR}/ggml/src/ggml-vulkan/ggml-vulkan.cpp")
+if(GGML_VULKAN AND EXISTS "${DIGITOR_GGML_VULKAN_SOURCE}")
+    file(READ "${DIGITOR_GGML_VULKAN_SOURCE}" DIGITOR_GGML_VULKAN_TEXT)
+
+    set(DIGITOR_FEATURES2_HELPER [=[
+static void digitor_vk_get_physical_device_features2(
+        VkPhysicalDevice physical_device,
+        VkPhysicalDeviceFeatures2 * features) {
+    auto & dispatcher = VULKAN_HPP_DEFAULT_DISPATCHER;
+    if (dispatcher.vkGetPhysicalDeviceFeatures2 != nullptr) {
+        dispatcher.vkGetPhysicalDeviceFeatures2(physical_device, features);
+        return;
+    }
+    if (dispatcher.vkGetPhysicalDeviceFeatures2KHR != nullptr) {
+        dispatcher.vkGetPhysicalDeviceFeatures2KHR(
+            physical_device,
+            reinterpret_cast<VkPhysicalDeviceFeatures2KHR *>(features));
+        return;
+    }
+    throw std::runtime_error("Vulkan Features2 entry point is unavailable");
+}
+]=])
+
+    string(FIND "${DIGITOR_GGML_VULKAN_TEXT}" "#include <thread>" DIGITOR_THREAD_INCLUDE_POS)
+    if(DIGITOR_THREAD_INCLUDE_POS EQUAL -1)
+        message(FATAL_ERROR "Pinned ggml-vulkan source changed: thread include anchor missing")
+    endif()
+    string(REPLACE
+        "#include <thread>"
+        "#include <thread>\n#include <stdexcept>\n\n${DIGITOR_FEATURES2_HELPER}"
+        DIGITOR_GGML_VULKAN_TEXT
+        "${DIGITOR_GGML_VULKAN_TEXT}"
+    )
+
+    set(DIGITOR_FEATURES2_REPLACEMENTS 0)
+    foreach(DIGITOR_FEATURES2_CALL
+            "vkGetPhysicalDeviceFeatures2(device->physical_device, &device_features2);"
+            "vkGetPhysicalDeviceFeatures2(physical_device, &device_features2);"
+            "vkGetPhysicalDeviceFeatures2(vkdev, &device_features2);")
+        string(FIND "${DIGITOR_GGML_VULKAN_TEXT}" "${DIGITOR_FEATURES2_CALL}" DIGITOR_FEATURES2_POS)
+        if(DIGITOR_FEATURES2_POS EQUAL -1)
+            message(FATAL_ERROR "Pinned ggml-vulkan source changed: expected Features2 call missing: ${DIGITOR_FEATURES2_CALL}")
+        endif()
+        string(REPLACE
+            "${DIGITOR_FEATURES2_CALL}"
+            "digitor_vk_get_physical_device_features2(static_cast<VkPhysicalDevice>(${DIGITOR_FEATURES2_CALL}))"
+            DIGITOR_UNUSED_REPLACEMENT
+            "${DIGITOR_FEATURES2_CALL}"
+        )
+        math(EXPR DIGITOR_FEATURES2_REPLACEMENTS "${DIGITOR_FEATURES2_REPLACEMENTS} + 1")
+    endforeach()
+
+    # Replace each exact upstream statement explicitly. Keeping the replacements literal makes a
+    # future whisper.cpp pin fail configure rather than silently applying an incompatible patch.
+    string(REPLACE
+        "vkGetPhysicalDeviceFeatures2(device->physical_device, &device_features2);"
+        "digitor_vk_get_physical_device_features2(static_cast<VkPhysicalDevice>(device->physical_device), &device_features2);"
+        DIGITOR_GGML_VULKAN_TEXT
+        "${DIGITOR_GGML_VULKAN_TEXT}"
+    )
+    string(REPLACE
+        "vkGetPhysicalDeviceFeatures2(physical_device, &device_features2);"
+        "digitor_vk_get_physical_device_features2(static_cast<VkPhysicalDevice>(physical_device), &device_features2);"
+        DIGITOR_GGML_VULKAN_TEXT
+        "${DIGITOR_GGML_VULKAN_TEXT}"
+    )
+    string(REPLACE
+        "vkGetPhysicalDeviceFeatures2(vkdev, &device_features2);"
+        "digitor_vk_get_physical_device_features2(static_cast<VkPhysicalDevice>(vkdev), &device_features2);"
+        DIGITOR_GGML_VULKAN_TEXT
+        "${DIGITOR_GGML_VULKAN_TEXT}"
+    )
+
+    if(NOT DIGITOR_FEATURES2_REPLACEMENTS EQUAL 3)
+        message(FATAL_ERROR "Expected to patch exactly three Vulkan Features2 calls")
+    endif()
+    file(WRITE "${DIGITOR_GGML_VULKAN_SOURCE}" "${DIGITOR_GGML_VULKAN_TEXT}")
+    message(STATUS "Digitor Auto CC: patched Vulkan Features2 calls for Android API 24 loader compatibility")
+endif()
+
 # whisper.cpp v1.9.4 finds SPIRV-Headers but its ggml-vulkan target does not consume the imported
 # target's include directory. Attach both pinned Khronos include roots directly so Android cross
 # compilation sees <vulkan/vulkan.hpp> and <spirv/unified1/spirv.hpp> deterministically.
