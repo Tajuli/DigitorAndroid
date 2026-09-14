@@ -3,12 +3,13 @@
 This file records third-party components intentionally introduced by Digitor Auto CC.
 It is not legal advice; release packaging should retain the applicable notices and license texts.
 
-## WhisperKit Android 0.3.3
+## whisper.cpp / ggml (pinned v1.9.4 commit)
 
-- Project: `argmaxinc/WhisperKitAndroid`
-- Purpose: on-device automatic speech recognition
+- Project: `ggml-org/whisper.cpp`
+- Pinned commit: `927cfce34f31707e17f2bff35c349632fb9e2c3a`
+- Purpose: on-device Whisper inference, including ggml Vulkan GPU and CPU backends
 - License: MIT
-- Copyright: Copyright (c) 2024 argmax, inc.
+- Copyright: Copyright (c) 2023-2026 The ggml authors
 
 MIT License
 
@@ -30,10 +31,11 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## OpenAI Whisper
+## OpenAI Whisper models
 
 - Project: `openai/whisper`
-- Purpose: Whisper speech-recognition architecture/model family used by the Auto CC runtime
+- Purpose: Whisper multilingual model family; Digitor downloads the selected converted ggml model on first use
+- Model host used by the upstream whisper.cpp downloader: `ggerganov/whisper.cpp` on Hugging Face
 - License: MIT
 - Copyright: Copyright (c) 2022 OpenAI
 
@@ -57,38 +59,19 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Qualcomm QNN Runtime / LiteRT delegate 2.34.0
+## Khronos SPIR-V Headers
 
-Digitor packages `com.qualcomm.qti:qnn-runtime:2.34.0` and
-`com.qualcomm.qti:qnn-litert-delegate:2.34.0` because the published WhisperKit Android
-native binary has a hard dynamic-library dependency on `libQnnTFLiteDelegate.so`.
-Without those AARs, `System.loadLibrary("whisperkit_jni")` fails before Digitor can
-select either the GPU or CPU inference backend.
+- Project: `KhronosGroup/SPIRV-Headers`
+- Pinned commit: `04fd3caa1e8267e4d95c806cad901181728e1006`
+- Purpose: build-time headers required by ggml's Vulkan shader generator
+- Primary source/header license: MIT (the repository also contains documentation/specification files under their stated licenses)
 
-These Qualcomm runtime components are **not MIT/open-source software**. Maven Central
-identifies them under Qualcomm's license terms. Keep Qualcomm's copyright/proprietary
-notices and review the exact redistribution terms before a Play Store production
-release. They must not be described as part of Digitor's MIT/open-source dependency set.
-
-If Digitor's release policy requires every Auto CC runtime component to be OSI-style
-open source, this WhisperKit binary path should be replaced rather than shipping the
-Qualcomm runtime.
-
-## FFmpeg libraries used inside WhisperKit Android
-
-WhisperKit Android's native build links FFmpeg `avformat`, `avcodec`, `avutil`, and
-`swresample` as **shared libraries** and its build script configures FFmpeg with
-`--disable-static --enable-shared`. Those FFmpeg components are generally distributed
-under LGPL-2.1-or-later when no GPL-only options are enabled.
-
-For a Play Store release, retain the FFmpeg copyright/license notice, distribute a
-copy of the applicable LGPL license with the app or accompanying legal notices, and
-provide the corresponding FFmpeg source (or an equivalent compliant source offer)
-for the exact binary version bundled by the pinned WhisperKit artifact. Do not switch
-WhisperKit's FFmpeg build to GPL/nonfree options without re-checking the app's licensing.
+The SPIR-V header sources are fetched only while building the native Vulkan backend. Digitor retains
+the upstream notices and does not ship the source repository as an app feature.
 
 ## Release note
 
-The Auto CC feature does not require a paid/cloud speech API. Model inference runs on
-the user's device. The first use downloads the selected model from the model host and
-then reuses the cached copy.
+Auto CC no longer includes WhisperKit, Qualcomm QNN, or WhisperKit's FFmpeg runtime. The speech
+engine is built from the pinned whisper.cpp/ggml source and uses Vulkan first with CPU fallback.
+No paid/cloud speech API is required. The selected multilingual model is downloaded on first use,
+then reused from private app storage; user audio remains on-device.
