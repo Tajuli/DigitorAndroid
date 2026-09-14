@@ -216,8 +216,7 @@ android {
         compose = true
     }
 
-    // WhisperKit ships JNI + FFmpeg/TFLite shared objects. Legacy packaging ensures the runtime can
-    // resolve those sibling .so files from applicationInfo.nativeLibraryDir on physical devices.
+    // Native editor engines (ncnn + whisper.cpp/ggml) are packaged as real app .so libraries.
     packaging {
         jniLibs {
             useLegacyPackaging = true
@@ -267,12 +266,7 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // Auto CC. WhisperKit's published Android native package has a DT_NEEDED dependency on the
-    // Qualcomm LiteRT delegate even when Digitor requests the generic GPU backend. Without these
-    // runtime AARs System.loadLibrary("whisperkit_jni") fails before GPU/CPU backend selection.
-    implementation("com.argmaxinc:whisperkit:0.3.3")
-    implementation("com.qualcomm.qti:qnn-runtime:2.34.0")
-    implementation("com.qualcomm.qti:qnn-litert-delegate:2.34.0")
+    // Auto CC V78 is built from pinned whisper.cpp/ggml source in CMake; no proprietary QNN AAR.
 
     // Lazy CPU reliability fallback. Primary PP-MattingV2 inference is ncnn Vulkan GPU.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
