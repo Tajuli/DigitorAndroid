@@ -48,6 +48,20 @@ file(WRITE "${DIGITOR_SPIRV_CONFIG_DIR}/SPIRV-HeadersConfig.cmake"
 "endif()\n")
 set(SPIRV-Headers_DIR "${DIGITOR_SPIRV_CONFIG_DIR}" CACHE PATH "Pinned SPIRV-Headers package" FORCE)
 
+# Android NDK 29 exposes the Vulkan C API, but its sysroot does not include Vulkan-Hpp
+# (vulkan/vulkan.hpp), which ggml's Vulkan backend includes directly. Pin the Khronos headers and
+# make CMake's Vulkan::Vulkan imported target use them while still linking Android's libvulkan.
+set(DIGITOR_VULKAN_HEADERS_COMMIT "e3b1eec08173d6b825cd3ac88c885a63b621504a") # Vulkan-Headers v1.4.357
+FetchContent_Declare(
+    digitor_vulkan_headers
+    URL "https://github.com/KhronosGroup/Vulkan-Headers/archive/${DIGITOR_VULKAN_HEADERS_COMMIT}.tar.gz"
+)
+FetchContent_GetProperties(digitor_vulkan_headers)
+if(NOT digitor_vulkan_headers_POPULATED)
+    FetchContent_Populate(digitor_vulkan_headers)
+endif()
+set(Vulkan_INCLUDE_DIR "${digitor_vulkan_headers_SOURCE_DIR}/include" CACHE PATH "Pinned Vulkan-Headers include directory" FORCE)
+
 # Find the host glslc bundled with the Android NDK. ggml uses it only at build time to compile
 # Vulkan shaders; the generated SPIR-V is embedded in the native library and no compiler ships in APK.
 set(DIGITOR_NDK_ROOT "${ANDROID_NDK}")
@@ -99,7 +113,7 @@ FetchContent_MakeAvailable(digitor_whispercpp)
 # valid for the matting target, but Whisper/ggml relies on IEEE NaN/Infinity semantics and its
 # numerics should not inherit fast-math. Clang processes these target-local flags after the global
 # flags, so the speech engine gets normal IEEE math while PP-Matting keeps its optimized setting.
-foreach(DIGITOR_GGML_TARGET ggml-base ggml-cpu ggml whisper)
+foreach(DIGITOR_GGML_TARGET ggml-base ggml-cpu ggml ggml-vulkan whisper)
     if(TARGET ${DIGITOR_GGML_TARGET})
         target_compile_options(${DIGITOR_GGML_TARGET} PRIVATE -fno-fast-math -fno-finite-math-only)
     endif()
