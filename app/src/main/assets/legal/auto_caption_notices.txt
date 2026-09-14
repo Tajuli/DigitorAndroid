@@ -1,56 +1,31 @@
-DIGITOR AUTO CC - THIRD-PARTY NOTICES
+DIGITOR AUTO CC V79 - THIRD-PARTY NOTICES
 
-whisper.cpp / ggml
-Pinned upstream: ggml-org/whisper.cpp commit 927cfce34f31707e17f2bff35c349632fb9e2c3a (v1.9.4)
-Copyright (c) 2023-2026 The ggml authors
-MIT License
+sherpa-onnx Android runtime
+Project: k2-fsa/sherpa-onnx
+Version: v1.13.8
+License: Apache License 2.0
+Purpose: On-device streaming speech recognition runtime and Android JNI bindings.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Bengali speech model
+Model: alphacep/vosk-model-small-streaming-bn
+Pinned revision: dfabeea5eee1f33d81436826d0575d8cfd64bd1d
+License: Apache License 2.0
+Purpose: Dedicated Bengali streaming Zipformer2 recognition.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+English speech model
+Model: csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17
+Pinned revision: d42f2d9f7ca24806fb667456a18a9f1b60f70d16
+License: Apache License 2.0
+Purpose: Compact English streaming Zipformer recognition using INT8 encoder/decoder/joiner files.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+The complete Apache License 2.0 text is packaged at assets/legal/APACHE-2.0.txt.
 
-OpenAI Whisper models
-Copyright (c) 2022 OpenAI
-MIT License
+ONNX Runtime
+sherpa-onnx uses ONNX Runtime internally. Digitor already includes Android ONNX Runtime for its
+PP-Matting reliability fallback. ONNX Runtime is distributed under the MIT License; retain the
+upstream ONNX Runtime notices/license with production distributions as applicable.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-Khronos SPIR-V Headers
-Pinned upstream: KhronosGroup/SPIRV-Headers commit 04fd3caa1e8267e4d95c806cad901181728e1006.
-The header source used by the ggml Vulkan shader build is provided under the upstream MIT terms;
-the upstream repository also identifies separate documentation/specification-file licenses.
-See THIRD_PARTY_NOTICES.md in the Digitor source distribution for details.
-
-Auto CC V78 does not package WhisperKit, Qualcomm QNN, or WhisperKit FFmpeg libraries.
-Inference runs on-device using whisper.cpp Vulkan first with CPU fallback. The selected multilingual
-model is downloaded on first use and cached in private app storage.
+Auto CC V79 does not package or use Whisper, WhisperKit, ggml, Qualcomm QNN, or the former
+WhisperKit FFmpeg runtime. Recognition is performed locally on the device. The selected speech model
+is downloaded on first use and cached in private app storage; user audio/video is not uploaded to a
+speech API.
