@@ -3,6 +3,7 @@ package com.tajuli.digitorandroid.editor.processing
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.render.autoCaptionExportTextureCountV80
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -66,5 +67,21 @@ class AutoCaptionEngineV77Test {
 
         assertEquals(0, cleared.autoCaptionCountV77())
         assertEquals(listOf(manual), cleared.textOverlays)
+    }
+
+    @Test
+    fun manyGeneratedCaptionsUseOneExportTexture() {
+        val captions = (0 until 21).map { index ->
+            val start = index * 1_000_000L
+            AutoCaptionDraftV77(
+                text = "caption $index",
+                timelineStartUs = start,
+                timelineEndUs = start + 900_000L,
+            )
+        }
+        val project = TimelineProject().withAutoCaptionsV77(captions)
+
+        assertEquals(21, project.autoCaptionCountV77())
+        assertEquals(1, autoCaptionExportTextureCountV80(project.textOverlays))
     }
 }
