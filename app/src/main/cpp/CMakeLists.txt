@@ -95,8 +95,17 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(digitor_whispercpp)
 
+# The PP-Matting Gradle block historically passes -ffast-math to the whole native build. ggml
+# explicitly requires IEEE NaN/Infinity semantics, so override only finite-math on ggml targets.
+# PP-Matting still keeps its own target-local -ffast-math above.
+foreach(DIGITOR_GGML_TARGET ggml-base ggml-cpu ggml whisper)
+    if(TARGET ${DIGITOR_GGML_TARGET})
+        target_compile_options(${DIGITOR_GGML_TARGET} PRIVATE -fno-finite-math-only)
+    endif()
+endforeach()
+
 add_library(digitor_whispercpp SHARED WhisperCppJni.cpp)
 target_compile_features(digitor_whispercpp PRIVATE cxx_std_17)
-target_compile_options(digitor_whispercpp PRIVATE -O3 -fvisibility=hidden)
+target_compile_options(digitor_whispercpp PRIVATE -O3 -fno-finite-math-only -fvisibility=hidden)
 target_include_directories(digitor_whispercpp PRIVATE "${digitor_whispercpp_SOURCE_DIR}/include")
 target_link_libraries(digitor_whispercpp PRIVATE whisper ${log-lib})
