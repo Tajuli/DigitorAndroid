@@ -33,7 +33,6 @@ set(DIGITOR_SPIRV_HEADERS_COMMIT "04fd3caa1e8267e4d95c806cad901181728e1006")
 FetchContent_Declare(
     digitor_spirv_headers
     URL "https://github.com/KhronosGroup/SPIRV-Headers/archive/${DIGITOR_SPIRV_HEADERS_COMMIT}.tar.gz"
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_GetProperties(digitor_spirv_headers)
 if(NOT digitor_spirv_headers_POPULATED)
@@ -79,21 +78,20 @@ set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
 set(GGML_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
 
-# Vulkan is the primary path. If a host toolchain truly cannot provide glslc we still build the
-# same JNI API CPU-only instead of breaking the entire editor build; CI/Play builds use NDK glslc.
-if(Vulkan_GLSLC_EXECUTABLE)
+# Vulkan is the primary path on actual supported phones. Emulator/x86 parity builds do not need it.
+if(ANDROID_ABI STREQUAL "arm64-v8a" AND Vulkan_GLSLC_EXECUTABLE)
     set(GGML_VULKAN ON CACHE BOOL "" FORCE)
     message(STATUS "Digitor Auto CC: whisper.cpp Vulkan enabled with ${Vulkan_GLSLC_EXECUTABLE}")
 else()
     set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
-    message(WARNING "Digitor Auto CC: glslc not found; building CPU fallback only")
+    message(STATUS "Digitor Auto CC: building CPU backend for ${ANDROID_ABI}")
 endif()
 
 FetchContent_Declare(
     digitor_whispercpp
     URL "https://github.com/ggml-org/whisper.cpp/archive/${DIGITOR_WHISPER_CPP_COMMIT}.tar.gz"
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(digitor_whispercpp)
 
