@@ -150,8 +150,8 @@ val downloadPpMattingV2Model by tasks.registering {
         val output = ppMattingV2ModelFile.get().asFile
         downloadGeneratedAssetWithRetry(
             urls = listOf(
-                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2_stdc1_human_512.onnx",
-                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2_stdc1_human_512.onnx?download=true",
+                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2-stdc1-human_512.onnx",
+                "https://huggingface.co/pstic/spatialthings-onnx/resolve/main/ppmattingv2-stdc1-human_512.onnx?download=true",
             ),
             output = output,
             minimumBytes = 30_000_000L,
