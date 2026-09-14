@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- WhisperKit's published Android runtime declares API 26. Digitor still installs on API 24/25;
+         Auto CC is runtime-gated to Android 8.0+ and never loads its native library below that. -->
+    <uses-sdk tools:overrideLibrary="com.argmaxinc.whisperkit" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
