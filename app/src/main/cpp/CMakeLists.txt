@@ -109,6 +109,16 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(digitor_whispercpp)
 
+# whisper.cpp v1.9.4 finds SPIRV-Headers but its ggml-vulkan target does not consume the imported
+# target's include directory. Attach both pinned Khronos include roots directly so Android cross
+# compilation sees <vulkan/vulkan.hpp> and <spirv/unified1/spirv.hpp> deterministically.
+if(TARGET ggml-vulkan)
+    target_include_directories(ggml-vulkan PRIVATE
+        "${digitor_vulkan_headers_SOURCE_DIR}/include"
+        "${digitor_spirv_headers_SOURCE_DIR}/include"
+    )
+endif()
+
 # The pre-existing PP-Matting Gradle block passes -ffast-math to the whole native build. That is
 # valid for the matting target, but Whisper/ggml relies on IEEE NaN/Infinity semantics and its
 # numerics should not inherit fast-math. Clang processes these target-local flags after the global
