@@ -7,6 +7,12 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import android.os.Build
+import com.k2fsa.sherpa.onnx.FeatureConfig
+import com.k2fsa.sherpa.onnx.OnlineModelConfig
+import com.k2fsa.sherpa.onnx.OnlineRecognizer
+import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OnlineRecognizerResult
+import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 import com.tajuli.digitorandroid.editor.model.TextAlignmentV2
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TextStyleV2
@@ -14,7 +20,6 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
-import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
@@ -35,11 +40,23 @@ private const val AUTO_CC_TRACK_NAME_V77 = "CC"
 private const val TARGET_SAMPLE_RATE_V77 = 16_000
 private const val MIN_CAPTION_US_V77 = 180_000L
 private const val MAX_CAPTION_CHARS_V77 = 42
-private const val WHISPER_TIME_UNIT_US_V78 = 10_000L // whisper.cpp segment times are centiseconds
+private const val MAX_CAPTION_SPAN_US_V79 = 4_200_000L
+private const val TAIL_SILENCE_SAMPLES_V79 = 16_000
 
+/**
+ * V79 intentionally stops using Whisper. Dedicated streaming Zipformer models are faster and much
+ * less fragile on Android because Digitor consumes sherpa-onnx's prebuilt Android runtime instead of
+ * compiling a second Vulkan stack into the editor.
+ */
 enum class AutoCaptionQualityV77(val label: String, val detail: String) {
-    FAST("Fast", "Tiny Q5 multilingual · fastest Vulkan path"),
-    ACCURATE("Accurate", "Base Q5 multilingual · better accuracy"),
+    FAST("Fast", "Greedy decode · lower CPU use"),
+    ACCURATE("Accurate", "Beam search · better recognition"),
+}
+
+enum class AutoCaptionLanguageV79(val label: String, val detail: String) {
+    BANGLA("বাংলা", "Dedicated Bengali Zipformer2 model"),
+    ENGLISH("English", "Small English Zipformer INT8 model"),
+    AUTO("Auto", "Try Bengali first; use English when the result is not Bengali"),
 }
 
 data class AutoCaptionProgressV77(
@@ -59,232 +76,335 @@ data class AutoCaptionResultV77(
     val model: String,
 )
 
-private data class WhisperModelSpecV78(
-    val fileName: String,
-    val url: String,
+private data class RemoteModelFileV79(
+    val remotePath: String,
+    val localName: String,
     val minimumBytes: Long,
+)
+
+private data class ZipformerModelSpecV79(
+    val language: AutoCaptionLanguageV79,
+    val directoryName: String,
+    val baseUrl: String,
     val displayName: String,
-    val bestOf: Int,
+    val modelType: String,
+    val dither: Float,
+    val files: List<RemoteModelFileV79>,
 )
 
-private data class NativeSegmentV78(
-    val text: String,
-    val startCentiseconds: Long,
-    val endCentiseconds: Long,
+private data class InstalledZipformerModelV79(
+    val spec: ZipformerModelSpecV79,
+    val directory: File,
+) {
+    val encoder: File get() = File(directory, "encoder.onnx")
+    val decoder: File get() = File(directory, "decoder.onnx")
+    val joiner: File get() = File(directory, "joiner.onnx")
+    val tokens: File get() = File(directory, "tokens.txt")
+}
+
+private data class RecognitionV79(
+    val language: AutoCaptionLanguageV79,
+    val result: OnlineRecognizerResult,
 )
 
-/**
- * V78 Auto CC engine.
- *
- * This deliberately does not use WhisperKit. The previous Android artifact could load only when a
- * proprietary Qualcomm QNN delegate was packaged and its multilingual path produced unreliable text
- * on the target phone. V78 uses pinned MIT-licensed whisper.cpp/ggml, requests Vulkan first, retains
- * ggml CPU fallback, lets whisper.cpp auto-detect Bangla/English, and consumes whisper.cpp's own
- * segment timestamps.
- */
-class WhisperGpuAutoCaptionEngineV77(private val context: Context) {
+private val BANGLA_MODEL_V79 = ZipformerModelSpecV79(
+    language = AutoCaptionLanguageV79.BANGLA,
+    directoryName = "bn-zipformer2-2026-02-09",
+    baseUrl = "https://huggingface.co/alphacep/vosk-model-small-streaming-bn/resolve/dfabeea5eee1f33d81436826d0575d8cfd64bd1d",
+    displayName = "Bengali Zipformer2 0.60",
+    modelType = "zipformer2",
+    dither = 3e-5f,
+    files = listOf(
+        RemoteModelFileV79("am-onnx/encoder.onnx", "encoder.onnx", 80_000_000L),
+        RemoteModelFileV79("am-onnx/decoder.onnx", "decoder.onnx", 1_500_000L),
+        RemoteModelFileV79("am-onnx/joiner.onnx", "joiner.onnx", 700_000L),
+        RemoteModelFileV79("lang/tokens.txt", "tokens.txt", 4_000L),
+    ),
+)
+
+private val ENGLISH_MODEL_V79 = ZipformerModelSpecV79(
+    language = AutoCaptionLanguageV79.ENGLISH,
+    directoryName = "en-zipformer-20m-int8-2023-02-17",
+    baseUrl = "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17/resolve/d42f2d9f7ca24806fb667456a18a9f1b60f70d16",
+    displayName = "English Zipformer 20M INT8",
+    modelType = "zipformer",
+    dither = 0f,
+    files = listOf(
+        RemoteModelFileV79("encoder-epoch-99-avg-1.int8.onnx", "encoder.onnx", 35_000_000L),
+        RemoteModelFileV79("decoder-epoch-99-avg-1.int8.onnx", "decoder.onnx", 400_000L),
+        RemoteModelFileV79("joiner-epoch-99-avg-1.int8.onnx", "joiner.onnx", 200_000L),
+        RemoteModelFileV79("tokens.txt", "tokens.txt", 4_000L),
+    ),
+)
+
+class ZipformerAutoCaptionEngineV79(private val context: Context) {
 
     companion object {
+        private val supportedAbis = setOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+
         fun supportedOnThisDevice(): Boolean =
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
-                Build.SUPPORTED_ABIS.any { it == "arm64-v8a" }
+                Build.SUPPORTED_ABIS.any { it in supportedAbis }
     }
 
     suspend fun generate(
         project: TimelineProject,
         audioTrackId: String,
         quality: AutoCaptionQualityV77,
+        language: AutoCaptionLanguageV79 = AutoCaptionLanguageV79.BANGLA,
         onProgress: (AutoCaptionProgressV77) -> Unit = {},
     ): AutoCaptionResultV77 {
-        check(supportedOnThisDevice()) {
-            "Auto CC requires a 64-bit ARM Android phone"
-        }
+        check(supportedOnThisDevice()) { "Auto CC is not available on this Android ABI" }
         val track = project.track(audioTrackId)
             ?.takeIf { it.kind == TrackKind.AUDIO && !it.muted }
             ?: error("Select an unmuted audio track")
         val clips = track.sortedClips()
         require(clips.isNotEmpty()) { "${track.name} has no audio clips" }
 
-        val spec = when (quality) {
-            AutoCaptionQualityV77.FAST -> WhisperModelSpecV78(
-                fileName = "ggml-tiny-q5_1.bin",
-                url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin",
-                minimumBytes = 20_000_000L,
-                displayName = "Whisper Tiny Q5 multilingual",
-                bestOf = 1,
-            )
-            AutoCaptionQualityV77.ACCURATE -> WhisperModelSpecV78(
-                fileName = "ggml-base-q5_1.bin",
-                url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin",
-                minimumBytes = 45_000_000L,
-                displayName = "Whisper Base Q5 multilingual",
-                bestOf = 3,
-            )
-        }
+        val recognizers = mutableMapOf<AutoCaptionLanguageV79, OnlineRecognizer>()
+        val installed = mutableMapOf<AutoCaptionLanguageV79, InstalledZipformerModelV79>()
+        val usedModels = linkedSetOf<String>()
 
-        val model = ensureWhisperModelV78(spec, onProgress)
-        return try {
-            runBackendV78(
-                clips = clips,
-                model = model,
-                spec = spec,
-                useGpu = true,
-                backendLabel = "Vulkan GPU",
-                onProgress = onProgress,
-            )
-        } catch (gpuError: Throwable) {
-            currentCoroutineContext().ensureActive()
-            onProgress(AutoCaptionProgressV77(.18f, "Vulkan unavailable · retrying CPU fallback"))
-            runCatching {
-                runBackendV78(
-                    clips = clips,
-                    model = model,
-                    spec = spec,
-                    useGpu = false,
-                    backendLabel = "CPU fallback",
-                    onProgress = onProgress,
-                )
-            }.getOrElse { cpuError ->
-                throw IllegalStateException(
-                    "Auto CC failed on Vulkan (${gpuError.message ?: "unknown"}) and CPU (${cpuError.message ?: "unknown"})",
-                    cpuError,
-                )
+        suspend fun recognizerFor(requested: AutoCaptionLanguageV79): OnlineRecognizer {
+            require(requested != AutoCaptionLanguageV79.AUTO)
+            recognizers[requested]?.let { return it }
+            val spec = when (requested) {
+                AutoCaptionLanguageV79.BANGLA -> BANGLA_MODEL_V79
+                AutoCaptionLanguageV79.ENGLISH -> ENGLISH_MODEL_V79
+                AutoCaptionLanguageV79.AUTO -> error("AUTO has no direct recognizer")
+            }
+            val model = installed[requested] ?: ensureModelV79(spec, onProgress).also {
+                installed[requested] = it
+            }
+            return withContext(Dispatchers.Default) {
+                createRecognizerV79(model, quality).also {
+                    recognizers[requested] = it
+                    usedModels += spec.displayName
+                }
             }
         }
-    }
 
-    private suspend fun runBackendV78(
-        clips: List<TimelineClip>,
-        model: File,
-        spec: WhisperModelSpecV78,
-        useGpu: Boolean,
-        backendLabel: String,
-        onProgress: (AutoCaptionProgressV77) -> Unit,
-    ): AutoCaptionResultV77 = withContext(Dispatchers.Default) {
-        currentCoroutineContext().ensureActive()
-        onProgress(AutoCaptionProgressV77(.17f, "Loading ${spec.displayName} · $backendLabel"))
-
-        var nativeContext = 0L
-        try {
-            nativeContext = WhisperCppNativeV78.createContext(model.absolutePath, useGpu)
-            check(nativeContext != 0L) { "whisper.cpp context initialization returned null" }
-
-            val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
+        return try {
             val drafts = mutableListOf<AutoCaptionDraftV77>()
             val totalDuration = clips.sumOf { it.durationUs }.coerceAtLeast(1L)
             var completedDuration = 0L
 
             clips.forEachIndexed { index, clip ->
                 currentCoroutineContext().ensureActive()
+                val progressBase = completedDuration.toFloat() / totalDuration.toFloat()
                 onProgress(
                     AutoCaptionProgressV77(
-                        .20f + .70f * (completedDuration.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f),
-                        "$backendLabel · decoding ${index + 1}/${clips.size}",
+                        .18f + .70f * progressBase.coerceIn(0f, 1f),
+                        "Decoding speech ${index + 1}/${clips.size}",
                     ),
                 )
-                val audio = decodeClipToFloatV78(clip)
+                val audio = decodeClipToFloatV79(clip)
                 if (audio.isNotEmpty()) {
-                    currentCoroutineContext().ensureActive()
-                    val encodedSegments = WhisperCppNativeV78.transcribeSegments(
-                        contextPtr = nativeContext,
-                        audioData = audio,
-                        threadCount = threads,
-                        bestOf = spec.bestOf,
-                    )
-                    encodedSegments
-                        .mapNotNull(::parseNativeSegmentV78)
-                        .mapNotNull { segment -> segment.toTimelineDraftV78(clip) }
-                        .flatMap(::splitCaptionForReadabilityV77)
-                        .let(drafts::addAll)
+                    val recognition = when (language) {
+                        AutoCaptionLanguageV79.BANGLA -> RecognitionV79(
+                            AutoCaptionLanguageV79.BANGLA,
+                            recognizeV79(recognizerFor(AutoCaptionLanguageV79.BANGLA), audio),
+                        )
+                        AutoCaptionLanguageV79.ENGLISH -> RecognitionV79(
+                            AutoCaptionLanguageV79.ENGLISH,
+                            recognizeV79(recognizerFor(AutoCaptionLanguageV79.ENGLISH), audio),
+                        )
+                        AutoCaptionLanguageV79.AUTO -> recognizeAutoV79(
+                            audio = audio,
+                            bangla = recognizerFor(AutoCaptionLanguageV79.BANGLA),
+                            englishProvider = { recognizerFor(AutoCaptionLanguageV79.ENGLISH) },
+                        )
+                    }
+                    recognition.result.toTimelineDraftsV79(clip).let(drafts::addAll)
                 }
                 completedDuration += clip.durationUs
                 onProgress(
                     AutoCaptionProgressV77(
-                        .20f + .76f * (completedDuration.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f),
-                        "$backendLabel transcribing · ${index + 1}/${clips.size}",
+                        .18f + .78f * (completedDuration.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f),
+                        "Transcribing ${index + 1}/${clips.size}",
                     ),
                 )
             }
 
             val normalized = drafts.normalizeCaptionOrderV77()
-            require(normalized.isNotEmpty()) {
-                "No speech was detected on the selected audio track"
-            }
-            onProgress(AutoCaptionProgressV77(1f, "${normalized.size} captions ready · $backendLabel"))
+            require(normalized.isNotEmpty()) { "No speech was detected on the selected audio track" }
+            onProgress(AutoCaptionProgressV77(1f, "${normalized.size} captions ready"))
             AutoCaptionResultV77(
                 captions = normalized,
-                backend = backendLabel,
-                model = spec.displayName,
+                backend = "sherpa-onnx CPU",
+                model = usedModels.joinToString(" + ").ifBlank { "Zipformer" },
             )
         } finally {
-            if (nativeContext != 0L) runCatching { WhisperCppNativeV78.freeContext(nativeContext) }
+            recognizers.values.forEach { recognizer -> runCatching { recognizer.release() } }
         }
     }
 
-    private suspend fun ensureWhisperModelV78(
-        spec: WhisperModelSpecV78,
-        onProgress: (AutoCaptionProgressV77) -> Unit,
-    ): File = withContext(Dispatchers.IO) {
-        val directory = File(context.filesDir, "auto_cc_models_v78").apply { mkdirs() }
-        val target = File(directory, spec.fileName)
-        if (target.isFile && target.length() > spec.minimumBytes) {
-            onProgress(AutoCaptionProgressV77(.15f, "Speech model cached · ${spec.displayName}"))
-            return@withContext target
+    private fun createRecognizerV79(
+        model: InstalledZipformerModelV79,
+        quality: AutoCaptionQualityV77,
+    ): OnlineRecognizer {
+        val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        val modelConfig = OnlineModelConfig(
+            transducer = OnlineTransducerModelConfig(
+                encoder = model.encoder.absolutePath,
+                decoder = model.decoder.absolutePath,
+                joiner = model.joiner.absolutePath,
+            ),
+            tokens = model.tokens.absolutePath,
+            numThreads = threads,
+            provider = "cpu",
+            modelType = model.spec.modelType,
+        )
+        val config = OnlineRecognizerConfig(
+            featConfig = FeatureConfig(
+                sampleRate = TARGET_SAMPLE_RATE_V77,
+                featureDim = 80,
+                dither = model.spec.dither,
+            ),
+            modelConfig = modelConfig,
+            enableEndpoint = false,
+            decodingMethod = if (quality == AutoCaptionQualityV77.ACCURATE) {
+                "modified_beam_search"
+            } else {
+                "greedy_search"
+            },
+            maxActivePaths = if (quality == AutoCaptionQualityV77.ACCURATE) 10 else 4,
+        )
+        return OnlineRecognizer(config = config)
+    }
+
+    private fun recognizeV79(recognizer: OnlineRecognizer, audio: FloatArray): OnlineRecognizerResult {
+        val stream = recognizer.createStream()
+        try {
+            stream.acceptWaveform(audio, TARGET_SAMPLE_RATE_V77)
+            stream.acceptWaveform(FloatArray(TAIL_SILENCE_SAMPLES_V79), TARGET_SAMPLE_RATE_V77)
+            stream.inputFinished()
+            while (recognizer.isReady(stream)) {
+                recognizer.decode(stream)
+            }
+            return recognizer.getResult(stream)
+        } finally {
+            runCatching { stream.release() }
+        }
+    }
+
+    private suspend fun recognizeAutoV79(
+        audio: FloatArray,
+        bangla: OnlineRecognizer,
+        englishProvider: suspend () -> OnlineRecognizer,
+    ): RecognitionV79 {
+        val bn = recognizeV79(bangla, audio)
+        val bnText = bn.text.normalizeCaptionTextV79()
+        if (bnText.isNotBlank() && bnText.banglaCharacterRatioV79() >= .20f) {
+            return RecognitionV79(AutoCaptionLanguageV79.BANGLA, bn)
         }
 
-        val temp = File(directory, "${spec.fileName}.download")
-        if (temp.exists()) temp.delete()
-        var connection: HttpURLConnection? = null
-        try {
-            onProgress(AutoCaptionProgressV77(.01f, "Downloading ${spec.displayName}"))
-            connection = URI(spec.url).toURL().openConnection() as HttpURLConnection
-            connection.instanceFollowRedirects = true
-            connection.connectTimeout = 30_000
-            connection.readTimeout = 300_000
-            connection.setRequestProperty("User-Agent", "DigitorAndroid-AutoCC/1.0")
-            connection.setRequestProperty("Accept", "application/octet-stream,*/*")
-            val response = connection.responseCode
-            require(response in 200..299) { "Speech model download returned HTTP $response" }
-            val expected = connection.contentLengthLong.takeIf { it > 0L }
-            var copied = 0L
-            connection.inputStream.buffered().use { input ->
-                temp.outputStream().buffered().use { output ->
-                    val buffer = ByteArray(1024 * 1024)
-                    while (true) {
-                        currentCoroutineContext().ensureActive()
-                        val read = input.read(buffer)
-                        if (read <= 0) break
-                        output.write(buffer, 0, read)
-                        copied += read
-                        val downloadFraction = if (expected != null) {
-                            (copied.toDouble() / expected.toDouble()).toFloat().coerceIn(0f, 1f)
-                        } else {
-                            (copied.toDouble() / max(spec.minimumBytes, copied).toDouble()).toFloat().coerceIn(0f, 1f)
+        currentCoroutineContext().ensureActive()
+        val en = recognizeV79(englishProvider(), audio)
+        val enText = en.text.normalizeCaptionTextV79()
+        if (enText.isBlank()) return RecognitionV79(AutoCaptionLanguageV79.BANGLA, bn)
+        if (bnText.isBlank()) return RecognitionV79(AutoCaptionLanguageV79.ENGLISH, en)
+
+        val bnConfidence = bn.safeMeanProbabilityV79()
+        val enConfidence = en.safeMeanProbabilityV79()
+        return if (enConfidence > bnConfidence + .04f || enText.asciiLetterRatioV79() > bnText.asciiLetterRatioV79()) {
+            RecognitionV79(AutoCaptionLanguageV79.ENGLISH, en)
+        } else {
+            RecognitionV79(AutoCaptionLanguageV79.BANGLA, bn)
+        }
+    }
+
+    private suspend fun ensureModelV79(
+        spec: ZipformerModelSpecV79,
+        onProgress: (AutoCaptionProgressV77) -> Unit,
+    ): InstalledZipformerModelV79 = withContext(Dispatchers.IO) {
+        val directory = File(context.filesDir, "auto_cc_models_v79/${spec.directoryName}").apply { mkdirs() }
+        val totalFiles = spec.files.size
+        spec.files.forEachIndexed { index, remote ->
+            currentCoroutineContext().ensureActive()
+            val target = File(directory, remote.localName)
+            if (target.isFile && target.length() > remote.minimumBytes) return@forEachIndexed
+            downloadModelFileV79(
+                url = "${spec.baseUrl}/${remote.remotePath}?download=true",
+                target = target,
+                minimumBytes = remote.minimumBytes,
+                label = spec.displayName,
+                fileIndex = index,
+                fileCount = totalFiles,
+                onProgress = onProgress,
+            )
+        }
+        onProgress(AutoCaptionProgressV77(.17f, "Model ready · ${spec.displayName}"))
+        InstalledZipformerModelV79(spec, directory)
+    }
+
+    private suspend fun downloadModelFileV79(
+        url: String,
+        target: File,
+        minimumBytes: Long,
+        label: String,
+        fileIndex: Int,
+        fileCount: Int,
+        onProgress: (AutoCaptionProgressV77) -> Unit,
+    ) {
+        val temp = File(target.parentFile, "${target.name}.download")
+        var lastError: Throwable? = null
+        repeat(3) { attempt ->
+            currentCoroutineContext().ensureActive()
+            if (temp.exists()) temp.delete()
+            var connection: HttpURLConnection? = null
+            try {
+                connection = URI(url).toURL().openConnection() as HttpURLConnection
+                connection.instanceFollowRedirects = true
+                connection.connectTimeout = 30_000
+                connection.readTimeout = 300_000
+                connection.setRequestProperty("User-Agent", "DigitorAndroid-AutoCC/1.0")
+                connection.setRequestProperty("Accept", "application/octet-stream,*/*")
+                val response = connection.responseCode
+                require(response in 200..299) { "Model download returned HTTP $response" }
+                val expected = connection.contentLengthLong.takeIf { it > 0L }
+                var copied = 0L
+                connection.inputStream.buffered().use { input ->
+                    temp.outputStream().buffered().use { output ->
+                        val buffer = ByteArray(1024 * 1024)
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val read = input.read(buffer)
+                            if (read <= 0) break
+                            output.write(buffer, 0, read)
+                            copied += read
+                            val withinFile = if (expected != null) {
+                                (copied.toDouble() / expected.toDouble()).toFloat().coerceIn(0f, 1f)
+                            } else {
+                                (copied.toDouble() / max(minimumBytes, copied).toDouble()).toFloat().coerceIn(0f, 1f)
+                            }
+                            val overall = (fileIndex + withinFile) / fileCount.toFloat()
+                            onProgress(
+                                AutoCaptionProgressV77(
+                                    .01f + overall * .15f,
+                                    "Downloading $label · ${(overall * 100f).roundToInt()}%",
+                                ),
+                            )
                         }
-                        onProgress(
-                            AutoCaptionProgressV77(
-                                .01f + downloadFraction * .13f,
-                                "Speech model ${(downloadFraction * 100f).roundToInt()}%",
-                            ),
-                        )
                     }
                 }
+                require(temp.length() > minimumBytes) { "Downloaded model file is incomplete" }
+                if (target.exists()) target.delete()
+                check(temp.renameTo(target)) { "Could not install ${target.name}" }
+                return
+            } catch (error: Throwable) {
+                lastError = error
+                if (temp.exists()) temp.delete()
+                if (attempt < 2) Thread.sleep(1_500L * (attempt + 1))
+            } finally {
+                connection?.disconnect()
             }
-            require(temp.length() > spec.minimumBytes) {
-                "Downloaded speech model is incomplete (${temp.length()} bytes)"
-            }
-            if (target.exists()) target.delete()
-            check(temp.renameTo(target)) { "Could not install ${spec.fileName}" }
-            onProgress(AutoCaptionProgressV77(.15f, "Speech model ready · ${spec.displayName}"))
-            target
-        } finally {
-            connection?.disconnect()
-            if (temp.exists() && (!target.exists() || target.length() <= spec.minimumBytes)) temp.delete()
         }
+        throw IllegalStateException("Could not download $label (${target.name})", lastError)
     }
 
-    /** Decode only the selected timeline range to 16 kHz mono float PCM expected by whisper.cpp. */
-    private suspend fun decodeClipToFloatV78(clip: TimelineClip): FloatArray {
+    /** Decode only the selected timeline range to 16 kHz mono float PCM expected by sherpa-onnx. */
+    private suspend fun decodeClipToFloatV79(clip: TimelineClip): FloatArray {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         var codecStarted = false
@@ -406,26 +526,87 @@ class WhisperGpuAutoCaptionEngineV77(private val context: Context) {
     }
 }
 
-private fun parseNativeSegmentV78(encoded: String): NativeSegmentV78? {
-    val parts = encoded.split('\t', limit = 3)
-    if (parts.size < 3) return null
-    val t0 = parts[0].toLongOrNull() ?: return null
-    val t1 = parts[1].toLongOrNull() ?: return null
-    val text = parts[2].replace(Regex("\\s+"), " ").trim()
-    if (text.isBlank() || t1 <= t0) return null
-    return NativeSegmentV78(text, t0, t1)
+private fun OnlineRecognizerResult.toTimelineDraftsV79(clip: TimelineClip): List<AutoCaptionDraftV77> {
+    val cleanText = text.normalizeCaptionTextV79()
+    if (cleanText.isBlank()) return emptyList()
+    val words = cleanText.split(Regex("\\s+")).filter { it.isNotBlank() }
+    if (words.isEmpty()) return emptyList()
+
+    val usableTimes = timestamps
+        .filter { it.isFinite() && it >= 0f }
+        .map { (it * 1_000_000f).toLong().coerceIn(0L, clip.durationUs) }
+
+    fun startForWord(index: Int): Long {
+        if (usableTimes.isEmpty()) {
+            return clip.durationUs * index / words.size.coerceAtLeast(1)
+        }
+        if (words.size == 1) return usableTimes.first()
+        val mapped = ((index.toDouble() / (words.size - 1).toDouble()) * (usableTimes.size - 1))
+            .roundToInt()
+            .coerceIn(0, usableTimes.lastIndex)
+        return usableTimes[mapped]
+    }
+
+    val groups = mutableListOf<Pair<List<String>, Long>>()
+    var current = mutableListOf<String>()
+    var currentStart = startForWord(0)
+    words.forEachIndexed { index, word ->
+        val wordStart = startForWord(index)
+        val candidateLength = current.sumOf { it.length } + current.size + word.length
+        val punctuationBreak = current.lastOrNull()?.endsWithAnyPunctuationV79() == true
+        val tooLong = current.isNotEmpty() && candidateLength > MAX_CAPTION_CHARS_V77
+        val tooWide = current.isNotEmpty() && wordStart - currentStart > MAX_CAPTION_SPAN_US_V79
+        if (current.isNotEmpty() && (tooLong || tooWide || punctuationBreak)) {
+            groups += current.toList() to currentStart
+            current = mutableListOf()
+            currentStart = wordStart
+        }
+        if (current.isEmpty()) currentStart = wordStart
+        current += word
+    }
+    if (current.isNotEmpty()) groups += current.toList() to currentStart
+
+    return groups.mapIndexedNotNull { index, (groupWords, localStart) ->
+        val nextStart = groups.getOrNull(index + 1)?.second
+        val localEnd = if (nextStart != null) {
+            nextStart
+        } else {
+            min(clip.durationUs, max(localStart + 900_000L, (usableTimes.lastOrNull() ?: localStart) + 1_200_000L))
+        }.coerceAtLeast(localStart + MIN_CAPTION_US_V77)
+            .coerceAtMost(clip.durationUs)
+        if (localEnd <= localStart) return@mapIndexedNotNull null
+        AutoCaptionDraftV77(
+            text = groupWords.joinToString(" ").normalizeCaptionTextV79(),
+            timelineStartUs = clip.timelineStartUs + localStart,
+            timelineEndUs = clip.timelineStartUs + localEnd,
+        )
+    }
 }
 
-private fun NativeSegmentV78.toTimelineDraftV78(clip: TimelineClip): AutoCaptionDraftV77? {
-    val localStartUs = (startCentiseconds * WHISPER_TIME_UNIT_US_V78).coerceIn(0L, clip.durationUs)
-    val localEndUs = (endCentiseconds * WHISPER_TIME_UNIT_US_V78).coerceIn(localStartUs, clip.durationUs)
-    if (localEndUs - localStartUs < MIN_CAPTION_US_V77 || text.isBlank()) return null
-    return AutoCaptionDraftV77(
-        text = text,
-        timelineStartUs = clip.timelineStartUs + localStartUs,
-        timelineEndUs = clip.timelineStartUs + localEndUs,
-    )
+private fun OnlineRecognizerResult.safeMeanProbabilityV79(): Float {
+    val safe = ysProbs.filter { it.isFinite() && it in 0f..1f }
+    return if (safe.isEmpty()) .5f else safe.average().toFloat()
 }
+
+private fun String.normalizeCaptionTextV79(): String =
+    replace('▁', ' ')
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
+private fun String.banglaCharacterRatioV79(): Float {
+    val letters = count { it.isLetter() }.coerceAtLeast(1)
+    val bangla = count { it.code in 0x0980..0x09FF }
+    return bangla.toFloat() / letters.toFloat()
+}
+
+private fun String.asciiLetterRatioV79(): Float {
+    val letters = count { it.isLetter() }.coerceAtLeast(1)
+    val ascii = count { it in 'A'..'Z' || it in 'a'..'z' }
+    return ascii.toFloat() / letters.toFloat()
+}
+
+private fun String.endsWithAnyPunctuationV79(): Boolean =
+    endsWith('.') || endsWith('?') || endsWith('!') || endsWith('।') || endsWith(';') || endsWith(':')
 
 private fun ByteBuffer.toMonoPcm16V77(channels: Int, encoding: Int): ShortArray {
     val ch = channels.coerceAtLeast(1)
@@ -476,52 +657,6 @@ private fun resampleMonoV77(input: ShortArray, sourceRate: Int, targetRate: Int)
             .toShort()
     }
 }
-
-private fun splitCaptionForReadabilityV77(source: AutoCaptionDraftV77): List<AutoCaptionDraftV77> {
-    if (source.text.length <= MAX_CAPTION_CHARS_V77) return listOf(source)
-    val words = source.text.split(Regex("\\s+")).filter { it.isNotBlank() }
-    if (words.size <= 1) {
-        val chunks = source.text.chunked(MAX_CAPTION_CHARS_V77)
-        return distributeCaptionChunksV77(source, chunks)
-    }
-    val chunks = mutableListOf<String>()
-    var current = StringBuilder()
-    words.forEach { word ->
-        val candidateLength = current.length + if (current.isEmpty()) 0 else 1 + word.length
-        if (candidateLength > MAX_CAPTION_CHARS_V77 && current.isNotEmpty()) {
-            chunks += current.toString()
-            current = StringBuilder(word)
-        } else {
-            if (current.isNotEmpty()) current.append(' ')
-            current.append(word)
-        }
-    }
-    if (current.isNotEmpty()) chunks += current.toString()
-    return distributeCaptionChunksV77(source, chunks)
-}
-
-private fun distributeCaptionChunksV77(
-    source: AutoCaptionDraftV77,
-    chunks: List<String>,
-): List<AutoCaptionDraftV77> {
-    if (chunks.size <= 1) return listOf(source.copy(text = chunks.firstOrNull() ?: source.text))
-    val totalWeight = chunks.sumOf { max(1, it.length) }.toLong()
-    var cursor = source.timelineStartUs
-    return chunks.mapIndexed { index, text ->
-        val remaining = source.timelineEndUs - cursor
-        val duration = if (index == chunks.lastIndex) {
-            remaining
-        } else {
-            max(MIN_CAPTION_US_V77, source.durationShareV77(text.length, totalWeight))
-                .coerceAtMost(remaining)
-        }
-        val end = if (index == chunks.lastIndex) source.timelineEndUs else (cursor + duration).coerceAtMost(source.timelineEndUs)
-        AutoCaptionDraftV77(text.trim(), cursor, end).also { cursor = end }
-    }.filter { it.timelineEndUs - it.timelineStartUs >= MIN_CAPTION_US_V77 }
-}
-
-private fun AutoCaptionDraftV77.durationShareV77(weight: Int, totalWeight: Long): Long =
-    ((timelineEndUs - timelineStartUs).coerceAtLeast(1L) * max(1, weight) / totalWeight.coerceAtLeast(1L))
 
 private fun List<AutoCaptionDraftV77>.normalizeCaptionOrderV77(): List<AutoCaptionDraftV77> {
     if (isEmpty()) return emptyList()
