@@ -111,7 +111,7 @@ val downloadFaceSkinSegmenterModel by tasks.registering {
         val output = faceSkinSegmenterModelFile.get().asFile
         downloadGeneratedAssetWithRetry(
             urls = listOf(
-                "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite",
+                "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/hair_segmenter.tflite",
             ),
             output = output,
             minimumBytes = 200_000L,
@@ -216,10 +216,12 @@ android {
         compose = true
     }
 
-    // Native editor engines (ncnn + whisper.cpp/ggml) are packaged as real app .so libraries.
+    // Native editor engines are packaged as real app .so libraries. sherpa-onnx and the existing
+    // ONNX Runtime fallback both carry libonnxruntime.so; they use the same C ABI, so package one copy.
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            pickFirsts += setOf("**/libonnxruntime.so")
         }
     }
 
@@ -266,7 +268,9 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // Auto CC V78 is built from pinned whisper.cpp/ggml source in CMake; no proprietary QNN AAR.
+    // Auto CC V79: official Apache-2.0 sherpa-onnx Android runtime. Speech models are downloaded
+    // lazily and remain outside the APK so a ~90 MB Bengali model is not paid by every install.
+    implementation("com.github.k2-fsa:sherpa-onnx:v1.13.8")
 
     // Lazy CPU reliability fallback. Primary PP-MattingV2 inference is ncnn Vulkan GPU.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
