@@ -268,9 +268,12 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // Auto CC V79: exact native ABI pairing matters because libonnxruntime.so has versioned symbols.
-    // sherpa-onnx v1.13.4 is the release that upgraded to ONNX Runtime 1.27.0, which is also an
-    // official Maven Android artifact. Keep both on 1.27.0 so OnlineRecognizer can load reliably.
+    // Auto CC V80: Accurate mode downloads a pinned .tar.bz2 Omnilingual model on first use.
+    // Commons Compress is Apache-2.0 and only handles that local archive extraction.
+    implementation("org.apache.commons:commons-compress:1.28.0")
+
+    // Auto CC: exact native ABI pairing matters because libonnxruntime.so has versioned symbols.
+    // sherpa-onnx v1.13.4 is paired with the official ONNX Runtime 1.27.0 Android artifact.
     implementation("com.github.k2-fsa:sherpa-onnx:v1.13.4") {
         exclude(group = "com.github.k2-fsa.sherpa-onnx", module = "sherpa-onnx-jvm")
     }
