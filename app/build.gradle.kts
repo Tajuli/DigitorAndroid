@@ -216,6 +216,14 @@ android {
         compose = true
     }
 
+    // WhisperKit ships JNI + FFmpeg/TFLite shared objects. Legacy packaging ensures the runtime can
+    // resolve those sibling .so files from applicationInfo.nativeLibraryDir on physical devices.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     sourceSets["main"].assets.srcDir(generatedHairModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedFaceSkinModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedPersonDetectorAssets.get().asFile)
@@ -258,6 +266,10 @@ dependencies {
     implementation("com.google.code.gson:gson:2.13.1")
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
+
+    // Auto CC: MIT-licensed on-device Whisper runtime. Generic LiteRT/TFLite GPU path is used;
+    // Qualcomm QNN dependencies are intentionally not bundled so the Play Store build stays generic.
+    implementation("com.argmaxinc:whisperkit:0.3.3")
 
     // Lazy CPU reliability fallback. Primary PP-MattingV2 inference is ncnn Vulkan GPU.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
