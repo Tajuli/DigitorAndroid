@@ -41,9 +41,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.processing.AutoCaptionLanguageV79
 import com.tajuli.digitorandroid.editor.processing.AutoCaptionProgressV77
 import com.tajuli.digitorandroid.editor.processing.AutoCaptionQualityV77
-import com.tajuli.digitorandroid.editor.processing.WhisperGpuAutoCaptionEngineV77
+import com.tajuli.digitorandroid.editor.processing.ZipformerAutoCaptionEngineV79
 import com.tajuli.digitorandroid.editor.processing.autoCaptionCountV77
 import com.tajuli.digitorandroid.editor.processing.clearAutoCaptionsV77
 import com.tajuli.digitorandroid.editor.processing.withAutoCaptionsV77
@@ -56,7 +57,7 @@ private val CC77Panel = Color(0xFF121217)
 private val CC77Muted = Color(0xFF9898A1)
 
 /**
- * Small launcher above the existing workspace rail. The generated clips are normal TextOverlayClip
+ * Small launcher above the existing workspace rail. Generated clips remain normal TextOverlayClip
  * items, so creators can immediately switch to Text and edit words, style, position or keyframes.
  */
 @Composable
@@ -92,10 +93,11 @@ private fun AutoCaptionDialogV77(
     val state by vm.state.collectAsState()
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
-    val engine = remember(context) { WhisperGpuAutoCaptionEngineV77(context) }
+    val engine = remember(context) { ZipformerAutoCaptionEngineV79(context) }
     val audioTracks = state.project.tracks.filter { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
     var selectedTrackId by remember { mutableStateOf(audioTracks.firstOrNull { it.name == "A1" }?.id ?: audioTracks.firstOrNull()?.id) }
-    var quality by remember { mutableStateOf(AutoCaptionQualityV77.FAST) }
+    var language by remember { mutableStateOf(AutoCaptionLanguageV79.BANGLA) }
+    var quality by remember { mutableStateOf(AutoCaptionQualityV77.ACCURATE) }
     var running by remember { mutableStateOf(false) }
     var progress by remember { mutableFloatStateOf(0f) }
     var status by remember { mutableStateOf("Ready") }
@@ -121,6 +123,7 @@ private fun AutoCaptionDialogV77(
                         project = state.project,
                         audioTrackId = trackId,
                         quality = quality,
+                        language = language,
                         onProgress = { update: AutoCaptionProgressV77 ->
                             scope.launch {
                                 progress = update.fraction.coerceIn(0f, 1f)
@@ -132,12 +135,12 @@ private fun AutoCaptionDialogV77(
             }.onSuccess { result ->
                 val nextProject = state.project.withAutoCaptionsV77(result.captions)
                 vm.commitProjectV19(
-                    label = "auto-caption-v77",
+                    label = "auto-caption-v79",
                     project = nextProject,
                     status = "Auto CC · ${result.captions.size} captions · ${result.backend}",
                 )
                 progress = 1f
-                status = "${result.captions.size} captions ready"
+                status = "${result.captions.size} captions ready · ${result.model}"
                 lastBackend = result.backend
             }.onFailure { error ->
                 status = error.message ?: "Auto CC failed"
@@ -157,19 +160,19 @@ private fun AutoCaptionDialogV77(
                 verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
                 Text(
-                    "GPU-first on-device captions. Audio stays on your phone; first use downloads the speech model, then it works from the local cache.",
+                    "On-device Zipformer captions. Audio stays on your phone; first use downloads only the selected speech model, then it runs from local cache.",
                     fontSize = 9.sp,
                     color = Color.White.copy(alpha = .78f),
                 )
                 Text(
-                    "Multilingual · Bangla/English auto detect · real Whisper timestamps · captions remain editable in Text",
+                    "বাংলা-first · English available · token timestamps · captions remain editable in Text",
                     fontSize = 8.sp,
                     color = CC77Muted,
                 )
 
-                if (!WhisperGpuAutoCaptionEngineV77.supportedOnThisDevice()) {
+                if (!ZipformerAutoCaptionEngineV79.supportedOnThisDevice()) {
                     Text(
-                        "Auto CC needs Android 8.0+ on a 64-bit ARM phone. The rest of Digitor still supports older devices.",
+                        "Auto CC is not available for this device ABI. The rest of Digitor is unaffected.",
                         fontSize = 9.sp,
                         color = Color(0xFFFFB4AB),
                     )
@@ -197,6 +200,25 @@ private fun AutoCaptionDialogV77(
                     }
                 }
 
+                Text("Language", fontSize = 8.sp, color = CC77Muted)
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    AutoCaptionLanguageV79.entries.forEach { item ->
+                        if (item == language) {
+                            Button(onClick = { language = item }, enabled = !running, modifier = Modifier.height(34.dp)) {
+                                Text(item.label, fontSize = 8.sp)
+                            }
+                        } else {
+                            OutlinedButton(onClick = { language = item }, enabled = !running, modifier = Modifier.height(34.dp)) {
+                                Text(item.label, fontSize = 8.sp)
+                            }
+                        }
+                    }
+                }
+                Text(language.detail, fontSize = 8.sp, color = CC77Muted)
+
                 Text("Mode", fontSize = 8.sp, color = CC77Muted)
                 Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                     AutoCaptionQualityV77.entries.forEach { item ->
@@ -220,7 +242,14 @@ private fun AutoCaptionDialogV77(
                     )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(status, modifier = Modifier.weight(1f), fontSize = 8.sp, color = if (running) CC77Accent else CC77Muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        status,
+                        modifier = Modifier.weight(1f),
+                        fontSize = 8.sp,
+                        color = if (running) CC77Accent else CC77Muted,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                     lastBackend?.let { backend -> Text(backend, fontSize = 8.sp, color = CC77Accent) }
                 }
 
@@ -229,7 +258,7 @@ private fun AutoCaptionDialogV77(
                     TextButton(
                         onClick = {
                             vm.commitProjectV19(
-                                label = "clear-auto-caption-v77",
+                                label = "clear-auto-caption-v79",
                                 project = state.project.clearAutoCaptionsV77(),
                                 status = "Auto captions cleared",
                             )
@@ -245,7 +274,7 @@ private fun AutoCaptionDialogV77(
         confirmButton = {
             Button(
                 onClick = ::startGenerate,
-                enabled = !running && selectedTrackId != null && WhisperGpuAutoCaptionEngineV77.supportedOnThisDevice(),
+                enabled = !running && selectedTrackId != null && ZipformerAutoCaptionEngineV79.supportedOnThisDevice(),
             ) {
                 Text(if (running) "Generating…" else "Generate Auto CC")
             }
