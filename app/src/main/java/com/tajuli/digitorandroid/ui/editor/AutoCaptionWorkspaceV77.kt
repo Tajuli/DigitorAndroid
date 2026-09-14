@@ -44,7 +44,7 @@ import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.processing.AutoCaptionLanguageV79
 import com.tajuli.digitorandroid.editor.processing.AutoCaptionProgressV77
 import com.tajuli.digitorandroid.editor.processing.AutoCaptionQualityV77
-import com.tajuli.digitorandroid.editor.processing.ZipformerAutoCaptionEngineV79
+import com.tajuli.digitorandroid.editor.processing.HybridAutoCaptionEngineV80
 import com.tajuli.digitorandroid.editor.processing.autoCaptionCountV77
 import com.tajuli.digitorandroid.editor.processing.clearAutoCaptionsV77
 import com.tajuli.digitorandroid.editor.processing.withAutoCaptionsV77
@@ -93,7 +93,7 @@ private fun AutoCaptionDialogV77(
     val state by vm.state.collectAsState()
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
-    val engine = remember(context) { ZipformerAutoCaptionEngineV79(context) }
+    val engine = remember(context) { HybridAutoCaptionEngineV80(context) }
     val audioTracks = state.project.tracks.filter { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
     var selectedTrackId by remember { mutableStateOf(audioTracks.firstOrNull { it.name == "A1" }?.id ?: audioTracks.firstOrNull()?.id) }
     var language by remember { mutableStateOf(AutoCaptionLanguageV79.BANGLA) }
@@ -135,7 +135,7 @@ private fun AutoCaptionDialogV77(
             }.onSuccess { result ->
                 val nextProject = state.project.withAutoCaptionsV77(result.captions)
                 vm.commitProjectV19(
-                    label = "auto-caption-v79",
+                    label = "auto-caption-v80",
                     project = nextProject,
                     status = "Auto CC · ${result.captions.size} captions · ${result.backend}",
                 )
@@ -160,17 +160,17 @@ private fun AutoCaptionDialogV77(
                 verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
                 Text(
-                    "On-device Zipformer captions. Audio stays on your phone; first use downloads only the selected speech model, then it runs from local cache.",
+                    "On-device captions. Fast uses the smaller Zipformer model; Accurate uses a larger Omnilingual v2 model for better recognition. Audio stays on your phone.",
                     fontSize = 9.sp,
                     color = Color.White.copy(alpha = .78f),
                 )
                 Text(
-                    "বাংলা-first · English available · token timestamps · captions remain editable in Text",
+                    "বাংলা + English · token timestamps · captions remain editable in Text",
                     fontSize = 8.sp,
                     color = CC77Muted,
                 )
 
-                if (!ZipformerAutoCaptionEngineV79.supportedOnThisDevice()) {
+                if (!HybridAutoCaptionEngineV80.supportedOnThisDevice()) {
                     Text(
                         "Auto CC is not available for this device ABI. The rest of Digitor is unaffected.",
                         fontSize = 9.sp,
@@ -217,7 +217,15 @@ private fun AutoCaptionDialogV77(
                         }
                     }
                 }
-                Text(language.detail, fontSize = 8.sp, color = CC77Muted)
+                Text(
+                    if (quality == AutoCaptionQualityV77.ACCURATE) {
+                        "Omnilingual v2 handles Bangla/English and code-switching automatically"
+                    } else {
+                        language.detail
+                    },
+                    fontSize = 8.sp,
+                    color = CC77Muted,
+                )
 
                 Text("Mode", fontSize = 8.sp, color = CC77Muted)
                 Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -233,7 +241,15 @@ private fun AutoCaptionDialogV77(
                         }
                     }
                 }
-                Text(quality.detail, fontSize = 8.sp, color = CC77Muted)
+                Text(
+                    if (quality == AutoCaptionQualityV77.ACCURATE) {
+                        "Omnilingual v2 300M INT8 · higher accuracy · ~235 MB first download"
+                    } else {
+                        "Greedy Zipformer decode · lower CPU and download size"
+                    },
+                    fontSize = 8.sp,
+                    color = CC77Muted,
+                )
 
                 if (running || progress > 0f) {
                     LinearProgressIndicator(
@@ -258,7 +274,7 @@ private fun AutoCaptionDialogV77(
                     TextButton(
                         onClick = {
                             vm.commitProjectV19(
-                                label = "clear-auto-caption-v79",
+                                label = "clear-auto-caption-v80",
                                 project = state.project.clearAutoCaptionsV77(),
                                 status = "Auto captions cleared",
                             )
@@ -274,7 +290,7 @@ private fun AutoCaptionDialogV77(
         confirmButton = {
             Button(
                 onClick = ::startGenerate,
-                enabled = !running && selectedTrackId != null && ZipformerAutoCaptionEngineV79.supportedOnThisDevice(),
+                enabled = !running && selectedTrackId != null && HybridAutoCaptionEngineV80.supportedOnThisDevice(),
             ) {
                 Text(if (running) "Generating…" else "Generate Auto CC")
             }
