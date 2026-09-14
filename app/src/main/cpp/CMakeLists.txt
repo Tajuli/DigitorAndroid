@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(digitor_ppmatting_ncnn LANGUAGES CXX)
+project(digitor_native LANGUAGES C CXX)
 
 # V69 chooses 256/320/384/512 at runtime. The selected ncnn graph is fixed-shape, but the JNI bridge
 # itself must not bake one compile-time tensor size into the shared library.
@@ -20,3 +20,85 @@ find_package(ncnn REQUIRED)
 find_library(log-lib log)
 
 target_link_libraries(digitor_ppmatting_ncnn ncnn ${log-lib})
+
+# -----------------------------------------------------------------------------
+# Auto CC V78: whisper.cpp + ggml Vulkan, with the same library retaining CPU fallback.
+# Everything fetched here is pinned to an immutable commit. No Qualcomm/QNN binary is required.
+# -----------------------------------------------------------------------------
+include(FetchContent)
+
+# ggml's Vulkan backend asks for a SPIRV-Headers CMake package. Android's NDK ships Vulkan itself,
+# but not that host-side CMake package, so materialize a tiny package config around pinned headers.
+set(DIGITOR_SPIRV_HEADERS_COMMIT "04fd3caa1e8267e4d95c806cad901181728e1006")
+FetchContent_Declare(
+    digitor_spirv_headers
+    URL "https://github.com/KhronosGroup/SPIRV-Headers/archive/${DIGITOR_SPIRV_HEADERS_COMMIT}.tar.gz"
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_GetProperties(digitor_spirv_headers)
+if(NOT digitor_spirv_headers_POPULATED)
+    FetchContent_Populate(digitor_spirv_headers)
+endif()
+
+set(DIGITOR_SPIRV_CONFIG_DIR "${CMAKE_BINARY_DIR}/digitor-spirv-headers-config")
+file(MAKE_DIRECTORY "${DIGITOR_SPIRV_CONFIG_DIR}")
+file(WRITE "${DIGITOR_SPIRV_CONFIG_DIR}/SPIRV-HeadersConfig.cmake"
+"if(NOT TARGET SPIRV-Headers::SPIRV-Headers)\n"
+"  add_library(SPIRV-Headers::SPIRV-Headers INTERFACE IMPORTED)\n"
+"  set_target_properties(SPIRV-Headers::SPIRV-Headers PROPERTIES INTERFACE_INCLUDE_DIRECTORIES \"${digitor_spirv_headers_SOURCE_DIR}/include\")\n"
+"endif()\n")
+set(SPIRV-Headers_DIR "${DIGITOR_SPIRV_CONFIG_DIR}" CACHE PATH "Pinned SPIRV-Headers package" FORCE)
+
+# Find the host glslc bundled with the Android NDK. ggml uses it only at build time to compile
+# Vulkan shaders; the generated SPIR-V is embedded in the native library and no compiler ships in APK.
+set(DIGITOR_NDK_ROOT "${ANDROID_NDK}")
+if(NOT DIGITOR_NDK_ROOT)
+    set(DIGITOR_NDK_ROOT "${CMAKE_ANDROID_NDK}")
+endif()
+file(GLOB DIGITOR_GLSLC_CANDIDATES
+    "${DIGITOR_NDK_ROOT}/shader-tools/*/glslc"
+    "${DIGITOR_NDK_ROOT}/shader-tools/*/glslc.exe"
+)
+if(DIGITOR_GLSLC_CANDIDATES)
+    list(GET DIGITOR_GLSLC_CANDIDATES 0 DIGITOR_GLSLC)
+    set(Vulkan_GLSLC_EXECUTABLE "${DIGITOR_GLSLC}" CACHE FILEPATH "Android NDK glslc" FORCE)
+else()
+    find_program(DIGITOR_GLSLC NAMES glslc)
+    if(DIGITOR_GLSLC)
+        set(Vulkan_GLSLC_EXECUTABLE "${DIGITOR_GLSLC}" CACHE FILEPATH "Host glslc" FORCE)
+    endif()
+endif()
+
+set(DIGITOR_WHISPER_CPP_COMMIT "927cfce34f31707e17f2bff35c349632fb9e2c3a") # whisper.cpp v1.9.4
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(WHISPER_CURL OFF CACHE BOOL "" FORCE)
+set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(GGML_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+
+# Vulkan is the primary path. If a host toolchain truly cannot provide glslc we still build the
+# same JNI API CPU-only instead of breaking the entire editor build; CI/Play builds use NDK glslc.
+if(Vulkan_GLSLC_EXECUTABLE)
+    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+    message(STATUS "Digitor Auto CC: whisper.cpp Vulkan enabled with ${Vulkan_GLSLC_EXECUTABLE}")
+else()
+    set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+    message(WARNING "Digitor Auto CC: glslc not found; building CPU fallback only")
+endif()
+
+FetchContent_Declare(
+    digitor_whispercpp
+    URL "https://github.com/ggml-org/whisper.cpp/archive/${DIGITOR_WHISPER_CPP_COMMIT}.tar.gz"
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(digitor_whispercpp)
+
+add_library(digitor_whispercpp SHARED WhisperCppJni.cpp)
+target_compile_features(digitor_whispercpp PRIVATE cxx_std_17)
+target_compile_options(digitor_whispercpp PRIVATE -O3 -fvisibility=hidden)
+target_include_directories(digitor_whispercpp PRIVATE "${digitor_whispercpp_SOURCE_DIR}/include")
+target_link_libraries(digitor_whispercpp PRIVATE whisper ${log-lib})
