@@ -1,7 +1,8 @@
 DIGITOR AUTO CC - THIRD-PARTY NOTICES
 
-WhisperKit Android 0.3.3
-Copyright (c) 2024 argmax, inc.
+whisper.cpp / ggml
+Pinned upstream: ggml-org/whisper.cpp commit 927cfce34f31707e17f2bff35c349632fb9e2c3a (v1.9.4)
+Copyright (c) 2023-2026 The ggml authors
 MIT License
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -22,7 +23,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-OpenAI Whisper
+OpenAI Whisper models
 Copyright (c) 2022 OpenAI
 MIT License
 
@@ -44,18 +45,12 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-Qualcomm QNN Runtime / LiteRT delegate 2.34.0
-Digitor includes com.qualcomm.qti:qnn-runtime and qnn-litert-delegate because the
-published WhisperKit Android native binary requires libQnnTFLiteDelegate.so at load
-time. These Qualcomm components are proprietary and are governed by Qualcomm's own
-license terms; they are not covered by the MIT notices above. Retain Qualcomm notices
-and review the exact redistribution terms before Play Store production release.
+Khronos SPIR-V Headers
+Pinned upstream: KhronosGroup/SPIRV-Headers commit 04fd3caa1e8267e4d95c806cad901181728e1006.
+The header source used by the ggml Vulkan shader build is provided under the upstream MIT terms;
+the upstream repository also identifies separate documentation/specification-file licenses.
+See THIRD_PARTY_NOTICES.md in the Digitor source distribution for details.
 
-FFmpeg notice
-WhisperKit Android links FFmpeg avformat, avcodec, avutil and swresample as shared
-libraries. The upstream WhisperKit build script configures FFmpeg with
---disable-static --enable-shared. FFmpeg LGPL components are covered by the GNU
-Lesser General Public License, version 2.1 or later. Release packaging must retain
-the applicable FFmpeg notice/license and make corresponding source available as
-required by that license. See the repository THIRD_PARTY_NOTICES.md for release
-compliance notes.
+Auto CC V78 does not package WhisperKit, Qualcomm QNN, or WhisperKit FFmpeg libraries.
+Inference runs on-device using whisper.cpp Vulkan first with CPU fallback. The selected multilingual
+model is downloaded on first use and cached in private app storage.
