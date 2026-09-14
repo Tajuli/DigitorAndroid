@@ -32,10 +32,8 @@ constexpr int kTokenLangLast = 50357;
 constexpr int kTokenTranscribe = 50359;
 constexpr int kTokenNoCaptions = 50362;
 constexpr int kTokenNoTimestamps = 50363;
-constexpr int kMaxDecodedTokens = 448;
-constexpr int kBeamSize = 5;
-constexpr int kMaxFinishedBeams = 5;
-constexpr int kTopK = 5;
+constexpr int kMaxDecodedTokens = 192;
+constexpr int kKvCacheUnavailable = -7001;
 
 // Token order is defined by the multilingual OpenAI Whisper tokenizer and matches Tencent ncnn's
 // official examples/whisper.cpp implementation.
@@ -105,6 +103,7 @@ public:
     std::string decodeText(const std::vector<int>& tokens) const {
         std::string encoded;
         for (const int token : tokens) {
+            // Whisper special/control tokens start at end-of-text. Only decode actual text tokens.
             if (token >= 0 && token < kTokenEndOfText && token < static_cast<int>(reverseVocab.size())) {
                 encoded += reverseVocab[static_cast<size_t>(token)];
             }
@@ -177,12 +176,6 @@ struct CaptionSegment {
     std::string text;
 };
 
-struct BeamResult {
-    std::vector<int> ids;
-    float score = 0.f;
-    std::vector<ncnn::Mat> kvcache;
-};
-
 void LogSoftmaxInPlace(ncnn::Mat& logits) {
     ncnn::Option option;
     option.use_packing_layout = false;
@@ -231,7 +224,9 @@ std::vector<CaptionSegment> SplitTranscriptAcrossDuration(
         }
         const int64_t localStart = durationUs * static_cast<int64_t>(wordStart) / static_cast<int64_t>(words.size());
         int64_t localEnd = durationUs * static_cast<int64_t>(wordEnd) / static_cast<int64_t>(words.size());
-        if (localEnd <= localStart) localEnd = std::min(durationUs, localStart + 180000LL);
+        if (localEnd <= localStart) {
+            localEnd = std::min<int64_t>(durationUs, localStart + static_cast<int64_t>(180000));
+        }
         if (!text.empty() && localEnd > localStart) {
             result.push_back({chunkOffsetUs + localStart, chunkOffsetUs + localEnd, text});
         }
@@ -272,20 +267,27 @@ struct WhisperNcnnEngine {
         gpuName = (name != nullptr && name[0] != '\0') ? name : "Vulkan GPU";
         modelDir = directory;
 
-        configureGpuNet(fbank);
-        configureGpuNet(encoder);
-        configureGpuNet(decoder);
-        configureGpuNet(projOut);
+        // The fbank graph is lightweight. Keep it CPU-side because the target Mali driver already
+        // demonstrated an fbank Vulkan failure; Whisper inference itself remains GPU-first.
+        fbank.opt.use_vulkan_compute = false;
+        fbank.opt.num_threads = 2;
+        fbank.opt.use_fp16_packed = false;
+        fbank.opt.use_fp16_storage = false;
+        fbank.opt.use_fp16_arithmetic = false;
+
+        configureGpuNet(encoder, false);
+        configureGpuNet(decoder, true);
+        configureGpuNet(projOut, false);
         embedToken.opt.num_threads = 2;
         embedPosition.opt.num_threads = 2;
 
-        if (!loadNet(fbank, "whisper_base_fbank.ncnn.param", "whisper_base_fbank.ncnn.bin", error)) return false;
-        if (!loadNet(encoder, "whisper_base_encoder.ncnn.param", "whisper_base_encoder.ncnn.bin", error)) return false;
-        if (!loadNet(embedToken, "whisper_base_embed_token.ncnn.param", "whisper_base_embed_token.ncnn.bin", error)) return false;
-        if (!loadNet(embedPosition, "whisper_base_embed_position.ncnn.param", "whisper_base_embed_position.ncnn.bin", error)) return false;
-        if (!loadNet(decoder, "whisper_base_decoder.ncnn.param", "whisper_base_decoder.ncnn.bin", error)) return false;
-        // The official release has byte-identical proj_out and embed_token weight blobs.
-        if (!loadNet(projOut, "whisper_base_proj_out.ncnn.param", "whisper_base_embed_token.ncnn.bin", error)) return false;
+        if (!loadNet(fbank, "whisper_tiny_fbank.ncnn.param", "whisper_tiny_fbank.ncnn.bin", error)) return false;
+        if (!loadNet(encoder, "whisper_tiny_encoder.ncnn.param", "whisper_tiny_encoder.ncnn.bin", error)) return false;
+        if (!loadNet(embedToken, "whisper_tiny_embed_token.ncnn.param", "whisper_tiny_embed_token.ncnn.bin", error)) return false;
+        if (!loadNet(embedPosition, "whisper_tiny_embed_position.ncnn.param", "whisper_tiny_embed_position.ncnn.bin", error)) return false;
+        if (!loadNet(decoder, "whisper_tiny_decoder.ncnn.param", "whisper_tiny_decoder.ncnn.bin", error)) return false;
+        // Official tiny proj_out and embed_token weight blobs are byte-identical.
+        if (!loadNet(projOut, "whisper_tiny_proj_out.ncnn.param", "whisper_tiny_embed_token.ncnn.bin", error)) return false;
         if (!tokenizer.load(path("whisper_vocab.txt"))) {
             error = "Could not load Whisper vocabulary";
             return false;
@@ -312,7 +314,7 @@ struct WhisperNcnnEngine {
         __android_log_print(
             ANDROID_LOG_INFO,
             kTag,
-            "ncnn Whisper base ready on %s (Vulkan, kv=%zu)",
+            "ncnn Whisper tiny ready on %s (Vulkan, kv=%zu, safeDecoder=1)",
             gpuName.c_str(),
             kvCacheIndexes.size()
         );
@@ -332,11 +334,16 @@ struct WhisperNcnnEngine {
             error = "encoder failed during language detection (status=" + std::to_string(status) + ")";
             return -1;
         }
+
+        // Language detection never needs K/V cache. Avoid the old ncnn Vulkan cache-output path
+        // completely so Auto Detect can run on mobile drivers where cache extraction is broken.
         ncnn::Mat logits;
-        std::vector<ncnn::Mat> cache;
-        status = runDecoderPrefill({kTokenStartOfTranscript}, encoded, logits, cache);
+        std::string stage;
+        status = runDecoderFullSequence({kTokenStartOfTranscript}, encoded, logits, stage);
         if (status != 0 || logits.empty() || logits.w <= kTokenLangLast) {
-            error = "decoder failed during language detection (status=" + std::to_string(status) + ")";
+            error = stage.empty()
+                ? "decoder failed during language detection (status=" + std::to_string(status) + ")"
+                : stage;
             return -1;
         }
 
@@ -378,93 +385,115 @@ struct WhisperNcnnEngine {
             return false;
         }
 
-        // Mirror Tencent ncnn examples/whisper.cpp exactly: the fourth prompt token explicitly asks
-        // for text without timestamp tokens. This avoids the previous custom greedy/timestamp path
-        // accidentally choosing a functional token and returning an empty transcript.
-        const std::vector<int> prompt = {
+        std::vector<int> ids = {
             kTokenStartOfTranscript,
             kTokenLangFirst + languageIndex,
             kTokenTranscribe,
             kTokenNoTimestamps,
         };
+        std::vector<ncnn::Mat> cache;
+        bool useKvCache = true;
+        bool cacheFallbackLogged = false;
+        float score = 0.f;
 
-        std::vector<BeamResult> finished;
-        std::vector<BeamResult> beams(1);
-        beams[0].ids = prompt;
-        beams[0].score = 0.f;
+        for (int step = 0; step < kMaxDecodedTokens; ++step) {
+            ncnn::Mat logits;
+            std::vector<ncnn::Mat> nextCache;
+            std::string stage;
 
-        for (int step = 0; step < kMaxDecodedTokens && !beams.empty() &&
-                           static_cast<int>(finished.size()) < kMaxFinishedBeams; ++step) {
-            std::vector<BeamResult> candidates;
-            for (const BeamResult& beam : beams) {
-                ncnn::Mat logits;
-                std::vector<ncnn::Mat> outCache;
-                status = step == 0
-                    ? runDecoderPrefill(beam.ids, encoded, logits, outCache)
-                    : runDecoderStep(beam.ids, encoded, logits, beam.kvcache, outCache);
-                if (status != 0 || logits.empty()) {
-                    error = "decoder failed at token " + std::to_string(step) +
-                            " (status=" + std::to_string(status) + ")";
-                    return false;
+            if (step == 0) {
+                status = runDecoderPrefill(ids, encoded, logits, nextCache, stage);
+                if (status == kKvCacheUnavailable && !logits.empty()) {
+                    // Decoder output itself succeeded. Only old Vulkan K/V cache materialization
+                    // failed, so keep this GPU result and continue with full-sequence GPU decoding.
+                    useKvCache = false;
+                    cacheFallbackLogged = true;
+                    __android_log_print(
+                        ANDROID_LOG_WARN,
+                        kTag,
+                        "Vulkan KV cache unavailable on %s; using GPU full-sequence decoder (%s)",
+                        gpuName.c_str(),
+                        stage.c_str()
+                    );
+                    status = 0;
+                } else if (status != 0) {
+                    // If the cached prefill path itself fails, retry the same token sequence without
+                    // touching K/V cache outputs. This remains ncnn Vulkan GPU inference.
+                    const std::string cachedStage = stage;
+                    stage.clear();
+                    status = runDecoderFullSequence(ids, encoded, logits, stage);
+                    if (status == 0 && !logits.empty()) {
+                        useKvCache = false;
+                        cacheFallbackLogged = true;
+                        __android_log_print(
+                            ANDROID_LOG_WARN,
+                            kTag,
+                            "Cached Vulkan prefill failed on %s (%s); GPU no-cache retry succeeded",
+                            gpuName.c_str(),
+                            cachedStage.c_str()
+                        );
+                    }
                 }
-
-                LogSoftmaxInPlace(logits);
-                const int topk = std::min(kTopK, logits.w);
-                std::vector<std::pair<float, int>> ranked(static_cast<size_t>(logits.w));
-                for (int token = 0; token < logits.w; ++token) {
-                    ranked[static_cast<size_t>(token)] = {logits[token], token};
+            } else if (useKvCache) {
+                status = runDecoderStep(ids, encoded, logits, cache, nextCache, stage);
+                if (status == kKvCacheUnavailable && !logits.empty()) {
+                    useKvCache = false;
+                    cacheFallbackLogged = true;
+                    __android_log_print(
+                        ANDROID_LOG_WARN,
+                        kTag,
+                        "Vulkan KV cache update failed at token %d on %s; continuing GPU no-cache (%s)",
+                        step,
+                        gpuName.c_str(),
+                        stage.c_str()
+                    );
+                    status = 0;
+                } else if (status != 0) {
+                    const std::string cachedStage = stage;
+                    stage.clear();
+                    status = runDecoderFullSequence(ids, encoded, logits, stage);
+                    if (status == 0 && !logits.empty()) {
+                        useKvCache = false;
+                        cacheFallbackLogged = true;
+                        __android_log_print(
+                            ANDROID_LOG_WARN,
+                            kTag,
+                            "Cached Vulkan decode failed at token %d on %s (%s); GPU no-cache retry succeeded",
+                            step,
+                            gpuName.c_str(),
+                            cachedStage.c_str()
+                        );
+                    }
                 }
-                std::partial_sort(
-                    ranked.begin(), ranked.begin() + topk, ranked.end(),
-                    std::greater<std::pair<float, int>>()
-                );
-
-                for (int i = 0; i < topk; ++i) {
-                    BeamResult candidate;
-                    candidate.ids = beam.ids;
-                    candidate.ids.push_back(ranked[static_cast<size_t>(i)].second);
-                    candidate.score = beam.score + ranked[static_cast<size_t>(i)].first;
-                    candidate.kvcache = outCache;
-                    candidates.push_back(std::move(candidate));
-                }
+            } else {
+                status = runDecoderFullSequence(ids, encoded, logits, stage);
             }
 
-            std::sort(candidates.begin(), candidates.end(), [](const BeamResult& a, const BeamResult& b) {
-                return a.score > b.score;
-            });
+            if (status != 0 || logits.empty()) {
+                error = "decoder failed at token " + std::to_string(step) +
+                    " · " + (stage.empty() ? ("status=" + std::to_string(status)) : stage);
+                return false;
+            }
 
-            beams.clear();
-            for (BeamResult& candidate : candidates) {
-                if (candidate.ids.back() == kTokenEndOfText) {
-                    finished.push_back(std::move(candidate));
-                } else if (static_cast<int>(beams.size()) < kBeamSize) {
-                    beams.push_back(std::move(candidate));
+            if (useKvCache) cache = std::move(nextCache);
+            else cache.clear();
+
+            LogSoftmaxInPlace(logits);
+            int bestToken = 0;
+            float bestValue = -FLT_MAX;
+            for (int token = 0; token < logits.w; ++token) {
+                const float value = logits[token];
+                if (value > bestValue) {
+                    bestValue = value;
+                    bestToken = token;
                 }
             }
+            score += bestValue;
+            ids.push_back(bestToken);
+            if (bestToken == kTokenEndOfText) break;
         }
 
-        // If the token cap is reached without EOT, preserve the best live beam. It is more useful to
-        // return the recognized text than to misreport audible speech as "No speech detected".
-        if (finished.empty() && !beams.empty()) finished.push_back(beams.front());
-        if (finished.empty()) {
-            error = "decoder produced no beam";
-            return false;
-        }
-
-        size_t bestIndex = 0;
-        float bestAverage = -FLT_MAX;
-        for (size_t i = 0; i < finished.size(); ++i) {
-            const BeamResult& candidate = finished[i];
-            const float average = candidate.ids.empty()
-                ? -FLT_MAX
-                : candidate.score / static_cast<float>(candidate.ids.size());
-            if (average > bestAverage) {
-                bestAverage = average;
-                bestIndex = i;
-            }
-        }
-
-        const std::string transcript = tokenizer.decodeText(finished[bestIndex].ids);
+        const std::string transcript = tokenizer.decodeText(ids);
         const int64_t durationUs = static_cast<int64_t>(sampleCount) * 1000000LL / kSampleRate;
         const std::vector<CaptionSegment> split =
             SplitTranscriptAcrossDuration(transcript, chunkOffsetUs, durationUs);
@@ -473,12 +502,14 @@ struct WhisperNcnnEngine {
         __android_log_print(
             ANDROID_LOG_INFO,
             kTag,
-            "GPU chunk done: samples=%d lang=%s textBytes=%zu captions=%zu bestAvg=%.4f nocaptionsToken=%d",
+            "GPU chunk done: samples=%d lang=%s textBytes=%zu captions=%zu score=%.4f mode=%s fallback=%d nocaptionsToken=%d",
             sampleCount,
             kLanguageCodes[languageIndex],
             transcript.size(),
             split.size(),
-            bestAverage,
+            score,
+            useKvCache ? "vulkan-kvcache" : "vulkan-full-sequence",
+            cacheFallbackLogged ? 1 : 0,
             kTokenNoCaptions
         );
         return true;
@@ -489,13 +520,22 @@ private:
         return modelDir + "/" + name;
     }
 
-    void configureGpuNet(ncnn::Net& net) {
+    void configureGpuNet(ncnn::Net& net, bool decoderSafeMode) {
         net.opt.use_vulkan_compute = true;
         net.opt.num_threads = 2;
-        // Match Tencent's official Whisper ncnn reference: stable FP32 storage/arithmetic.
+        // Match Tencent's Whisper reference: stable FP32 storage/arithmetic.
         net.opt.use_fp16_packed = false;
         net.opt.use_fp16_storage = false;
         net.opt.use_fp16_arithmetic = false;
+        if (decoderSafeMode) {
+            // Decoder attention is the only stage that failed on the Mali-G57. Avoid optional Vulkan
+            // optimization paths and keep all decoder blobs alive while multiple graph outputs are
+            // inspected. Compute still runs on Vulkan; this is not a CPU transcription fallback.
+            net.opt.use_subgroup_ops = false;
+            net.opt.use_shader_local_memory = false;
+            net.opt.use_cooperative_matrix = false;
+            net.opt.lightmode = false;
+        }
         net.set_vulkan_device(vkdev);
     }
 
@@ -528,7 +568,7 @@ private:
         status = ex.extract("out0", features);
         if (status != 0 || features.empty() || features.w <= 1) return status != 0 ? status : -1;
 
-        // Exact Tencent ncnn Whisper reference behavior: fbank produces 3001 frames; encoder expects 3000.
+        // ncnn Whisper fbank produces 3001 frames; the encoder expects 3000.
         ncnn::Mat trimmed(features.w - 1, features.h);
         for (int row = 0; row < features.h; ++row) {
             std::memcpy(trimmed.row(row), features.row(row), static_cast<size_t>(features.w - 1) * sizeof(float));
@@ -544,13 +584,18 @@ private:
         return ex.extract("out0", states);
     }
 
-    int runDecoderPrefill(
+    int buildDecoderInputs(
         const std::vector<int>& tokens,
-        const ncnn::Mat& encoderStates,
-        ncnn::Mat& lastLogits,
-        std::vector<ncnn::Mat>& outCache
+        ncnn::Mat& inputEmbeds,
+        ncnn::Mat& attentionMask,
+        std::string& stage
     ) const {
         const int seqLen = static_cast<int>(tokens.size());
+        if (seqLen <= 0) {
+            stage = "decoder received empty token sequence";
+            return -1;
+        }
+
         ncnn::Mat inputTokens(seqLen);
         std::memcpy(static_cast<int*>(inputTokens), tokens.data(), tokens.size() * sizeof(int));
 
@@ -558,9 +603,15 @@ private:
         {
             ncnn::Extractor ex = embedToken.create_extractor();
             int status = ex.input("in0", inputTokens);
-            if (status != 0) return status;
+            if (status != 0) {
+                stage = "token embedding input status=" + std::to_string(status);
+                return status;
+            }
             status = ex.extract("out0", tokenEmbeds);
-            if (status != 0) return status;
+            if (status != 0 || tokenEmbeds.empty()) {
+                stage = "token embedding output status=" + std::to_string(status);
+                return status != 0 ? status : -1;
+            }
         }
 
         ncnn::Mat positions(seqLen);
@@ -570,52 +621,167 @@ private:
         {
             ncnn::Extractor ex = embedPosition.create_extractor();
             int status = ex.input("in0", positions);
-            if (status != 0) return status;
+            if (status != 0) {
+                stage = "position embedding input status=" + std::to_string(status);
+                return status;
+            }
             status = ex.extract("out0", positionEmbeds);
-            if (status != 0) return status;
+            if (status != 0 || positionEmbeds.empty()) {
+                stage = "position embedding output status=" + std::to_string(status);
+                return status != 0 ? status : -1;
+            }
         }
 
-        if (tokenEmbeds.total() != positionEmbeds.total()) return -1;
-        ncnn::Mat inputEmbeds;
+        if (tokenEmbeds.total() != positionEmbeds.total()) {
+            stage = "embedding shape mismatch";
+            return -1;
+        }
         inputEmbeds.create_like(tokenEmbeds);
+        if (inputEmbeds.empty()) {
+            stage = "embedding allocation failed";
+            return -100;
+        }
         float* inputPtr = inputEmbeds;
         const float* tokenPtr = tokenEmbeds;
         const float* positionPtr = positionEmbeds;
         for (size_t i = 0; i < inputEmbeds.total(); ++i) inputPtr[i] = tokenPtr[i] + positionPtr[i];
 
-        ncnn::Mat attentionMask(seqLen, seqLen);
+        attentionMask.create(seqLen, seqLen);
+        if (attentionMask.empty()) {
+            stage = "attention-mask allocation failed";
+            return -100;
+        }
         attentionMask.fill(0.f);
         for (int i = 0; i < seqLen; ++i) {
             float* row = attentionMask.row(i);
             for (int j = i + 1; j < seqLen; ++j) row[j] = -INFINITY;
         }
+        return 0;
+    }
 
-        ncnn::Mat outputStates;
-        {
-            ncnn::Extractor ex = decoder.create_extractor();
-            int status = ex.input("in0", inputEmbeds);
-            if (status != 0) return status;
-            status = ex.input("in1", encoderStates);
-            if (status != 0) return status;
-            status = ex.input("in2", attentionMask);
-            if (status != 0) return status;
-
-            outCache.resize(outKvCacheIndexes.size());
-            for (size_t i = 0; i < outKvCacheIndexes.size(); ++i) {
-                status = ex.extract(outKvCacheIndexes[i], outCache[i], 1);
-                if (status != 0) return status;
-            }
-            status = ex.extract("out0", outputStates);
-            if (status != 0) return status;
+    int projectLastState(
+        const ncnn::Mat& outputStates,
+        int row,
+        ncnn::Mat& lastLogits,
+        std::string& stage
+    ) const {
+        if (outputStates.empty() || row < 0 || row >= outputStates.h) {
+            stage = "decoder output shape invalid";
+            return -1;
         }
-
-        ncnn::Mat lastState = outputStates.row_range(seqLen - 1, 1).clone();
+        ncnn::Mat lastState = outputStates.row_range(row, 1).clone();
+        if (lastState.empty()) {
+            stage = "decoder last-state copy failed";
+            return -100;
+        }
         ncnn::Extractor projection = projOut.create_extractor();
         int status = projection.input("in0", lastState);
-        if (status != 0) return status;
+        if (status != 0) {
+            stage = "projection input status=" + std::to_string(status);
+            return status;
+        }
         status = projection.extract("out0", lastLogits);
-        if (status != 0) return status;
+        if (status != 0 || lastLogits.empty()) {
+            stage = "projection output status=" + std::to_string(status);
+            return status != 0 ? status : -1;
+        }
         lastLogits = lastLogits.reshape(lastLogits.w);
+        if (lastLogits.empty()) {
+            stage = "projection reshape failed";
+            return -1;
+        }
+        return 0;
+    }
+
+    // GPU-only compatibility path: re-run the full current token sequence and extract only the
+    // decoder text output. It deliberately never materializes K/V cache outputs, bypassing the
+    // problematic old ncnn Vulkan cache path while keeping decoder inference on the Vulkan GPU.
+    int runDecoderFullSequence(
+        const std::vector<int>& tokens,
+        const ncnn::Mat& encoderStates,
+        ncnn::Mat& lastLogits,
+        std::string& stage
+    ) const {
+        ncnn::Mat inputEmbeds;
+        ncnn::Mat attentionMask;
+        int status = buildDecoderInputs(tokens, inputEmbeds, attentionMask, stage);
+        if (status != 0) return status;
+
+        ncnn::Mat outputStates;
+        ncnn::Extractor ex = decoder.create_extractor();
+        status = ex.input("in0", inputEmbeds);
+        if (status != 0) {
+            stage = "decoder input0 status=" + std::to_string(status);
+            return status;
+        }
+        status = ex.input("in1", encoderStates);
+        if (status != 0) {
+            stage = "decoder encoder-state input status=" + std::to_string(status);
+            return status;
+        }
+        status = ex.input("in2", attentionMask);
+        if (status != 0) {
+            stage = "decoder mask input status=" + std::to_string(status);
+            return status;
+        }
+        status = ex.extract("out0", outputStates);
+        if (status != 0 || outputStates.empty()) {
+            stage = "decoder out0 status=" + std::to_string(status) + " (GPU full-sequence)";
+            return status != 0 ? status : -1;
+        }
+        return projectLastState(outputStates, static_cast<int>(tokens.size()) - 1, lastLogits, stage);
+    }
+
+    int runDecoderPrefill(
+        const std::vector<int>& tokens,
+        const ncnn::Mat& encoderStates,
+        ncnn::Mat& lastLogits,
+        std::vector<ncnn::Mat>& outCache,
+        std::string& stage
+    ) const {
+        ncnn::Mat inputEmbeds;
+        ncnn::Mat attentionMask;
+        int status = buildDecoderInputs(tokens, inputEmbeds, attentionMask, stage);
+        if (status != 0) return status;
+
+        ncnn::Mat outputStates;
+        ncnn::Extractor ex = decoder.create_extractor();
+        status = ex.input("in0", inputEmbeds);
+        if (status != 0) {
+            stage = "decoder prefill input0 status=" + std::to_string(status);
+            return status;
+        }
+        status = ex.input("in1", encoderStates);
+        if (status != 0) {
+            stage = "decoder prefill encoder-state input status=" + std::to_string(status);
+            return status;
+        }
+        status = ex.input("in2", attentionMask);
+        if (status != 0) {
+            stage = "decoder prefill mask input status=" + std::to_string(status);
+            return status;
+        }
+
+        // Extract text output first. On the May-2026 ncnn runtime the phone failure occurs while
+        // materializing MHA cache outputs; getting out0 first lets us keep a valid GPU decode result.
+        status = ex.extract("out0", outputStates);
+        if (status != 0 || outputStates.empty()) {
+            stage = "decoder prefill out0 status=" + std::to_string(status);
+            return status != 0 ? status : -1;
+        }
+        status = projectLastState(outputStates, static_cast<int>(tokens.size()) - 1, lastLogits, stage);
+        if (status != 0) return status;
+
+        outCache.resize(outKvCacheIndexes.size());
+        for (size_t i = 0; i < outKvCacheIndexes.size(); ++i) {
+            status = ex.extract(outKvCacheIndexes[i], outCache[i], 1);
+            if (status != 0 || outCache[i].empty()) {
+                stage = "Vulkan KV-cache prefill output " + std::to_string(i) +
+                    " status=" + std::to_string(status);
+                outCache.clear();
+                return kKvCacheUnavailable;
+            }
+        }
         return 0;
     }
 
@@ -624,19 +790,29 @@ private:
         const ncnn::Mat& encoderStates,
         ncnn::Mat& lastLogits,
         const std::vector<ncnn::Mat>& cache,
-        std::vector<ncnn::Mat>& outCache
+        std::vector<ncnn::Mat>& outCache,
+        std::string& stage
     ) const {
-        if (cache.size() != kvCacheIndexes.size()) return -1;
+        if (cache.size() != kvCacheIndexes.size()) {
+            stage = "KV-cache input count mismatch";
+            return kKvCacheUnavailable;
+        }
+
         ncnn::Mat inputTokens(1);
         static_cast<int*>(inputTokens)[0] = tokens.back();
-
         ncnn::Mat tokenEmbeds;
         {
             ncnn::Extractor ex = embedToken.create_extractor();
             int status = ex.input("in0", inputTokens);
-            if (status != 0) return status;
+            if (status != 0) {
+                stage = "step token embedding input status=" + std::to_string(status);
+                return status;
+            }
             status = ex.extract("out0", tokenEmbeds);
-            if (status != 0) return status;
+            if (status != 0 || tokenEmbeds.empty()) {
+                stage = "step token embedding output status=" + std::to_string(status);
+                return status != 0 ? status : -1;
+            }
         }
 
         ncnn::Mat positions(1);
@@ -645,50 +821,78 @@ private:
         {
             ncnn::Extractor ex = embedPosition.create_extractor();
             int status = ex.input("in0", positions);
-            if (status != 0) return status;
+            if (status != 0) {
+                stage = "step position embedding input status=" + std::to_string(status);
+                return status;
+            }
             status = ex.extract("out0", positionEmbeds);
-            if (status != 0) return status;
+            if (status != 0 || positionEmbeds.empty()) {
+                stage = "step position embedding output status=" + std::to_string(status);
+                return status != 0 ? status : -1;
+            }
         }
 
+        if (tokenEmbeds.total() != positionEmbeds.total()) {
+            stage = "step embedding shape mismatch";
+            return -1;
+        }
         ncnn::Mat inputEmbeds;
         inputEmbeds.create_like(tokenEmbeds);
+        if (inputEmbeds.empty()) {
+            stage = "step embedding allocation failed";
+            return -100;
+        }
         float* inputPtr = inputEmbeds;
         const float* tokenPtr = tokenEmbeds;
         const float* positionPtr = positionEmbeds;
         for (size_t i = 0; i < inputEmbeds.total(); ++i) inputPtr[i] = tokenPtr[i] + positionPtr[i];
 
-        // Exact Tencent reference behavior: one cached decoder token needs only a 1x1 zero mask.
         ncnn::Mat attentionMask(1, 1);
         attentionMask.fill(0.f);
         ncnn::Mat outputStates;
-        {
-            ncnn::Extractor ex = decoder.create_extractor();
-            int status = ex.input("in0", inputEmbeds);
-            if (status != 0) return status;
-            status = ex.input("in1", encoderStates);
-            if (status != 0) return status;
-            status = ex.input("in2", attentionMask);
-            if (status != 0) return status;
-            for (size_t i = 0; i < kvCacheIndexes.size(); ++i) {
-                status = ex.input(kvCacheIndexes[i], cache[i]);
-                if (status != 0) return status;
+        ncnn::Extractor ex = decoder.create_extractor();
+        int status = ex.input("in0", inputEmbeds);
+        if (status != 0) {
+            stage = "decoder step input0 status=" + std::to_string(status);
+            return status;
+        }
+        status = ex.input("in1", encoderStates);
+        if (status != 0) {
+            stage = "decoder step encoder-state input status=" + std::to_string(status);
+            return status;
+        }
+        status = ex.input("in2", attentionMask);
+        if (status != 0) {
+            stage = "decoder step mask input status=" + std::to_string(status);
+            return status;
+        }
+        for (size_t i = 0; i < kvCacheIndexes.size(); ++i) {
+            status = ex.input(kvCacheIndexes[i], cache[i]);
+            if (status != 0) {
+                stage = "decoder KV-cache input " + std::to_string(i) +
+                    " status=" + std::to_string(status);
+                return kKvCacheUnavailable;
             }
-            outCache.resize(outKvCacheIndexes.size());
-            for (size_t i = 0; i < outKvCacheIndexes.size(); ++i) {
-                status = ex.extract(outKvCacheIndexes[i], outCache[i], 1);
-                if (status != 0) return status;
-            }
-            status = ex.extract("out0", outputStates);
-            if (status != 0) return status;
         }
 
-        ncnn::Mat lastState = outputStates.row_range(0, 1).clone();
-        ncnn::Extractor projection = projOut.create_extractor();
-        int status = projection.input("in0", lastState);
+        status = ex.extract("out0", outputStates);
+        if (status != 0 || outputStates.empty()) {
+            stage = "decoder cached out0 status=" + std::to_string(status);
+            return status != 0 ? status : -1;
+        }
+        status = projectLastState(outputStates, 0, lastLogits, stage);
         if (status != 0) return status;
-        status = projection.extract("out0", lastLogits);
-        if (status != 0) return status;
-        lastLogits = lastLogits.reshape(lastLogits.w);
+
+        outCache.resize(outKvCacheIndexes.size());
+        for (size_t i = 0; i < outKvCacheIndexes.size(); ++i) {
+            status = ex.extract(outKvCacheIndexes[i], outCache[i], 1);
+            if (status != 0 || outCache[i].empty()) {
+                stage = "Vulkan KV-cache step output " + std::to_string(i) +
+                    " status=" + std::to_string(status);
+                outCache.clear();
+                return kKvCacheUnavailable;
+            }
+        }
         return 0;
     }
 };
@@ -837,9 +1041,6 @@ Java_com_tajuli_digitorandroid_editor_processing_WhisperNativeV80_transcribe(
         const int count = std::min(kMaxChunkSamples, static_cast<int>(sampleCount) - offset);
         const float* chunk = samples.data() + offset;
 
-        // V88 intentionally does not pre-reject low-level PCM. The previous hand-written energy gate
-        // could classify a real but quiet voice as silence before Whisper ever saw it. Whisper's own
-        // decoder now decides whether the chunk contains transcribable speech.
         if (languageIndex < 0) {
             languageIndex = gEngine->detectLanguage(chunk, count, error);
             if (languageIndex < 0 || languageIndex >= kLanguageCount) {
