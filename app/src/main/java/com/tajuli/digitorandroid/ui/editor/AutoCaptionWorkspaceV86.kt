@@ -58,7 +58,6 @@ import com.tajuli.digitorandroid.editor.processing.deleteAutoCaptionTrackV84
 import com.tajuli.digitorandroid.editor.processing.internationalLanguageChoicesV86
 import com.tajuli.digitorandroid.editor.processing.updateAutoCaptionTextV84
 import com.tajuli.digitorandroid.editor.processing.withAutoCaptionsV77
-import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -70,19 +69,12 @@ private val CC86Panel = Color(0xFF121217)
 private val CC86Muted = Color(0xFF9898A1)
 private const val CC86_PREFS = "auto_caption_v86"
 private const val CC86_LANGUAGE = "language"
+private val CC86_DEFAULT_LANGUAGE = AutoCaptionLanguageV86.ENGLISH
 
 private enum class AutoCcOperationV86 {
     IDLE,
     DOWNLOAD,
     GENERATE,
-}
-
-private fun localeDefaultLanguageV86(): AutoCaptionLanguageV86 = when (Locale.getDefault().language.lowercase()) {
-    "bn" -> AutoCaptionLanguageV86.BANGLA
-    "zh" -> AutoCaptionLanguageV86.CHINESE
-    "ko" -> AutoCaptionLanguageV86.KOREAN
-    "fr" -> AutoCaptionLanguageV86.FRENCH
-    else -> AutoCaptionLanguageV86.ENGLISH
 }
 
 @Composable
@@ -138,9 +130,9 @@ private fun AutoCaptionDialogV86(
                 storedLanguage in installedLanguages ||
                     storedLanguage == AutoCaptionLanguageV86.AUTO_BN_EN && autoLanguageAvailableV86(installedLanguages)
                 ) -> storedLanguage
-            localeDefaultLanguageV86() in installedLanguages -> localeDefaultLanguageV86()
+            CC86_DEFAULT_LANGUAGE in installedLanguages -> CC86_DEFAULT_LANGUAGE
             installedLanguages.isNotEmpty() -> installedLanguages.first()
-            else -> localeDefaultLanguageV86()
+            else -> CC86_DEFAULT_LANGUAGE
         }
     }
 
@@ -151,7 +143,13 @@ private fun AutoCaptionDialogV86(
     var downloadTarget by remember { mutableStateOf<AutoCaptionLanguageV86?>(null) }
     var progress by remember { mutableFloatStateOf(0f) }
     var status by remember {
-        mutableStateOf(if (installedLanguages.isEmpty()) "Choose a language to install" else "Ready")
+        mutableStateOf(
+            if (CC86_DEFAULT_LANGUAGE !in installedLanguages) {
+                "Download English to enable Auto CC"
+            } else {
+                "Ready"
+            },
+        )
     }
     var lastBackend by remember { mutableStateOf<String?>(null) }
     var manageLanguages by remember { mutableStateOf(false) }
@@ -167,10 +165,20 @@ private fun AutoCaptionDialogV86(
     var selectedCaptionId by remember { mutableStateOf<String?>(generatedCaptions.firstOrNull()?.id) }
     var editText by remember { mutableStateOf(generatedCaptions.firstOrNull()?.text.orEmpty()) }
     val busy = operation != AutoCcOperationV86.IDLE
-    val firstInstall = installedLanguages.isEmpty()
+    val defaultPackInstalled = CC86_DEFAULT_LANGUAGE in installedLanguages
+    val firstInstall = !defaultPackInstalled
 
+    val languagePackChoices = buildList {
+        add(CC86_DEFAULT_LANGUAGE)
+        addAll(internationalLanguageChoicesV86().filter { it != CC86_DEFAULT_LANGUAGE })
+    }
     val generationLanguages = buildList {
-        addAll(internationalLanguageChoicesV86().filter { it in installedLanguages })
+        if (CC86_DEFAULT_LANGUAGE in installedLanguages) add(CC86_DEFAULT_LANGUAGE)
+        addAll(
+            internationalLanguageChoicesV86().filter {
+                it != CC86_DEFAULT_LANGUAGE && it in installedLanguages
+            },
+        )
         if (autoLanguageAvailableV86(installedLanguages)) add(AutoCaptionLanguageV86.AUTO_BN_EN)
     }
 
@@ -184,8 +192,8 @@ private fun AutoCaptionDialogV86(
         val valid = language in installedLanguages ||
             (language == AutoCaptionLanguageV86.AUTO_BN_EN && autoLanguageAvailableV86(installedLanguages))
         if (!valid && installedLanguages.isNotEmpty()) {
-            language = if (localeDefaultLanguageV86() in installedLanguages) {
-                localeDefaultLanguageV86()
+            language = if (CC86_DEFAULT_LANGUAGE in installedLanguages) {
+                CC86_DEFAULT_LANGUAGE
             } else {
                 installedLanguages.first()
             }
@@ -220,6 +228,7 @@ private fun AutoCaptionDialogV86(
     fun startDownload(target: AutoCaptionLanguageV86) {
         if (busy || !target.downloadable || packManager.isInstalled(target)) return
         if (!GlobalZipformerAutoCaptionEngineV86.supportedOnThisDevice()) return
+        val installsDefaultPack = target == CC86_DEFAULT_LANGUAGE && !defaultPackInstalled
         operation = AutoCcOperationV86.DOWNLOAD
         downloadTarget = target
         progress = 0f
@@ -232,7 +241,7 @@ private fun AutoCaptionDialogV86(
                     status = update.message
                 }
                 installedLanguages = packManager.installedLanguages().toSet()
-                rememberLanguage(target)
+                if (installsDefaultPack) rememberLanguage(CC86_DEFAULT_LANGUAGE)
                 progress = 1f
                 status = "${target.label} language pack ready"
                 manageLanguages = false
@@ -251,7 +260,7 @@ private fun AutoCaptionDialogV86(
     }
 
     fun deleteLanguage(target: AutoCaptionLanguageV86) {
-        if (busy || !target.downloadable) return
+        if (busy || !target.downloadable || target == CC86_DEFAULT_LANGUAGE) return
         packManager.delete(target)
         installedLanguages = packManager.installedLanguages().toSet()
         status = "${target.label} language pack removed"
@@ -322,38 +331,22 @@ private fun AutoCaptionDialogV86(
                 ) {
                     Text("Download Auto Caption Generator", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "Choose your first language. Only the selected language pack is downloaded.",
+                        "English is the default Auto CC language.",
                         fontSize = 9.sp,
-                        color = CC86Muted,
+                        color = Color.White.copy(alpha = .82f),
                     )
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        internationalLanguageChoicesV86().forEach { item ->
-                            if (item == language) {
-                                Button(
-                                    onClick = { rememberLanguage(item) },
-                                    enabled = !busy,
-                                    modifier = Modifier.height(34.dp),
-                                ) { Text(item.label, fontSize = 8.sp) }
-                            } else {
-                                OutlinedButton(
-                                    onClick = { rememberLanguage(item) },
-                                    enabled = !busy,
-                                    modifier = Modifier.height(34.dp),
-                                ) { Text(item.label, fontSize = 8.sp) }
-                            }
-                        }
-                    }
-                    val size = if (language.downloadable) packManager.approximateDownloadMb(language) else 0
                     Text(
-                        if (size > 0) "${language.detail} · about $size MB · saved on this device" else language.detail,
+                        "${CC86_DEFAULT_LANGUAGE.detail} · about ${packManager.approximateDownloadMb(CC86_DEFAULT_LANGUAGE)} MB · saved on this device",
                         fontSize = 8.sp,
                         color = CC86Muted,
                     )
                     Text(
-                        "Speech stays on your phone. More languages can be added later from Manage Languages.",
+                        "বাংলা, 中文, 한국어 and Français can be added later from Manage Languages.",
+                        fontSize = 8.sp,
+                        color = CC86Muted,
+                    )
+                    Text(
+                        "Speech stays on your phone. Language packs download only when you choose to add them.",
                         fontSize = 8.sp,
                         color = CC86Muted,
                     )
@@ -378,7 +371,7 @@ private fun AutoCaptionDialogV86(
                     verticalArrangement = Arrangement.spacedBy(9.dp),
                 ) {
                     Text(
-                        "On-device Auto CC · ${installedLanguages.size} language pack${if (installedLanguages.size == 1) "" else "s"} installed",
+                        "On-device Auto CC · English default · ${installedLanguages.size} language pack${if (installedLanguages.size == 1) "" else "s"} installed",
                         fontSize = 9.sp,
                         color = Color.White.copy(alpha = .78f),
                     )
@@ -441,36 +434,48 @@ private fun AutoCaptionDialogV86(
 
                     if (manageLanguages) {
                         Column(
-                            Modifier.fillMaxWidth().background(Color.White.copy(alpha = .035f), RoundedCornerShape(8.dp)).padding(8.dp),
+                            Modifier
+                                .fillMaxWidth()
+                                .background(Color.White.copy(alpha = .035f), RoundedCornerShape(8.dp))
+                                .padding(8.dp),
                             verticalArrangement = Arrangement.spacedBy(7.dp),
                         ) {
                             Text("Language packs", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
-                            internationalLanguageChoicesV86().forEach { item ->
+                            languagePackChoices.forEach { item ->
                                 val installed = item in installedLanguages
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f)) {
-                                        Text(item.label, fontSize = 9.sp)
                                         Text(
-                                            if (installed) {
-                                                "Installed · ${item.detail}"
-                                            } else {
-                                                "About ${packManager.approximateDownloadMb(item)} MB · ${item.detail}"
+                                            if (item == CC86_DEFAULT_LANGUAGE) "${item.label} · Default" else item.label,
+                                            fontSize = 9.sp,
+                                        )
+                                        Text(
+                                            when {
+                                                item == CC86_DEFAULT_LANGUAGE && installed -> "Installed · Base Auto CC language"
+                                                installed -> "Installed · ${item.detail}"
+                                                else -> "About ${packManager.approximateDownloadMb(item)} MB · ${item.detail}"
                                             },
                                             fontSize = 7.sp,
                                             color = CC86Muted,
                                         )
                                     }
-                                    if (installed) {
-                                        TextButton(
-                                            onClick = { deleteLanguage(item) },
-                                            enabled = !busy,
-                                        ) { Text("Delete", fontSize = 8.sp, color = Color(0xFFFF7474)) }
-                                    } else {
-                                        OutlinedButton(
-                                            onClick = { startDownload(item) },
-                                            enabled = !busy,
-                                            modifier = Modifier.height(32.dp),
-                                        ) { Text("Download", fontSize = 8.sp) }
+                                    when {
+                                        item == CC86_DEFAULT_LANGUAGE && installed -> {
+                                            Text("Installed", fontSize = 8.sp, color = CC86Accent)
+                                        }
+                                        installed -> {
+                                            TextButton(
+                                                onClick = { deleteLanguage(item) },
+                                                enabled = !busy,
+                                            ) { Text("Delete", fontSize = 8.sp, color = Color(0xFFFF7474)) }
+                                        }
+                                        else -> {
+                                            OutlinedButton(
+                                                onClick = { startDownload(item) },
+                                                enabled = !busy,
+                                                modifier = Modifier.height(32.dp),
+                                            ) { Text("Download", fontSize = 8.sp) }
+                                        }
                                     }
                                 }
                             }
@@ -637,9 +642,9 @@ private fun AutoCaptionDialogV86(
                 }
                 firstInstall -> {
                     Button(
-                        onClick = { startDownload(language) },
-                        enabled = language.downloadable && GlobalZipformerAutoCaptionEngineV86.supportedOnThisDevice(),
-                    ) { Text("Download") }
+                        onClick = { startDownload(CC86_DEFAULT_LANGUAGE) },
+                        enabled = GlobalZipformerAutoCaptionEngineV86.supportedOnThisDevice(),
+                    ) { Text("Download English") }
                 }
                 else -> {
                     Button(
