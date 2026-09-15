@@ -44,7 +44,7 @@ import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.processing.AutoCaptionLanguageV79
 import com.tajuli.digitorandroid.editor.processing.AutoCaptionProgressV77
 import com.tajuli.digitorandroid.editor.processing.AutoCaptionQualityV77
-import com.tajuli.digitorandroid.editor.processing.ZipformerAutoCaptionEngineV82
+import com.tajuli.digitorandroid.editor.processing.ZipformerAutoCaptionEngineV83
 import com.tajuli.digitorandroid.editor.processing.autoCaptionCountV77
 import com.tajuli.digitorandroid.editor.processing.clearAutoCaptionsV77
 import com.tajuli.digitorandroid.editor.processing.withAutoCaptionsV77
@@ -87,7 +87,7 @@ private fun AutoCaptionDialogV77(
     val state by vm.state.collectAsState()
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
-    val engine = remember(context) { ZipformerAutoCaptionEngineV82(context) }
+    val engine = remember(context) { ZipformerAutoCaptionEngineV83(context) }
     val audioTracks = state.project.tracks.filter { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
     var selectedTrackId by remember { mutableStateOf(audioTracks.firstOrNull { it.name == "A1" }?.id ?: audioTracks.firstOrNull()?.id) }
     var language by remember { mutableStateOf(AutoCaptionLanguageV79.BANGLA) }
@@ -129,7 +129,7 @@ private fun AutoCaptionDialogV77(
             }.onSuccess { result ->
                 val nextProject = state.project.withAutoCaptionsV77(result.captions)
                 vm.commitProjectV19(
-                    label = "auto-caption-v82",
+                    label = "auto-caption-v83",
                     project = nextProject,
                     status = "Auto CC · ${result.captions.size} captions · ${result.backend}",
                 )
@@ -164,7 +164,7 @@ private fun AutoCaptionDialogV77(
                     color = CC77Muted,
                 )
 
-                if (!ZipformerAutoCaptionEngineV82.supportedOnThisDevice()) {
+                if (!ZipformerAutoCaptionEngineV83.supportedOnThisDevice()) {
                     Text(
                         "Auto CC is not available for this device ABI. The rest of Digitor is unaffected.",
                         fontSize = 9.sp,
@@ -224,7 +224,7 @@ private fun AutoCaptionDialogV77(
                 }
                 Text(
                     if (quality == AutoCaptionQualityV77.ACCURATE) {
-                        "Zipformer beam search · shorter balanced speech windows · better long-speech accuracy"
+                        "Zipformer tuned · speech normalization · silence-aware chunks · 24-path beam search"
                     } else {
                         "Greedy Zipformer decode · fastest and lowest CPU use"
                     },
@@ -255,7 +255,7 @@ private fun AutoCaptionDialogV77(
                     TextButton(
                         onClick = {
                             vm.commitProjectV19(
-                                label = "clear-auto-caption-v82",
+                                label = "clear-auto-caption-v83",
                                 project = state.project.clearAutoCaptionsV77(),
                                 status = "Auto captions cleared",
                             )
@@ -269,7 +269,7 @@ private fun AutoCaptionDialogV77(
         confirmButton = {
             Button(
                 onClick = ::startGenerate,
-                enabled = !running && selectedTrackId != null && ZipformerAutoCaptionEngineV82.supportedOnThisDevice(),
+                enabled = !running && selectedTrackId != null && ZipformerAutoCaptionEngineV83.supportedOnThisDevice(),
             ) { Text(if (running) "Generating…" else "Generate Auto CC") }
         },
         dismissButton = { TextButton(onClick = onDismiss, enabled = !running) { Text("Close") } },
