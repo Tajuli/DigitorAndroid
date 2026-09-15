@@ -42,15 +42,19 @@ fun TimelineProject.deleteAutoCaptionTextV84(textId: String): TimelineProject =
 
 /**
  * Delete the CC track like a normal video track: remove the track and every text item assigned to
- * it. Generated captions are also removed even if an older project lost their track assignment.
- * Manual text on V1/V2/etc is preserved.
+ * it. `previousTrackId` lets the UI finish cleanup when TimelineEditor has already removed the track
+ * through its generic long-press track-delete action. Generated captions are removed even from
+ * older projects whose track assignment was lost. Manual text on V1/V2/etc is preserved.
  */
-fun TimelineProject.deleteAutoCaptionTrackV84(): TimelineProject {
-    val ccTrackId = autoCaptionTrackIdV84()
-    if (ccTrackId == null && textOverlays.none { it.id.startsWith(AUTO_CC_ID_PREFIX_V84) }) return this
+fun TimelineProject.deleteAutoCaptionTrackV84(previousTrackId: String? = null): TimelineProject {
+    val liveCcTrackId = autoCaptionTrackIdV84()
+    val ccTrackId = liveCcTrackId ?: previousTrackId
+    val hasGenerated = textOverlays.any { it.id.startsWith(AUTO_CC_ID_PREFIX_V84) }
+    val hasAssigned = ccTrackId != null && textOverlays.any { it.videoTrackIdV3 == ccTrackId }
+    if (liveCcTrackId == null && !hasGenerated && !hasAssigned) return this
 
     return copy(
-        tracks = if (ccTrackId == null) tracks else tracks.filterNot { it.id == ccTrackId },
+        tracks = if (liveCcTrackId == null) tracks else tracks.filterNot { it.id == liveCcTrackId },
         textOverlays = textOverlays.filterNot { overlay ->
             overlay.id.startsWith(AUTO_CC_ID_PREFIX_V84) ||
                 (ccTrackId != null && overlay.videoTrackIdV3 == ccTrackId)
