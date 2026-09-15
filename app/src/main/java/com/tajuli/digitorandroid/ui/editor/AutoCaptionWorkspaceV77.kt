@@ -44,7 +44,7 @@ import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.processing.AutoCaptionLanguageV79
 import com.tajuli.digitorandroid.editor.processing.AutoCaptionProgressV77
 import com.tajuli.digitorandroid.editor.processing.AutoCaptionQualityV77
-import com.tajuli.digitorandroid.editor.processing.HybridAutoCaptionEngineV80
+import com.tajuli.digitorandroid.editor.processing.MemorySafeHybridAutoCaptionEngineV81
 import com.tajuli.digitorandroid.editor.processing.autoCaptionCountV77
 import com.tajuli.digitorandroid.editor.processing.clearAutoCaptionsV77
 import com.tajuli.digitorandroid.editor.processing.withAutoCaptionsV77
@@ -93,7 +93,7 @@ private fun AutoCaptionDialogV77(
     val state by vm.state.collectAsState()
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
-    val engine = remember(context) { HybridAutoCaptionEngineV80(context) }
+    val engine = remember(context) { MemorySafeHybridAutoCaptionEngineV81(context) }
     val audioTracks = state.project.tracks.filter { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
     var selectedTrackId by remember { mutableStateOf(audioTracks.firstOrNull { it.name == "A1" }?.id ?: audioTracks.firstOrNull()?.id) }
     var language by remember { mutableStateOf(AutoCaptionLanguageV79.BANGLA) }
@@ -135,7 +135,7 @@ private fun AutoCaptionDialogV77(
             }.onSuccess { result ->
                 val nextProject = state.project.withAutoCaptionsV77(result.captions)
                 vm.commitProjectV19(
-                    label = "auto-caption-v80",
+                    label = "auto-caption-v81",
                     project = nextProject,
                     status = "Auto CC · ${result.captions.size} captions · ${result.backend}",
                 )
@@ -170,7 +170,7 @@ private fun AutoCaptionDialogV77(
                     color = CC77Muted,
                 )
 
-                if (!HybridAutoCaptionEngineV80.supportedOnThisDevice()) {
+                if (!MemorySafeHybridAutoCaptionEngineV81.supportedOnThisDevice()) {
                     Text(
                         "Auto CC is not available for this device ABI. The rest of Digitor is unaffected.",
                         fontSize = 9.sp,
@@ -243,7 +243,7 @@ private fun AutoCaptionDialogV77(
                 }
                 Text(
                     if (quality == AutoCaptionQualityV77.ACCURATE) {
-                        "Omnilingual v2 300M INT8 · higher accuracy · ~235 MB first download"
+                        "Omnilingual v2 300M INT8 · memory-safe 8 s chunks · ~235 MB first download"
                     } else {
                         "Greedy Zipformer decode · lower CPU and download size"
                     },
@@ -274,7 +274,7 @@ private fun AutoCaptionDialogV77(
                     TextButton(
                         onClick = {
                             vm.commitProjectV19(
-                                label = "clear-auto-caption-v80",
+                                label = "clear-auto-caption-v81",
                                 project = state.project.clearAutoCaptionsV77(),
                                 status = "Auto captions cleared",
                             )
@@ -290,7 +290,7 @@ private fun AutoCaptionDialogV77(
         confirmButton = {
             Button(
                 onClick = ::startGenerate,
-                enabled = !running && selectedTrackId != null && HybridAutoCaptionEngineV80.supportedOnThisDevice(),
+                enabled = !running && selectedTrackId != null && MemorySafeHybridAutoCaptionEngineV81.supportedOnThisDevice(),
             ) {
                 Text(if (running) "Generating…" else "Generate Auto CC")
             }
