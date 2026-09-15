@@ -7,7 +7,7 @@ import org.junit.Test
 
 class AutoCaptionInternationalV86Test {
     @Test
-    fun languagePickerContainsOnlyTheFiveRegisteredDownloadableStreamingZipformerPacks() {
+    fun firstInternationalReleaseHasFiveDownloadableLanguagePacks() {
         val languages = internationalLanguageChoicesV86()
         assertEquals(
             setOf(
@@ -22,6 +22,20 @@ class AutoCaptionInternationalV86Test {
         assertEquals(5, languages.size)
         assertTrue(languages.all { it.downloadable })
         assertFalse(AutoCaptionLanguageV86.AUTO_BN_EN.downloadable)
+    }
+
+    @Test
+    fun registryOrderIsStableForHorizontalLanguagePicker() {
+        assertEquals(
+            listOf(
+                AutoCaptionLanguageV86.BANGLA,
+                AutoCaptionLanguageV86.ENGLISH,
+                AutoCaptionLanguageV86.CHINESE,
+                AutoCaptionLanguageV86.KOREAN,
+                AutoCaptionLanguageV86.FRENCH,
+            ),
+            internationalLanguageChoicesV86(),
+        )
     }
 
     @Test
