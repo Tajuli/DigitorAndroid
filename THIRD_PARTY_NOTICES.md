@@ -44,9 +44,10 @@ version; Digitor pins the pair used by Auto CC rather than allowing an arbitrary
 
 ## Release note
 
-Auto CC V82 does **not** use Whisper, WhisperKit, ggml, Qualcomm QNN, Omnilingual ASR, or the former
+Auto CC V83 does **not** use Whisper, WhisperKit, ggml, Qualcomm QNN, Omnilingual ASR, or the former
 WhisperKit FFmpeg runtime. Fast and Accurate both use Zipformer models. Accurate mode improves the
-same Bengali/English Zipformer path with shorter balanced recognition windows and modified beam
-search rather than downloading a second large multilingual model. Speech recognition stays on-device;
-audio/video is not uploaded to a speech service. Internet permission is used only to download the
-selected Zipformer model on first use, and models are reused from private app storage afterwards.
+same Bengali/English Zipformer path with speech-level normalization, silence-aware segmentation,
+incremental streaming input, a short tail flush, and a wider modified-beam search instead of
+downloading a second large multilingual model. Speech recognition stays on-device; audio/video is
+not uploaded to a speech service. Internet permission is used only to download the selected
+Zipformer model on first use, and models are reused from private app storage afterwards.
