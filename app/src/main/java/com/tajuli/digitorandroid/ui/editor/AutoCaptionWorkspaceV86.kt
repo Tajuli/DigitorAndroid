@@ -69,7 +69,20 @@ private val CC86Panel = Color(0xFF121217)
 private val CC86Muted = Color(0xFF9898A1)
 private const val CC86_PREFS = "auto_caption_v86"
 private const val CC86_LANGUAGE = "language"
+private const val CC86_CAPTION_PREVIEW_CODEPOINTS = 18
 private val CC86_INITIAL_LANGUAGE = AutoCaptionLanguageV86.ENGLISH
+
+private fun captionPreviewV88(text: String): String {
+    val clean = text
+        .replace('\n', ' ')
+        .replace(Regex("\\s+"), " ")
+        .trim()
+    if (clean.isBlank()) return "…"
+    val codePoints = clean.codePointCount(0, clean.length)
+    if (codePoints <= CC86_CAPTION_PREVIEW_CODEPOINTS) return clean
+    val end = clean.offsetByCodePoints(0, CC86_CAPTION_PREVIEW_CODEPOINTS)
+    return clean.substring(0, end).trimEnd() + "…"
+}
 
 private enum class AutoCcOperationV86 {
     IDLE,
@@ -456,36 +469,48 @@ private fun AutoCaptionDialogV86(
                         ) {
                             Text("Language packs", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Only downloadable streaming Zipformer packs supported by this Auto CC engine are listed.",
+                                "Swipe left/right to browse every downloadable streaming Zipformer pack available in this engine.",
                                 fontSize = 7.sp,
                                 color = CC86Muted,
                             )
-                            languagePackChoices.forEach { item ->
-                                val installed = item in installedLanguages
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(item.label, fontSize = 9.sp)
+                            Row(
+                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                languagePackChoices.forEach { item ->
+                                    val installed = item in installedLanguages
+                                    Column(
+                                        Modifier
+                                            .width(176.dp)
+                                            .background(Color.White.copy(alpha = .035f), RoundedCornerShape(8.dp))
+                                            .padding(8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(5.dp),
+                                    ) {
+                                        Text(item.label, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                                         Text(
-                                            if (installed) {
-                                                "Installed · ${item.detail}"
-                                            } else {
-                                                "About ${packManager.approximateDownloadMb(item)} MB · ${item.detail}"
-                                            },
+                                            item.detail,
                                             fontSize = 7.sp,
                                             color = CC86Muted,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
                                         )
-                                    }
-                                    if (installed) {
-                                        TextButton(
-                                            onClick = { deleteLanguage(item) },
-                                            enabled = !busy,
-                                        ) { Text("Delete", fontSize = 8.sp, color = Color(0xFFFF7474)) }
-                                    } else {
-                                        OutlinedButton(
-                                            onClick = { startDownload(item) },
-                                            enabled = !busy,
-                                            modifier = Modifier.height(32.dp),
-                                        ) { Text("Download", fontSize = 8.sp) }
+                                        Text(
+                                            if (installed) "Installed" else "About ${packManager.approximateDownloadMb(item)} MB",
+                                            fontSize = 7.sp,
+                                            color = if (installed) CC86Accent else CC86Muted,
+                                        )
+                                        if (installed) {
+                                            TextButton(
+                                                onClick = { deleteLanguage(item) },
+                                                enabled = !busy,
+                                            ) { Text("Delete", fontSize = 8.sp, color = Color(0xFFFF7474)) }
+                                        } else {
+                                            OutlinedButton(
+                                                onClick = { startDownload(item) },
+                                                enabled = !busy,
+                                                modifier = Modifier.height(32.dp),
+                                            ) { Text("Download", fontSize = 8.sp) }
+                                        }
                                     }
                                 }
                             }
@@ -542,7 +567,8 @@ private fun AutoCaptionDialogV86(
                             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(5.dp),
                         ) {
-                            generatedCaptions.forEachIndexed { index, caption ->
+                            generatedCaptions.forEach { caption ->
+                                val preview = captionPreviewV88(caption.text)
                                 AssistChip(
                                     onClick = {
                                         selectedCaptionId = caption.id
@@ -552,8 +578,10 @@ private fun AutoCaptionDialogV86(
                                     },
                                     label = {
                                         Text(
-                                            if (caption.id == selectedCaptionId) "✓ ${index + 1}" else "${index + 1}",
+                                            if (caption.id == selectedCaptionId) "✓ $preview" else preview,
                                             fontSize = 8.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
                                         )
                                     },
                                 )
