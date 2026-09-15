@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.processing
 
+import android.app.ActivityManager
 import android.content.Context
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
@@ -7,6 +8,7 @@ import com.tajuli.digitorandroid.editor.model.TrackKind
 import kotlin.math.ceil
 
 private const val ACCURATE_MAX_CHUNK_US_V81 = 8_000_000L
+private const val ACCURATE_MIN_AVAILABLE_RAM_BYTES_V81 = 768L * 1024L * 1024L
 
 /**
  * V81 protects the large Omnilingual Accurate model from long-utterance native-memory spikes.
@@ -23,6 +25,7 @@ private const val ACCURATE_MAX_CHUNK_US_V81 = 8_000_000L
  */
 class MemorySafeHybridAutoCaptionEngineV81(private val context: Context) {
     private val delegate = HybridAutoCaptionEngineV80(context)
+    private val compactFallback = ZipformerAutoCaptionEngineV79(context)
 
     companion object {
         fun supportedOnThisDevice(): Boolean = HybridAutoCaptionEngineV80.supportedOnThisDevice()
@@ -37,6 +40,22 @@ class MemorySafeHybridAutoCaptionEngineV81(private val context: Context) {
     ): AutoCaptionResultV77 {
         if (quality == AutoCaptionQualityV77.FAST) {
             return delegate.generate(project, audioTrackId, quality, language, onProgress)
+        }
+
+        if (!context.hasOmnilingualMemoryHeadroomV81()) {
+            onProgress(
+                AutoCaptionProgressV77(
+                    .08f,
+                    "Low free RAM · using compact Accurate fallback",
+                ),
+            )
+            return compactFallback.generate(
+                project = project,
+                audioTrackId = audioTrackId,
+                quality = AutoCaptionQualityV77.ACCURATE,
+                language = language,
+                onProgress = onProgress,
+            )
         }
 
         val safeProject = project.withMemorySafeAccurateAudioChunksV81(audioTrackId)
@@ -65,6 +84,15 @@ class MemorySafeHybridAutoCaptionEngineV81(private val context: Context) {
             }
         }
     }
+}
+
+private fun Context.hasOmnilingualMemoryHeadroomV81(): Boolean {
+    val manager = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return true
+    if (manager.isLowRamDevice) return false
+    val info = ActivityManager.MemoryInfo()
+    manager.getMemoryInfo(info)
+    if (info.lowMemory) return false
+    return info.availMem >= ACCURATE_MIN_AVAILABLE_RAM_BYTES_V81
 }
 
 /**
