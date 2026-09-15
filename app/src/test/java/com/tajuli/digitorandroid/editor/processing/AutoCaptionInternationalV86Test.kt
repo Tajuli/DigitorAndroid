@@ -10,17 +10,26 @@ class AutoCaptionInternationalV86Test {
     fun firstInternationalReleaseHasFiveDownloadableLanguagePacks() {
         val languages = internationalLanguageChoicesV86()
         assertEquals(
-            listOf(
+            setOf(
                 AutoCaptionLanguageV86.BANGLA,
                 AutoCaptionLanguageV86.ENGLISH,
                 AutoCaptionLanguageV86.CHINESE,
                 AutoCaptionLanguageV86.KOREAN,
                 AutoCaptionLanguageV86.FRENCH,
             ),
-            languages,
+            languages.toSet(),
         )
+        assertEquals(5, languages.size)
         assertTrue(languages.all { it.downloadable })
         assertFalse(AutoCaptionLanguageV86.AUTO_BN_EN.downloadable)
+    }
+
+    @Test
+    fun englishPackExistsAsCompactDefaultCandidate() {
+        val english = autoCaptionPackSpecV86(AutoCaptionLanguageV86.ENGLISH)
+        assertEquals(AutoCaptionLanguageV86.ENGLISH, english.language)
+        assertEquals("English Zipformer 20M INT8", english.displayName)
+        assertTrue(english.approximateDownloadMb in 1..50)
     }
 
     @Test
