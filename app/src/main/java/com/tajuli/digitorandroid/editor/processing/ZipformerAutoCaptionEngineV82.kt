@@ -4,6 +4,7 @@ import android.content.Context
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import java.io.File
 import kotlin.math.ceil
 
 private const val ACCURATE_ZIPFORMER_MAX_CHUNK_US_V82 = 6_500_000L
@@ -21,6 +22,12 @@ private const val ACCURATE_ZIPFORMER_MAX_CHUNK_US_V82 = 6_500_000L
  */
 class ZipformerAutoCaptionEngineV82(private val context: Context) {
     private val delegate = ZipformerAutoCaptionEngineV79(context)
+
+    init {
+        // V80 briefly downloaded a large Omnilingual model. It is no longer used; reclaim that private
+        // app-storage cache automatically for users who tested the experimental build.
+        runCatching { File(context.filesDir, "auto_cc_models_v80").deleteRecursively() }
+    }
 
     companion object {
         fun supportedOnThisDevice(): Boolean = ZipformerAutoCaptionEngineV79.supportedOnThisDevice()
@@ -41,12 +48,7 @@ class ZipformerAutoCaptionEngineV82(private val context: Context) {
         val originalCount = project.track(audioTrackId)?.clips?.size ?: 0
         val tunedCount = tuned.track(audioTrackId)?.clips?.size ?: 0
         if (tunedCount > originalCount) {
-            onProgress(
-                AutoCaptionProgressV77(
-                    .17f,
-                    "Accurate Zipformer · $tunedCount speech windows",
-                ),
-            )
+            onProgress(AutoCaptionProgressV77(.17f, "Accurate Zipformer · $tunedCount speech windows"))
         }
         return delegate.generate(
             project = tuned,
@@ -55,10 +57,7 @@ class ZipformerAutoCaptionEngineV82(private val context: Context) {
             language = language,
             onProgress = onProgress,
         ).let { result ->
-            result.copy(
-                backend = "${result.backend} · Zipformer tuned",
-                model = result.model,
-            )
+            result.copy(backend = "${result.backend} · Zipformer tuned")
         }
     }
 }
