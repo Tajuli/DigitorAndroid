@@ -15,15 +15,16 @@ The complete Apache License 2.0 text is packaged in the app at
 
 ## International Auto CC language packs
 
-Digitor uses English as the default Auto CC language pack. The English pack is installed first by
-an explicit user download. Bengali, Chinese, Korean, and French are optional packs that users can
-add or remove later from Manage Languages. Speech models are not bundled in the APK.
+Digitor does not require an English base pack. Before the first Auto CC model download, the user
+chooses one of the language packs supported by Digitor's streaming Zipformer recognizer. English,
+Bengali, Chinese, Korean, and French are independently downloadable and removable. Speech models
+are not bundled in the APK.
 
-### English (default)
+### English
 
 - Model: `csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17`
 - Pinned model revision: `d42f2d9f7ca24806fb667456a18a9f1b60f70d16`
-- Purpose: compact default English streaming Zipformer recognition
+- Purpose: compact English streaming Zipformer recognition
 - License: Apache License 2.0
 
 ### Bengali
@@ -54,9 +55,9 @@ add or remove later from Manage Languages. Speech models are not bundled in the 
 - Purpose: French streaming Zipformer recognition
 - License: Apache License 2.0
 
-The model files are downloaded only after explicit user action into private app storage. English is
-the non-deletable base Auto CC pack in the V86 UI; the four additional language packs can be added
-or removed independently.
+The model files are downloaded only after explicit user action into private app storage. The first
+pack is whichever supported language the user selects. Additional packs can be added or removed
+independently from Manage Languages.
 
 ## ONNX Runtime
 
