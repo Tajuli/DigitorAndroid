@@ -7,7 +7,7 @@ import org.junit.Test
 
 class AutoCaptionInternationalV86Test {
     @Test
-    fun firstInternationalReleaseHasFiveDownloadableLanguagePacks() {
+    fun languagePickerContainsOnlyTheFiveRegisteredDownloadableStreamingZipformerPacks() {
         val languages = internationalLanguageChoicesV86()
         assertEquals(
             setOf(
@@ -25,7 +25,7 @@ class AutoCaptionInternationalV86Test {
     }
 
     @Test
-    fun englishPackExistsAsCompactDefaultCandidate() {
+    fun englishPackExistsAsCompactSelectableCandidate() {
         val english = autoCaptionPackSpecV86(AutoCaptionLanguageV86.ENGLISH)
         assertEquals(AutoCaptionLanguageV86.ENGLISH, english.language)
         assertEquals("English Zipformer 20M INT8", english.displayName)
