@@ -1,4 +1,4 @@
-DIGITOR AUTO CC V82 - THIRD-PARTY NOTICES
+DIGITOR AUTO CC V83 - THIRD-PARTY NOTICES
 
 sherpa-onnx Android runtime
 Project: k2-fsa/sherpa-onnx
@@ -25,7 +25,8 @@ Artifact: com.microsoft.onnxruntime:onnxruntime-android:1.27.0
 License: MIT License
 Purpose: Native inference runtime shared by sherpa-onnx and Digitor's PP-Matting fallback.
 
-Auto CC V82 does not package or use Whisper, WhisperKit, ggml, Qualcomm QNN, Omnilingual ASR, or the
-former WhisperKit FFmpeg runtime. Recognition is performed locally with Zipformer. Speech models
-download on first use and are cached in private app storage; user audio/video is not uploaded to a
-speech API.
+Auto CC V83 does not package or use Whisper, WhisperKit, ggml, Qualcomm QNN, Omnilingual ASR, or the
+former WhisperKit FFmpeg runtime. Recognition is performed locally with Zipformer. Accurate mode adds
+speech-level normalization, silence-aware segmentation, incremental streaming input and wider beam
+search. Speech models download on first use and are cached in private app storage; user audio/video
+is not uploaded to a speech API.
