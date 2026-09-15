@@ -83,4 +83,28 @@ class AutoCaptionProjectActionsV84Test {
         assertFalse(next.textOverlays.any { it.id == "manual-cc" })
         assertTrue(next.tracks.any { it.id == "v1" && it.name == "V1" })
     }
+
+    @Test
+    fun timelineDeleteCanFinishCleanupAfterCcTrackWasAlreadyRemoved() {
+        val source = projectWithCaptions()
+        val ccTrackId = source.autoCaptionTrackIdV84()!!
+        val manualOnCc = TextOverlayClip(
+            id = "manual-cc",
+            text = "Manual text on CC",
+            timelineStartUs = 2_000_000L,
+            timelineEndUs = 3_000_000L,
+            videoTrackIdV3 = ccTrackId,
+        )
+        val timelineDeletedFirst = source.copy(
+            tracks = source.tracks.filterNot { it.id == ccTrackId },
+            textOverlays = source.textOverlays + manualOnCc,
+        )
+
+        val cleaned = timelineDeletedFirst.deleteAutoCaptionTrackV84(previousTrackId = ccTrackId)
+
+        assertNull(cleaned.autoCaptionTrackIdV84())
+        assertEquals(0, cleaned.autoCaptionCountV77())
+        assertFalse(cleaned.textOverlays.any { it.id == "manual-cc" })
+        assertTrue(cleaned.textOverlays.any { it.id == "manual-v1" })
+    }
 }
