@@ -9,13 +9,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.media3.common.util.UnstableApi
 
-/** V77 shell: keeps the V7 editor stable and layers creator Auto CC just above the workspace rail. */
+/** V84 shell: V7 editor plus Zipformer Auto CC controls and CC-track integrity handling. */
 @UnstableApi
 @Composable
 fun DigitorEditorScreenV8(
     vm: EditorViewModelV4,
     onHome: () -> Unit = {},
 ) {
+    AutoCaptionTrackIntegrityV84(vm)
     Box(Modifier.fillMaxSize()) {
         DigitorEditorScreenV7(vm = vm, onHome = onHome)
         AutoCaptionLauncherV77(
