@@ -9,7 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.media3.common.util.UnstableApi
 
-/** V84 shell: V7 editor plus Zipformer Auto CC controls and CC-track integrity handling. */
+/** V85 shell: V7 editor plus install-gated Zipformer Auto CC and CC-track integrity handling. */
 @UnstableApi
 @Composable
 fun DigitorEditorScreenV8(
@@ -19,7 +19,7 @@ fun DigitorEditorScreenV8(
     AutoCaptionTrackIntegrityV84(vm)
     Box(Modifier.fillMaxSize()) {
         DigitorEditorScreenV7(vm = vm, onHome = onHome)
-        AutoCaptionLauncherV77(
+        AutoCaptionLauncherV85(
             vm = vm,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
