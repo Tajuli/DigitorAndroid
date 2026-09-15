@@ -6,6 +6,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.effect.TextOverlay
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
+import com.tajuli.digitorandroid.editor.model.autoCaptionWrappedTextV85
 
 /**
  * Renders a non-overlapping Auto CC lane through one Media3 texture.
@@ -15,6 +16,10 @@ import com.tajuli.digitorandroid.editor.model.TextOverlayClip
  * separate TextureOverlay can exceed a phone GPU's fragment-texture limit during export even
  * though only one caption is visible at a time. This wrapper keeps the existing text renderer and
  * switches the active caption by presentation timestamp, so one CC lane always consumes one slot.
+ *
+ * V85 also feeds the same explicit word-wrapped text used by preview into export. This keeps long
+ * captions on two/three centered lines instead of allowing the rendered file to grow back into one
+ * line and escape the video frame.
  */
 @UnstableApi
 internal class TimedAutoCaptionSequenceOverlayV80(
@@ -27,7 +32,10 @@ internal class TimedAutoCaptionSequenceOverlayV80(
 
     private val entries = captions
         .sortedBy { it.timelineStartUs }
-        .map { Entry(it, TimedDigitorTextOverlay(it)) }
+        .map { spec ->
+            val rendered = spec.copy(text = autoCaptionWrappedTextV85(spec.text))
+            Entry(spec, TimedDigitorTextOverlay(rendered))
+        }
 
     private val hiddenText = SpannableString(" ")
     private val hiddenSettings: OverlaySettings =
