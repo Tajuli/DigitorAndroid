@@ -16,9 +16,12 @@ The complete Apache License 2.0 text is packaged in the app at
 ## International Auto CC language packs
 
 Digitor does not require an English base pack. Before the first Auto CC model download, the user
-chooses one of the language packs supported by Digitor's streaming Zipformer recognizer. English,
-Bengali, Chinese, Korean, and French are independently downloadable and removable. Speech models
-are not bundled in the APK.
+chooses a supported streaming Zipformer language. Speech models are not bundled in the APK.
+
+The current picker exposes 12 language choices: Bengali, English, Hindi, Arabic, Indonesian,
+Japanese, Russian, Thai, Vietnamese, Chinese, Korean, and French. Arabic, Indonesian, Japanese,
+Russian, Thai, and Vietnamese share one multilingual Zipformer download, so installing one of those
+choices makes the same shared model available to all six choices without downloading it six times.
 
 ### English
 
@@ -33,6 +36,22 @@ are not bundled in the APK.
 - Pinned model revision: `dfabeea5eee1f33d81436826d0575d8cfd64bd1d`
 - Purpose: dedicated Bengali streaming Zipformer2 recognition
 - License: Apache License 2.0
+
+### Hindi
+
+- Model: `mobilebytesensei/betterflow-hindi-streaming-ctc`
+- Source ref in this draft: `main` (must be pinned to an immutable revision before release)
+- Purpose: Hindi streaming Zipformer2-CTC recognition through sherpa-onnx `OnlineZipformer2CtcModelConfig`
+- License: Apache License 2.0
+
+### Arabic / Indonesian / Japanese / Russian / Thai / Vietnamese shared pack
+
+- Model: `csukuangfj/sherpa-onnx-streaming-zipformer-ar_en_id_ja_ru_th_vi_zh-2025-02-10`
+- Pinned model revision: `8248322d9167a408b966f37fbc75e9f4afc70d6f`
+- Purpose: shared streaming Zipformer transducer covering `ar/en/id/ja/ru/th/vi/zh`
+- Digitor exposes Arabic, Indonesian, Japanese, Russian, Thai, and Vietnamese from this pack; the
+  existing smaller dedicated English and Chinese packs remain available separately.
+- License recorded by the distributed model mirror: Apache License 2.0
 
 ### Chinese
 
@@ -55,9 +74,12 @@ are not bundled in the APK.
 - Purpose: French streaming Zipformer recognition
 - License: Apache License 2.0
 
-The model files are downloaded only after explicit user action into private app storage. The first
-pack is whichever supported language the user selects. Additional packs can be added or removed
-independently from Manage Languages.
+Urdu is intentionally not exposed in this Zipformer-only registry yet. A sherpa-onnx-compatible Urdu
+ASR model exists in other model families, but this feature does not advertise a language unless a
+compatible Zipformer download is available for the recognizer path used by Auto CC.
+
+The model files are downloaded only after explicit user action into private app storage. Additional
+packs can be added or removed from Manage Languages.
 
 ## ONNX Runtime
 
@@ -70,8 +92,8 @@ version; Digitor pins the pair used by Auto CC rather than allowing an arbitrary
 
 ## Release note
 
-Auto CC V86 does **not** use Whisper, WhisperKit, ggml, Qualcomm QNN, Omnilingual ASR, or the former
-WhisperKit FFmpeg runtime. Fast and Accurate both use Zipformer models. Accurate mode adds
-speech-level normalization, silence-aware segmentation, incremental streaming input, a short tail
-flush, and wider modified-beam search. Speech recognition stays on-device; audio/video is not
+Auto CC does **not** use Whisper, WhisperKit, ggml, Qualcomm QNN, Omnilingual ASR, Dolphin, or the
+former WhisperKit FFmpeg runtime. The downloadable speech models in this feature are Zipformer /
+Zipformer2 models. Transducer packs use greedy or modified-beam decoding; the Hindi Zipformer2-CTC
+pack uses sherpa-onnx's streaming CTC path. Speech recognition stays on-device; audio/video is not
 uploaded to a speech service. Internet permission is used only for explicit language-pack downloads.
