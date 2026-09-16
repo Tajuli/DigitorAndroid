@@ -12,6 +12,7 @@ import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizerResult
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
+import com.k2fsa.sherpa.onnx.OnlineZipformer2CtcModelConfig
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
@@ -42,13 +43,15 @@ private const val V86_MIN_CAPTION_US = 180_000L
 private const val V86_MAX_CAPTION_CHARS = 42
 private const val V86_MAX_CAPTION_SPAN_US = 4_000_000L
 private const val V86_CACHE_ROOT = "auto_cc_models_v79"
+private const val V89_MULTI8_DIRECTORY = "multi8-zipformer-2025-02-10"
+private const val V89_MULTI8_BASE = "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-ar_en_id_ja_ru_th_vi_zh-2025-02-10/resolve/8248322d9167a408b966f37fbc75e9f4afc70d6f"
 
 /**
  * International Auto CC language selector.
  *
- * AUTO_BN_EN is intentionally limited to the two proven legacy packs. Digitor does not fan out a
- * clip through every installed model because that multiplies CPU/RAM use as users install more
- * languages. All other international languages are explicit selections.
+ * AUTO_BN_EN remains a lightweight two-model detector. Other international languages are explicit
+ * selections. The ar/en/id/ja/ru/th/vi/zh model is one shared multilingual Zipformer download;
+ * its six new language choices point at the same installed files instead of wasting storage.
  */
 enum class AutoCaptionLanguageV86(
     val label: String,
@@ -57,6 +60,13 @@ enum class AutoCaptionLanguageV86(
 ) {
     BANGLA("বাংলা", "Bengali Zipformer2", "bn"),
     ENGLISH("English", "English Zipformer INT8", "en"),
+    HINDI("हिन्दी", "Hindi streaming Zipformer2 CTC INT8", "hi"),
+    ARABIC("العربية", "Arabic · shared multilingual Zipformer", "ar"),
+    INDONESIAN("Bahasa Indonesia", "Indonesian · shared multilingual Zipformer", "id"),
+    JAPANESE("日本語", "Japanese · shared multilingual Zipformer", "ja"),
+    RUSSIAN("Русский", "Russian · shared multilingual Zipformer", "ru"),
+    THAI("ไทย", "Thai · shared multilingual Zipformer", "th"),
+    VIETNAMESE("Tiếng Việt", "Vietnamese · shared multilingual Zipformer", "vi"),
     CHINESE("中文", "Chinese Zipformer 14M INT8", "zh"),
     KOREAN("한국어", "Korean streaming Zipformer INT8", "ko"),
     FRENCH("Français", "French streaming Zipformer INT8", "fr"),
@@ -64,6 +74,11 @@ enum class AutoCaptionLanguageV86(
     ;
 
     val downloadable: Boolean get() = this != AUTO_BN_EN
+}
+
+internal enum class AutoCaptionModelFamilyV89 {
+    TRANSDUCER,
+    ZIPFORMER2_CTC,
 }
 
 internal data class AutoCaptionPackFileV86(
@@ -82,6 +97,7 @@ internal data class AutoCaptionPackSpecV86(
     val approximateDownloadMb: Int,
     val license: String,
     val files: List<AutoCaptionPackFileV86>,
+    val family: AutoCaptionModelFamilyV89 = AutoCaptionModelFamilyV89.TRANSDUCER,
 )
 
 private val V86_BANGLA = AutoCaptionPackSpecV86(
@@ -118,6 +134,49 @@ private val V86_ENGLISH = AutoCaptionPackSpecV86(
     ),
 )
 
+private val V89_HINDI = AutoCaptionPackSpecV86(
+    language = AutoCaptionLanguageV86.HINDI,
+    directoryName = "hi-zipformer2-ctc-int8-2026-07",
+    baseUrl = "https://huggingface.co/mobilebytesensei/betterflow-hindi-streaming-ctc/resolve/main",
+    displayName = "Hindi streaming Zipformer2 CTC INT8",
+    modelType = "zipformer2",
+    dither = 0f,
+    approximateDownloadMb = 90,
+    license = "Apache-2.0",
+    family = AutoCaptionModelFamilyV89.ZIPFORMER2_CTC,
+    files = listOf(
+        AutoCaptionPackFileV86("encoder.int8.onnx", "model.onnx", 20_000_000L),
+        AutoCaptionPackFileV86("tokens.txt", "tokens.txt", 100L),
+    ),
+)
+
+private val V89_MULTI8_FILES = listOf(
+    AutoCaptionPackFileV86("encoder-epoch-75-avg-11-chunk-16-left-128.int8.onnx", "encoder.onnx", 290_000_000L),
+    AutoCaptionPackFileV86("decoder-epoch-75-avg-11-chunk-16-left-128.onnx", "decoder.onnx", 30_000_000L),
+    AutoCaptionPackFileV86("joiner-epoch-75-avg-11-chunk-16-left-128.int8.onnx", "joiner.onnx", 8_000_000L),
+    AutoCaptionPackFileV86("tokens.txt", "tokens.txt", 100_000L),
+)
+
+private fun multi8SpecV89(language: AutoCaptionLanguageV86): AutoCaptionPackSpecV86 =
+    AutoCaptionPackSpecV86(
+        language = language,
+        directoryName = V89_MULTI8_DIRECTORY,
+        baseUrl = V89_MULTI8_BASE,
+        displayName = "Streaming Zipformer multi-8 · ar/en/id/ja/ru/th/vi/zh",
+        modelType = "zipformer",
+        dither = 0f,
+        approximateDownloadMb = 340,
+        license = "Apache-2.0",
+        files = V89_MULTI8_FILES,
+    )
+
+private val V89_ARABIC = multi8SpecV89(AutoCaptionLanguageV86.ARABIC)
+private val V89_INDONESIAN = multi8SpecV89(AutoCaptionLanguageV86.INDONESIAN)
+private val V89_JAPANESE = multi8SpecV89(AutoCaptionLanguageV86.JAPANESE)
+private val V89_RUSSIAN = multi8SpecV89(AutoCaptionLanguageV86.RUSSIAN)
+private val V89_THAI = multi8SpecV89(AutoCaptionLanguageV86.THAI)
+private val V89_VIETNAMESE = multi8SpecV89(AutoCaptionLanguageV86.VIETNAMESE)
+
 private val V86_CHINESE = AutoCaptionPackSpecV86(
     language = AutoCaptionLanguageV86.CHINESE,
     directoryName = "zh-zipformer-14m-int8-2023-02-23",
@@ -146,7 +205,6 @@ private val V86_KOREAN = AutoCaptionPackSpecV86(
     license = "Apache-2.0",
     files = listOf(
         AutoCaptionPackFileV86("encoder-epoch-99-avg-1.int8.onnx", "encoder.onnx", 120_000_000L),
-        // Upstream's documented INT8 recipe keeps the decoder in fp32.
         AutoCaptionPackFileV86("decoder-epoch-99-avg-1.onnx", "decoder.onnx", 10_000_000L),
         AutoCaptionPackFileV86("joiner-epoch-99-avg-1.int8.onnx", "joiner.onnx", 2_000_000L),
         AutoCaptionPackFileV86("tokens.txt", "tokens.txt", 45_000L),
@@ -164,7 +222,6 @@ private val V86_FRENCH = AutoCaptionPackSpecV86(
     license = "Apache-2.0",
     files = listOf(
         AutoCaptionPackFileV86("encoder-epoch-29-avg-9-with-averaged-model.int8.onnx", "encoder.onnx", 120_000_000L),
-        // Upstream's documented INT8 recipe keeps the decoder in fp32.
         AutoCaptionPackFileV86("decoder-epoch-29-avg-9-with-averaged-model.onnx", "decoder.onnx", 1_500_000L),
         AutoCaptionPackFileV86("joiner-epoch-29-avg-9-with-averaged-model.int8.onnx", "joiner.onnx", 200_000L),
         AutoCaptionPackFileV86("tokens.txt", "tokens.txt", 3_000L),
@@ -174,6 +231,13 @@ private val V86_FRENCH = AutoCaptionPackSpecV86(
 internal val AUTO_CAPTION_PACKS_V86: List<AutoCaptionPackSpecV86> = listOf(
     V86_BANGLA,
     V86_ENGLISH,
+    V89_HINDI,
+    V89_ARABIC,
+    V89_INDONESIAN,
+    V89_JAPANESE,
+    V89_RUSSIAN,
+    V89_THAI,
+    V89_VIETNAMESE,
     V86_CHINESE,
     V86_KOREAN,
     V86_FRENCH,
@@ -183,10 +247,6 @@ internal fun autoCaptionPackSpecV86(language: AutoCaptionLanguageV86): AutoCapti
     AUTO_CAPTION_PACKS_V86.firstOrNull { it.language == language }
         ?: error("${language.label} is not a downloadable language pack")
 
-/**
- * Explicit, user-driven language-pack manager. Generate never invokes this downloader. This keeps
- * international launch storage predictable: users pay only for the languages they choose.
- */
 class AutoCaptionLanguagePackManagerV86(private val context: Context) {
     fun isInstalled(language: AutoCaptionLanguageV86): Boolean = when (language) {
         AutoCaptionLanguageV86.AUTO_BN_EN ->
@@ -308,11 +368,6 @@ class AutoCaptionLanguagePackManagerV86(private val context: Context) {
     }
 }
 
-/**
- * V86 keeps the proven V83 Bengali/English recognizer untouched and routes additional international
- * packs through the same sherpa-onnx streaming transducer API. This isolates launch expansion from
- * the already phone-tested Bangla/English path.
- */
 class GlobalZipformerAutoCaptionEngineV86(private val context: Context) {
     private val legacy = ZipformerAutoCaptionEngineV83(context)
     private val packs = AutoCaptionLanguagePackManagerV86(context)
@@ -375,7 +430,7 @@ private class InternationalZipformerRecognizerV86(
         language: AutoCaptionLanguageV86,
         onProgress: (AutoCaptionProgressV77) -> Unit,
     ): AutoCaptionResultV77 {
-        require(language in setOf(AutoCaptionLanguageV86.CHINESE, AutoCaptionLanguageV86.KOREAN, AutoCaptionLanguageV86.FRENCH))
+        require(language.downloadable && language !in setOf(AutoCaptionLanguageV86.BANGLA, AutoCaptionLanguageV86.ENGLISH))
         val track = project.track(audioTrackId)?.takeIf { it.kind == TrackKind.AUDIO && !it.muted }
             ?: error("Select an unmuted audio track")
         val clips = track.sortedClips()
@@ -423,10 +478,13 @@ private class InternationalZipformerRecognizerV86(
             onProgress(AutoCaptionProgressV77(1f, "${normalized.size} captions ready · ${language.label}"))
             AutoCaptionResultV77(
                 captions = normalized,
-                backend = if (quality == AutoCaptionQualityV77.ACCURATE) {
-                    "sherpa-onnx CPU · international Zipformer tuned"
-                } else {
-                    "sherpa-onnx CPU · international Zipformer fast"
+                backend = when (spec.family) {
+                    AutoCaptionModelFamilyV89.ZIPFORMER2_CTC -> "sherpa-onnx CPU · streaming Zipformer2 CTC"
+                    AutoCaptionModelFamilyV89.TRANSDUCER -> if (quality == AutoCaptionQualityV77.ACCURATE) {
+                        "sherpa-onnx CPU · international Zipformer tuned"
+                    } else {
+                        "sherpa-onnx CPU · international Zipformer fast"
+                    }
                 },
                 model = spec.displayName,
             )
@@ -441,23 +499,37 @@ private class InternationalZipformerRecognizerV86(
     ): OnlineRecognizer {
         val dir = packs.modelDir(spec.language)
         val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        val modelConfig = when (spec.family) {
+            AutoCaptionModelFamilyV89.TRANSDUCER -> OnlineModelConfig(
+                transducer = OnlineTransducerModelConfig(
+                    encoder = File(dir, "encoder.onnx").absolutePath,
+                    decoder = File(dir, "decoder.onnx").absolutePath,
+                    joiner = File(dir, "joiner.onnx").absolutePath,
+                ),
+                tokens = File(dir, "tokens.txt").absolutePath,
+                numThreads = threads,
+                provider = "cpu",
+                modelType = spec.modelType,
+            )
+            AutoCaptionModelFamilyV89.ZIPFORMER2_CTC -> OnlineModelConfig(
+                zipformer2Ctc = OnlineZipformer2CtcModelConfig(
+                    model = File(dir, "model.onnx").absolutePath,
+                ),
+                tokens = File(dir, "tokens.txt").absolutePath,
+                numThreads = threads,
+                provider = "cpu",
+                modelType = spec.modelType,
+            )
+        }
+        val transducerAccurate = spec.family == AutoCaptionModelFamilyV89.TRANSDUCER &&
+            quality == AutoCaptionQualityV77.ACCURATE
         return OnlineRecognizer(
             config = OnlineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = V86_RATE, featureDim = 80, dither = spec.dither),
-                modelConfig = OnlineModelConfig(
-                    transducer = OnlineTransducerModelConfig(
-                        encoder = File(dir, "encoder.onnx").absolutePath,
-                        decoder = File(dir, "decoder.onnx").absolutePath,
-                        joiner = File(dir, "joiner.onnx").absolutePath,
-                    ),
-                    tokens = File(dir, "tokens.txt").absolutePath,
-                    numThreads = threads,
-                    provider = "cpu",
-                    modelType = spec.modelType,
-                ),
+                modelConfig = modelConfig,
                 enableEndpoint = false,
-                decodingMethod = if (quality == AutoCaptionQualityV77.ACCURATE) "modified_beam_search" else "greedy_search",
-                maxActivePaths = if (quality == AutoCaptionQualityV77.ACCURATE) 24 else 4,
+                decodingMethod = if (transducerAccurate) "modified_beam_search" else "greedy_search",
+                maxActivePaths = if (transducerAccurate) 24 else 4,
             ),
         )
     }
@@ -680,7 +752,7 @@ private fun OnlineRecognizerResult.toInternationalDraftsV86(
 ): List<AutoCaptionDraftV77> {
     val clean = text.cleanInternationalTextV86()
     if (clean.isBlank()) return emptyList()
-    val cjkCompact = language == AutoCaptionLanguageV86.CHINESE
+    val cjkCompact = language == AutoCaptionLanguageV86.CHINESE || language == AutoCaptionLanguageV86.JAPANESE
     val units = if (cjkCompact) {
         clean.filterNot { it.isWhitespace() }.map { it.toString() }
     } else {
@@ -744,7 +816,8 @@ private fun String.cleanInternationalTextV86(): String =
 
 private fun String.endsSentenceV86(): Boolean =
     endsWith('.') || endsWith('?') || endsWith('!') || endsWith('।') ||
-        endsWith(';') || endsWith(':') || endsWith('。') || endsWith('？') || endsWith('！')
+        endsWith(';') || endsWith(':') || endsWith('。') || endsWith('？') || endsWith('！') ||
+        endsWith('؟') || endsWith('！')
 
 private fun ByteBuffer.toMonoV86(channels: Int, encoding: Int): ShortArray {
     val channelCount = channels.coerceAtLeast(1)
