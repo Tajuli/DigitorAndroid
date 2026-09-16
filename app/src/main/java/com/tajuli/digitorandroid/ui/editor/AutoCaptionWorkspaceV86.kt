@@ -71,6 +71,14 @@ private const val CC86_PREFS = "auto_caption_v86"
 private const val CC86_LANGUAGE = "language"
 private const val CC86_CAPTION_PREVIEW_CODEPOINTS = 18
 private val CC86_INITIAL_LANGUAGE = AutoCaptionLanguageV86.ENGLISH
+private val CC89_SHARED_MULTI8 = setOf(
+    AutoCaptionLanguageV86.ARABIC,
+    AutoCaptionLanguageV86.INDONESIAN,
+    AutoCaptionLanguageV86.JAPANESE,
+    AutoCaptionLanguageV86.RUSSIAN,
+    AutoCaptionLanguageV86.THAI,
+    AutoCaptionLanguageV86.VIETNAMESE,
+)
 
 private fun captionPreviewV88(text: String): String {
     val clean = text
@@ -247,7 +255,11 @@ private fun AutoCaptionDialogV86(
                 installedLanguages = packManager.installedLanguages().toSet()
                 rememberLanguage(target)
                 progress = 1f
-                status = "${target.label} language pack ready"
+                status = if (target in CC89_SHARED_MULTI8) {
+                    "Shared multilingual Zipformer ready · 6 language choices enabled"
+                } else {
+                    "${target.label} language pack ready"
+                }
                 manageLanguages = false
             } catch (cancelled: CancellationException) {
                 status = "${target.label} download cancelled"
@@ -267,10 +279,10 @@ private fun AutoCaptionDialogV86(
         if (busy || !target.downloadable) return
         packManager.delete(target)
         installedLanguages = packManager.installedLanguages().toSet()
-        status = if (installedLanguages.isEmpty()) {
-            "Choose a language pack to download"
-        } else {
-            "${target.label} language pack removed"
+        status = when {
+            installedLanguages.isEmpty() -> "Choose a language pack to download"
+            target in CC89_SHARED_MULTI8 -> "Shared multilingual Zipformer removed"
+            else -> "${target.label} language pack removed"
         }
         progress = 0f
     }
@@ -338,7 +350,7 @@ private fun AutoCaptionDialogV86(
                 ) {
                     Text("Choose Auto Caption Language", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "Select a language first. Only packs compatible with Digitor's streaming Zipformer engine are shown.",
+                        "Select a language first. Only packs compatible with Digitor's Zipformer engine are shown.",
                         fontSize = 9.sp,
                         color = Color.White.copy(alpha = .82f),
                     )
@@ -367,6 +379,13 @@ private fun AutoCaptionDialogV86(
                         fontSize = 8.sp,
                         color = CC86Muted,
                     )
+                    if (language in CC89_SHARED_MULTI8) {
+                        Text(
+                            "One shared download enables العربية, Bahasa Indonesia, 日本語, Русский, ไทย and Tiếng Việt.",
+                            fontSize = 8.sp,
+                            color = CC86Accent,
+                        )
+                    }
                     Text(
                         "You can add or remove other supported language packs later from Manage Languages.",
                         fontSize = 8.sp,
@@ -398,7 +417,7 @@ private fun AutoCaptionDialogV86(
                     verticalArrangement = Arrangement.spacedBy(9.dp),
                 ) {
                     Text(
-                        "On-device Auto CC · ${installedLanguages.size} language pack${if (installedLanguages.size == 1) "" else "s"} installed",
+                        "On-device Auto CC · ${installedLanguages.size} language choice${if (installedLanguages.size == 1) "" else "s"} available",
                         fontSize = 9.sp,
                         color = Color.White.copy(alpha = .78f),
                     )
@@ -469,7 +488,7 @@ private fun AutoCaptionDialogV86(
                         ) {
                             Text("Language packs", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Swipe left/right to browse every downloadable streaming Zipformer pack available in this engine.",
+                                "Swipe left/right to browse every downloadable Zipformer language available in this engine.",
                                 fontSize = 7.sp,
                                 color = CC86Muted,
                             )
@@ -499,11 +518,24 @@ private fun AutoCaptionDialogV86(
                                             fontSize = 7.sp,
                                             color = if (installed) CC86Accent else CC86Muted,
                                         )
+                                        if (item in CC89_SHARED_MULTI8) {
+                                            Text(
+                                                "Shared 6-choice download",
+                                                fontSize = 7.sp,
+                                                color = CC86Muted,
+                                            )
+                                        }
                                         if (installed) {
                                             TextButton(
                                                 onClick = { deleteLanguage(item) },
                                                 enabled = !busy,
-                                            ) { Text("Delete", fontSize = 8.sp, color = Color(0xFFFF7474)) }
+                                            ) {
+                                                Text(
+                                                    if (item in CC89_SHARED_MULTI8) "Delete shared pack" else "Delete",
+                                                    fontSize = 8.sp,
+                                                    color = Color(0xFFFF7474),
+                                                )
+                                            }
                                         } else {
                                             OutlinedButton(
                                                 onClick = { startDownload(item) },
@@ -516,7 +548,7 @@ private fun AutoCaptionDialogV86(
                             }
                             if (autoLanguageAvailableV86(installedLanguages)) {
                                 Text(
-                                    "Auto · বাংলা + English becomes available automatically when both packs are installed.",
+                                    "Auto · বাংলা + English becomes available automatically when both dedicated packs are installed.",
                                     fontSize = 7.sp,
                                     color = CC86Muted,
                                 )
