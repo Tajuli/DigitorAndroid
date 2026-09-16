@@ -1,0 +1,65 @@
+DIGITOR AUTO CC - THIRD-PARTY NOTICES
+
+sherpa-onnx Android runtime
+Project: k2-fsa/sherpa-onnx
+Version: v1.13.4
+License: Apache License 2.0
+Purpose: On-device streaming speech recognition runtime / Android JNI bindings.
+
+English language pack
+Model: csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17
+Pinned revision: d42f2d9f7ca24806fb667456a18a9f1b60f70d16
+License: Apache License 2.0
+
+Bengali language pack
+Model: alphacep/vosk-model-small-streaming-bn
+Pinned revision: dfabeea5eee1f33d81436826d0575d8cfd64bd1d
+License: Apache License 2.0
+
+Hindi language pack
+Model: mobilebytesensei/betterflow-hindi-streaming-ctc
+Source ref in this draft: main; pin an immutable revision before release.
+License: Apache License 2.0
+Purpose: Hindi streaming Zipformer2-CTC through sherpa-onnx.
+
+Shared Arabic / Indonesian / Japanese / Russian / Thai / Vietnamese language pack
+Model: csukuangfj/sherpa-onnx-streaming-zipformer-ar_en_id_ja_ru_th_vi_zh-2025-02-10
+Pinned revision: 8248322d9167a408b966f37fbc75e9f4afc70d6f
+License recorded by distributed model mirror: Apache License 2.0
+Purpose: Shared streaming Zipformer transducer covering ar/en/id/ja/ru/th/vi/zh. Digitor exposes
+Arabic, Indonesian, Japanese, Russian, Thai and Vietnamese from this shared download while keeping
+its smaller dedicated English and Chinese packs separately selectable.
+
+Chinese language pack
+Model: csukuangfj/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23
+Pinned revision: 204ad334e2e683fd295359930cc16fc0432a23ac
+License: Apache License 2.0
+
+Korean language pack
+Model: k2-fsa/sherpa-onnx-streaming-zipformer-korean-2024-06-16
+Pinned revision: 023c8279ae8ac55719b07eee0ad8bc59889973fb
+License: Apache License 2.0
+
+French language pack
+Model: shaojieli/sherpa-onnx-streaming-zipformer-fr-2023-04-14
+Pinned revision: 3db9565d9633758d6b87b9a7b3dc09ebfb6b2c73
+License: Apache License 2.0
+
+The complete Apache License 2.0 text is packaged at assets/legal/APACHE-2.0.txt.
+No English base pack is required. The language picker currently exposes Bengali, English, Hindi,
+Arabic, Indonesian, Japanese, Russian, Thai, Vietnamese, Chinese, Korean and French. The six choices
+backed by the multilingual model share one physical download. Urdu is not exposed yet because this
+feature remains Zipformer-only and no compatible Urdu Zipformer pack is registered.
+
+Models are downloaded only after explicit user action, cached in private app storage and not bundled
+in the APK. User audio/video is not uploaded to a speech API.
+
+ONNX Runtime
+Artifact: com.microsoft.onnxruntime:onnxruntime-android:1.27.0
+License: MIT License
+Purpose: Native inference runtime shared by sherpa-onnx and Digitor's PP-Matting fallback.
+
+Auto CC does not package or use Whisper, WhisperKit, ggml, Qualcomm QNN, Omnilingual ASR or Dolphin.
+Recognition is local with Zipformer / Zipformer2 models. Transducer packs use greedy or modified-beam
+decoding; Hindi uses the sherpa-onnx streaming Zipformer2-CTC path. Auto detection remains limited to
+Bengali + English when both dedicated packs are installed.

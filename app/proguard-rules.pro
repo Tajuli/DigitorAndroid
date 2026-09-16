@@ -4,8 +4,10 @@
 # AndroidX through reflection and the project model is serialized/deserialized by Gson, so those
 # runtime contracts must keep stable constructors/field names.
 
-# JNI entry points use this exact Kotlin object/class name.
+# JNI entry points use these exact Kotlin/Java class names. sherpa-onnx's Android JNI bridge resolves
+# its API classes/methods from native code, so keep that small package stable in minified builds.
 -keep class com.tajuli.digitorandroid.editor.processing.NcnnVulkanNativeV52 { *; }
+-keep class com.k2fsa.sherpa.onnx.** { *; }
 
 # AndroidX ViewModelProvider creates this AndroidViewModel through its Application constructor.
 # Keep the class/constructor so opening a freshly-created project cannot fail only in minified APKs.

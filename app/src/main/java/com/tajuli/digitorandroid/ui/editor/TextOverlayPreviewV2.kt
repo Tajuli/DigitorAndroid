@@ -3,6 +3,7 @@ package com.tajuli.digitorandroid.ui.editor
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -14,6 +15,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -22,9 +24,12 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import com.tajuli.digitorandroid.editor.model.AUTO_CAPTION_SAFE_WIDTH_FRACTION_V85
 import com.tajuli.digitorandroid.editor.model.TextAlignmentV2
 import com.tajuli.digitorandroid.editor.model.TextFontV2
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
+import com.tajuli.digitorandroid.editor.model.autoCaptionWrappedTextV85
+import com.tajuli.digitorandroid.editor.model.isAutoCaptionV85
 import com.tajuli.digitorandroid.editor.model.resolvedTextStyleV2
 import com.tajuli.digitorandroid.editor.model.textAnimationFrameV2
 import com.tajuli.digitorandroid.editor.model.textManualFrameV2
@@ -42,6 +47,17 @@ fun TextOverlayPreviewV2(
     val manual = overlay.textManualFrameV2(timelineUs)
     val combinedAlpha = (preset.alpha * manual.alpha).coerceIn(0f, 1f)
     if (combinedAlpha <= 0f) return
+
+    val autoCaption = overlay.isAutoCaptionV85()
+    val density = LocalDensity.current
+    // graphicsLayer scales after measurement. Divide by the text scale here so the final visible
+    // Auto CC box still stays inside ~82% of the actual preview frame even after a size edit.
+    val safeCaptionWidth = with(density) {
+        val scaledSafePx = previewSize.width.coerceAtLeast(1) *
+            AUTO_CAPTION_SAFE_WIDTH_FRACTION_V85 / manual.sizeScale.coerceAtLeast(.1f)
+        scaledSafePx.toDp().coerceAtLeast(1.dp)
+    }
+    val renderedText = if (autoCaption) autoCaptionWrappedTextV85(overlay.text) else overlay.text
 
     val fontFamily = when (style.font) {
         TextFontV2.SANS -> FontFamily.SansSerif
@@ -71,6 +87,7 @@ fun TextOverlayPreviewV2(
         null
     }
 
+    val widthModifier = if (autoCaption) Modifier.width(safeCaptionWidth) else Modifier.widthIn(max = 520.dp)
     Box(
         modifier
             .zIndex(PreviewOverlayLayerOrderV19.zFor(overlay.videoTrackIdV3))
@@ -82,20 +99,24 @@ fun TextOverlayPreviewV2(
                 scaleY = manual.sizeScale
                 rotationZ = manual.rotationDegrees
             }
-            .widthIn(max = 520.dp),
+            .then(widthModifier),
         contentAlignment = contentAlignment,
     ) {
+        val textBoxModifier = if (autoCaption) Modifier.width(safeCaptionWidth) else Modifier
         Box(
-            Modifier.background(
-                if (style.backgroundEnabled) Color(style.backgroundArgb.toInt()) else Color.Transparent,
-                RoundedCornerShape(6.dp),
-            ).padding(horizontal = 8.dp, vertical = 4.dp),
+            textBoxModifier
+                .background(
+                    if (style.backgroundEnabled) Color(style.backgroundArgb.toInt()) else Color.Transparent,
+                    RoundedCornerShape(6.dp),
+                )
+                .padding(horizontal = 8.dp, vertical = 4.dp),
             contentAlignment = contentAlignment,
         ) {
             if (style.strokeWidth > 0f) {
                 Text(
-                    text = overlay.text,
+                    text = renderedText,
                     textAlign = textAlign,
+                    softWrap = true,
                     fontSize = 22.sp,
                     fontFamily = fontFamily,
                     fontWeight = if (overlay.bold) FontWeight.Bold else FontWeight.Normal,
@@ -104,8 +125,9 @@ fun TextOverlayPreviewV2(
                 )
             }
             Text(
-                text = overlay.text,
+                text = renderedText,
                 textAlign = textAlign,
+                softWrap = true,
                 fontSize = 22.sp,
                 fontFamily = fontFamily,
                 fontWeight = if (overlay.bold) FontWeight.Bold else FontWeight.Normal,

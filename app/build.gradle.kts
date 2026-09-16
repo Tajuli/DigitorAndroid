@@ -216,6 +216,15 @@ android {
         compose = true
     }
 
+    // Native editor engines are packaged as real app .so libraries. sherpa-onnx and the existing
+    // ONNX Runtime fallback both carry libonnxruntime.so, so their native ABI versions must match.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            pickFirsts += setOf("**/libonnxruntime.so")
+        }
+    }
+
     sourceSets["main"].assets.srcDir(generatedHairModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedFaceSkinModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedPersonDetectorAssets.get().asFile)
@@ -259,8 +268,14 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
-    // Lazy CPU reliability fallback. Primary PP-MattingV2 inference is ncnn Vulkan GPU.
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
+    // Auto CC: exact native ABI pairing matters because libonnxruntime.so has versioned symbols.
+    // sherpa-onnx v1.13.4 is paired with the official ONNX Runtime 1.27.0 Android artifact.
+    implementation("com.github.k2-fsa:sherpa-onnx:v1.13.4") {
+        exclude(group = "com.github.k2-fsa.sherpa-onnx", module = "sherpa-onnx-jvm")
+    }
+
+    // Lazy CPU reliability fallback. Primary PP-MattingV2 inference is ncnn Vulkan GPU. Match sherpa.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.27.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
