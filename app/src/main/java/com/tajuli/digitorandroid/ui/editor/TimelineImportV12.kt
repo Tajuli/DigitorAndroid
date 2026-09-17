@@ -25,7 +25,7 @@ import kotlin.math.roundToInt
 private const val IMAGE_DEFAULT_DURATION_US_V21 = 5_000_000L
 
 /** DaVinci-style V tracks accept moving video and still-image media; A tracks accept audio only. */
-fun EditorViewModelV4.selectedImportMimeTypesV21(): Array<String> {
+fun EditorViewModel.selectedImportMimeTypesV21(): Array<String> {
     val kind = state.value.project.track(state.value.selectedTrackId)?.kind
     return when (kind) {
         TrackKind.VIDEO -> arrayOf("video/*", "image/*")
@@ -42,7 +42,7 @@ fun EditorViewModelV4.selectedImportMimeTypesV21(): Array<String> {
  * - the first moving video adopts its native canvas/FPS so "Original" export is meaningful;
  * - every new V item appends after media, text, sticker and shape items already occupying the lane.
  */
-fun EditorViewModelV4.importUrisAppendAwareV12(uris: List<Uri>) {
+fun EditorViewModel.importUrisAppendAwareV12(uris: List<Uri>) {
     if (uris.isEmpty()) return
 
     migrateLegacyImageOverlaysV21()
@@ -73,7 +73,7 @@ fun EditorViewModelV4.importUrisAppendAwareV12(uris: List<Uri>) {
     state.value.selectedClipId?.let(::selectClip)
 }
 
-private fun EditorViewModelV4.importImageAsTimelineClipV21(uri: Uri, mime: String) {
+private fun EditorViewModel.importImageAsTimelineClipV21(uri: Uri, mime: String) {
     val snapshot = state.value
     val track = snapshot.project.track(snapshot.selectedTrackId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return
     val startUs = snapshot.project.vLaneAppendFloorV21(track.id)
@@ -108,7 +108,7 @@ private data class VideoSourceProbeV72(
  * Imports video without going through EditorViewModelV4's legacy 1000 ms metadata fallback.
  * MediaExtractor is authoritative when available and sample PTS is the final duration fallback.
  */
-private fun EditorViewModelV4.importVideoAppendAwareV72(uri: Uri, mime: String) {
+private fun EditorViewModel.importVideoAppendAwareV72(uri: Uri, mime: String) {
     val snapshot = state.value
     val selectedTrack = snapshot.project.track(snapshot.selectedTrackId)
         ?.takeIf { it.kind == TrackKind.VIDEO }
@@ -321,7 +321,7 @@ private fun TimelineProject.vLaneAppendFloorV21(trackId: String): Long = maxOf(
  * One-time compatibility migration for projects created by PR #42/#43 where a user-imported image
  * was stored as VisualOverlayClipV19. Stickers/shapes remain overlays; images become native V clips.
  */
-fun EditorViewModelV4.migrateLegacyImageOverlaysV21() {
+fun EditorViewModel.migrateLegacyImageOverlaysV21() {
     val snapshot = state.value
     val project = snapshot.project
     val legacyImages = project.resolvedVisualOverlaysV19().filter { it.kind == VisualOverlayKindV19.IMAGE }
