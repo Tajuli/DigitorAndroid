@@ -105,7 +105,7 @@ private data class VideoSourceProbeV72(
 )
 
 /**
- * Imports video without going through EditorViewModelV4's legacy 1000 ms metadata fallback.
+ * Imports video without going through the legacy one-second metadata fallback.
  * MediaExtractor is authoritative when available and sample PTS is the final duration fallback.
  */
 private fun EditorViewModel.importVideoAppendAwareV72(uri: Uri, mime: String) {
