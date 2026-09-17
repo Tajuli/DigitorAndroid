@@ -5,7 +5,7 @@ import com.tajuli.digitorandroid.editor.model.ProjectStore
 import com.tajuli.digitorandroid.editor.model.TrackKind
 
 /** Discrete clip-level input-profile edit using the existing project checkpoint/load path. */
-fun EditorViewModelV4.commitInputColorProfile(profile: InputColorProfile) {
+fun EditorViewModel.commitInputColorProfile(profile: InputColorProfile) {
     val state = state.value
     val selectedId = state.selectedClipId ?: return
     val owner = state.project.trackContaining(selectedId) ?: return
