@@ -84,9 +84,9 @@ private fun swatchV36(id: String): FilterSwatchV36 = when (id) {
 }
 
 @Composable
-fun CreatorFiltersWorkspaceV27(
+fun CreatorFiltersWorkspace(
     clip: TimelineClip?,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {
     if (clip == null) {
@@ -278,7 +278,7 @@ private fun FilterCardV36(
 }
 
 private fun updateFilterMarkerV36(
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     clipId: String,
     presetId: String,
     intensity: Float,
@@ -331,7 +331,7 @@ private fun updateFilterMarkerV36(
     )
 }
 
-private fun clearFilterMarkersV36(vm: EditorViewModelV4, clipId: String) {
+private fun clearFilterMarkersV36(vm: EditorViewModel, clipId: String) {
     val state = vm.state.value
     val liveClip = state.project.clip(clipId) ?: return
     var graph = liveClip.nodeGraph
