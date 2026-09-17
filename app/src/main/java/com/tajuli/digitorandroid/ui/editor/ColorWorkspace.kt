@@ -81,7 +81,7 @@ private enum class ColorPage(val title: String) {
 @Composable
 fun ColorWorkspaceV4(
     clip: TimelineClip?,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {
     val node = clip?.nodeGraph?.selectedNode()
@@ -127,7 +127,7 @@ fun ColorWorkspaceV4(
 }
 
 @Composable
-private fun PrimaryPage(node: ColorNode, vm: EditorViewModelV4, modifier: Modifier) {
+private fun PrimaryPage(node: ColorNode, vm: EditorViewModel, modifier: Modifier) {
     val p = node.advancedColor.primary
     Column(modifier.verticalScroll(rememberScrollState())) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -184,7 +184,7 @@ private fun PrimaryPage(node: ColorNode, vm: EditorViewModelV4, modifier: Modifi
 }
 
 @Composable
-private fun LogPage(node: ColorNode, vm: EditorViewModelV4, modifier: Modifier) {
+private fun LogPage(node: ColorNode, vm: EditorViewModel, modifier: Modifier) {
     val log = node.advancedColor.log
     Column(modifier.verticalScroll(rememberScrollState())) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -375,7 +375,7 @@ private fun ColorWheel(
 }
 
 @Composable
-private fun CurvesPage(node: ColorNode, vm: EditorViewModelV4, modifier: Modifier) {
+private fun CurvesPage(node: ColorNode, vm: EditorViewModel, modifier: Modifier) {
     var channel by remember { mutableStateOf("RGB") }
     var selectedIndex by remember(channel) { mutableStateOf<Int?>(null) }
     val curves = node.advancedColor.curves
@@ -590,7 +590,7 @@ private fun CurveEditorGraph(
 }
 
 @Composable
-private fun QualifierPage(node: ColorNode, vm: EditorViewModelV4, modifier: Modifier) {
+private fun QualifierPage(node: ColorNode, vm: EditorViewModel, modifier: Modifier) {
     val q = node.advancedColor.qualifier
     val uiState by vm.state.collectAsState()
     Column(modifier.verticalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 6.dp)) {

@@ -4,7 +4,7 @@ import com.tajuli.digitorandroid.editor.model.TransitionStyleV22
 import com.tajuli.digitorandroid.editor.model.TrackKind
 
 /** Commit V22 cut-transition metadata through the existing project/undo pipeline. */
-fun EditorViewModelV4.setSelectedTransitionV22(style: TransitionStyleV22, durationUs: Long) {
+fun EditorViewModel.setSelectedTransitionV22(style: TransitionStyleV22, durationUs: Long) {
     val state = state.value
     val id = state.selectedClipId ?: return
     val clip = state.project.clip(id) ?: return
