@@ -65,10 +65,10 @@ private val VisualPaletteV19 = listOf(
  * are imported from the regular media Import action, exactly like video clips.
  */
 @Composable
-fun VisualOverlayWorkspaceV19(
+fun VisualOverlayWorkspace(
     project: TimelineProject,
     cursorUs: Long,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
