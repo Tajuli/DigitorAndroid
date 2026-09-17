@@ -52,7 +52,7 @@ import kotlin.math.roundToInt
 private val EditorShell = Color(0xFF08080A)
 private val EditorMuted = Color(0xFF909098)
 
-private fun TimelineProject.activeVideoClipsV7(timelineUs: Long): List<TimelineClip> =
+private fun TimelineProject.activeVideoClips(timelineUs: Long): List<TimelineClip> =
     tracks.filter { it.kind == TrackKind.VIDEO && !it.muted }
         .mapNotNull { track ->
             track.clips.firstOrNull { clip ->
@@ -63,7 +63,7 @@ private fun TimelineProject.activeVideoClipsV7(timelineUs: Long): List<TimelineC
 @UnstableApi
 @Composable
 fun DigitorEditorScreenV7(
-    vm: EditorViewModelV4 = viewModel(),
+    vm: EditorViewModel = viewModel(),
     onHome: () -> Unit = {},
 ) {
     val state by vm.state.collectAsState()
@@ -104,7 +104,7 @@ fun DigitorEditorScreenV7(
     var exportStatus by remember { mutableStateOf<String?>(null) }
 
     val previewClip = state.project.topmostVideoClipAt(cursorUs)
-    val activeVideoClips = state.project.activeVideoClipsV7(cursorUs)
+    val activeVideoClips = state.project.activeVideoClips(cursorUs)
     val activeText = state.project.activeTextOverlaysAt(cursorUs)
     val activeVisual = state.project.activeVisualOverlaysAtV19(cursorUs)
     val hasVisual = state.project.resolvedVisualOverlaysV19().isNotEmpty()
@@ -244,7 +244,7 @@ fun DigitorEditorScreenV7(
                 .statusBarsPadding()
                 .navigationBarsPadding(),
         ) {
-            TopBarV7(
+            EditorTopBar(
                 title = selectedClip?.label
                     ?: selectedVisual?.label
                     ?: state.project.textOverlays.firstOrNull { it.id == state.selectedTextId }?.text
@@ -275,7 +275,7 @@ fun DigitorEditorScreenV7(
                 onExport = { showExportDialog = true },
             )
 
-            ProjectActionsBarV7(
+            EditorProjectActionsBar(
                 canUndo = state.canUndo,
                 canRedo = state.canRedo,
                 exporting = exportingNow,
@@ -314,7 +314,7 @@ fun DigitorEditorScreenV7(
                 }
             }
 
-            FramePreviewV7(
+            EditorFramePreview(
                 project = state.project,
                 previewEngine = previewEngine,
                 frame = previewFrame,
@@ -341,7 +341,7 @@ fun DigitorEditorScreenV7(
                     .weight(1f),
             )
 
-            TransportV7(
+            EditorTransportControls(
                 enabled = hasMedia,
                 isPlaying = isPlaying,
                 cursorUs = cursorUs,
