@@ -61,7 +61,7 @@ internal enum class EditorWorkspaceTab(val label: String, val icon: ImageVector)
 @Composable
 internal fun EditorWorkspaceContent(
     selected: EditorWorkspaceTab,
-    state: EditorViewModelV4.UiState,
+    state: EditorUiState,
     selectedClip: TimelineClip?,
     cursorUs: Long,
     vm: EditorViewModel,
@@ -150,7 +150,7 @@ internal fun EditorWorkspaceContent(
 
 internal fun applyEditorWorkspaceSelection(
     next: EditorWorkspaceTab,
-    state: EditorViewModelV4.UiState,
+    state: EditorUiState,
     selectedClip: TimelineClip?,
     previewClip: TimelineClip?,
     cursorUs: Long,
