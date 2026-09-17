@@ -64,7 +64,7 @@ internal fun EditorWorkspaceContent(
     state: EditorViewModelV4.UiState,
     selectedClip: TimelineClip?,
     cursorUs: Long,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     onSeek: (Long) -> Unit,
     onImport: () -> Unit,
     modifier: Modifier = Modifier,
@@ -154,7 +154,7 @@ internal fun applyEditorWorkspaceSelection(
     selectedClip: TimelineClip?,
     previewClip: TimelineClip?,
     cursorUs: Long,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
 ) {
     when (next) {
         EditorWorkspaceTab.TEXT -> {
