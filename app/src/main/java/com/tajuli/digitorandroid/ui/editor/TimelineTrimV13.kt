@@ -18,7 +18,7 @@ private val sourceDurationCacheV13 = ConcurrentHashMap<String, Long>()
 
 /** Resize the left edge of a title while keeping its right edge fixed. */
 fun EditorViewModelV4.resizeTextStartV13(textId: String, requestedStartUs: Long) {
-    val activeVm = ActiveEditorVmRegistryV14.current()
+    val activeVm = ActiveEditorVmRegistry.current()
     if (activeVm != null && activeVm !== this) {
         activeVm.resizeTextStartV13(textId, requestedStartUs)
         return
@@ -56,7 +56,7 @@ fun EditorViewModelV4.resizeTextStartV13(textId: String, requestedStartUs: Long)
 
 /** Resize the right edge of a title with no fixed maximum duration. */
 fun EditorViewModelV4.resizeTextEndV13(textId: String, requestedEndUs: Long) {
-    val activeVm = ActiveEditorVmRegistryV14.current()
+    val activeVm = ActiveEditorVmRegistry.current()
     if (activeVm != null && activeVm !== this) {
         activeVm.resizeTextEndV13(textId, requestedEndUs)
         return
@@ -99,7 +99,7 @@ fun EditorViewModelV4.resizeTextEndV13(textId: String, requestedEndUs: Long) {
  * be shortened below five seconds. Moving-video clips keep the historic source-aware trim rules.
  */
 fun EditorViewModelV4.resizeVideoClipStartV13(clipId: String, requestedStartUs: Long) {
-    val activeVm = ActiveEditorVmRegistryV14.current()
+    val activeVm = ActiveEditorVmRegistry.current()
     if (activeVm != null && activeVm !== this) {
         activeVm.resizeVideoClipStartV13(clipId, requestedStartUs)
         return
@@ -171,7 +171,7 @@ fun EditorViewModelV4.resizeVideoClipStartV13(clipId: String, requestedStartUs: 
  * the next item on the same V lane, and cannot be shorter than five seconds.
  */
 fun EditorViewModelV4.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long) {
-    val activeVm = ActiveEditorVmRegistryV14.current()
+    val activeVm = ActiveEditorVmRegistry.current()
     if (activeVm != null && activeVm !== this) {
         activeVm.resizeVideoClipEndV13(clipId, requestedEndUs)
         return
