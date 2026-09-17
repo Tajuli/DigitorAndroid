@@ -33,7 +33,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisPowerGuardV48
 import com.tajuli.digitorandroid.ui.editor.ActiveEditorVmRegistryV14
 import com.tajuli.digitorandroid.ui.editor.DigitorEditorScreen
-import com.tajuli.digitorandroid.ui.editor.EditorViewModelV4
+import com.tajuli.digitorandroid.ui.editor.EditorViewModel
 import com.tajuli.digitorandroid.ui.home.DigitorHomeScreen
 import com.tajuli.digitorandroid.ui.theme.DigitorTheme
 import kotlinx.coroutines.Dispatchers
@@ -147,7 +147,7 @@ class MainActivity : ComponentActivity() {
 
                 when (destination) {
                     DESTINATION_EDITOR -> {
-                        val editorVm: EditorViewModelV4 = viewModel(key = "editor-session-$editorSession")
+                        val editorVm: EditorViewModel = viewModel(key = "editor-session-$editorSession")
                         ActiveEditorVmRegistryV14.bind(editorVm)
                         val editorState by editorVm.state.collectAsState()
                         latestEditorProject = editorState.project
