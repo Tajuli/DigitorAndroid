@@ -166,12 +166,10 @@ fun DigitorEditorScreenV7(
 
     val selectedClip = state.project.clip(state.selectedClipId)
     var workspace by remember { mutableStateOf(WorkspaceV7.EDIT) }
-    var isPlaying by remember { mutableStateOf(false) }
-    var cursorUs by remember { mutableStateOf(0L) }
-    var previousProjectDurationUs by remember { mutableStateOf(state.project.durationUs) }
-    var playAnchorCursorUs by remember { mutableStateOf(0L) }
-    var playAnchorRealtimeMs by remember { mutableStateOf(0L) }
-    var previewStatus by remember { mutableStateOf<String?>(null) }
+    val playback = rememberEditorPlaybackController(state.project.durationUs)
+    val isPlaying = playback.isPlaying
+    val cursorUs = playback.cursorUs
+    val previewStatus = playback.previewStatus
     var showExportDialog by remember { mutableStateOf(false) }
     var exportName by remember { mutableStateOf("Digitor_${System.currentTimeMillis()}") }
     var exportQuality by remember { mutableStateOf(ExportQuality.HIGH) }
@@ -192,85 +190,36 @@ fun DigitorEditorScreenV7(
 
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
-            isPlaying = false
+            playback.isPlaying = false
             runCatching { audioPreview.pause() }
             vm.importUrisAppendAwareV12(uris)
         }
     }
     fun launchImport() = mediaPicker.launch(vm.selectedImportMimeTypesV21())
 
-    LaunchedEffect(state.project, cursorUs, hasVideo, isPlaying) {
-        if (hasVideo) previewEngine.submit(state.project, cursorUs, isPlaying)
-    }
-
-    LaunchedEffect(previewFrame?.timelineUs, previewFrame?.renderTimeMs) {
-        val frame = previewFrame
-        previewStatus = when {
-            !hasVideo -> null
-            frame == null -> "Preview: GPU preparing…"
-            frame.bitmap != null -> "Preview: CPU fallback · ${frame.renderTimeMs}ms"
-            else -> "GPU ${timeV7(frame.timelineUs)} · ${frame.activeLayerCount}L"
-        }
-    }
-
-    LaunchedEffect(audioPreviewState.error) {
-        audioPreviewState.error?.let { previewStatus = "Audio preview: $it" }
-    }
-
-    LaunchedEffect(state.project.durationUs) {
-        val durationUs = state.project.durationUs.coerceAtLeast(0L)
-        if (durationUs < previousProjectDurationUs && cursorUs >= durationUs) {
-            cursorUs = if (durationUs > 0L) durationUs - 1L else 0L
-        }
-        previousProjectDurationUs = durationUs
-    }
-
-    LaunchedEffect(audioPreviewKey, hasAudio) {
-        if (!hasAudio) { audioPreview.clear(); return@LaunchedEffect }
-        val snapshot = state.project
-        val resume = isPlaying
-        delay(100)
-        try {
-            val maxStartUs = (snapshot.durationUs - 1L).coerceAtLeast(0L)
-            audioPreview.rebuild(snapshot, cursorUs.coerceIn(0L, maxStartUs) / 1000L, resume)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Throwable) {
-            previewStatus = "Audio preview: ${error.message ?: "unavailable"}"
-        }
-    }
-
-    LaunchedEffect(isPlaying, audioPreviewReady, hasAudio) {
-        while (isPlaying) {
-            val durationUs = state.project.durationUs.coerceAtLeast(0L)
-            val nextUs = if (hasAudio && audioPreviewReady) {
-                audioPreview.syncFollowers()
-                audioPreview.currentPositionMs().coerceAtLeast(0L) * 1000L
-            } else {
-                playAnchorCursorUs + (SystemClock.elapsedRealtime() - playAnchorRealtimeMs) * 1000L
-            }.coerceIn(0L, durationUs)
-            cursorUs = nextUs
-            if (durationUs > 0L && nextUs >= durationUs) {
-                runCatching { audioPreview.pause() }; isPlaying = false; break
-            }
-            delay(33)
-        }
-    }
-
-    LaunchedEffect(cursorUs, selectedClip?.id, previewClip?.id) {
-        val clockClip = selectedClip?.takeIf { clip ->
-            state.project.trackContaining(clip.id)?.kind == TrackKind.VIDEO && cursorUs in clip.timelineStartUs until clip.timelineEndUs
-        } ?: previewClip
-        if (clockClip == null) PreviewTransformClock.clear() else PreviewTransformClock.update(clockClip, cursorUs)
-    }
+    EditorPlaybackEffects(
+        project = state.project,
+        selectedClip = selectedClip,
+        previewClip = previewClip,
+        hasVideo = hasVideo,
+        hasAudio = hasAudio,
+        audioPreviewKey = audioPreviewKey,
+        previewEngine = previewEngine,
+        previewFrame = previewFrame,
+        audioPreview = audioPreview,
+        audioPreviewReady = audioPreviewReady,
+        audioPreviewError = audioPreviewState.error,
+        controller = playback,
+    )
 
     fun seekTimeline(requestUs: Long) {
-        val target = requestUs.coerceIn(0L, state.project.durationUs.coerceAtLeast(0L))
-        cursorUs = target
-        if (hasAudio && audioPreviewReady) runCatching { audioPreview.seekTo(target / 1000L) }
-        if (isPlaying && !(hasAudio && audioPreviewReady)) {
-            playAnchorCursorUs = target; playAnchorRealtimeMs = SystemClock.elapsedRealtime()
-        }
+        val target = playback.seek(
+            requestUs = requestUs,
+            project = state.project,
+            hasAudio = hasAudio,
+            audioPreviewReady = audioPreviewReady,
+            audioPreview = audioPreview,
+        )
         val activeVideo = state.project.topmostVideoClipAt(target)
         val textSelectedNow = vm.state.value.selectedTextId != null || TimelineTextSelectionBusV10.selectedTextId.value != null
         val visualSelectedNow = VisualOverlaySelectionBusV19.selectedId.value != null
@@ -281,20 +230,18 @@ fun DigitorEditorScreenV7(
     }
 
     fun stopForEdit() {
-        isPlaying = false
-        runCatching { audioPreview.pause() }
+        playback.stopForEdit(audioPreview)
     }
 
     fun togglePlayback() {
-        if (!hasMedia) return
-        if (isPlaying) {
-            stopForEdit()
-        } else {
-            if (cursorUs >= state.project.durationUs && state.project.durationUs > 0L) seekTimeline(0L)
-            playAnchorCursorUs = cursorUs; playAnchorRealtimeMs = SystemClock.elapsedRealtime()
-            if (hasAudio && audioPreviewReady) runCatching { audioPreview.play() }
-            isPlaying = true
-        }
+        playback.togglePlayback(
+            hasMedia = hasMedia,
+            durationUs = state.project.durationUs,
+            hasAudio = hasAudio,
+            audioPreviewReady = audioPreviewReady,
+            audioPreview = audioPreview,
+            onSeek = ::seekTimeline,
+        )
     }
 
     fun startExport(destination: Uri) {
@@ -319,7 +266,7 @@ fun DigitorEditorScreenV7(
                     exportFraction = fraction
                     exportStatus = status
                 },
-                onPreviewStatus = { previewStatus = it },
+                onPreviewStatus = { playback.previewStatus = it },
             )
         }
     }
