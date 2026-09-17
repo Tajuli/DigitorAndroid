@@ -119,7 +119,7 @@ fun TimelineEditorV4(
     onDeleteText: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    val vm: EditorViewModelV4 = viewModel()
+    val vm: EditorViewModel = viewModel()
     val scroll = rememberScrollState()
     val verticalScroll = rememberScrollState()
     val density = LocalDensity.current
@@ -413,7 +413,7 @@ private fun TimelineLaneV4(
     cursorUs: Long,
     pps: Float,
     width: Dp,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     onSelectClip: (String) -> Unit,
     onMoveClip: (String, String, Long) -> Unit,
     onMoveClipToTrack: (String, String) -> Unit,
@@ -485,7 +485,7 @@ private fun TextClipV10(
     selected: Boolean,
     cursorUs: Long,
     pps: Float,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     onSelect: () -> Unit,
     onMoveText: (String, Long) -> Unit,
     onMoveTextToTrack: (String, String) -> Unit,
@@ -617,7 +617,7 @@ private fun ClipV4(
     selected: Boolean,
     cursorUs: Long,
     pps: Float,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     onSelectClip: (String) -> Unit,
     onMoveClip: (String, String, Long) -> Unit,
     onMoveClipToTrack: (String, String) -> Unit,
@@ -778,7 +778,7 @@ private fun androidx.compose.foundation.layout.BoxScope.EffectBarV26(
     row: Int,
     pps: Float,
     frameUs: Long,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     onSelectClip: (String) -> Unit,
 ) {
     val density = LocalDensity.current
