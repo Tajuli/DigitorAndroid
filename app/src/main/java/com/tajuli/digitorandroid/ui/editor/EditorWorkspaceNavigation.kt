@@ -44,7 +44,7 @@ import com.tajuli.digitorandroid.editor.model.resolvedVisualOverlaysV19
 
 private val WorkspaceAccent = Color(0xFF30E0C3)
 
-/** First five entries intentionally match the primary mobile workflow order. */
+/** Canonical editor workspace tabs; the first five preserve the primary mobile workflow order. */
 internal enum class EditorWorkspaceTab(val label: String, val icon: ImageVector) {
     EDIT("Edit", Icons.Rounded.ContentCut),
     CORRECTION("Correction", Icons.Rounded.Tune),
