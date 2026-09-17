@@ -50,11 +50,13 @@ internal suspend fun runEditorExport(
     cursorUs: Long,
     destination: Uri,
     settings: ExportSettingsV72,
-    onProgress: (Float?, String?) -> Unit,
+    onFraction: (Float?) -> Unit,
+    onStatus: (String) -> Unit,
     onPreviewStatus: (String) -> Unit,
 ) {
     if (project.durationUs <= 0L) {
-        onProgress(null, "Timeline is empty")
+        onFraction(null)
+        onStatus("Timeline is empty")
         return
     }
 
@@ -62,10 +64,11 @@ internal suspend fun runEditorExport(
     val exportHasAudio = project.tracks.any {
         it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty()
     }
+    var latestFraction = 0f
 
-    audioPreview.suspendForExternalWork()
-    onProgress(
-        0f,
+    runCatching { audioPreview.suspendForExternalWork() }
+    onFraction(0f)
+    onStatus(
         "Preparing ${resolvedExport.width}×${resolvedExport.height} · ${resolvedExport.frameRate} fps · ${settings.quality.label}",
     )
 
@@ -73,21 +76,29 @@ internal suspend fun runEditorExport(
     try {
         val result = router.export(project, temp, settings) { progress ->
             if (progress is ExportProgress.Stage) {
-                onProgress(progress.fraction?.coerceIn(0f, 1f), progress.name)
+                onStatus(progress.name)
+                progress.fraction?.coerceIn(0f, 1f)?.let { fraction ->
+                    latestFraction = fraction
+                    onFraction(fraction)
+                }
             }
         }
 
-        onProgress(.99f, "Saving file…")
+        latestFraction = max(latestFraction, .99f)
+        onFraction(latestFraction)
+        onStatus("Saving file…")
         withContext(Dispatchers.IO) {
             context.contentResolver.openOutputStream(destination, "w")?.use { output ->
                 temp.inputStream().use { it.copyTo(output, 1024 * 1024) }
             } ?: error("Could not open selected save location")
         }
-        onProgress(1f, "Saved · ${result.backend} · ${settings.description(project)}")
+        onFraction(1f)
+        onStatus("Saved · ${result.backend} · ${settings.description(project)}")
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (error: Throwable) {
-        onProgress(null, error.message ?: "Export failed")
+        onFraction(null)
+        onStatus(error.message ?: "Export failed")
     } finally {
         temp.delete()
         if (exportHasAudio) {
