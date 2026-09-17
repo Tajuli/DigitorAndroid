@@ -56,7 +56,7 @@ private val N4Muted = Color(0xFF909098)
 private val N4Accent = Color(0xFF30E0C3)
 
 @Composable
-fun NodeGraphV4(clip: TimelineClip?, vm: EditorViewModelV4, modifier: Modifier = Modifier) {
+fun NodeGraph(clip: TimelineClip?, vm: EditorViewModel, modifier: Modifier = Modifier) {
     if (clip == null) {
         NodeEmptyV4("Select a clip to open its node graph", modifier)
         return
@@ -144,7 +144,7 @@ fun NodeGraphV4(clip: TimelineClip?, vm: EditorViewModelV4, modifier: Modifier =
 }
 
 @Composable
-fun CorrectionWorkspaceV4(clip: TimelineClip?, vm: EditorViewModelV4, modifier: Modifier = Modifier) {
+fun CorrectionWorkspace(clip: TimelineClip?, vm: EditorViewModel, modifier: Modifier = Modifier) {
     val node = clip?.nodeGraph?.selectedNode()
     if (clip == null || node == null) { NodeEmptyV4("Select a clip and node", modifier); return }
     if (node.kind != NodeKind.SERIAL && node.kind != NodeKind.PARALLEL) { NodeEmptyV4("Select Serial or Parallel node", modifier); return }
@@ -165,9 +165,9 @@ fun CorrectionWorkspaceV4(clip: TimelineClip?, vm: EditorViewModelV4, modifier: 
 }
 
 @Composable
-fun EffectsWorkspaceV4(
+fun EffectsWorkspace(
     clip: TimelineClip?,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier = Modifier,
     animationSourceTimeUs: Long? = null,
 ) {

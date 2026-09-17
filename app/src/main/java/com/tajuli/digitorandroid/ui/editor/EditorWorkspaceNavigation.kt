@@ -92,20 +92,20 @@ internal fun EditorWorkspaceContent(
                 modifier = Modifier.fillMaxSize(),
             )
 
-            EditorWorkspaceTab.CORRECTION -> KeyframedCorrectionWorkspaceV5(
+            EditorWorkspaceTab.CORRECTION -> KeyframedCorrectionWorkspace(
                 selectedClip,
                 state.project.frameRate,
                 vm,
                 Modifier.fillMaxSize(),
             )
-            EditorWorkspaceTab.EFFECTS -> KeyframedEffectsWorkspaceV5(
+            EditorWorkspaceTab.EFFECTS -> KeyframedEffectsWorkspace(
                 selectedClip,
                 state.project.frameRate,
                 vm,
                 Modifier.fillMaxSize(),
             )
             EditorWorkspaceTab.FILTERS -> CreatorFiltersWorkspaceV27(selectedClip, vm, Modifier.fillMaxSize())
-            EditorWorkspaceTab.COLOR -> KeyframedColorWorkspaceV5(
+            EditorWorkspaceTab.COLOR -> KeyframedColorWorkspace(
                 selectedClip,
                 state.project.frameRate,
                 vm,
@@ -143,7 +143,7 @@ internal fun EditorWorkspaceContent(
                 vm,
                 Modifier.fillMaxSize(),
             )
-            EditorWorkspaceTab.NODES -> NodeGraphV4(selectedClip, vm, Modifier.fillMaxSize())
+            EditorWorkspaceTab.NODES -> NodeGraph(selectedClip, vm, Modifier.fillMaxSize())
         }
     }
 }

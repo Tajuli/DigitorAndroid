@@ -194,12 +194,12 @@ private fun changed(previous: Float, current: Float, evaluated: Float): Float =
 private fun changedNullable(previous: Float?, current: Float?, evaluated: Float?): Float? =
     if (current != previous) current else evaluated
 
-/** Keeps the V4 grading panels while adding one clean keyframe lane per editing domain. */
+/** Adds one clean keyframe lane per editing domain while keeping the existing grading behavior. */
 @Composable
-fun KeyframedCorrectionWorkspaceV5(
+fun KeyframedCorrectionWorkspace(
     clip: TimelineClip?,
     frameRate: Int,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {
     val baseNode = clip?.nodeGraph?.selectedNode()
@@ -211,16 +211,16 @@ fun KeyframedCorrectionWorkspaceV5(
             NodeDomainKeyframeBarV5(clip, baseNode, NodeAnimationDomain.CORRECTION, frameRate)
         }
         Box(Modifier.weight(1f).fillMaxSize()) {
-            CorrectionWorkspaceV4(evaluated.clip, vm, Modifier.fillMaxSize())
+            CorrectionWorkspace(evaluated.clip, vm, Modifier.fillMaxSize())
         }
     }
 }
 
 @Composable
-fun KeyframedColorWorkspaceV5(
+fun KeyframedColorWorkspace(
     clip: TimelineClip?,
     frameRate: Int,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {
     val baseNode = clip?.nodeGraph?.selectedNode()
@@ -238,10 +238,10 @@ fun KeyframedColorWorkspaceV5(
 }
 
 @Composable
-fun KeyframedEffectsWorkspaceV5(
+fun KeyframedEffectsWorkspace(
     clip: TimelineClip?,
     frameRate: Int,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {
     val baseNode = clip?.nodeGraph?.selectedNode()
@@ -251,7 +251,7 @@ fun KeyframedEffectsWorkspaceV5(
             NodeDomainKeyframeBarV5(clip, baseNode, NodeAnimationDomain.EFFECTS, frameRate)
         }
         Box(Modifier.weight(1f).fillMaxSize()) {
-            CreatorEffectsWorkspaceV25(
+            CreatorEffectsWorkspace(
                 clip = evaluated.clip,
                 vm = vm,
                 modifier = Modifier.fillMaxSize(),

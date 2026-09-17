@@ -46,9 +46,9 @@ private val Fx25Muted = Color(0xFF909098)
 private val Fx25Accent = Color(0xFF30E0C3)
 
 @Composable
-fun CreatorEffectsWorkspaceV25(
+fun CreatorEffectsWorkspace(
     clip: TimelineClip?,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier = Modifier,
     animationSourceTimeUs: Long? = null,
 ) {
