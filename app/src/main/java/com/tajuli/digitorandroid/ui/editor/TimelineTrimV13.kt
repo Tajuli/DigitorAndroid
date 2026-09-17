@@ -17,7 +17,7 @@ private const val MIN_IMAGE_DURATION_US_V21 = 5_000_000L
 private val sourceDurationCacheV13 = ConcurrentHashMap<String, Long>()
 
 /** Resize the left edge of a title while keeping its right edge fixed. */
-fun EditorViewModelV4.resizeTextStartV13(textId: String, requestedStartUs: Long) {
+fun EditorViewModel.resizeTextStartV13(textId: String, requestedStartUs: Long) {
     val activeVm = ActiveEditorVmRegistry.current()
     if (activeVm != null && activeVm !== this) {
         activeVm.resizeTextStartV13(textId, requestedStartUs)
@@ -55,7 +55,7 @@ fun EditorViewModelV4.resizeTextStartV13(textId: String, requestedStartUs: Long)
 }
 
 /** Resize the right edge of a title with no fixed maximum duration. */
-fun EditorViewModelV4.resizeTextEndV13(textId: String, requestedEndUs: Long) {
+fun EditorViewModel.resizeTextEndV13(textId: String, requestedEndUs: Long) {
     val activeVm = ActiveEditorVmRegistry.current()
     if (activeVm != null && activeVm !== this) {
         activeVm.resizeTextEndV13(textId, requestedEndUs)
@@ -98,7 +98,7 @@ fun EditorViewModelV4.resizeTextEndV13(textId: String, requestedEndUs: Long) {
  * their right edge stays fixed, sourceOut simply becomes the new timeline duration, and they may not
  * be shortened below five seconds. Moving-video clips keep the historic source-aware trim rules.
  */
-fun EditorViewModelV4.resizeVideoClipStartV13(clipId: String, requestedStartUs: Long) {
+fun EditorViewModel.resizeVideoClipStartV13(clipId: String, requestedStartUs: Long) {
     val activeVm = ActiveEditorVmRegistry.current()
     if (activeVm != null && activeVm !== this) {
         activeVm.resizeVideoClipStartV13(clipId, requestedStartUs)
@@ -170,7 +170,7 @@ fun EditorViewModelV4.resizeVideoClipStartV13(clipId: String, requestedStartUs: 
  * Extend/trim the right edge. Image clips can be pulled to any later duration, constrained only by
  * the next item on the same V lane, and cannot be shorter than five seconds.
  */
-fun EditorViewModelV4.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long) {
+fun EditorViewModel.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long) {
     val activeVm = ActiveEditorVmRegistry.current()
     if (activeVm != null && activeVm !== this) {
         activeVm.resizeVideoClipEndV13(clipId, requestedEndUs)
@@ -241,7 +241,7 @@ fun EditorViewModelV4.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long
     commitTrimProjectV13(snapshot.project.copy(tracks = tracks), selectedClipId = clipId, selectedTrackId = track.id)
 }
 
-private fun EditorViewModelV4.resizeImageClipStartV21(
+private fun EditorViewModel.resizeImageClipStartV21(
     project: TimelineProject,
     trackId: String,
     clip: TimelineClip,
@@ -265,7 +265,7 @@ private fun EditorViewModelV4.resizeImageClipStartV21(
     commitTrimProjectV13(project.copy(tracks = tracks), selectedClipId = clip.id, selectedTrackId = trackId)
 }
 
-private fun EditorViewModelV4.resizeImageClipEndV21(
+private fun EditorViewModel.resizeImageClipEndV21(
     project: TimelineProject,
     trackId: String,
     clip: TimelineClip,
@@ -290,7 +290,7 @@ private fun EditorViewModelV4.resizeImageClipEndV21(
     commitTrimProjectV13(project.copy(tracks = tracks), selectedClipId = clip.id, selectedTrackId = trackId)
 }
 
-private fun EditorViewModelV4.sourceDurationUsV13(clip: TimelineClip): Long =
+private fun EditorViewModel.sourceDurationUsV13(clip: TimelineClip): Long =
     sourceDurationCacheV13.getOrPut(clip.uri) {
         val retriever = MediaMetadataRetriever()
         try {
@@ -304,7 +304,7 @@ private fun EditorViewModelV4.sourceDurationUsV13(clip: TimelineClip): Long =
         }
     }.coerceAtLeast(clip.sourceOutUs)
 
-private fun EditorViewModelV4.commitTrimProjectV13(
+private fun EditorViewModel.commitTrimProjectV13(
     project: TimelineProject,
     selectedTextId: String? = null,
     selectedClipId: String? = null,
