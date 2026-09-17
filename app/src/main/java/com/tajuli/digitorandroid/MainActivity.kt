@@ -32,7 +32,7 @@ import com.tajuli.digitorandroid.editor.model.ProjectStore
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisPowerGuardV48
 import com.tajuli.digitorandroid.ui.editor.ActiveEditorVmRegistryV14
-import com.tajuli.digitorandroid.ui.editor.DigitorEditorScreenV8
+import com.tajuli.digitorandroid.ui.editor.DigitorEditorScreen
 import com.tajuli.digitorandroid.ui.editor.EditorViewModelV4
 import com.tajuli.digitorandroid.ui.home.DigitorHomeScreen
 import com.tajuli.digitorandroid.ui.theme.DigitorTheme
@@ -161,7 +161,7 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        DigitorEditorScreenV8(
+                        DigitorEditorScreen(
                             vm = editorVm,
                             onHome = ::returnToHome,
                         )
