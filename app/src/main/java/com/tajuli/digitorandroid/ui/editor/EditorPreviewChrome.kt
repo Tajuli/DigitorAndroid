@@ -67,7 +67,7 @@ private val E7Accent = Color(0xFF30E0C3)
 private val E7PreviewPasteboard = Color(0xFF222226)
 
 @Composable
-internal fun TopBarV7(
+internal fun EditorTopBar(
     title: String,
     status: String,
     exportFraction: Float?,
@@ -106,7 +106,7 @@ internal fun TopBarV7(
 }
 
 @Composable
-internal fun ProjectActionsBarV7(
+internal fun EditorProjectActionsBar(
     canUndo: Boolean,
     canRedo: Boolean,
     exporting: Boolean,
@@ -137,7 +137,7 @@ internal fun ProjectActionsBarV7(
 }
 
 @Composable
-internal fun FramePreviewV7(
+internal fun EditorFramePreview(
     project: TimelineProject,
     previewEngine: DavinciFramePreviewEngine,
     frame: DavinciFramePreviewEngine.Frame?,
@@ -197,7 +197,7 @@ internal fun FramePreviewV7(
 }
 
 @Composable
-internal fun TransportV7(
+internal fun EditorTransportControls(
     enabled: Boolean,
     isPlaying: Boolean,
     cursorUs: Long,
@@ -207,15 +207,15 @@ internal fun TransportV7(
     onForward: () -> Unit,
 ) {
     Row(Modifier.fillMaxWidth().height(42.dp).background(Color(0xFF0D0D11)), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-        Text(timeV7(cursorUs), color = E7Muted, fontSize = 9.sp, modifier = Modifier.width(66.dp))
+        Text(formatTimelineTime(cursorUs), color = E7Muted, fontSize = 9.sp, modifier = Modifier.width(66.dp))
         IconButton(onClick = onBack, enabled = enabled, modifier = Modifier.size(34.dp)) { Icon(Icons.Rounded.Replay10, null, modifier = Modifier.size(18.dp), tint = Color.White) }
         IconButton(onClick = onPlayPause, enabled = enabled, modifier = Modifier.size(38.dp)) { Icon(if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, null, modifier = Modifier.size(23.dp), tint = Color.White) }
         IconButton(onClick = onForward, enabled = enabled, modifier = Modifier.size(34.dp)) { Icon(Icons.Rounded.Forward10, null, modifier = Modifier.size(18.dp), tint = Color.White) }
-        Text(timeV7(durationUs), color = E7Muted, fontSize = 9.sp, modifier = Modifier.width(66.dp))
+        Text(formatTimelineTime(durationUs), color = E7Muted, fontSize = 9.sp, modifier = Modifier.width(66.dp))
     }
 }
 
-internal fun timeV7(us: Long): String {
+internal fun formatTimelineTime(us: Long): String {
     val totalSeconds = us.coerceAtLeast(0L) / US_PER_SECOND
     val hours = totalSeconds / 3600
     val minutes = (totalSeconds % 3600) / 60
