@@ -50,6 +50,32 @@ internal suspend fun runEditorExport(
     cursorUs: Long,
     destination: Uri,
     settings: ExportSettingsV72,
+    onProgress: (Float?, String?) -> Unit,
+    onPreviewStatus: (String) -> Unit,
+) {
+    var latestFraction: Float? = null
+    runEditorExport(
+        context = context,
+        router = router,
+        audioPreview = audioPreview,
+        project = project,
+        cursorUs = cursorUs,
+        destination = destination,
+        settings = settings,
+        onFraction = { latestFraction = it },
+        onStatus = { status -> onProgress(latestFraction, status) },
+        onPreviewStatus = onPreviewStatus,
+    )
+}
+
+private suspend fun runEditorExport(
+    context: Context,
+    router: ProcessingRouter,
+    audioPreview: MultitrackAudioPreviewEngine,
+    project: TimelineProject,
+    cursorUs: Long,
+    destination: Uri,
+    settings: ExportSettingsV72,
     onFraction: (Float?) -> Unit,
     onStatus: (String) -> Unit,
     onPreviewStatus: (String) -> Unit,
@@ -76,11 +102,11 @@ internal suspend fun runEditorExport(
     try {
         val result = router.export(project, temp, settings) { progress ->
             if (progress is ExportProgress.Stage) {
-                onStatus(progress.name)
                 progress.fraction?.coerceIn(0f, 1f)?.let { fraction ->
                     latestFraction = fraction
                     onFraction(fraction)
                 }
+                onStatus(progress.name)
             }
         }
 
