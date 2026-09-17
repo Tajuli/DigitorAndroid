@@ -298,139 +298,52 @@ fun DigitorEditorScreenV7(
     }
 
     fun startExport(destination: Uri) {
-        if (state.project.durationUs <= 0L) { exportStatus = "Timeline is empty"; return }
         val exportProject = state.project
         val exportCursorUs = cursorUs
-        val exportSettingsSnapshot = ExportSettingsV72(
+        val settings = ExportSettingsV72(
             quality = exportQuality,
             resolution = exportResolution,
             frameRate = exportFrameRate,
         )
-        val resolvedExport = exportSettingsSnapshot.applyTo(exportProject)
-        val exportHasAudio = exportProject.tracks.any { it.kind == TrackKind.AUDIO && !it.muted && it.clips.isNotEmpty() }
         scope.launch {
             stopForEdit()
-            runCatching { audioPreview.suspendForExternalWork() }
-            exportFraction = 0f
-            exportStatus = "Preparing ${resolvedExport.width}×${resolvedExport.height} · ${resolvedExport.frameRate} fps · ${exportSettingsSnapshot.quality.label}"
-            val temp = File(context.cacheDir, "digitor_export_${System.currentTimeMillis()}.mp4")
-            try {
-                val result = router.export(exportProject, temp, exportSettingsSnapshot) { progress ->
-                    if (progress is ExportProgress.Stage) {
-                        exportStatus = progress.name
-                        progress.fraction?.let { exportFraction = it.coerceIn(0f, 1f) }
-                    }
-                }
-                exportStatus = "Saving file…"
-                exportFraction = max(exportFraction ?: 0f, .99f)
-                withContext(Dispatchers.IO) {
-                    context.contentResolver.openOutputStream(destination, "w")?.use { output ->
-                        temp.inputStream().use { it.copyTo(output, 1024 * 1024) }
-                    } ?: error("Could not open selected save location")
-                }
-                exportFraction = 1f
-                exportStatus = "Saved · ${result.backend} · ${exportSettingsSnapshot.description(exportProject)}"
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Throwable) {
-                exportFraction = null
-                exportStatus = error.message ?: "Export failed"
-            } finally {
-                temp.delete()
-                if (exportHasAudio) {
-                    try {
-                        val maxStartUs = (exportProject.durationUs - 1L).coerceAtLeast(0L)
-                        audioPreview.rebuild(
-                            exportProject,
-                            exportCursorUs.coerceIn(0L, maxStartUs) / 1000L,
-                            resumePlayback = false,
-                        )
-                    } catch (_: CancellationException) {
-                    } catch (error: Throwable) {
-                        previewStatus = "Audio preview: ${error.message ?: "unavailable"}"
-                    }
-                }
-            }
+            runEditorExport(
+                context = context,
+                router = router,
+                audioPreview = audioPreview,
+                project = exportProject,
+                cursorUs = exportCursorUs,
+                destination = destination,
+                settings = settings,
+                onProgress = { fraction, status ->
+                    exportFraction = fraction
+                    exportStatus = status
+                },
+                onPreviewStatus = { previewStatus = it },
+            )
         }
     }
 
-    val saveDocument = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("video/mp4")) { uri: Uri? -> if (uri != null) startExport(uri) }
+    val saveDocument = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("video/mp4")) { uri: Uri? ->
+        if (uri != null) startExport(uri)
+    }
 
     if (showExportDialog) {
-        val exportSettingsPreview = ExportSettingsV72(
+        EditorExportDialog(
+            project = state.project,
+            name = exportName,
             quality = exportQuality,
             resolution = exportResolution,
             frameRate = exportFrameRate,
-        )
-        val resolvedExport = exportSettingsPreview.applyTo(state.project)
-        val targetMbps = exportQuality.videoBitrate(
-            resolvedExport.width,
-            resolvedExport.height,
-            resolvedExport.frameRate,
-        ) / 1_000_000f
-        AlertDialog(
-            onDismissRequest = { showExportDialog = false },
-            title = { Text("Export video") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = exportName, onValueChange = { exportName = it }, label = { Text("File name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-
-                    Text("Resolution", fontSize = 10.sp, color = E7Muted)
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        ExportResolutionV72.entries.forEach { resolution ->
-                            AssistChip(
-                                onClick = { exportResolution = resolution },
-                                label = { Text(if (exportResolution == resolution) "✓ ${resolution.label}" else resolution.label, fontSize = 9.sp) },
-                            )
-                        }
-                    }
-
-                    Text("Frame rate", fontSize = 10.sp, color = E7Muted)
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        ExportFrameRateV72.entries.forEach { frameRate ->
-                            AssistChip(
-                                onClick = { exportFrameRate = frameRate },
-                                label = { Text(if (exportFrameRate == frameRate) "✓ ${frameRate.label}" else frameRate.label, fontSize = 9.sp) },
-                            )
-                        }
-                    }
-
-                    Text("Quality", fontSize = 10.sp, color = E7Muted)
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        ExportQuality.entries.forEach { quality ->
-                            AssistChip(onClick = { exportQuality = quality }, label = { Text(if (exportQuality == quality) "✓ ${quality.label}" else quality.label, fontSize = 9.sp) })
-                        }
-                    }
-                    Text(
-                        "${resolvedExport.width}×${resolvedExport.height} · ${resolvedExport.frameRate} fps · %.1f Mbps H.264 target".format(targetMbps),
-                        fontSize = 9.sp,
-                        color = E7Muted,
-                    )
-                    Text("File type", fontSize = 10.sp, color = E7Muted)
-                    AssistChip(onClick = {}, label = { Text("MP4 · H.264 / AAC") })
-                    Text(
-                        "For video sources, FPS is a maximum: higher-FPS footage is reduced cleanly; lower-FPS footage is not fake-interpolated.",
-                        fontSize = 8.sp,
-                        color = E7Muted,
-                    )
-                }
+            onNameChange = { exportName = it },
+            onQualityChange = { exportQuality = it },
+            onResolutionChange = { exportResolution = it },
+            onFrameRateChange = { exportFrameRate = it },
+            onConfirm = { base ->
+                showExportDialog = false
+                saveDocument.launch("$base.mp4")
             },
-            confirmButton = {
-                Button(onClick = {
-                    val base = exportName.trim().ifEmpty { "Digitor_export" }.removeSuffix(".mp4")
-                    showExportDialog = false; saveDocument.launch("$base.mp4")
-                }) { Icon(Icons.Rounded.Save, null, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(5.dp)); Text("Choose location") }
-            },
-            dismissButton = { TextButton(onClick = { showExportDialog = false }) { Text("Cancel") } },
+            onDismiss = { showExportDialog = false },
         )
     }
 
