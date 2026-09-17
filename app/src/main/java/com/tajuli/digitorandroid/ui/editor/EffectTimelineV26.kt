@@ -38,7 +38,7 @@ object EffectTimelineSelectionBusV26 {
  * pointer mutates an invisible ViewModel and the bar snaps back on the next recomposition.
  */
 private fun EditorViewModelV4.activeEffectEditorV26(): EditorViewModelV4 =
-    ActiveEditorVmRegistryV14.current() ?: this
+    ActiveEditorVmRegistry.current() ?: this
 
 fun EditorViewModelV4.deleteEffectTimelineV26(selection: EffectTimelineSelectionV26) {
     val target = activeEffectEditorV26()
