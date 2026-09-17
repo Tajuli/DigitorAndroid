@@ -77,13 +77,13 @@ private val TextPaletteV2 = listOf(
 )
 
 @Composable
-fun CreatorMediaWorkspaceV8(
+fun CreatorMediaWorkspace(
     project: TimelineProject,
     selectedClip: TimelineClip?,
     selectedTextId: String?,
     cursorUs: Long,
     busyOperation: String?,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {
     val selectedIsVideo = selectedClip != null && project.trackContaining(selectedClip.id)?.kind == TrackKind.VIDEO
@@ -193,7 +193,7 @@ fun CreatorMediaWorkspaceV8(
 }
 
 @Composable
-private fun CutoutEditorV43(clip: TimelineClip, vm: EditorViewModelV4) {
+private fun CutoutEditorV43(clip: TimelineClip, vm: EditorViewModel) {
     val context = LocalContext.current
     val settings = clip.resolvedCutoutV43()
     val personReady = PersonCutoutMaskStoreV43.hasAny(context.applicationContext, clip)
@@ -301,11 +301,11 @@ private fun CutoutEditorV43(clip: TimelineClip, vm: EditorViewModelV4) {
 }
 
 @Composable
-fun CreatorAudioWorkspaceV8(
+fun CreatorAudioWorkspace(
     project: TimelineProject,
     selectedClipId: String?,
     selectedClipIds: Set<String>,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {
     val selected = project.audioSelection(selectedClipId, selectedClipIds)
@@ -362,7 +362,7 @@ fun CreatorAudioWorkspaceV8(
 }
 
 @Composable
-private fun TextEditorV8(item: TextOverlayClip, vm: EditorViewModelV4) {
+private fun TextEditorV8(item: TextOverlayClip, vm: EditorViewModel) {
     val style = item.resolvedTextStyleV2()
     val entry = item.resolvedEntryAnimationV2()
     val exit = item.resolvedExitAnimationV2()
@@ -476,7 +476,7 @@ private fun AnimationEditorV2(
     item: TextOverlayClip,
     spec: TextAnimationSpecV2,
     isEntry: Boolean,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
 ) {
     Row(
         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
