@@ -33,7 +33,7 @@ private val ICPMuted = Color(0xFF909098)
 @Composable
 fun InputColorProfileBarV1(
     clip: TimelineClip?,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {
     if (clip == null) return
