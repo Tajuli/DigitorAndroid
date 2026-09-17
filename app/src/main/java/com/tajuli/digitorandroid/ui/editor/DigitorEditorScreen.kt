@@ -13,7 +13,7 @@ import androidx.media3.common.util.UnstableApi
  * Canonical editor entry point.
  *
  * Keep top-level editor integrations here instead of creating another DigitorEditorScreenV* shell.
- * Versioned implementation details stay behind the stable EditorViewModel and EditorWorkspace
+ * Versioned implementation details stay behind the stable EditorViewModel and EditorWorkspaceScreen
  * boundaries so callers no longer depend on historical runtime suffixes.
  */
 @UnstableApi
@@ -24,7 +24,7 @@ fun DigitorEditorScreen(
 ) {
     AutoCaptionTrackIntegrityV84(vm)
     Box(Modifier.fillMaxSize()) {
-        EditorWorkspace(vm = vm, onHome = onHome)
+        EditorWorkspaceScreen(vm = vm, onHome = onHome)
         AutoCaptionLauncherV86(
             vm = vm,
             modifier = Modifier
