@@ -123,7 +123,7 @@ fun EditorViewModelV4.setTransitionForCutV23(
     presetIdV24: String? = null,
     displayLabelV24: String? = null,
 ) {
-    val activeVm = ActiveEditorVmRegistryV14.current()
+    val activeVm = ActiveEditorVmRegistry.current()
     if (activeVm != null && activeVm !== this) {
         activeVm.setTransitionForCutV23(incomingClipId, style, durationUs, presetIdV24, displayLabelV24)
         return
