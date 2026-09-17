@@ -106,7 +106,7 @@ internal fun EditorPlaybackEffects(
             !hasVideo -> null
             frame == null -> "Preview: GPU preparing…"
             frame.bitmap != null -> "Preview: CPU fallback · ${frame.renderTimeMs}ms"
-            else -> "GPU ${timeV7(frame.timelineUs)} · ${frame.activeLayerCount}L"
+            else -> "GPU ${formatTimelineTime(frame.timelineUs)} · ${frame.activeLayerCount}L"
         }
     }
 
