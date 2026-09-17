@@ -8,7 +8,7 @@ package com.tajuli.digitorandroid.ui.editor
  * the un-keyed instance therefore changes the wrong state. Keep the active keyed instance explicit
  * so trim/resize mutations always land in the editor state that is actually on screen.
  */
-object ActiveEditorVmRegistryV14 {
+object ActiveEditorVmRegistry {
     @Volatile
     private var active: EditorViewModel? = null
 
@@ -22,3 +22,8 @@ object ActiveEditorVmRegistryV14 {
 
     fun current(): EditorViewModel? = active
 }
+
+/** Temporary compatibility bridge for internal callers migrated in a follow-up CI-gated pass. */
+@Deprecated("Use ActiveEditorVmRegistry", ReplaceWith("ActiveEditorVmRegistry"))
+internal val ActiveEditorVmRegistryV14: ActiveEditorVmRegistry
+    get() = ActiveEditorVmRegistry

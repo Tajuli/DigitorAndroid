@@ -31,7 +31,7 @@ import com.tajuli.digitorandroid.editor.model.ProjectSaveCoordinator
 import com.tajuli.digitorandroid.editor.model.ProjectStore
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisPowerGuardV48
-import com.tajuli.digitorandroid.ui.editor.ActiveEditorVmRegistryV14
+import com.tajuli.digitorandroid.ui.editor.ActiveEditorVmRegistry
 import com.tajuli.digitorandroid.ui.editor.DigitorEditorScreen
 import com.tajuli.digitorandroid.ui.editor.EditorViewModel
 import com.tajuli.digitorandroid.ui.home.DigitorHomeScreen
@@ -148,7 +148,7 @@ class MainActivity : ComponentActivity() {
                 when (destination) {
                     DESTINATION_EDITOR -> {
                         val editorVm: EditorViewModel = viewModel(key = "editor-session-$editorSession")
-                        ActiveEditorVmRegistryV14.bind(editorVm)
+                        ActiveEditorVmRegistry.bind(editorVm)
                         val editorState by editorVm.state.collectAsState()
                         latestEditorProject = editorState.project
 
@@ -168,7 +168,7 @@ class MainActivity : ComponentActivity() {
                     }
 
                     else -> {
-                        ActiveEditorVmRegistryV14.clear()
+                        ActiveEditorVmRegistry.clear()
                         latestEditorProject = null
                         val recents = remember(recentRefresh) { projectStore.recentProjects() }
                         DigitorHomeScreen(
