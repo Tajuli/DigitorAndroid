@@ -4,10 +4,9 @@ New integration code should depend on the stable editor runtime names:
 
 - `EditorViewModel`
 - `DigitorEditorScreen`
-- `EditorWorkspace`
 - `EditorWorkspaceScreen`
 
-The historical `DigitorEditorScreenV7` workspace symbol has been removed. The active workspace implementation now uses the canonical `EditorWorkspaceScreen` name directly.
+The historical `DigitorEditorScreenV7` and forwarding `EditorWorkspace` workspace symbols have been removed. `DigitorEditorScreen` now calls the canonical `EditorWorkspaceScreen` implementation directly.
 
 `EditorViewModelV4` remains a compatibility implementation detail behind the `EditorViewModel` alias. New entry-point or app-shell code should use `EditorViewModel`.
 
