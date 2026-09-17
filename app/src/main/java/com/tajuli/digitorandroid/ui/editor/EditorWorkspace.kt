@@ -62,7 +62,7 @@ private fun TimelineProject.activeVideoClips(timelineUs: Long): List<TimelineCli
 
 @UnstableApi
 @Composable
-fun DigitorEditorScreenV7(
+internal fun EditorWorkspaceScreen(
     vm: EditorViewModel = viewModel(),
     onHome: () -> Unit = {},
 ) {
