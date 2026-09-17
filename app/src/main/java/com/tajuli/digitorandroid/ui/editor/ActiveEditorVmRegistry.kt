@@ -22,8 +22,3 @@ object ActiveEditorVmRegistry {
 
     fun current(): EditorViewModel? = active
 }
-
-/** Temporary compatibility bridge for internal callers migrated in a follow-up CI-gated pass. */
-@Deprecated("Use ActiveEditorVmRegistry", ReplaceWith("ActiveEditorVmRegistry"))
-internal val ActiveEditorVmRegistryV14: ActiveEditorVmRegistry
-    get() = ActiveEditorVmRegistry
