@@ -52,13 +52,13 @@ private enum class EditPageV5 { TIMELINE, TRANSFORM, RETIME, CUTOUT }
 
 /** Timeline, transform, retime and cutout live under Edit; transitions stay on the timeline. */
 @Composable
-fun EditWorkspaceV5(
+fun EditWorkspace(
     project: TimelineProject,
     selectedTrackId: String?,
     selectedClipIds: Set<String>,
     selectedClip: TimelineClip?,
     cursorUs: Long,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     onSeek: (Long) -> Unit,
     onSelectTrack: (String) -> Unit,
     onSelectClip: (String) -> Unit,
@@ -153,7 +153,7 @@ fun EditWorkspaceV5(
 private fun RetimeWorkspaceV5(
     clip: TimelineClip,
     cursorUs: Long,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier,
 ) {
     Column(
@@ -207,7 +207,7 @@ private fun TransformWorkspaceV5(
     clip: TimelineClip,
     cursorUs: Long,
     frameRate: Int,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     onSeek: (Long) -> Unit,
     modifier: Modifier,
 ) {

@@ -71,7 +71,7 @@ internal fun EditorWorkspaceContent(
 ) {
     Box(modifier) {
         when (selected) {
-            EditorWorkspaceTab.EDIT -> EditWorkspaceV5(
+            EditorWorkspaceTab.EDIT -> EditWorkspace(
                 project = state.project,
                 selectedTrackId = state.selectedTrackId,
                 selectedClipIds = state.selectedClipIds,
@@ -104,7 +104,7 @@ internal fun EditorWorkspaceContent(
                 vm,
                 Modifier.fillMaxSize(),
             )
-            EditorWorkspaceTab.FILTERS -> CreatorFiltersWorkspaceV27(selectedClip, vm, Modifier.fillMaxSize())
+            EditorWorkspaceTab.FILTERS -> CreatorFiltersWorkspace(selectedClip, vm, Modifier.fillMaxSize())
             EditorWorkspaceTab.COLOR -> KeyframedColorWorkspace(
                 selectedClip,
                 state.project.frameRate,
@@ -120,21 +120,21 @@ internal fun EditorWorkspaceContent(
                 onSeek = onSeek,
                 modifier = Modifier.fillMaxSize(),
             )
-            EditorWorkspaceTab.OVERLAY -> VisualOverlayWorkspaceV19(
+            EditorWorkspaceTab.OVERLAY -> VisualOverlayWorkspace(
                 project = state.project,
                 cursorUs = cursorUs,
                 vm = vm,
                 onSeek = onSeek,
                 modifier = Modifier.fillMaxSize(),
             )
-            EditorWorkspaceTab.AUDIO -> CreatorAudioWorkspaceV8(
+            EditorWorkspaceTab.AUDIO -> CreatorAudioWorkspace(
                 state.project,
                 state.selectedClipId,
                 state.selectedClipIds,
                 vm,
                 Modifier.fillMaxSize(),
             )
-            EditorWorkspaceTab.MEDIA -> CreatorMediaWorkspaceV8(
+            EditorWorkspaceTab.MEDIA -> CreatorMediaWorkspace(
                 state.project,
                 selectedClip,
                 state.selectedTextId,
