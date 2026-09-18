@@ -296,11 +296,10 @@ private fun ClipStabilizationV90.filteredCorrectionV95(sourceTimeUs: Long): Stab
         val kernel = (1f - normalized * normalized).coerceAtLeast(0f)
         val weight = kernel * kernel * (.25f + .75f * sample.confidence.coerceIn(0f, 1f))
         if (weight <= .0001f) continue
-        val correction = if (mode == StabilizationModeV90.TRANSLATION) {
-            translationCorrectionV96(sample.sourceTimeUs)
-        } else {
-            robustBaseCorrectionV95(sample.sourceTimeUs)
-        }
+        // Lookahead only needs a robust estimate of future crop demand. The exact playhead floor
+        // above already uses V96 Translation, so avoid re-running the heavy gimbal regression for
+        // every sparse zoom probe.
+        val correction = robustBaseCorrectionV95(sample.sourceTimeUs)
         sumW += weight
         dx += correction.dx * weight
         dy += correction.dy * weight
