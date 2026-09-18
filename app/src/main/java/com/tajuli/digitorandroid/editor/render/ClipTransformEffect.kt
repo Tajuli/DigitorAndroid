@@ -6,6 +6,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.MatrixTransformation
 import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.evaluatedDisplayTransformV90
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -34,7 +35,8 @@ object ClipTransformEffect {
         presentationTimeOffsetUs: Long,
         usePreviewClock: Boolean,
     ): Effect? {
-        if (clip.transform.isStaticIdentity) return null
+        val stabilizationActive = clip.stabilizationV90?.let { it.enabled && it.hasAnalysis } == true
+        if (clip.transform.isStaticIdentity && !stabilizationActive) return null
 
         var previewRevision = Long.MIN_VALUE
         var previewAnchorPresentationUs = 0L
@@ -61,7 +63,7 @@ object ClipTransformEffect {
                 fallbackLocalUs
             }
 
-            val value = clip.transform.evaluate(localUs)
+            val value = clip.evaluatedDisplayTransformV90(localUs)
             val radians = Math.toRadians(value.rotationDegrees.toDouble())
             val cos = cos(radians).toFloat()
             val sin = sin(radians).toFloat()
