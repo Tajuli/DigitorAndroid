@@ -281,23 +281,35 @@ private fun ClipStabilizationV90.zoomEnvelopeV95(
     )
     var envelope = currentRequired
 
+    // Build a sparse robust crop-demand curve. Each probe is already median/MAD clipped. A second
+    // tiny median across neighbouring crop probes removes any remaining isolated peak without
+    // repeatedly running the full zero-phase correction filter for every preview frame.
+    val probes = ArrayList<Pair<Long, Float>>()
     var sampleIndex = 0
     for (sample in samplesInWindowV94(sourceTimeUs, radius, segment)) {
-        // Probe a slow envelope only. Critically, probes use the V95 robust filtered correction,
-        // never the raw/base correction that caused the measured 154% isolated zoom spike.
         if (sampleIndex++ % ZOOM_PROBE_STRIDE_V94 != 0) continue
-        val distance = abs(sample.sourceTimeUs - sourceTimeUs)
-        val normalized = (distance.toFloat() / radius.toFloat()).coerceIn(0f, 1f)
-        val feather = (1f - normalized * normalized).coerceAtLeast(0f)
-        if (feather <= .0001f) continue
-
-        val correction = filteredCorrectionV95(sample.sourceTimeUs)
+        val correction = robustBaseCorrectionV95(sample.sourceTimeUs)
         val required = max(
             correction.scaleCorrection,
             requiredCoverScaleV92(correction.dx, correction.dy, correction.rotation) * COVER_SAFETY_V92,
         )
-        // The envelope can anticipate a real sustained correction, but an isolated outlier has
-        // already been MAD-clipped before it reaches this point.
+        probes += sample.sourceTimeUs to required
+    }
+
+    for (index in probes.indices) {
+        val (probeTimeUs, _) = probes[index]
+        val localStart = max(0, index - ZOOM_MEDIAN_HALF_WINDOW_V95)
+        val localEnd = minOf(probes.lastIndex, index + ZOOM_MEDIAN_HALF_WINDOW_V95)
+        val localRequired = ArrayList<Float>(localEnd - localStart + 1)
+        for (localIndex in localStart..localEnd) {
+            localRequired += probes[localIndex].second
+        }
+        val required = medianFloatV95(localRequired)
+        val distance = abs(probeTimeUs - sourceTimeUs)
+        val normalized = (distance.toFloat() / radius.toFloat()).coerceIn(0f, 1f)
+        val feather = (1f - normalized * normalized).coerceAtLeast(0f)
+        if (feather <= .0001f) continue
+
         val feathered = 1f + (required - 1f).coerceAtLeast(0f) * feather
         envelope = max(envelope, feathered)
     }
@@ -458,6 +470,7 @@ private const val TRACKING_FILTER_RADIUS_US_V94 = 90_000L
 private const val CORRECTION_FILTER_RADIUS_US_V94 = 160_000L
 private const val ZOOM_ENVELOPE_RADIUS_US_V94 = 1_200_000L
 private const val ZOOM_PROBE_STRIDE_V94 = 3
+private const val ZOOM_MEDIAN_HALF_WINDOW_V95 = 1
 private const val OUTLIER_WINDOW_RADIUS_US_V95 = 225_000L
 private const val MIN_OUTLIER_WINDOW_SAMPLES_V95 = 5
 private const val MAD_TO_SIGMA_V95 = 1.4826f
