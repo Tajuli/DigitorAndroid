@@ -208,7 +208,7 @@ fun KeyframedCorrectionWorkspace(
     AutoKeyCorrectionV5(clip, baseNode, evaluatedNode, evaluated.sourceTimeUs)
     Column(modifier) {
         if (clip != null && baseNode != null && (baseNode.kind == NodeKind.SERIAL || baseNode.kind == NodeKind.PARALLEL)) {
-            NodeDomainKeyframeBarV5(clip, baseNode, NodeAnimationDomain.CORRECTION, frameRate)
+            NodeDomainKeyframeBar(clip, baseNode, NodeAnimationDomain.CORRECTION, frameRate)
         }
         Box(Modifier.weight(1f).fillMaxSize()) {
             CorrectionWorkspace(evaluated.clip, vm, Modifier.fillMaxSize())
@@ -229,7 +229,7 @@ fun KeyframedColorWorkspace(
     AutoKeyColorV5(clip, baseNode, evaluatedNode, evaluated.sourceTimeUs)
     Column(modifier) {
         if (clip != null && baseNode != null && (baseNode.kind == NodeKind.SERIAL || baseNode.kind == NodeKind.PARALLEL)) {
-            NodeDomainKeyframeBarV5(clip, baseNode, NodeAnimationDomain.COLOR, frameRate)
+            NodeDomainKeyframeBar(clip, baseNode, NodeAnimationDomain.COLOR, frameRate)
         }
         Box(Modifier.weight(1f).fillMaxSize()) {
             ColorWorkspace(evaluated.clip, vm, Modifier.fillMaxSize())
@@ -248,7 +248,7 @@ fun KeyframedEffectsWorkspace(
     val evaluated = evaluatedNodeClip(clip, frameRate)
     Column(modifier) {
         if (clip != null && baseNode != null && (baseNode.kind == NodeKind.SERIAL || baseNode.kind == NodeKind.PARALLEL)) {
-            NodeDomainKeyframeBarV5(clip, baseNode, NodeAnimationDomain.EFFECTS, frameRate)
+            NodeDomainKeyframeBar(clip, baseNode, NodeAnimationDomain.EFFECTS, frameRate)
         }
         Box(Modifier.weight(1f).fillMaxSize()) {
             CreatorEffectsWorkspace(
