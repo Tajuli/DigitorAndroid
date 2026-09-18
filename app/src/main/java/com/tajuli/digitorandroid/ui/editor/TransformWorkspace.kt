@@ -258,10 +258,13 @@ private fun StabilizationWorkspaceV90(
         }
 
         Text(
-            if (stabilization.analysisVersionV93 >= 93) {
-                "V93 Pro · ${stabilization.samples.size} motion samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
-            } else {
-                "Legacy analysis · Re-analyze for V93 Pro tracking"
+            when {
+                stabilization.analysisVersionV93 >= 96 ->
+                    "V96 Resolve Translation · ${stabilization.samples.size} frame samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
+                stabilization.analysisVersionV93 >= 93 ->
+                    "V93 analysis · Re-analyze for V96 full-frame tracking"
+                else ->
+                    "Legacy analysis · Re-analyze for V96 full-frame tracking"
             },
             fontSize = 7.sp,
             color = if (stabilization.analysisVersionV93 >= 93) X5Muted else X5Accent,
