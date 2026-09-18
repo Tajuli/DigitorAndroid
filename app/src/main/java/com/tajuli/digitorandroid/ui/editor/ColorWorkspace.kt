@@ -120,7 +120,7 @@ fun ColorWorkspace(
             ColorPage.PRIMARY -> PrimaryPage(node, vm, Modifier.fillMaxSize())
             ColorPage.LOG -> LogPage(node, vm, Modifier.fillMaxSize())
             ColorPage.CURVES -> CurvesPage(node, vm, Modifier.fillMaxSize())
-            ColorPage.INPUT -> InputColorProfileBarV1(clip, vm, Modifier.fillMaxSize())
+            ColorPage.INPUT -> InputColorProfileBar(clip, vm, Modifier.fillMaxSize())
             ColorPage.QUALIFIER -> ResolveQualifierPanelV4(node, vm, Modifier.fillMaxSize())
         }
     }
