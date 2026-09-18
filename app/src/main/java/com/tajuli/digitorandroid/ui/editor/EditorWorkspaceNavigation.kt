@@ -111,7 +111,7 @@ internal fun EditorWorkspaceContent(
                 vm,
                 Modifier.fillMaxSize(),
             )
-            EditorWorkspaceTab.TEXT -> TextWorkspaceV9(
+            EditorWorkspaceTab.TEXT -> TextWorkspace(
                 project = state.project,
                 selectedTextId = state.selectedTextId,
                 cursorUs = cursorUs,

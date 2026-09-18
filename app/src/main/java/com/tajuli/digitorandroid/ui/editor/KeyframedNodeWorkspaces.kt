@@ -232,7 +232,7 @@ fun KeyframedColorWorkspace(
             NodeDomainKeyframeBarV5(clip, baseNode, NodeAnimationDomain.COLOR, frameRate)
         }
         Box(Modifier.weight(1f).fillMaxSize()) {
-            ColorWorkspaceV4(evaluated.clip, vm, Modifier.fillMaxSize())
+            ColorWorkspace(evaluated.clip, vm, Modifier.fillMaxSize())
         }
     }
 }

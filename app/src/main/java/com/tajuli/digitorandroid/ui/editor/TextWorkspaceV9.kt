@@ -91,12 +91,12 @@ private val TextPaletteV9 = listOf(
 )
 
 @Composable
-fun TextWorkspaceV9(
+fun TextWorkspace(
     project: TimelineProject,
     selectedTextId: String?,
     cursorUs: Long,
     frameRate: Int,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -214,7 +214,7 @@ private fun EmptyTextV9(message: String) {
 }
 
 @Composable
-private fun TextInspectorV9(project: TimelineProject, item: TextOverlayClip, vm: EditorViewModelV4) {
+private fun TextInspectorV9(project: TimelineProject, item: TextOverlayClip, vm: EditorViewModel) {
     val style = item.resolvedTextStyleV2()
     val assignedTrackId = item.resolvedVideoTrackIdV3(project)
 
@@ -330,7 +330,7 @@ private fun TextAnimateV9(
     item: TextOverlayClip,
     cursorUs: Long,
     frameRate: Int,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     onSeek: (Long) -> Unit,
 ) {
     val inside = cursorUs in item.timelineStartUs until item.timelineEndUs
@@ -448,7 +448,7 @@ private fun QuickAnimationV9(
     item: TextOverlayClip,
     spec: TextAnimationSpecV2,
     entry: Boolean,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
 ) {
     Text(title, fontSize = 8.sp, color = TX9Muted)
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -483,7 +483,7 @@ private fun TextTemplatesPanelV10(
     selected: TextOverlayClip?,
     targetTrackName: String?,
     cursorUs: Long,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
 ) {
     var category by remember { mutableStateOf("All") }
     var draggingId by remember { mutableStateOf<String?>(null) }
