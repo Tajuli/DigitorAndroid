@@ -16,14 +16,14 @@ private object PreviewColorPickerRoute {
 }
 
 /** Starts preview sampling with the next picked color routed to the selected clip's Chroma Key. */
-internal fun startChromaKeyColorPicker(vm: EditorViewModelV4) {
+internal fun startChromaKeyColorPicker(vm: EditorViewModel) {
     PreviewColorPickerRoute.target = PreviewColorPickerTarget.CHROMA_KEY
     vm.setQualifierPickerActive(true)
     vm.setEditorStatusV19("Chroma picker: tap a clean green/blue background area in Preview")
 }
 
 /** Cancels a pending Chroma Key pick and restores the preview picker to its qualifier default. */
-internal fun cancelChromaKeyColorPicker(vm: EditorViewModelV4) {
+internal fun cancelChromaKeyColorPicker(vm: EditorViewModel) {
     if (PreviewColorPickerRoute.target == PreviewColorPickerTarget.CHROMA_KEY) {
         PreviewColorPickerRoute.target = PreviewColorPickerTarget.QUALIFIER
         vm.setQualifierPickerActive(false)
@@ -38,7 +38,7 @@ internal fun cancelChromaKeyColorPicker(vm: EditorViewModelV4) {
  * decoder, long-GOP seeks and vendor-codec contention while keeping the interaction instant.
  */
 internal fun applyQualifierPickedColor(
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     red: Float,
     green: Float,
     blue: Float,
