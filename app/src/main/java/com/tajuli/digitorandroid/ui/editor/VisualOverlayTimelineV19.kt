@@ -47,7 +47,7 @@ private const val VOT19_TRACK_HEIGHT = 38f
 private const val VOT19_MIN_DURATION_US = 100_000L
 
 @Composable
-internal fun VisualOverlayTimelineItemV19(
+internal fun VisualOverlayTimelineItem(
     project: TimelineProject,
     track: TimelineTrack,
     overlay: VisualOverlayClipV19,

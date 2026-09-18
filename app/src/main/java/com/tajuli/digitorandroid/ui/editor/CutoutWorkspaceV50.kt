@@ -49,7 +49,7 @@ private val C50Text = Color.White
 
 /** Compact Edit-tab Pro Cutout workspace. PP-MattingV2 is the only portrait matte backend. */
 @Composable
-fun CutoutWorkspaceV50(
+fun CutoutWorkspace(
     vm: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {

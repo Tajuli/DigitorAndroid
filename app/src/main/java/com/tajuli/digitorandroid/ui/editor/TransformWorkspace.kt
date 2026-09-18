@@ -142,7 +142,7 @@ fun EditWorkspace(
 
             EditPageV5.CUTOUT -> {
                 if (selectedClip != null && canEditVideo) {
-                    CutoutWorkspaceV50(vm = vm, modifier = Modifier.fillMaxSize())
+                    CutoutWorkspace(vm = vm, modifier = Modifier.fillMaxSize())
                 }
             }
         }

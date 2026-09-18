@@ -157,7 +157,7 @@ fun EditorViewModel.setTransitionForCutV23(
 }
 
 @Composable
-internal fun CapCutTransitionCutButtonV23(
+internal fun CapCutTransitionCutButton(
     target: TransitionCutTargetV23,
     pps: Float,
     onClick: () -> Unit,
@@ -194,7 +194,7 @@ internal fun CapCutTransitionCutButtonV23(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun CapCutTransitionSheetV23(
+internal fun CapCutTransitionSheet(
     project: TimelineProject,
     targetClipId: String,
     vm: EditorViewModel,

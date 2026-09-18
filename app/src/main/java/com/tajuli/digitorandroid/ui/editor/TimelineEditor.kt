@@ -160,7 +160,7 @@ fun TimelineEditorV4(
         }
 
         transitionTargetClipId?.let { targetClipId ->
-            CapCutTransitionSheetV23(
+            CapCutTransitionSheet(
                 project = project,
                 targetClipId = targetClipId,
                 vm = vm,
@@ -458,7 +458,7 @@ private fun TimelineLaneV4(
                 )
             }
             project.visualOverlaysForVideoTrackV19(track.id).forEach { overlay ->
-                VisualOverlayTimelineItemV19(
+                VisualOverlayTimelineItem(
                     project = project,
                     track = track,
                     overlay = overlay,
@@ -467,7 +467,7 @@ private fun TimelineLaneV4(
                 )
             }
             track.capCutTransitionCutsV23().forEach { target ->
-                CapCutTransitionCutButtonV23(
+                CapCutTransitionCutButton(
                     target = target,
                     pps = pps,
                     onClick = { onTransitionCut(target) },

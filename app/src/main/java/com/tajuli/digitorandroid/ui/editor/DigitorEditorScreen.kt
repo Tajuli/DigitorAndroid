@@ -25,7 +25,7 @@ fun DigitorEditorScreen(
     AutoCaptionTrackIntegrityV84(vm)
     Box(Modifier.fillMaxSize()) {
         EditorWorkspaceScreen(vm = vm, onHome = onHome)
-        AutoCaptionLauncherV86(
+        AutoCaptionLauncher(
             vm = vm,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
