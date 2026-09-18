@@ -115,6 +115,63 @@ class StabilizationV90Test {
     }
 
     @Test
+    fun v94CorrectionFilter_reducesTrackingMicroJitter() {
+        val samples = listOf(
+            StabilizationPathSampleV90(0L, 0f, 0f, 0f, confidence = 1f),
+            StabilizationPathSampleV90(50_000L, .08f, 0f, 0f, confidence = .9f),
+            StabilizationPathSampleV90(100_000L, .01f, 0f, 0f, confidence = .9f),
+            StabilizationPathSampleV90(150_000L, .09f, 0f, 0f, confidence = .9f),
+            StabilizationPathSampleV90(200_000L, .02f, 0f, 0f, confidence = .9f),
+            StabilizationPathSampleV90(250_000L, .10f, 0f, 0f, confidence = .9f),
+            StabilizationPathSampleV90(300_000L, .03f, 0f, 0f, confidence = .9f),
+        )
+        val legacy = ClipStabilizationV90(
+            strength = 1f,
+            smoothRadiusUs = 300_000L,
+            crop = 0f,
+            samples = samples,
+            analysisVersionV93 = 0,
+        )
+        val pro = legacy.copy(analysisVersionV93 = 93)
+
+        val times = samples.map { it.sourceTimeUs }
+        val legacyJitter = times.zipWithNext().sumOf { (a, b) ->
+            abs(legacy.evaluate(b).offsetX - legacy.evaluate(a).offsetX).toDouble()
+        }
+        val proJitter = times.zipWithNext().sumOf { (a, b) ->
+            abs(pro.evaluate(b).offsetX - pro.evaluate(a).offsetX).toDouble()
+        }
+        assertTrue("V94 correction should reduce micro-jitter", proJitter < legacyJitter)
+    }
+
+    @Test
+    fun v94ZoomEnvelope_preZoomsBeforeLargeCorrection() {
+        val stabilization = ClipStabilizationV90(
+            mode = StabilizationModeV90.SIMILARITY,
+            strength = 1f,
+            smoothRadiusUs = 250_000L,
+            crop = 1f,
+            analysisVersionV93 = 93,
+            samples = listOf(
+                StabilizationPathSampleV90(0L, 0f, 0f, 0f),
+                StabilizationPathSampleV90(300_000L, 0f, 0f, 0f),
+                StabilizationPathSampleV90(600_000L, .30f, 0f, 0f),
+                StabilizationPathSampleV90(900_000L, .30f, 0f, 0f),
+                StabilizationPathSampleV90(1_200_000L, .30f, 0f, 0f),
+            ),
+        )
+
+        val early = stabilization.evaluate(300_000L)
+        val peak = stabilization.evaluate(600_000L)
+        assertTrue("zoom envelope should begin before the peak correction", early.scale > 1.01f)
+        assertTrue("peak must still be fully covered", peak.scale >= requiredCoverScaleV92(
+            peak.offsetX,
+            peak.offsetY,
+            peak.rotationDegrees,
+        ))
+    }
+
+    @Test
     fun displayTransform_composesManualAndStabilizedMotion() {
         val clip = TimelineClip(
             uri = "content://video",
