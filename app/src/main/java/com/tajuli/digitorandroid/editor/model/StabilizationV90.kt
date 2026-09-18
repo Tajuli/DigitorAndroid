@@ -1,10 +1,11 @@
 package com.tajuli.digitorandroid.editor.model
 
-import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.max
+import kotlin.math.sin
 
 /**
  * V90 Resolve-style clip stabilization.
@@ -92,16 +93,58 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
             exp(((desired.logScale - raw.logScale) * amount).coerceIn(-.22f, .22f).toDouble()).toFloat()
     }
 
-    // Conservative border compensation. It intentionally prefers a little extra crop to black edges.
-    val rotationRad = abs(rotation) * (PI.toFloat() / 180f)
-    val borderDemand = (abs(dx) * .55f + abs(dy) * .55f + rotationRad * .62f).coerceIn(0f, .45f)
-    // If correction needs to scale down a measured zoom-in, Crop=1 compensates that border demand;
-    // lower Crop values deliberately preserve more framing and may reveal a small edge.
-    val scaleBorderDemand = max(0f, 1f / scaleCorrection.coerceAtLeast(.01f) - 1f).coerceAtMost(.30f)
-    val autoZoom = 1f + (borderDemand + scaleBorderDemand) * state.crop
-    val finalScale = (scaleCorrection * autoZoom).coerceIn(.78f, 1.55f)
+    // V92 exact crop compensation. The previous heuristic could leave a thin black edge because
+    // translation + rotation do not combine linearly. Solve the inverse transform of all four output
+    // corners instead: the required scale is the smallest uniform zoom that keeps every corner inside
+    // the source rectangle. Crop=1 guarantees cover (plus a small sampling safety margin).
+    val requiredCoverScale = requiredCoverScaleV92(
+        offsetX = dx,
+        offsetY = dy,
+        rotationDegrees = rotation,
+    )
+    val coverTarget = max(scaleCorrection, requiredCoverScale * COVER_SAFETY_V92)
+    val finalScale = lerpV90(
+        scaleCorrection,
+        coverTarget,
+        state.crop,
+    ).coerceIn(.78f, MAX_STABILIZATION_ZOOM_V92)
 
     return EvaluatedStabilizationV90(dx, dy, rotation, finalScale)
+}
+
+
+/**
+ * Returns the minimum uniform scale needed for a translated/rotated full-frame source to cover the
+ * output canvas. Stabilization X/Y use the same normalized-device convention as ClipTransformEffect:
+ * +/-1 equals half a frame, and render Y is inverted.
+ */
+internal fun requiredCoverScaleV92(
+    offsetX: Float,
+    offsetY: Float,
+    rotationDegrees: Float,
+): Float {
+    val radians = Math.toRadians(rotationDegrees.toDouble())
+    val cosR = cos(radians).toFloat()
+    val sinR = sin(radians).toFloat()
+    val tx = offsetX
+    val ty = -offsetY
+
+    var required = 1f
+    val corners = arrayOf(
+        -1f to -1f,
+        1f to -1f,
+        -1f to 1f,
+        1f to 1f,
+    )
+    for ((x, y) in corners) {
+        val shiftedX = x - tx
+        val shiftedY = y - ty
+        // R^-1 = transpose(R) for a pure rotation.
+        val sourceX = cosR * shiftedX + sinR * shiftedY
+        val sourceY = -sinR * shiftedX + cosR * shiftedY
+        required = max(required, max(abs(sourceX), abs(sourceY)))
+    }
+    return required.coerceAtLeast(1f)
 }
 
 /** Manual transform and stabilization are composed once so preview/export/compositor stay identical. */
@@ -172,3 +215,6 @@ private fun StabilizationPathSampleV90.pathValueV90() =
     StabilizationPathValueV90(pathX, pathY, rotationDegrees, logScale)
 
 private fun lerpV90(a: Float, b: Float, t: Float): Float = a + (b - a) * t
+
+private const val COVER_SAFETY_V92 = 1.015f
+private const val MAX_STABILIZATION_ZOOM_V92 = 2.25f
