@@ -35,7 +35,7 @@ data class ClipStabilizationV90(
     val strength: Float = .90f,
     val smoothRadiusUs: Long = 700_000L,
     /** 0 keeps the original framing; 1 aggressively hides stabilization borders. */
-    val crop: Float = .85f,
+    val crop: Float = 1f,
     val analyzedWidth: Int = 0,
     val analyzedHeight: Int = 0,
     val samples: List<StabilizationPathSampleV90> = emptyList(),
