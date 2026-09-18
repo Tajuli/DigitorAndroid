@@ -82,7 +82,7 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
         state.analysisVersionV93 >= 93 && state.mode == StabilizationModeV90.TRANSLATION ->
             state.translationCorrectionV96(sourceTimeUs)
         state.analysisVersionV93 < 93 -> state.baseCorrectionV94(sourceTimeUs)
-        state.mode == StabilizationModeV90.CAMERA_LOCK -> state.robustBaseCorrectionV95(sourceTimeUs)
+        state.mode == StabilizationModeV90.CAMERA_LOCK -> state.cameraLockCorrectionV97(sourceTimeUs)
         else -> state.filteredCorrectionV95(sourceTimeUs)
     }
 
@@ -147,6 +147,77 @@ private fun ClipStabilizationV90.baseCorrectionV94(sourceTimeUs: Long): Stabiliz
             exp(((desired.logScale - raw.logScale) * amount).coerceIn(-.22f, .22f).toDouble()).toFloat()
     }
     return StabilizationCorrectionV94(dx, dy, rotation, scaleCorrection)
+}
+
+/**
+ * V97 Resolve-style Camera Lock.
+ *
+ * The stored path is the reference->current cumulative similarity pose. A hard camera lock must
+ * apply its exact inverse, not simply negate X/Y/rotation and invert scale independently. For
+ * T(p) = s R p + t, T^-1(p) = (1/s) R^-1 p - (1/s) R^-1 t.
+ *
+ * A short local median/MAD guard rejects isolated tracking failures without low-pass filtering the
+ * real pose; low-pass filtering the correction would re-introduce the original hand shake.
+ */
+private fun ClipStabilizationV90.cameraLockCorrectionV97(sourceTimeUs: Long): StabilizationCorrectionV94 {
+    val pose = robustCameraPoseV97(sourceTimeUs)
+    val amount = strength.coerceIn(0f, 1f)
+
+    val fullRotation = -pose.rotation
+    val fullInverseScale = exp((-pose.logScale).coerceIn(-.35f, .35f).toDouble()).toFloat()
+
+    val radians = Math.toRadians((-pose.rotation).toDouble())
+    val cosR = cos(radians).toFloat()
+    val sinR = sin(radians).toFloat()
+    val inverseTx = -(fullInverseScale * (cosR * pose.x - sinR * pose.y))
+    val inverseTy = -(fullInverseScale * (sinR * pose.x + cosR * pose.y))
+
+    // Strength blends from identity to the exact inverse. Scale blends in log space.
+    val blendedScale = exp(
+        (ln(fullInverseScale.coerceAtLeast(.01f)) * amount).toDouble(),
+    ).toFloat()
+
+    return StabilizationCorrectionV94(
+        dx = (inverseTx * amount).coerceIn(-1.75f, 1.75f),
+        dy = (inverseTy * amount).coerceIn(-1.75f, 1.75f),
+        rotation = (fullRotation * amount).coerceIn(-55f, 55f),
+        scaleCorrection = blendedScale.coerceIn(.70f, 1.45f),
+    )
+}
+
+private fun ClipStabilizationV90.robustCameraPoseV97(sourceTimeUs: Long): StabilizationPathValueV90 {
+    val center = pathAtV90(sourceTimeUs)
+    val segment = segmentAtV93(sourceTimeUs)
+    val window = samplesInWindowV94(sourceTimeUs, CAMERA_LOCK_OUTLIER_RADIUS_US_V97, segment)
+    if (window.size < MIN_CAMERA_LOCK_WINDOW_SAMPLES_V97) return center
+
+    val xs = window.map { it.pathX }
+    val ys = window.map { it.pathY }
+    val rotations = window.map { it.rotationDegrees }
+    val logScales = window.map { it.logScale }
+
+    val medianX = medianFloatV95(xs)
+    val medianY = medianFloatV95(ys)
+    val medianRotation = medianFloatV95(rotations)
+    val medianLogScale = medianFloatV95(logScales)
+
+    val gateX = robustGateV95(xs, medianX, MIN_CAMERA_LOCK_TRANSLATION_GATE_V97)
+    val gateY = robustGateV95(ys, medianY, MIN_CAMERA_LOCK_TRANSLATION_GATE_V97)
+    val gateRotation = robustGateV95(rotations, medianRotation, MIN_CAMERA_LOCK_ROTATION_GATE_V97)
+    val gateLogScale = robustGateV95(logScales, medianLogScale, MIN_CAMERA_LOCK_LOG_SCALE_GATE_V97)
+
+    return StabilizationPathValueV90(
+        x = center.x.coerceIn(medianX - gateX, medianX + gateX),
+        y = center.y.coerceIn(medianY - gateY, medianY + gateY),
+        rotation = center.rotation.coerceIn(
+            medianRotation - gateRotation,
+            medianRotation + gateRotation,
+        ),
+        logScale = center.logScale.coerceIn(
+            medianLogScale - gateLogScale,
+            medianLogScale + gateLogScale,
+        ),
+    )
 }
 
 /**
@@ -299,7 +370,11 @@ private fun ClipStabilizationV90.filteredCorrectionV95(sourceTimeUs: Long): Stab
         // Lookahead only needs a robust estimate of future crop demand. The exact playhead floor
         // above already uses V96 Translation, so avoid re-running the heavy gimbal regression for
         // every sparse zoom probe.
-        val correction = robustBaseCorrectionV95(sample.sourceTimeUs)
+        val correction = if (mode == StabilizationModeV90.CAMERA_LOCK) {
+            cameraLockCorrectionV97(sample.sourceTimeUs)
+        } else {
+            robustBaseCorrectionV95(sample.sourceTimeUs)
+        }
         sumW += weight
         dx += correction.dx * weight
         dy += correction.dy * weight
@@ -620,3 +695,8 @@ private const val MAX_TRANSLATION_GIMBAL_RADIUS_US_V96 = 3_500_000L
 private const val TRANSLATION_GIMBAL_RADIUS_MULTIPLIER_V96 = 2.0f
 private const val MIN_GIMBAL_FIT_SAMPLES_V96 = 7
 private const val MIN_GIMBAL_RESIDUAL_GATE_V96 = .018f
+private const val CAMERA_LOCK_OUTLIER_RADIUS_US_V97 = 140_000L
+private const val MIN_CAMERA_LOCK_WINDOW_SAMPLES_V97 = 5
+private const val MIN_CAMERA_LOCK_TRANSLATION_GATE_V97 = .025f
+private const val MIN_CAMERA_LOCK_ROTATION_GATE_V97 = .35f
+private const val MIN_CAMERA_LOCK_LOG_SCALE_GATE_V97 = .006f
