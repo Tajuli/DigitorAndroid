@@ -181,7 +181,7 @@ internal fun EditorFramePreview(
             VisualOverlayPreviewV19(project = project, overlay = overlay, previewSize = previewSize)
         }
         textOverlays.forEach { overlay ->
-            TextOverlayPreviewV2(overlay = overlay, timelineUs = timelineUs, previewSize = previewSize)
+            TextOverlayPreview(overlay = overlay, timelineUs = timelineUs, previewSize = previewSize)
         }
 
         Text("GPU Preview · $activeLayerCount ${if (activeLayerCount == 1) "layer" else "layers"}", modifier = Modifier.align(Alignment.TopStart).padding(10.dp).background(Color.Black.copy(alpha = .6f), RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 4.dp), fontSize = 9.sp, color = Color.White.copy(alpha = .72f))
