@@ -76,7 +76,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             startUs = startUs,
             endUs = endUs,
             targetTimesUs = targetTimesUs,
-            emitEveryFrame = false,
+            emitEveryFrame = true,
         ) { sourceTimeUs, bitmap ->
             try {
                 val width = bitmap.width.coerceAtLeast(1)
@@ -139,7 +139,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             analyzedWidth = analyzedWidth,
             analyzedHeight = analyzedHeight,
             samples = samples,
-            analysisVersionV93 = 93,
+            analysisVersionV93 = 96,
         ).normalized()
     }
 
@@ -583,15 +583,15 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
     }
 
     private companion object {
-        const val ANALYSIS_LONG_SIDE = 256
-        const val MAX_ANALYSIS_SAMPLES = 1200
-        const val MIN_SAMPLE_INTERVAL_US = 50_000L
+        const val ANALYSIS_LONG_SIDE = 320
+        const val MAX_ANALYSIS_SAMPLES = 3600
+        const val MIN_SAMPLE_INTERVAL_US = 33_333L
         const val PATCH_RADIUS = 3
         const val SEARCH_RADIUS = 18
         const val COARSE_STEP = 3
         const val GRID_COLUMNS = 8
         const val GRID_ROWS = 6
-        const val MAX_FEATURES = 28
+        const val MAX_FEATURES = 32
         const val MIN_FEATURES = 7
         const val REJECT_SAD = 42f
         const val MIN_ACCEPTED_CONFIDENCE = .28f
