@@ -5,7 +5,6 @@ import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.sin
 
 /**
@@ -151,11 +150,12 @@ private fun ClipStabilizationV90.baseCorrectionV94(sourceTimeUs: Long): Stabiliz
 private fun ClipStabilizationV90.filteredCorrectionV94(sourceTimeUs: Long): StabilizationCorrectionV94 {
     val segment = segmentAtV93(sourceTimeUs)
     val radius = CORRECTION_FILTER_RADIUS_US_V94
+    val centerCorrection = baseCorrectionV94(sourceTimeUs)
     var sumW = 1f
-    var dx = baseCorrectionV94(sourceTimeUs).dx
-    var dy = baseCorrectionV94(sourceTimeUs).dy
-    var rotation = baseCorrectionV94(sourceTimeUs).rotation
-    var logScale = ln(baseCorrectionV94(sourceTimeUs).scaleCorrection.coerceAtLeast(.01f))
+    var dx = centerCorrection.dx
+    var dy = centerCorrection.dy
+    var rotation = centerCorrection.rotation
+    var logScale = ln(centerCorrection.scaleCorrection.coerceAtLeast(.01f))
 
     for (sample in samplesInWindowV94(sourceTimeUs, radius, segment)) {
         val distance = abs(sample.sourceTimeUs - sourceTimeUs)
