@@ -41,6 +41,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.TransformProperty
+import com.tajuli.digitorandroid.editor.model.evaluate
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
