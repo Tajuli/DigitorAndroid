@@ -172,6 +172,70 @@ class StabilizationV90Test {
     }
 
     @Test
+    fun v95IsolatedTrackingSpike_doesNotForceHugeZoom() {
+        val samples = (0..24).map { index ->
+            val timeUs = index * 50_000L
+            val normal = index * .002f
+            val pathX = if (index == 12) .95f else normal
+            StabilizationPathSampleV90(
+                sourceTimeUs = timeUs,
+                pathX = pathX,
+                pathY = 0f,
+                rotationDegrees = if (index == 12) 9f else 0f,
+                confidence = .9f,
+            )
+        }
+        val stabilization = ClipStabilizationV90(
+            mode = StabilizationModeV90.SIMILARITY,
+            strength = 1f,
+            smoothRadiusUs = 500_000L,
+            crop = 1f,
+            samples = samples,
+            analysisVersionV93 = 93,
+        )
+
+        val before = stabilization.evaluate(550_000L)
+        val spike = stabilization.evaluate(600_000L)
+        val after = stabilization.evaluate(650_000L)
+
+        assertTrue("isolated outlier must not create a 150%+ zoom spike", spike.scale < 1.30f)
+        assertTrue("zoom should stay continuous entering the outlier", abs(spike.scale - before.scale) < .12f)
+        assertTrue("zoom should stay continuous leaving the outlier", abs(spike.scale - after.scale) < .12f)
+        assertTrue("render correction itself must be clipped", abs(spike.offsetX) < .20f)
+    }
+
+    @Test
+    fun v95PersistentCorrection_isNotRejectedAsAnOutlier() {
+        val samples = (0..24).map { index ->
+            val timeUs = index * 50_000L
+            val pathX = when {
+                index < 8 -> 0f
+                index < 18 -> .28f
+                else -> .30f
+            }
+            StabilizationPathSampleV90(
+                sourceTimeUs = timeUs,
+                pathX = pathX,
+                pathY = 0f,
+                rotationDegrees = 0f,
+                confidence = .95f,
+            )
+        }
+        val stabilization = ClipStabilizationV90(
+            mode = StabilizationModeV90.SIMILARITY,
+            strength = 1f,
+            smoothRadiusUs = 650_000L,
+            crop = 1f,
+            samples = samples,
+            analysisVersionV93 = 93,
+        )
+
+        val onset = stabilization.evaluate(450_000L)
+        assertTrue("sustained camera correction should still be applied", abs(onset.offsetX) > .025f)
+        assertTrue("sustained correction should still request cover zoom", onset.scale > 1.02f)
+    }
+
+    @Test
     fun displayTransform_composesManualAndStabilizedMotion() {
         val clip = TimelineClip(
             uri = "content://video",
