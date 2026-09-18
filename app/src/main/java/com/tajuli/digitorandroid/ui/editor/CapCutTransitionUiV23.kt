@@ -116,7 +116,7 @@ internal fun TimelineProject.withTransitionForCutV23(
     )
 }
 
-fun EditorViewModelV4.setTransitionForCutV23(
+fun EditorViewModel.setTransitionForCutV23(
     incomingClipId: String,
     style: TransitionStyleV22,
     durationUs: Long,
@@ -197,7 +197,7 @@ internal fun CapCutTransitionCutButtonV23(
 internal fun CapCutTransitionSheetV23(
     project: TimelineProject,
     targetClipId: String,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     onSeek: (Long) -> Unit,
     onDismiss: () -> Unit,
 ) {
