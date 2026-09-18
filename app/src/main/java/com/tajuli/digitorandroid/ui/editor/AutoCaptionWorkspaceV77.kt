@@ -68,7 +68,7 @@ private const val CC84_LANGUAGE_KEY = "speech_language"
 
 @Composable
 fun AutoCaptionLauncherV77(
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {
     val state by vm.state.collectAsState()
@@ -91,7 +91,7 @@ fun AutoCaptionLauncherV77(
 
 @Composable
 private fun AutoCaptionDialogV77(
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     onDismiss: () -> Unit,
 ) {
     val state by vm.state.collectAsState()
