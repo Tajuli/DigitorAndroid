@@ -23,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -171,6 +172,8 @@ private fun StabilizationWorkspaceV90(
     modifier: Modifier,
 ) {
     val stabilization = clip.stabilizationV90 ?: ClipStabilizationV90(enabled = false)
+    val uiState by vm.state.collectAsState()
+    val analyzing = uiState.busyOperation == "Stabilization"
 
     Column(
         modifier
@@ -188,12 +191,19 @@ private fun StabilizationWorkspaceV90(
 
         Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
             Text(
-                if (stabilization.hasAnalysis) "Re-analyze" else "Analyze",
+                when {
+                    analyzing -> "Analyzing…"
+                    stabilization.hasAnalysis -> "Re-analyze"
+                    else -> "Analyze"
+                },
                 fontSize = 9.sp,
-                color = Color.White,
+                color = if (analyzing) X5Muted else Color.White,
                 modifier = Modifier
-                    .background(X5Accent.copy(alpha = .18f), RoundedCornerShape(6.dp))
-                    .clickable { vm.analyzeSelectedStabilizationV90() }
+                    .background(
+                        if (analyzing) X5Raised else X5Accent.copy(alpha = .18f),
+                        RoundedCornerShape(6.dp),
+                    )
+                    .clickable(enabled = !analyzing) { vm.analyzeSelectedStabilizationV90() }
                     .padding(horizontal = 14.dp, vertical = 9.dp),
             )
             if (stabilization.hasAnalysis) {
@@ -218,9 +228,25 @@ private fun StabilizationWorkspaceV90(
             }
         }
 
+        if (analyzing) {
+            Text(
+                uiState.status,
+                fontSize = 9.sp,
+                color = X5Accent,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(X5Raised, RoundedCornerShape(6.dp))
+                    .padding(horizontal = 10.dp, vertical = 9.dp),
+            )
+        }
+
         if (!stabilization.hasAnalysis) {
             Text(
-                "Analyze once, then Strength, Smooth and Crop update instantly without decoding the clip again.",
+                if (analyzing) {
+                    "Keep this screen open while the clip is decoded sequentially. Controls appear as soon as analysis finishes."
+                } else {
+                    "Analyze once, then Strength, Smooth and Crop update instantly without decoding the clip again."
+                },
                 fontSize = 8.sp,
                 color = X5Muted,
             )
