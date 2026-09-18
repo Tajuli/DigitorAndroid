@@ -75,20 +75,20 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
     val state = normalized()
     if (!state.enabled || !state.hasAnalysis || state.strength <= 0f) return EvaluatedStabilizationV90()
 
-    // V94 separates camera-path estimation from the correction actually sent to the renderer.
-    // A tiny tracking low-pass removes sub-pixel estimator noise, then a short zero-phase correction
-    // filter prevents the stabilizer itself from creating high-frequency X/Y/rotation oscillation.
+    // V95 keeps V94's zero-phase smoothing, but rejects isolated correction spikes first using
+    // a local median/MAD gate. A one- or two-sample tracking failure must not jerk the frame or
+    // force the crop envelope into a sudden 150%+ zoom.
     val correction = if (state.analysisVersionV93 >= 93 && state.mode != StabilizationModeV90.CAMERA_LOCK) {
-        state.filteredCorrectionV94(sourceTimeUs)
+        state.filteredCorrectionV95(sourceTimeUs)
     } else {
         state.baseCorrectionV94(sourceTimeUs)
     }
 
-    // V94 zoom envelope: exact current-frame coverage remains mandatory at Crop=100%, but nearby
-    // future/past crop demand is feathered in over a long window. This gives the crop a slow
-    // Resolve-like breathing envelope instead of chasing every stabilization sample.
+    // V95 zoom envelope is driven by the same robust filtered correction used by rendering.
+    // This removes V94's bug where crop probes re-read raw/base corrections and amplified an
+    // otherwise filtered tracking outlier into a visible zoom spike.
     val coverTarget = if (state.analysisVersionV93 >= 93 && state.crop > 0f) {
-        state.zoomEnvelopeV94(sourceTimeUs, correction)
+        state.zoomEnvelopeV95(sourceTimeUs, correction)
     } else {
         max(
             correction.scaleCorrection,
@@ -147,10 +147,10 @@ private fun ClipStabilizationV90.baseCorrectionV94(sourceTimeUs: Long): Stabiliz
     return StabilizationCorrectionV94(dx, dy, rotation, scaleCorrection)
 }
 
-private fun ClipStabilizationV90.filteredCorrectionV94(sourceTimeUs: Long): StabilizationCorrectionV94 {
+private fun ClipStabilizationV90.filteredCorrectionV95(sourceTimeUs: Long): StabilizationCorrectionV94 {
     val segment = segmentAtV93(sourceTimeUs)
     val radius = CORRECTION_FILTER_RADIUS_US_V94
-    val centerCorrection = baseCorrectionV94(sourceTimeUs)
+    val centerCorrection = robustBaseCorrectionV95(sourceTimeUs)
     var sumW = 1f
     var dx = centerCorrection.dx
     var dy = centerCorrection.dy
@@ -164,7 +164,7 @@ private fun ClipStabilizationV90.filteredCorrectionV94(sourceTimeUs: Long): Stab
         val kernel = (1f - normalized * normalized).coerceAtLeast(0f)
         val weight = kernel * kernel * (.25f + .75f * sample.confidence.coerceIn(0f, 1f))
         if (weight <= .0001f) continue
-        val correction = baseCorrectionV94(sample.sourceTimeUs)
+        val correction = robustBaseCorrectionV95(sample.sourceTimeUs)
         sumW += weight
         dx += correction.dx * weight
         dy += correction.dy * weight
@@ -177,6 +177,72 @@ private fun ClipStabilizationV90.filteredCorrectionV94(sourceTimeUs: Long): Stab
         rotation = rotation / sumW,
         scaleCorrection = exp((logScale / sumW).toDouble()).toFloat(),
     )
+}
+
+/**
+ * V95 isolated-spike rejection.
+ *
+ * Camera tracking can occasionally emit one bad global transform even after RANSAC (motion blur,
+ * foreground occlusion, repeated texture). Compare the center correction against neighbouring
+ * corrections in the same scene segment. Median gives the local center; MAD estimates normal
+ * variation. Only the excess beyond a robust gate is clipped, so sustained real camera motion
+ * remains intact while one/two-frame impulses cannot dominate rendering or crop.
+ */
+private fun ClipStabilizationV90.robustBaseCorrectionV95(sourceTimeUs: Long): StabilizationCorrectionV94 {
+    val center = baseCorrectionV94(sourceTimeUs)
+    val segment = segmentAtV93(sourceTimeUs)
+    val neighbors = samplesInWindowV94(sourceTimeUs, OUTLIER_WINDOW_RADIUS_US_V95, segment)
+    if (neighbors.size < MIN_OUTLIER_WINDOW_SAMPLES_V95) return center
+
+    val corrections = neighbors.map { baseCorrectionV94(it.sourceTimeUs) }
+    val dxValues = corrections.map { it.dx }
+    val dyValues = corrections.map { it.dy }
+    val rotationValues = corrections.map { it.rotation }
+    val logScaleValues = corrections.map { ln(it.scaleCorrection.coerceAtLeast(.01f)) }
+
+    val medianDx = medianFloatV95(dxValues)
+    val medianDy = medianFloatV95(dyValues)
+    val medianRotation = medianFloatV95(rotationValues)
+    val medianLogScale = medianFloatV95(logScaleValues)
+
+    val gateDx = robustGateV95(dxValues, medianDx, MIN_TRANSLATION_GATE_V95)
+    val gateDy = robustGateV95(dyValues, medianDy, MIN_TRANSLATION_GATE_V95)
+    val gateRotation = robustGateV95(rotationValues, medianRotation, MIN_ROTATION_GATE_DEGREES_V95)
+    val gateLogScale = robustGateV95(logScaleValues, medianLogScale, MIN_LOG_SCALE_GATE_V95)
+
+    return StabilizationCorrectionV94(
+        dx = center.dx.coerceIn(medianDx - gateDx, medianDx + gateDx),
+        dy = center.dy.coerceIn(medianDy - gateDy, medianDy + gateDy),
+        rotation = center.rotation.coerceIn(
+            medianRotation - gateRotation,
+            medianRotation + gateRotation,
+        ),
+        scaleCorrection = exp(
+            ln(center.scaleCorrection.coerceAtLeast(.01f))
+                .coerceIn(medianLogScale - gateLogScale, medianLogScale + gateLogScale)
+                .toDouble(),
+        ).toFloat(),
+    )
+}
+
+private fun robustGateV95(values: List<Float>, median: Float, minimumGate: Float): Float {
+    if (values.isEmpty()) return minimumGate
+    val deviations = values.map { abs(it - median) }
+    val mad = medianFloatV95(deviations)
+    // 1.4826 converts MAD to a Gaussian-equivalent sigma estimate.
+    val sigma = mad * MAD_TO_SIGMA_V95
+    return max(minimumGate, sigma * OUTLIER_SIGMA_MULTIPLIER_V95)
+}
+
+private fun medianFloatV95(values: List<Float>): Float {
+    if (values.isEmpty()) return 0f
+    val sorted = values.sorted()
+    val middle = sorted.size / 2
+    return if (sorted.size % 2 == 1) {
+        sorted[middle]
+    } else {
+        (sorted[middle - 1] + sorted[middle]) * .5f
+    }
 }
 
 private fun ClipStabilizationV90.trackingFilteredPathV94(sourceTimeUs: Long): StabilizationPathValueV90 {
@@ -203,7 +269,7 @@ private fun ClipStabilizationV90.trackingFilteredPathV94(sourceTimeUs: Long): St
     return StabilizationPathValueV90(x / sumW, y / sumW, rotation / sumW, logScale / sumW)
 }
 
-private fun ClipStabilizationV90.zoomEnvelopeV94(
+private fun ClipStabilizationV90.zoomEnvelopeV95(
     sourceTimeUs: Long,
     current: StabilizationCorrectionV94,
 ): Float {
@@ -217,19 +283,21 @@ private fun ClipStabilizationV90.zoomEnvelopeV94(
 
     var sampleIndex = 0
     for (sample in samplesInWindowV94(sourceTimeUs, radius, segment)) {
-        // About 6-7 crop probes/sec is enough for a slow zoom envelope and keeps frame callbacks cheap.
+        // Probe a slow envelope only. Critically, probes use the V95 robust filtered correction,
+        // never the raw/base correction that caused the measured 154% isolated zoom spike.
         if (sampleIndex++ % ZOOM_PROBE_STRIDE_V94 != 0) continue
         val distance = abs(sample.sourceTimeUs - sourceTimeUs)
         val normalized = (distance.toFloat() / radius.toFloat()).coerceIn(0f, 1f)
         val feather = (1f - normalized * normalized).coerceAtLeast(0f)
         if (feather <= .0001f) continue
 
-        val correction = baseCorrectionV94(sample.sourceTimeUs)
+        val correction = filteredCorrectionV95(sample.sourceTimeUs)
         val required = max(
             correction.scaleCorrection,
             requiredCoverScaleV92(correction.dx, correction.dy, correction.rotation) * COVER_SAFETY_V92,
         )
-        // Feather only the extra zoom above 1x. At the playhead currentRequired remains an exact floor.
+        // The envelope can anticipate a real sustained correction, but an isolated outlier has
+        // already been MAD-clipped before it reaches this point.
         val feathered = 1f + (required - 1f).coerceAtLeast(0f) * feather
         envelope = max(envelope, feathered)
     }
@@ -390,3 +458,10 @@ private const val TRACKING_FILTER_RADIUS_US_V94 = 90_000L
 private const val CORRECTION_FILTER_RADIUS_US_V94 = 160_000L
 private const val ZOOM_ENVELOPE_RADIUS_US_V94 = 1_200_000L
 private const val ZOOM_PROBE_STRIDE_V94 = 3
+private const val OUTLIER_WINDOW_RADIUS_US_V95 = 225_000L
+private const val MIN_OUTLIER_WINDOW_SAMPLES_V95 = 5
+private const val MAD_TO_SIGMA_V95 = 1.4826f
+private const val OUTLIER_SIGMA_MULTIPLIER_V95 = 3.25f
+private const val MIN_TRANSLATION_GATE_V95 = .028f
+private const val MIN_ROTATION_GATE_DEGREES_V95 = .40f
+private const val MIN_LOG_SCALE_GATE_V95 = .008f
