@@ -65,6 +65,36 @@ class StabilizationV90Test {
         assertEquals(0f, evaluated.rotationDegrees, 0.0001f)
     }
 
+
+    @Test
+    fun requiredCoverScale_growsForTranslationAndRotation() {
+        assertEquals(1f, requiredCoverScaleV92(0f, 0f, 0f), 0.0001f)
+        assertTrue(requiredCoverScaleV92(.20f, 0f, 0f) > 1.19f)
+        assertTrue(requiredCoverScaleV92(0f, 0f, 8f) > 1.12f)
+        assertTrue(requiredCoverScaleV92(.15f, -.10f, 6f) > 1.20f)
+    }
+
+    @Test
+    fun fullCrop_addsEnoughZoomForCameraLock() {
+        val stabilization = ClipStabilizationV90(
+            mode = StabilizationModeV90.CAMERA_LOCK,
+            strength = 1f,
+            crop = 1f,
+            samples = listOf(
+                StabilizationPathSampleV90(0L, 0f, 0f, 0f),
+                StabilizationPathSampleV90(100_000L, .20f, -.10f, 6f),
+            ),
+        )
+        val evaluated = stabilization.evaluate(100_000L)
+        val required = requiredCoverScaleV92(
+            evaluated.offsetX,
+            evaluated.offsetY,
+            evaluated.rotationDegrees,
+        )
+        assertTrue(evaluated.scale >= required)
+        assertTrue(evaluated.scale > 1.20f)
+    }
+
     @Test
     fun displayTransform_composesManualAndStabilizedMotion() {
         val clip = TimelineClip(
