@@ -10,6 +10,7 @@ import androidx.media3.common.util.UnstableApi
 import com.tajuli.digitorandroid.editor.model.AnimatedFloat
 import com.tajuli.digitorandroid.editor.model.AudioMix
 import com.tajuli.digitorandroid.editor.model.ClipNodeGraph
+import com.tajuli.digitorandroid.editor.model.ClipStabilizationV90
 import com.tajuli.digitorandroid.editor.model.ClipTransform
 import com.tajuli.digitorandroid.editor.model.ClipTransition
 import com.tajuli.digitorandroid.editor.model.ColorNode
@@ -24,6 +25,7 @@ import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.NodePosition
 import com.tajuli.digitorandroid.editor.model.ProjectStore
 import com.tajuli.digitorandroid.editor.model.RgbCurves
+import com.tajuli.digitorandroid.editor.model.StabilizationModeV90
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
@@ -32,6 +34,7 @@ import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.TransformProperty
 import com.tajuli.digitorandroid.editor.model.audioSelection
 import com.tajuli.digitorandroid.editor.processing.CreatorMediaProcessor
+import com.tajuli.digitorandroid.editor.processing.ResolveStabilizationAnalyzerV90
 import java.util.ArrayDeque
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -66,6 +69,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     private val projectStore = ProjectStore(application)
     private val creatorMedia = CreatorMediaProcessor(application)
+    private val stabilizationAnalyzerV90 = ResolveStabilizationAnalyzerV90(application)
     private val undoStack = ArrayDeque<String>()
     private val redoStack = ArrayDeque<String>()
     private var lastHistoryLabel: String? = null
@@ -560,6 +564,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         linkGroupId = linkGroup,
                         transform = clip.transform.retimed(timeRatio),
                         nodeAnimations = NodeAnimations(),
+                        stabilizationV90 = null,
                     )
                     clip.id in linkedIds && track.kind == TrackKind.AUDIO && derived.hasAudio -> rebuilt += clip.copy(
                         uri = derived.uri,
@@ -605,7 +610,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val tracks = project.tracks.map { track ->
             track.copy(clips = track.clips.mapNotNull { clip ->
                 when {
-                    clip.id == live.id -> clip.copy(uri = derived.uri, sourceInUs = 0L, sourceOutUs = derived.durationUs, linkGroupId = null, nodeAnimations = NodeAnimations())
+                    clip.id == live.id -> clip.copy(uri = derived.uri, sourceInUs = 0L, sourceOutUs = derived.durationUs, linkGroupId = null, nodeAnimations = NodeAnimations(), stabilizationV90 = null)
                     clip.id in linkedIds && track.kind == TrackKind.AUDIO -> null
                     else -> clip
                 }
@@ -694,6 +699,98 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val nextProject = project.copy(tracks = tracks, textOverlays = overlays, visualOverlaysV19 = visualOverlays)
         val freezeClip = nextProject.tracks.firstOrNull { it.id == track.id }?.clips?.firstOrNull { it.timelineStartUs == timelineUs && it.label.endsWith("· Freeze") }
         publish(state.copy(project = nextProject, selectedClipId = freezeClip?.id, selectedClipIds = freezeClip?.id?.let(::setOf).orEmpty(), busyOperation = null, status = "Freeze frame inserted"))
+    }
+
+    fun analyzeSelectedStabilizationV90() {
+        val state = _state.value
+        val selected = state.project.clip(state.selectedClipId) ?: return
+        if (state.project.trackContaining(selected.id)?.kind != TrackKind.VIDEO || state.busyOperation != null) return
+        publish(state.copy(busyOperation = "Stabilization", status = "Analyzing camera motion…"))
+        viewModelScope.launch {
+            runCatching {
+                stabilizationAnalyzerV90.analyze(
+                    selected,
+                    selected.stabilizationV90 ?: ClipStabilizationV90(),
+                ) { _, message ->
+                    val live = _state.value
+                    if (live.busyOperation == "Stabilization") {
+                        _state.value = live.copy(status = message)
+                    }
+                }
+            }.onSuccess { analyzed ->
+                val live = _state.value
+                if (live.project.clip(selected.id) == null) {
+                    publish(live.copy(busyOperation = null, status = "Stabilization clip is no longer available"))
+                    return@onSuccess
+                }
+                checkpoint("stabilization-analyze")
+                val tracks = live.project.tracks.map { track ->
+                    track.copy(clips = track.clips.map { clip ->
+                        if (clip.id == selected.id) clip.copy(stabilizationV90 = analyzed) else clip
+                    })
+                }
+                publish(
+                    live.copy(
+                        project = live.project.copy(tracks = tracks),
+                        busyOperation = null,
+                        status = "Stabilized · ${analyzed.samples.size} motion samples",
+                    ),
+                )
+            }.onFailure { error ->
+                publish(_state.value.copy(busyOperation = null, status = error.message ?: "Stabilization analysis failed"))
+            }
+        }
+    }
+
+    fun setSelectedStabilizationEnabledV90(enabled: Boolean) =
+        updateSelectedStabilizationV90("stabilization-enabled", "Stabilization ${if (enabled) "on" else "off"}") {
+            it.copy(enabled = enabled)
+        }
+
+    fun setSelectedStabilizationModeV90(mode: StabilizationModeV90) =
+        updateSelectedStabilizationV90("stabilization-mode", "Stabilization · ${mode.name.lowercase()}") {
+            it.copy(mode = mode)
+        }
+
+    fun setSelectedStabilizationStrengthV90(value: Float) =
+        updateSelectedStabilizationV90("stabilization-strength", "Stabilization strength updated", coalesce = true) {
+            it.copy(strength = value.coerceIn(0f, 1f))
+        }
+
+    fun setSelectedStabilizationSmoothV90(radiusUs: Long) =
+        updateSelectedStabilizationV90("stabilization-smooth", "Stabilization smoothing updated", coalesce = true) {
+            it.copy(smoothRadiusUs = radiusUs.coerceIn(80_000L, 3_000_000L))
+        }
+
+    fun setSelectedStabilizationCropV90(value: Float) =
+        updateSelectedStabilizationV90("stabilization-crop", "Stabilization crop updated", coalesce = true) {
+            it.copy(crop = value.coerceIn(0f, 1f))
+        }
+
+    fun clearSelectedStabilizationV90() {
+        val state = _state.value
+        val clip = state.project.clip(state.selectedClipId) ?: return
+        if (clip.stabilizationV90 == null) return
+        checkpoint("stabilization-clear")
+        updatePrimaryClip(recordHistory = false) { it.copy(stabilizationV90 = null) }
+        publish(_state.value.copy(status = "Stabilization cleared"))
+    }
+
+    private fun updateSelectedStabilizationV90(
+        historyLabel: String,
+        status: String,
+        coalesce: Boolean = false,
+        transform: (ClipStabilizationV90) -> ClipStabilizationV90,
+    ) {
+        val state = _state.value
+        val clip = state.project.clip(state.selectedClipId) ?: return
+        if (state.project.trackContaining(clip.id)?.kind != TrackKind.VIDEO || state.busyOperation != null) return
+        val base = clip.stabilizationV90 ?: ClipStabilizationV90(enabled = false)
+        checkpoint(historyLabel, coalesce)
+        updatePrimaryClip(recordHistory = false) {
+            it.copy(stabilizationV90 = transform(base).normalized())
+        }
+        publish(_state.value.copy(status = status))
     }
 
     fun setTransformProperty(property: TransformProperty, value: Float, timelineUs: Long) {
