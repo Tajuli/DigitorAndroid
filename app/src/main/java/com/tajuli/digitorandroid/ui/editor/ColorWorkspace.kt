@@ -79,7 +79,7 @@ private enum class ColorPage(val title: String) {
 }
 
 @Composable
-fun ColorWorkspaceV4(
+fun ColorWorkspace(
     clip: TimelineClip?,
     vm: EditorViewModel,
     modifier: Modifier = Modifier,
