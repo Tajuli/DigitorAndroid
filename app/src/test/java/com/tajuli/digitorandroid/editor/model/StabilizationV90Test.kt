@@ -3,6 +3,7 @@ package com.tajuli.digitorandroid.editor.model
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 class StabilizationV90Test {
     @Test
@@ -93,6 +94,24 @@ class StabilizationV90Test {
         )
         assertTrue(evaluated.scale >= required)
         assertTrue(evaluated.scale > 1.20f)
+    }
+
+    @Test
+    fun sceneCutSegments_doNotSmoothAcrossHardCut() {
+        val stabilization = ClipStabilizationV90(
+            strength = 1f,
+            smoothRadiusUs = 500_000L,
+            crop = 0f,
+            samples = listOf(
+                StabilizationPathSampleV90(0L, 0f, 0f, 0f, segmentV93 = 0),
+                StabilizationPathSampleV90(100_000L, .40f, 0f, 0f, segmentV93 = 0),
+                StabilizationPathSampleV90(120_000L, 0f, 0f, 0f, segmentV93 = 1),
+                StabilizationPathSampleV90(220_000L, .02f, 0f, 0f, segmentV93 = 1),
+            ),
+        )
+
+        val afterCut = stabilization.evaluate(120_000L)
+        assertTrue(abs(afterCut.offsetX) < .05f)
     }
 
     @Test
