@@ -263,6 +263,87 @@ class StabilizationV90Test {
     }
 
     @Test
+    fun v96Translation_turnsHandheldJitterIntoGimbalPath() {
+        val samples = (0..90).map { index ->
+            val trend = index * .0035f
+            val jitter = when (index % 4) {
+                0 -> .022f
+                1 -> -.018f
+                2 -> .014f
+                else -> -.020f
+            }
+            StabilizationPathSampleV90(
+                sourceTimeUs = index * 33_333L,
+                pathX = trend + jitter,
+                pathY = -trend * .35f - jitter * .55f,
+                rotationDegrees = 0f,
+                confidence = .95f,
+            )
+        }
+        val stabilization = ClipStabilizationV90(
+            mode = StabilizationModeV90.TRANSLATION,
+            strength = 1f,
+            smoothRadiusUs = 900_000L,
+            crop = 0f,
+            samples = samples,
+            analysisVersionV93 = 96,
+        )
+
+        val rawX = samples.map { it.pathX }
+        val stabilizedX = samples.map { sample ->
+            sample.pathX + stabilization.evaluate(sample.sourceTimeUs).offsetX
+        }
+        fun accelerationEnergy(values: List<Float>): Double =
+            values.windowed(3).sumOf { triple ->
+                abs(triple[2] - 2f * triple[1] + triple[0]).toDouble()
+            }
+
+        val rawAcceleration = accelerationEnergy(rawX)
+        val stabilizedAcceleration = accelerationEnergy(stabilizedX)
+        assertTrue(
+            "V96 Translation should strongly reduce handheld acceleration/jitter",
+            stabilizedAcceleration < rawAcceleration * .20,
+        )
+    }
+
+    @Test
+    fun v96Translation_preservesIntentionalPanAsSmoothConstantVelocity() {
+        val samples = (0..120).map { index ->
+            val pan = index * .004f
+            val jitter = if (index % 2 == 0) .012f else -.012f
+            StabilizationPathSampleV90(
+                sourceTimeUs = index * 33_333L,
+                pathX = pan + jitter,
+                pathY = 0f,
+                rotationDegrees = 0f,
+                confidence = .98f,
+            )
+        }
+        val stabilization = ClipStabilizationV90(
+            mode = StabilizationModeV90.TRANSLATION,
+            strength = 1f,
+            smoothRadiusUs = 900_000L,
+            crop = 0f,
+            samples = samples,
+            analysisVersionV93 = 96,
+        )
+
+        val stabilized = samples.map { sample ->
+            sample.pathX + stabilization.evaluate(sample.sourceTimeUs).offsetX
+        }
+        val rawTravel = samples.last().pathX - samples.first().pathX
+        val stabilizedTravel = stabilized.last() - stabilized.first()
+
+        assertTrue(
+            "deliberate pan should be preserved instead of frozen",
+            abs(stabilizedTravel) > abs(rawTravel) * .70f,
+        )
+        val velocities = stabilized.zipWithNext { a, b -> b - a }
+        val velocityJitter = velocities.zipWithNext { a, b -> abs(b - a) }.average()
+        assertTrue("gimbal pan velocity should be very smooth", velocityJitter < .0025)
+    }
+
+    @Test
     fun displayTransform_composesManualAndStabilizedMotion() {
         val clip = TimelineClip(
             uri = "content://video",
