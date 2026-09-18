@@ -78,10 +78,10 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
     // V95 keeps V94's zero-phase smoothing, but rejects isolated correction spikes first using
     // a local median/MAD gate. A one- or two-sample tracking failure must not jerk the frame or
     // force the crop envelope into a sudden 150%+ zoom.
-    val correction = if (state.analysisVersionV93 >= 93 && state.mode != StabilizationModeV90.CAMERA_LOCK) {
-        state.filteredCorrectionV95(sourceTimeUs)
-    } else {
-        state.baseCorrectionV94(sourceTimeUs)
+    val correction = when {
+        state.analysisVersionV93 < 93 -> state.baseCorrectionV94(sourceTimeUs)
+        state.mode == StabilizationModeV90.CAMERA_LOCK -> state.robustBaseCorrectionV95(sourceTimeUs)
+        else -> state.filteredCorrectionV95(sourceTimeUs)
     }
 
     // V95 zoom envelope is driven by the same robust filtered correction used by rendering.
