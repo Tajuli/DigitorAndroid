@@ -27,13 +27,15 @@ data class StabilizationPathSampleV90(
     val rotationDegrees: Float,
     val logScale: Float = 0f,
     val confidence: Float = 1f,
+    /** V93 scene segment. Smoothing never crosses a detected hard cut. */
+    val segmentV93: Int = 0,
 )
 
 data class ClipStabilizationV90(
     val enabled: Boolean = true,
     val mode: StabilizationModeV90 = StabilizationModeV90.SIMILARITY,
-    val strength: Float = .90f,
-    val smoothRadiusUs: Long = 700_000L,
+    val strength: Float = 1f,
+    val smoothRadiusUs: Long = 900_000L,
     /** 0 keeps the original framing; 1 aggressively hides stabilization borders. */
     val crop: Float = 1f,
     val analyzedWidth: Int = 0,
@@ -175,6 +177,10 @@ private fun ClipStabilizationV90.pathAtV90(sourceTimeUs: Long): StabilizationPat
     }
     val a = items[lo]
     val b = items[hi]
+    if (a.segmentV93 != b.segmentV93) {
+        val midpoint = a.sourceTimeUs + (b.sourceTimeUs - a.sourceTimeUs) / 2L
+        return if (sourceTimeUs < midpoint) a.pathValueV90() else b.pathValueV90()
+    }
     val span = (b.sourceTimeUs - a.sourceTimeUs).coerceAtLeast(1L)
     val t = ((sourceTimeUs - a.sourceTimeUs).toDouble() / span.toDouble()).toFloat().coerceIn(0f, 1f)
     return StabilizationPathValueV90(
@@ -187,6 +193,7 @@ private fun ClipStabilizationV90.pathAtV90(sourceTimeUs: Long): StabilizationPat
 
 private fun ClipStabilizationV90.smoothedPathAtV90(sourceTimeUs: Long): StabilizationPathValueV90 {
     val radius = smoothRadiusUs.coerceAtLeast(1L)
+    val segment = segmentAtV93(sourceTimeUs)
     var sumW = 0f
     var x = 0f
     var y = 0f
@@ -194,12 +201,13 @@ private fun ClipStabilizationV90.smoothedPathAtV90(sourceTimeUs: Long): Stabiliz
     var s = 0f
 
     for (sample in samples) {
+        if (sample.segmentV93 != segment) continue
         val distance = abs(sample.sourceTimeUs - sourceTimeUs)
         if (distance > radius) continue
         val normalized = distance.toFloat() / radius.toFloat()
-        // Smooth bell-like compact kernel, weighted by motion confidence.
+        // Zero-phase compact kernel: strong low-pass without adding temporal lag.
         val kernel = (1f - normalized * normalized).coerceAtLeast(0f)
-        val w = kernel * kernel * (.25f + .75f * sample.confidence.coerceIn(0f, 1f))
+        val w = kernel * kernel * (.20f + .80f * sample.confidence.coerceIn(0f, 1f))
         sumW += w
         x += sample.pathX * w
         y += sample.pathY * w
@@ -209,6 +217,22 @@ private fun ClipStabilizationV90.smoothedPathAtV90(sourceTimeUs: Long): Stabiliz
 
     if (sumW <= .0001f) return pathAtV90(sourceTimeUs)
     return StabilizationPathValueV90(x / sumW, y / sumW, r / sumW, s / sumW)
+}
+
+private fun ClipStabilizationV90.segmentAtV93(sourceTimeUs: Long): Int {
+    val items = samples
+    if (items.isEmpty()) return 0
+    var best = items.first()
+    var bestDistance = abs(best.sourceTimeUs - sourceTimeUs)
+    for (index in 1 until items.size) {
+        val candidate = items[index]
+        val distance = abs(candidate.sourceTimeUs - sourceTimeUs)
+        if (distance < bestDistance) {
+            best = candidate
+            bestDistance = distance
+        }
+    }
+    return best.segmentV93
 }
 
 private fun StabilizationPathSampleV90.pathValueV90() =
