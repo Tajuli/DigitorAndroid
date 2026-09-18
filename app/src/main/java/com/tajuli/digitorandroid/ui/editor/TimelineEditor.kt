@@ -97,7 +97,7 @@ private const val T4_MIN_TRIM_US = 100_000L
 private data class T4SnapResult(val deltaUs: Long, val magnet: Boolean)
 
 @Composable
-fun TimelineEditorV4(
+fun TimelineEditor(
     project: TimelineProject,
     selectedTrackId: String?,
     selectedClipIds: Set<String>,
@@ -704,7 +704,7 @@ private fun ClipV4(
         contentAlignment = Alignment.CenterStart,
     ) {
         if (track.kind == TrackKind.AUDIO) {
-            TimelineAudioWaveformV15(clip, Modifier.fillMaxSize())
+            TimelineAudioWaveform(clip, Modifier.fillMaxSize())
         }
 
         if (width > 24.dp) {

@@ -25,7 +25,7 @@ import kotlinx.coroutines.withContext
 import kotlin.math.min
 
 @Composable
-internal fun BoxScope.VisualOverlayPreviewV19(
+internal fun BoxScope.VisualOverlayPreview(
     project: TimelineProject,
     overlay: VisualOverlayClipV19,
     previewSize: IntSize,

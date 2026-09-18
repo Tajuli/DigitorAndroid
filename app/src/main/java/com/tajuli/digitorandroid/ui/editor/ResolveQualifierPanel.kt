@@ -51,7 +51,7 @@ private val QMuted = Color(0xFFB8B8BC)
 private val QAccent = Color(0xFF55B7FF)
 
 @Composable
-fun ResolveQualifierPanelV4(
+fun ResolveQualifierPanel(
     node: ColorNode,
     vm: EditorViewModel,
     modifier: Modifier = Modifier,

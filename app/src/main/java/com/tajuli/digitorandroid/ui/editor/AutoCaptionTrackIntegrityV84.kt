@@ -18,7 +18,7 @@ import com.tajuli.digitorandroid.editor.processing.deleteAutoCaptionTrackV84
  * onto V1 after CC is deleted.
  */
 @Composable
-internal fun AutoCaptionTrackIntegrityV84(vm: EditorViewModel) {
+internal fun AutoCaptionTrackIntegrity(vm: EditorViewModel) {
     val state by vm.state.collectAsState()
     val currentCcTrackId = state.project.autoCaptionTrackIdV84()
     var lastCcTrackId by remember { mutableStateOf(currentCcTrackId) }

@@ -22,7 +22,7 @@ fun DigitorEditorScreen(
     vm: EditorViewModel,
     onHome: () -> Unit = {},
 ) {
-    AutoCaptionTrackIntegrityV84(vm)
+    AutoCaptionTrackIntegrity(vm)
     Box(Modifier.fillMaxSize()) {
         EditorWorkspaceScreen(vm = vm, onHome = onHome)
         AutoCaptionLauncher(

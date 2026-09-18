@@ -52,7 +52,7 @@ private fun nodeKeyframeSourceTimeUs(clip: TimelineClip, frameRate: Int): Long {
 }
 
 @Composable
-fun NodeDomainKeyframeBarV5(
+fun NodeDomainKeyframeBar(
     clip: TimelineClip,
     node: ColorNode,
     domain: NodeAnimationDomain,
