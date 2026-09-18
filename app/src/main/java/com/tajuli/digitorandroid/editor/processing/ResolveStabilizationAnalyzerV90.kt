@@ -61,6 +61,8 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
 
         val samples = ArrayList<StabilizationPathSampleV90>(targetTimesUs.size)
         var previousGray: IntArray? = null
+        var segmentReferenceGray: IntArray? = null
+        var framesSinceReferenceProbe = 0
         var analyzedWidth = 0
         var analyzedHeight = 0
         var pathX = 0f
@@ -91,6 +93,8 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                 val confidence: Float
                 if (previous == null || previous.size != current.size) {
                     confidence = 1f
+                    segmentReferenceGray = current.copyOf()
+                    framesSinceReferenceProbe = 0
                 } else {
                     val motion = estimateSimilarityV90(previous, current, width, height)
                     confidence = motion.confidence
@@ -100,23 +104,61 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                         pathY = 0f
                         pathRotation = 0f
                         pathLogScale = 0f
-                    } else if (motion.confidence >= MIN_ACCEPTED_CONFIDENCE) {
-                        // V97 composes the incremental similarity transform instead of adding its
-                        // parameters independently. Camera Lock later applies the exact inverse of
-                        // this accumulated pose. Simple X/Y addition is wrong once rotation/scale
-                        // are present and was a major source of long-shot drift/swim.
-                        val incrementalScale = motion.scale.coerceIn(MIN_STEP_SCALE, MAX_STEP_SCALE)
-                        val radians = Math.toRadians(motion.rotationDegrees.toDouble())
-                        val cosR = cos(radians).toFloat()
-                        val sinR = sin(radians).toFloat()
-                        val previousX = pathX
-                        val previousY = pathY
-                        val incX = motion.txPx / (width * .5f)
-                        val incY = motion.tyPx / (height * .5f)
-                        pathX = incrementalScale * (cosR * previousX - sinR * previousY) + incX
-                        pathY = incrementalScale * (sinR * previousX + cosR * previousY) + incY
-                        pathRotation += motion.rotationDegrees
-                        pathLogScale += ln(incrementalScale)
+                        segmentReferenceGray = current.copyOf()
+                        framesSinceReferenceProbe = 0
+                    } else {
+                        if (motion.confidence >= MIN_ACCEPTED_CONFIDENCE) {
+                            // V97 composes the incremental similarity transform instead of adding
+                            // parameters independently.
+                            val incrementalScale = motion.scale.coerceIn(MIN_STEP_SCALE, MAX_STEP_SCALE)
+                            val radians = Math.toRadians(motion.rotationDegrees.toDouble())
+                            val cosR = cos(radians).toFloat()
+                            val sinR = sin(radians).toFloat()
+                            val previousX = pathX
+                            val previousY = pathY
+                            val incX = motion.txPx / (width * .5f)
+                            val incY = motion.tyPx / (height * .5f)
+                            pathX = incrementalScale * (cosR * previousX - sinR * previousY) + incX
+                            pathY = incrementalScale * (sinR * previousX + cosR * previousY) + incY
+                            pathRotation += motion.rotationDegrees
+                            pathLogScale += ln(incrementalScale)
+                        }
+
+                        // V97 reference re-lock: incremental tracking is excellent at high-frequency
+                        // shake but slowly drifts. Periodically match the current frame directly to
+                        // the first stable frame of this scene using a wider search. A confident
+                        // direct pose replaces the accumulated pose and removes long-term drift.
+                        framesSinceReferenceProbe++
+                        val reference = segmentReferenceGray
+                        if (
+                            reference != null &&
+                            reference.size == current.size &&
+                            framesSinceReferenceProbe >= REFERENCE_RELOCK_INTERVAL_FRAMES_V97
+                        ) {
+                            val anchored = estimateSimilarityV90(
+                                previous = reference,
+                                current = current,
+                                width = width,
+                                height = height,
+                                searchRadius = REFERENCE_SEARCH_RADIUS_V97,
+                                coarseStep = REFERENCE_COARSE_STEP_V97,
+                            )
+                            if (
+                                !anchored.sceneCut &&
+                                anchored.confidence >= REFERENCE_RELOCK_MIN_CONFIDENCE_V97
+                            ) {
+                                pathX = anchored.txPx / (width * .5f)
+                                pathY = anchored.tyPx / (height * .5f)
+                                pathRotation = anchored.rotationDegrees
+                                pathLogScale = ln(
+                                    anchored.scale.coerceIn(
+                                        REFERENCE_MIN_SCALE_V97,
+                                        REFERENCE_MAX_SCALE_V97,
+                                    ),
+                                )
+                            }
+                            framesSinceReferenceProbe = 0
+                        }
                     }
                 }
 
@@ -205,8 +247,10 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         current: IntArray,
         width: Int,
         height: Int,
+        searchRadius: Int = SEARCH_RADIUS,
+        coarseStep: Int = COARSE_STEP,
     ): SimilarityV90 {
-        val margin = SEARCH_RADIUS + PATCH_RADIUS + 3
+        val margin = searchRadius + PATCH_RADIUS + 3
         if (width <= margin * 2 || height <= margin * 2) return SimilarityV90()
 
         val frameDifference = frameDifferenceV93(previous, current)
@@ -224,7 +268,16 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             .take(MAX_FEATURES)
 
         val matches = chosen.mapNotNull { candidate ->
-            matchPatchV90(previous, current, width, height, candidate.x, candidate.y)
+            matchPatchV90(
+                previous,
+                current,
+                width,
+                height,
+                candidate.x,
+                candidate.y,
+                searchRadius,
+                coarseStep,
+            )
         }
 
         if (matches.size < MIN_FEATURES) {
@@ -293,8 +346,19 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         height: Int,
         x: Int,
         y: Int,
+        searchRadius: Int,
+        coarseStep: Int,
     ): MatchV90? {
-        val forward = matchPatchOneWayV93(previous, current, width, height, x, y) ?: return null
+        val forward = matchPatchOneWayV93(
+            previous,
+            current,
+            width,
+            height,
+            x,
+            y,
+            searchRadius,
+            coarseStep,
+        ) ?: return null
         val reverse = matchPatchOneWayV93(
             current,
             previous,
@@ -302,6 +366,8 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             height,
             forward.qx.roundToInt(),
             forward.qy.roundToInt(),
+            searchRadius,
+            coarseStep,
         ) ?: return null
 
         val backErrorX = reverse.qx - x.toFloat()
@@ -319,16 +385,18 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         height: Int,
         x: Int,
         y: Int,
+        searchRadius: Int,
+        coarseStep: Int,
     ): MatchV90? {
-        val margin = SEARCH_RADIUS + PATCH_RADIUS + 1
+        val margin = searchRadius + PATCH_RADIUS + 1
         if (x !in margin until width - margin || y !in margin until height - margin) return null
 
         var bestDx = 0
         var bestDy = 0
         var best = Int.MAX_VALUE
 
-        for (dy in -SEARCH_RADIUS..SEARCH_RADIUS step COARSE_STEP) {
-            for (dx in -SEARCH_RADIUS..SEARCH_RADIUS step COARSE_STEP) {
+        for (dy in -searchRadius..searchRadius step coarseStep) {
+            for (dx in -searchRadius..searchRadius step coarseStep) {
                 val score = patchSadV90(from, to, width, height, x, y, dx, dy)
                 if (score < best) {
                     best = score
@@ -342,7 +410,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val coarseY = bestDy
         for (dy in (coarseY - 2)..(coarseY + 2)) {
             for (dx in (coarseX - 2)..(coarseX + 2)) {
-                if (abs(dx) > SEARCH_RADIUS || abs(dy) > SEARCH_RADIUS) continue
+                if (abs(dx) > searchRadius || abs(dy) > searchRadius) continue
                 val score = patchSadV90(from, to, width, height, x, y, dx, dy)
                 if (score < best) {
                     best = score
@@ -617,6 +685,12 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         const val MAX_RANSAC_HYPOTHESES = 180
         const val MIN_RANSAC_BASELINE_PX = 18f
         const val SCENE_CUT_DIFFERENCE = 52f
+        const val REFERENCE_RELOCK_INTERVAL_FRAMES_V97 = 10
+        const val REFERENCE_SEARCH_RADIUS_V97 = 48
+        const val REFERENCE_COARSE_STEP_V97 = 6
+        const val REFERENCE_RELOCK_MIN_CONFIDENCE_V97 = .38f
+        const val REFERENCE_MIN_SCALE_V97 = .82f
+        const val REFERENCE_MAX_SCALE_V97 = 1.18f
     }
 }
 
