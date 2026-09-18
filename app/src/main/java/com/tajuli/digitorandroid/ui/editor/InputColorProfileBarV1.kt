@@ -31,7 +31,7 @@ private val ICPMuted = Color(0xFF909098)
 
 /** Optional clip-level camera Log/input transform. None/Bypass preserves the flat source image. */
 @Composable
-fun InputColorProfileBarV1(
+fun InputColorProfileBar(
     clip: TimelineClip?,
     vm: EditorViewModel,
     modifier: Modifier = Modifier,
