@@ -10,9 +10,11 @@ import com.tajuli.digitorandroid.editor.model.TimelineVisualMediaV21
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -99,10 +101,22 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                         pathRotation = 0f
                         pathLogScale = 0f
                     } else if (motion.confidence >= MIN_ACCEPTED_CONFIDENCE) {
-                        pathX += motion.txPx / (width * .5f)
-                        pathY += motion.tyPx / (height * .5f)
+                        // V97 composes the incremental similarity transform instead of adding its
+                        // parameters independently. Camera Lock later applies the exact inverse of
+                        // this accumulated pose. Simple X/Y addition is wrong once rotation/scale
+                        // are present and was a major source of long-shot drift/swim.
+                        val incrementalScale = motion.scale.coerceIn(MIN_STEP_SCALE, MAX_STEP_SCALE)
+                        val radians = Math.toRadians(motion.rotationDegrees.toDouble())
+                        val cosR = cos(radians).toFloat()
+                        val sinR = sin(radians).toFloat()
+                        val previousX = pathX
+                        val previousY = pathY
+                        val incX = motion.txPx / (width * .5f)
+                        val incY = motion.tyPx / (height * .5f)
+                        pathX = incrementalScale * (cosR * previousX - sinR * previousY) + incX
+                        pathY = incrementalScale * (sinR * previousX + cosR * previousY) + incY
                         pathRotation += motion.rotationDegrees
-                        pathLogScale += ln(motion.scale.coerceIn(MIN_STEP_SCALE, MAX_STEP_SCALE))
+                        pathLogScale += ln(incrementalScale)
                     }
                 }
 
@@ -139,7 +153,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             analyzedWidth = analyzedWidth,
             analyzedHeight = analyzedHeight,
             samples = samples,
-            analysisVersionV93 = 96,
+            analysisVersionV93 = 97,
         ).normalized()
     }
 
