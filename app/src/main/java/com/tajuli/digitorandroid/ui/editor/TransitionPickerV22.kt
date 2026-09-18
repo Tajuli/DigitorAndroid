@@ -28,7 +28,7 @@ private val T22Muted = Color(0xFF909098)
 private val T22Accent = Color(0xFF30E0C3)
 
 @Composable
-internal fun TransitionPickerV22(
+internal fun TransitionPicker(
     project: TimelineProject,
     clip: TimelineClip,
     vm: EditorViewModel,
