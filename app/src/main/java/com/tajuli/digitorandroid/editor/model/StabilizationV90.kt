@@ -5,6 +5,7 @@ import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sin
 
 /**
@@ -75,47 +76,190 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
     val state = normalized()
     if (!state.enabled || !state.hasAnalysis || state.strength <= 0f) return EvaluatedStabilizationV90()
 
-    val raw = state.pathAtV90(sourceTimeUs)
-    val desired = when (state.mode) {
-        StabilizationModeV90.CAMERA_LOCK -> StabilizationPathValueV90(0f, 0f, 0f, 0f)
-        StabilizationModeV90.TRANSLATION,
-        StabilizationModeV90.SIMILARITY -> state.smoothedPathAtV90(sourceTimeUs)
+    // V94 separates camera-path estimation from the correction actually sent to the renderer.
+    // A tiny tracking low-pass removes sub-pixel estimator noise, then a short zero-phase correction
+    // filter prevents the stabilizer itself from creating high-frequency X/Y/rotation oscillation.
+    val correction = if (state.analysisVersionV93 >= 93 && state.mode != StabilizationModeV90.CAMERA_LOCK) {
+        state.filteredCorrectionV94(sourceTimeUs)
+    } else {
+        state.baseCorrectionV94(sourceTimeUs)
     }
 
-    val amount = state.strength
+    // V94 zoom envelope: exact current-frame coverage remains mandatory at Crop=100%, but nearby
+    // future/past crop demand is feathered in over a long window. This gives the crop a slow
+    // Resolve-like breathing envelope instead of chasing every stabilization sample.
+    val coverTarget = if (state.analysisVersionV93 >= 93 && state.crop > 0f) {
+        state.zoomEnvelopeV94(sourceTimeUs, correction)
+    } else {
+        max(
+            correction.scaleCorrection,
+            requiredCoverScaleV92(
+                offsetX = correction.dx,
+                offsetY = correction.dy,
+                rotationDegrees = correction.rotation,
+            ) * COVER_SAFETY_V92,
+        )
+    }
+    val finalScale = lerpV90(
+        correction.scaleCorrection,
+        coverTarget,
+        state.crop,
+    ).coerceIn(.78f, MAX_STABILIZATION_ZOOM_V92)
+
+    return EvaluatedStabilizationV90(
+        offsetX = correction.dx,
+        offsetY = correction.dy,
+        rotationDegrees = correction.rotation,
+        scale = finalScale,
+    )
+}
+
+
+private data class StabilizationCorrectionV94(
+    val dx: Float,
+    val dy: Float,
+    val rotation: Float,
+    val scaleCorrection: Float,
+)
+
+private fun ClipStabilizationV90.baseCorrectionV94(sourceTimeUs: Long): StabilizationCorrectionV94 {
+    val raw = if (analysisVersionV93 >= 93) trackingFilteredPathV94(sourceTimeUs) else pathAtV90(sourceTimeUs)
+    val desired = when (mode) {
+        StabilizationModeV90.CAMERA_LOCK -> StabilizationPathValueV90(0f, 0f, 0f, 0f)
+        StabilizationModeV90.TRANSLATION,
+        StabilizationModeV90.SIMILARITY -> smoothedPathAtV90(sourceTimeUs)
+    }
+
+    val amount = strength
     val dx = ((desired.x - raw.x) * amount).coerceIn(-1.5f, 1.5f)
     val dy = ((desired.y - raw.y) * amount).coerceIn(-1.5f, 1.5f)
-    val rotation = when (state.mode) {
+    val rotation = when (mode) {
         StabilizationModeV90.TRANSLATION -> 0f
         StabilizationModeV90.SIMILARITY,
-        StabilizationModeV90.CAMERA_LOCK -> ((desired.rotation - raw.rotation) * amount).coerceIn(-45f, 45f)
+        StabilizationModeV90.CAMERA_LOCK ->
+            ((desired.rotation - raw.rotation) * amount).coerceIn(-45f, 45f)
     }
-    val scaleCorrection = when (state.mode) {
+    val scaleCorrection = when (mode) {
         StabilizationModeV90.TRANSLATION -> 1f
         StabilizationModeV90.SIMILARITY,
         StabilizationModeV90.CAMERA_LOCK ->
             exp(((desired.logScale - raw.logScale) * amount).coerceIn(-.22f, .22f).toDouble()).toFloat()
     }
-
-    // V92 exact crop compensation. The previous heuristic could leave a thin black edge because
-    // translation + rotation do not combine linearly. Solve the inverse transform of all four output
-    // corners instead: the required scale is the smallest uniform zoom that keeps every corner inside
-    // the source rectangle. Crop=1 guarantees cover (plus a small sampling safety margin).
-    val requiredCoverScale = requiredCoverScaleV92(
-        offsetX = dx,
-        offsetY = dy,
-        rotationDegrees = rotation,
-    )
-    val coverTarget = max(scaleCorrection, requiredCoverScale * COVER_SAFETY_V92)
-    val finalScale = lerpV90(
-        scaleCorrection,
-        coverTarget,
-        state.crop,
-    ).coerceIn(.78f, MAX_STABILIZATION_ZOOM_V92)
-
-    return EvaluatedStabilizationV90(dx, dy, rotation, finalScale)
+    return StabilizationCorrectionV94(dx, dy, rotation, scaleCorrection)
 }
 
+private fun ClipStabilizationV90.filteredCorrectionV94(sourceTimeUs: Long): StabilizationCorrectionV94 {
+    val segment = segmentAtV93(sourceTimeUs)
+    val radius = CORRECTION_FILTER_RADIUS_US_V94
+    var sumW = 1f
+    var dx = baseCorrectionV94(sourceTimeUs).dx
+    var dy = baseCorrectionV94(sourceTimeUs).dy
+    var rotation = baseCorrectionV94(sourceTimeUs).rotation
+    var logScale = ln(baseCorrectionV94(sourceTimeUs).scaleCorrection.coerceAtLeast(.01f))
+
+    for (sample in samplesInWindowV94(sourceTimeUs, radius, segment)) {
+        val distance = abs(sample.sourceTimeUs - sourceTimeUs)
+        if (distance == 0L) continue
+        val normalized = (distance.toFloat() / radius.toFloat()).coerceIn(0f, 1f)
+        val kernel = (1f - normalized * normalized).coerceAtLeast(0f)
+        val weight = kernel * kernel * (.25f + .75f * sample.confidence.coerceIn(0f, 1f))
+        if (weight <= .0001f) continue
+        val correction = baseCorrectionV94(sample.sourceTimeUs)
+        sumW += weight
+        dx += correction.dx * weight
+        dy += correction.dy * weight
+        rotation += correction.rotation * weight
+        logScale += ln(correction.scaleCorrection.coerceAtLeast(.01f)) * weight
+    }
+    return StabilizationCorrectionV94(
+        dx = dx / sumW,
+        dy = dy / sumW,
+        rotation = rotation / sumW,
+        scaleCorrection = exp((logScale / sumW).toDouble()).toFloat(),
+    )
+}
+
+private fun ClipStabilizationV90.trackingFilteredPathV94(sourceTimeUs: Long): StabilizationPathValueV90 {
+    val segment = segmentAtV93(sourceTimeUs)
+    val center = pathAtV90(sourceTimeUs)
+    var sumW = 1f
+    var x = center.x
+    var y = center.y
+    var rotation = center.rotation
+    var logScale = center.logScale
+
+    for (sample in samplesInWindowV94(sourceTimeUs, TRACKING_FILTER_RADIUS_US_V94, segment)) {
+        val distance = abs(sample.sourceTimeUs - sourceTimeUs)
+        if (distance == 0L) continue
+        val normalized = (distance.toFloat() / TRACKING_FILTER_RADIUS_US_V94.toFloat()).coerceIn(0f, 1f)
+        val weight = (1f - normalized) * (.20f + .80f * sample.confidence.coerceIn(0f, 1f))
+        if (weight <= .0001f) continue
+        sumW += weight
+        x += sample.pathX * weight
+        y += sample.pathY * weight
+        rotation += sample.rotationDegrees * weight
+        logScale += sample.logScale * weight
+    }
+    return StabilizationPathValueV90(x / sumW, y / sumW, rotation / sumW, logScale / sumW)
+}
+
+private fun ClipStabilizationV90.zoomEnvelopeV94(
+    sourceTimeUs: Long,
+    current: StabilizationCorrectionV94,
+): Float {
+    val segment = segmentAtV93(sourceTimeUs)
+    val radius = ZOOM_ENVELOPE_RADIUS_US_V94
+    val currentRequired = max(
+        current.scaleCorrection,
+        requiredCoverScaleV92(current.dx, current.dy, current.rotation) * COVER_SAFETY_V92,
+    )
+    var envelope = currentRequired
+
+    var sampleIndex = 0
+    for (sample in samplesInWindowV94(sourceTimeUs, radius, segment)) {
+        // About 6-7 crop probes/sec is enough for a slow zoom envelope and keeps frame callbacks cheap.
+        if (sampleIndex++ % ZOOM_PROBE_STRIDE_V94 != 0) continue
+        val distance = abs(sample.sourceTimeUs - sourceTimeUs)
+        val normalized = (distance.toFloat() / radius.toFloat()).coerceIn(0f, 1f)
+        val feather = (1f - normalized * normalized).coerceAtLeast(0f)
+        if (feather <= .0001f) continue
+
+        val correction = baseCorrectionV94(sample.sourceTimeUs)
+        val required = max(
+            correction.scaleCorrection,
+            requiredCoverScaleV92(correction.dx, correction.dy, correction.rotation) * COVER_SAFETY_V92,
+        )
+        // Feather only the extra zoom above 1x. At the playhead currentRequired remains an exact floor.
+        val feathered = 1f + (required - 1f).coerceAtLeast(0f) * feather
+        envelope = max(envelope, feathered)
+    }
+    return envelope.coerceIn(1f, MAX_STABILIZATION_ZOOM_V92)
+}
+
+private fun ClipStabilizationV90.samplesInWindowV94(
+    sourceTimeUs: Long,
+    radiusUs: Long,
+    segment: Int,
+): List<StabilizationPathSampleV90> {
+    if (samples.isEmpty()) return emptyList()
+    val startUs = sourceTimeUs - radiusUs
+    val endUs = sourceTimeUs + radiusUs
+    var lo = 0
+    var hi = samples.size
+    while (lo < hi) {
+        val mid = (lo + hi) ushr 1
+        if (samples[mid].sourceTimeUs < startUs) lo = mid + 1 else hi = mid
+    }
+    val out = ArrayList<StabilizationPathSampleV90>()
+    var index = lo
+    while (index < samples.size) {
+        val sample = samples[index]
+        if (sample.sourceTimeUs > endUs) break
+        if (sample.segmentV93 == segment) out += sample
+        index++
+    }
+    return out
+}
 
 /**
  * Returns the minimum uniform scale needed for a translated/rotated full-frame source to cover the
@@ -202,10 +346,8 @@ private fun ClipStabilizationV90.smoothedPathAtV90(sourceTimeUs: Long): Stabiliz
     var r = 0f
     var s = 0f
 
-    for (sample in samples) {
-        if (sample.segmentV93 != segment) continue
+    for (sample in samplesInWindowV94(sourceTimeUs, radius, segment)) {
         val distance = abs(sample.sourceTimeUs - sourceTimeUs)
-        if (distance > radius) continue
         val normalized = distance.toFloat() / radius.toFloat()
         // Zero-phase compact kernel: strong low-pass without adding temporal lag.
         val kernel = (1f - normalized * normalized).coerceAtLeast(0f)
@@ -244,3 +386,7 @@ private fun lerpV90(a: Float, b: Float, t: Float): Float = a + (b - a) * t
 
 private const val COVER_SAFETY_V92 = 1.015f
 private const val MAX_STABILIZATION_ZOOM_V92 = 2.25f
+private const val TRACKING_FILTER_RADIUS_US_V94 = 90_000L
+private const val CORRECTION_FILTER_RADIUS_US_V94 = 160_000L
+private const val ZOOM_ENVELOPE_RADIUS_US_V94 = 1_200_000L
+private const val ZOOM_PROBE_STRIDE_V94 = 3
