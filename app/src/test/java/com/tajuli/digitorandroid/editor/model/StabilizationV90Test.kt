@@ -344,6 +344,82 @@ class StabilizationV90Test {
     }
 
     @Test
+    fun v97CameraLock_isExactInverseOfSimilarityPose() {
+        val rotationDegrees = 12f
+        val scale = 1.12f
+        val pathX = .24f
+        val pathY = -.16f
+        val samples = (0..8).map { index ->
+            StabilizationPathSampleV90(
+                sourceTimeUs = index * 50_000L,
+                pathX = pathX,
+                pathY = pathY,
+                rotationDegrees = rotationDegrees,
+                logScale = kotlin.math.ln(scale),
+                confidence = .99f,
+            )
+        }
+        val stabilization = ClipStabilizationV90(
+            mode = StabilizationModeV90.CAMERA_LOCK,
+            strength = 1f,
+            crop = 0f,
+            samples = samples,
+            analysisVersionV93 = 97,
+        )
+
+        val correction = stabilization.evaluate(200_000L)
+        val cameraRadians = Math.toRadians(rotationDegrees.toDouble())
+        val cameraCos = kotlin.math.cos(cameraRadians).toFloat()
+        val cameraSin = kotlin.math.sin(cameraRadians).toFloat()
+        val correctionRadians = Math.toRadians(correction.rotationDegrees.toDouble())
+        val correctionCos = kotlin.math.cos(correctionRadians).toFloat()
+        val correctionSin = kotlin.math.sin(correctionRadians).toFloat()
+
+        // Compose correction ∘ camera in the same center-space similarity convention.
+        val composedScale = correction.scale * scale
+        val composedRotation = correction.rotationDegrees + rotationDegrees
+        val transformedPathX = correction.scale * (
+            correctionCos * pathX - correctionSin * pathY
+        ) + correction.offsetX
+        val transformedPathY = correction.scale * (
+            correctionSin * pathX + correctionCos * pathY
+        ) + correction.offsetY
+
+        assertEquals(1f, composedScale, .0005f)
+        assertEquals(0f, composedRotation, .0005f)
+        assertEquals(0f, transformedPathX, .001f)
+        assertEquals(0f, transformedPathY, .001f)
+    }
+
+    @Test
+    fun v97CameraLock_rejectsIsolatedPoseSpike() {
+        val samples = (0..16).map { index ->
+            StabilizationPathSampleV90(
+                sourceTimeUs = index * 50_000L,
+                pathX = if (index == 8) .85f else .12f,
+                pathY = if (index == 8) -.65f else -.06f,
+                rotationDegrees = if (index == 8) 18f else 1.5f,
+                logScale = if (index == 8) kotlin.math.ln(1.25f) else kotlin.math.ln(1.01f),
+                confidence = .95f,
+            )
+        }
+        val stabilization = ClipStabilizationV90(
+            mode = StabilizationModeV90.CAMERA_LOCK,
+            strength = 1f,
+            crop = 1f,
+            samples = samples,
+            analysisVersionV93 = 97,
+        )
+
+        val normal = stabilization.evaluate(350_000L)
+        val spike = stabilization.evaluate(400_000L)
+        assertTrue(abs(spike.offsetX - normal.offsetX) < .12f)
+        assertTrue(abs(spike.offsetY - normal.offsetY) < .12f)
+        assertTrue(abs(spike.rotationDegrees - normal.rotationDegrees) < 2f)
+        assertTrue(spike.scale < 1.40f)
+    }
+
+    @Test
     fun displayTransform_composesManualAndStabilizedMotion() {
         val clip = TimelineClip(
             uri = "content://video",
