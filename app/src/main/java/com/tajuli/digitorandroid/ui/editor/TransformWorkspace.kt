@@ -250,14 +250,18 @@ private fun StabilizationWorkspaceV90(
         }
 
         if (!stabilization.hasAnalysis) {
+            val failed = !analyzing && uiState.status.contains("stabilization", ignoreCase = true) &&
+                uiState.status.contains("fail", ignoreCase = true)
             Text(
-                if (analyzing) {
-                    "Keep this screen open while the clip is decoded sequentially. Controls appear as soon as analysis finishes."
-                } else {
-                    "Analyze once, then Strength, Smooth and Crop update instantly without decoding the clip again."
+                when {
+                    analyzing ->
+                        "Keep this screen open while the clip is decoded sequentially. Controls appear as soon as analysis finishes."
+                    failed -> uiState.status
+                    else ->
+                        "Analyze once, then Strength, Smooth and Crop update instantly without decoding the clip again."
                 },
                 fontSize = 8.sp,
-                color = X5Muted,
+                color = if (failed) X5Danger else X5Muted,
             )
             return@Column
         }
