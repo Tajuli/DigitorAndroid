@@ -52,7 +52,7 @@ internal fun VisualOverlayTimelineItemV19(
     track: TimelineTrack,
     overlay: VisualOverlayClipV19,
     pps: Float,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
 ) {
     if (track.kind != TrackKind.VIDEO) return
     val selectedId by VisualOverlaySelectionBusV19.selectedId.collectAsState()
