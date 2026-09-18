@@ -173,10 +173,15 @@ private fun StabilizationWorkspaceV90(
     vm: EditorViewModel,
     modifier: Modifier,
 ) {
-    val stabilization = clip.stabilizationV90 ?: ClipStabilizationV90(enabled = false)
-    val localUs = (cursorUs - clip.timelineStartUs).coerceIn(0L, clip.durationUs)
-    val stabilizationAtPlayhead = stabilization.evaluate(clip.sourceInUs + localUs)
+    // The clip passed by EditWorkspace can be an older snapshot while a long analysis coroutine
+    // updates the ViewModel project in-place. Observe the ViewModel first, then resolve the latest
+    // clip by id so analysis completion immediately reveals the controls without leaving/reopening
+    // Stabilize.
     val uiState by vm.state.collectAsState()
+    val liveClip = uiState.project.clip(clip.id) ?: clip
+    val stabilization = liveClip.stabilizationV90 ?: ClipStabilizationV90(enabled = false)
+    val localUs = (cursorUs - liveClip.timelineStartUs).coerceIn(0L, liveClip.durationUs)
+    val stabilizationAtPlayhead = stabilization.evaluate(liveClip.sourceInUs + localUs)
     val analyzing = uiState.busyOperation == "Stabilization"
 
     Column(
@@ -186,7 +191,7 @@ private fun StabilizationWorkspaceV90(
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(9.dp),
     ) {
-        Text("Stabilization · ${clip.label}", fontSize = 10.sp, color = Color.White)
+        Text("Stabilization · ${liveClip.label}", fontSize = 10.sp, color = Color.White)
         Text(
             "Resolve-style offline camera analysis. Translation removes hand-shake, Similarity also corrects rotation/zoom, and Camera Lock pins the shot to the analyzed reference.",
             fontSize = 7.sp,
