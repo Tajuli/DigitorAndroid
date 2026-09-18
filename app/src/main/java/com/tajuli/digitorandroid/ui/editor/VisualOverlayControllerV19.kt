@@ -28,7 +28,7 @@ object VisualOverlaySelectionBusV19 {
     }
 }
 
-fun EditorViewModelV4.selectedVideoTrackForVisualV19(): TimelineTrack? {
+fun EditorViewModel.selectedVideoTrackForVisualV19(): TimelineTrack? {
     val snapshot = state.value
     val selected = snapshot.project.track(snapshot.selectedTrackId)
     return selected?.takeIf { it.kind == TrackKind.VIDEO }
@@ -36,7 +36,7 @@ fun EditorViewModelV4.selectedVideoTrackForVisualV19(): TimelineTrack? {
         ?: snapshot.project.tracks.firstOrNull { it.kind == TrackKind.VIDEO }
 }
 
-fun EditorViewModelV4.addImageOverlayV19(uri: Uri, cursorUs: Long) {
+fun EditorViewModel.addImageOverlayV19(uri: Uri, cursorUs: Long) {
     addVisualOverlayV19(
         kind = VisualOverlayKindV19.IMAGE,
         cursorUs = cursorUs,
@@ -45,7 +45,7 @@ fun EditorViewModelV4.addImageOverlayV19(uri: Uri, cursorUs: Long) {
     )
 }
 
-fun EditorViewModelV4.addStickerOverlayV19(preset: StickerPresetV19, cursorUs: Long) {
+fun EditorViewModel.addStickerOverlayV19(preset: StickerPresetV19, cursorUs: Long) {
     addVisualOverlayV19(
         kind = VisualOverlayKindV19.STICKER,
         cursorUs = cursorUs,
@@ -55,7 +55,7 @@ fun EditorViewModelV4.addStickerOverlayV19(preset: StickerPresetV19, cursorUs: L
     )
 }
 
-fun EditorViewModelV4.addShapeOverlayV19(preset: ShapePresetV19, cursorUs: Long) {
+fun EditorViewModel.addShapeOverlayV19(preset: ShapePresetV19, cursorUs: Long) {
     addVisualOverlayV19(
         kind = VisualOverlayKindV19.SHAPE,
         cursorUs = cursorUs,
@@ -65,7 +65,7 @@ fun EditorViewModelV4.addShapeOverlayV19(preset: ShapePresetV19, cursorUs: Long)
     )
 }
 
-private fun EditorViewModelV4.addVisualOverlayV19(
+private fun EditorViewModel.addVisualOverlayV19(
     kind: VisualOverlayKindV19,
     cursorUs: Long,
     label: String,
@@ -106,14 +106,14 @@ private fun EditorViewModelV4.addVisualOverlayV19(
     focusVisualOverlayV19(track.id)
 }
 
-fun EditorViewModelV4.selectVisualOverlayV19(id: String) {
+fun EditorViewModel.selectVisualOverlayV19(id: String) {
     val project = state.value.project
     val overlay = project.resolvedVisualOverlaysV19().firstOrNull { it.id == id } ?: return
     VisualOverlaySelectionBusV19.select(id)
     focusVisualOverlayV19(overlay.resolvedVideoTrackIdV19(project))
 }
 
-fun EditorViewModelV4.updateSelectedVisualV19(
+fun EditorViewModel.updateSelectedVisualV19(
     positionX: Float? = null,
     positionY: Float? = null,
     scale: Float? = null,
@@ -135,7 +135,7 @@ fun EditorViewModelV4.updateSelectedVisualV19(
     replaceVisualV19(project, updated, "visual-transform", "Overlay updated", coalesce = true)
 }
 
-fun EditorViewModelV4.setSelectedVisualDurationV19(durationUs: Long) {
+fun EditorViewModel.setSelectedVisualDurationV19(durationUs: Long) {
     val id = VisualOverlaySelectionBusV19.selectedId.value ?: return
     val project = state.value.project
     val current = project.resolvedVisualOverlaysV19().firstOrNull { it.id == id } ?: return
@@ -148,7 +148,7 @@ fun EditorViewModelV4.setSelectedVisualDurationV19(durationUs: Long) {
     replaceVisualV19(project, current.copy(timelineEndUs = endUs), "visual-duration", "Overlay duration updated", coalesce = true)
 }
 
-fun EditorViewModelV4.moveVisualOverlayV19(id: String, deltaUs: Long) {
+fun EditorViewModel.moveVisualOverlayV19(id: String, deltaUs: Long) {
     if (deltaUs == 0L) return
     val project = state.value.project
     val current = project.resolvedVisualOverlaysV19().firstOrNull { it.id == id } ?: return
@@ -159,7 +159,7 @@ fun EditorViewModelV4.moveVisualOverlayV19(id: String, deltaUs: Long) {
     replaceVisualV19(project, current.copy(timelineStartUs = startUs, timelineEndUs = endUs), "move-visual", "Overlay moved", coalesce = true)
 }
 
-fun EditorViewModelV4.moveVisualOverlayToTrackV19(id: String, targetTrackId: String) {
+fun EditorViewModel.moveVisualOverlayToTrackV19(id: String, targetTrackId: String) {
     val project = state.value.project
     val current = project.resolvedVisualOverlaysV19().firstOrNull { it.id == id } ?: return
     val target = project.track(targetTrackId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return
@@ -172,7 +172,7 @@ fun EditorViewModelV4.moveVisualOverlayToTrackV19(id: String, targetTrackId: Str
     focusVisualOverlayV19(target.id)
 }
 
-fun EditorViewModelV4.resizeVisualStartV19(id: String, targetStartUs: Long) {
+fun EditorViewModel.resizeVisualStartV19(id: String, targetStartUs: Long) {
     val project = state.value.project
     val current = project.resolvedVisualOverlaysV19().firstOrNull { it.id == id } ?: return
     val trackId = current.resolvedVideoTrackIdV19(project) ?: return
@@ -181,7 +181,7 @@ fun EditorViewModelV4.resizeVisualStartV19(id: String, targetStartUs: Long) {
     replaceVisualV19(project, current.copy(timelineStartUs = start), "resize-visual", "Overlay resized", coalesce = true)
 }
 
-fun EditorViewModelV4.resizeVisualEndV19(id: String, targetEndUs: Long) {
+fun EditorViewModel.resizeVisualEndV19(id: String, targetEndUs: Long) {
     val project = state.value.project
     val current = project.resolvedVisualOverlaysV19().firstOrNull { it.id == id } ?: return
     val trackId = current.resolvedVideoTrackIdV19(project) ?: return
@@ -190,7 +190,7 @@ fun EditorViewModelV4.resizeVisualEndV19(id: String, targetEndUs: Long) {
     replaceVisualV19(project, current.copy(timelineEndUs = end), "resize-visual", "Overlay resized", coalesce = true)
 }
 
-fun EditorViewModelV4.deleteSelectedVisualV19() {
+fun EditorViewModel.deleteSelectedVisualV19() {
     val id = VisualOverlaySelectionBusV19.selectedId.value ?: return
     val project = state.value.project
     if (project.resolvedVisualOverlaysV19().none { it.id == id }) return
@@ -199,7 +199,7 @@ fun EditorViewModelV4.deleteSelectedVisualV19() {
     VisualOverlaySelectionBusV19.clear(id)
 }
 
-private fun EditorViewModelV4.replaceVisualV19(
+private fun EditorViewModel.replaceVisualV19(
     project: TimelineProject,
     updated: VisualOverlayClipV19,
     label: String,
