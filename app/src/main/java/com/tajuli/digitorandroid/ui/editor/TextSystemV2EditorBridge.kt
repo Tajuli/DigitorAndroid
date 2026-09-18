@@ -10,11 +10,11 @@ import com.tajuli.digitorandroid.editor.model.textOverlaysForVideoTrackV3
 import com.tajuli.digitorandroid.editor.model.videoTrackSlotAvailableV3
 
 /**
- * Text-system bridge that keeps EditorViewModelV4's stable public API while adding Resolve-style
+ * Text-system bridge that keeps EditorViewModel's stable public API while adding Resolve-style
  * title-track behaviour. ProjectStore + loadProject() are reused so edits still participate in the
  * existing project history and autosave path.
  */
-fun EditorViewModelV4.commitTextOverlayV2(updated: TextOverlayClip) {
+fun EditorViewModel.commitTextOverlayV2(updated: TextOverlayClip) {
     val state = state.value
     val selectedId = state.selectedTextId ?: return
     if (updated.id != selectedId) return
@@ -32,7 +32,7 @@ fun EditorViewModelV4.commitTextOverlayV2(updated: TextOverlayClip) {
     )
 }
 
-fun EditorViewModelV4.selectedVideoTrackForTextV10(): TimelineTrack? {
+fun EditorViewModel.selectedVideoTrackForTextV10(): TimelineTrack? {
     val snapshot = state.value
     val selectedTrack = snapshot.project.track(snapshot.selectedTrackId)
     if (selectedTrack?.kind == TrackKind.VIDEO) return selectedTrack
@@ -46,7 +46,7 @@ fun EditorViewModelV4.selectedVideoTrackForTextV10(): TimelineTrack? {
         ?: snapshot.project.tracks.lastOrNull { it.kind == TrackKind.VIDEO }
 }
 
-fun EditorViewModelV4.addTextAtSelectedVideoTrackV10(
+fun EditorViewModel.addTextAtSelectedVideoTrackV10(
     timelineUs: Long,
     caption: Boolean = false,
     template: TextTemplatePresetV10? = null,
@@ -82,7 +82,7 @@ fun EditorViewModelV4.addTextAtSelectedVideoTrackV10(
 }
 
 /** Move a title horizontally like a normal timeline clip. */
-fun EditorViewModelV4.moveTextOverlayV10(textId: String, deltaUs: Long) {
+fun EditorViewModel.moveTextOverlayV10(textId: String, deltaUs: Long) {
     if (deltaUs == 0L) return
     val snapshot = state.value
     val current = snapshot.project.textOverlays.firstOrNull { it.id == textId } ?: return
@@ -103,7 +103,7 @@ fun EditorViewModelV4.moveTextOverlayV10(textId: String, deltaUs: Long) {
 }
 
 /** Move a title vertically to another V track while keeping its timeline time unchanged. */
-fun EditorViewModelV4.moveTextOverlayToVideoTrackV10(textId: String, trackId: String) {
+fun EditorViewModel.moveTextOverlayToVideoTrackV10(textId: String, trackId: String) {
     val snapshot = state.value
     val target = snapshot.project.track(trackId)?.takeIf { it.kind == TrackKind.VIDEO } ?: return
     val current = snapshot.project.textOverlays.firstOrNull { it.id == textId } ?: return
@@ -128,12 +128,12 @@ fun EditorViewModelV4.moveTextOverlayToVideoTrackV10(textId: String, trackId: St
     TimelineTextSelectionBusV10.select(textId)
 }
 
-fun EditorViewModelV4.moveSelectedTextToVideoTrackV10(trackId: String) {
+fun EditorViewModel.moveSelectedTextToVideoTrackV10(trackId: String) {
     val selectedId = state.value.selectedTextId ?: return
     moveTextOverlayToVideoTrackV10(selectedId, trackId)
 }
 
-fun EditorViewModelV4.applyTemplateToSelectedTextV10(template: TextTemplatePresetV10) {
+fun EditorViewModel.applyTemplateToSelectedTextV10(template: TextTemplatePresetV10) {
     val snapshot = state.value
     val selected = snapshot.project.textOverlays.firstOrNull { it.id == snapshot.selectedTextId } ?: return
     commitTextOverlayV2(template.applyTo(selected))
@@ -153,7 +153,7 @@ internal fun TimelineProject.appendTextStartV11(trackId: String, requestedUs: Lo
     return if (occupiedEndUs > 0L) occupiedEndUs else requestedUs.coerceAtLeast(0L)
 }
 
-private fun EditorViewModelV4.commitTextProjectV10(
+private fun EditorViewModel.commitTextProjectV10(
     nextProject: TimelineProject,
     selectedTextId: String?,
     selectedTrackId: String?,

@@ -47,7 +47,7 @@ import kotlin.math.roundToLong
 import kotlin.math.sqrt
 
 @UnstableApi
-class EditorViewModelV4(application: Application) : AndroidViewModel(application) {
+class EditorViewModel(application: Application) : AndroidViewModel(application) {
     data class UiState(
         val project: TimelineProject = TimelineProject(),
         val selectedTrackId: String? = null,

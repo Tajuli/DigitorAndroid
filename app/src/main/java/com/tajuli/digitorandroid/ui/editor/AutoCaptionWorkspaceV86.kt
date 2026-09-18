@@ -100,7 +100,7 @@ private enum class AutoCcOperationV86 {
 
 @Composable
 fun AutoCaptionLauncherV86(
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {
     val state by vm.state.collectAsState()
@@ -127,7 +127,7 @@ fun AutoCaptionLauncherV86(
 
 @Composable
 private fun AutoCaptionDialogV86(
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     onDismiss: () -> Unit,
 ) {
     val state by vm.state.collectAsState()

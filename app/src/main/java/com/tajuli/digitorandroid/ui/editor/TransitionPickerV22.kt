@@ -31,7 +31,7 @@ private val T22Accent = Color(0xFF30E0C3)
 internal fun TransitionPickerV22(
     project: TimelineProject,
     clip: TimelineClip,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
 ) {
     val track = project.trackContaining(clip.id)
     val ordered = track?.sortedClips().orEmpty()
