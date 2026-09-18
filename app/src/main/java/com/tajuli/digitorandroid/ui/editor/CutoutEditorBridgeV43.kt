@@ -35,7 +35,7 @@ private val personCutoutAnalysisInFlightV43 = ConcurrentHashMap.newKeySet<String
 private val personCutoutAnalysisScopeV66 = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
 /** V69 bridge retains historical symbols so existing project/editor code remains source-compatible. */
-fun EditorViewModelV4.setSelectedCutoutV43(
+fun EditorViewModel.setSelectedCutoutV43(
     settings: ClipCutoutV43,
     status: String = "Cutout updated",
     coalesce: Boolean = true,
@@ -66,7 +66,7 @@ fun EditorViewModelV4.setSelectedCutoutV43(
     CutoutAnalysisRuntimeV66.clearIfClip(id)
 }
 
-fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
+fun EditorViewModel.enablePersonCutoutV43(settings: ClipCutoutV43) {
     val person = settings.copy(mode = CutoutModeV43.PERSON).normalized()
     val label = person.analysisQualityV47.uiLabelV47()
     setSelectedCutoutV43(
@@ -88,7 +88,7 @@ fun EditorViewModelV4.enablePersonCutoutV43(settings: ClipCutoutV43) {
     }
 }
 
-fun EditorViewModelV4.pauseSelectedPersonCutoutV66() {
+fun EditorViewModel.pauseSelectedPersonCutoutV66() {
     val clip = state.value.project.clip(state.value.selectedClipId) ?: return
     if (CutoutAnalysisRuntimeV66.requestPause(clip.id)) {
         setEditorStatusV19("Pro Cutout · pausing after current frame…")
@@ -100,7 +100,7 @@ fun EditorViewModelV4.pauseSelectedPersonCutoutV66() {
  * removes resumability: the saved partial matte remains usable for preview/export, and a later
  * Analyze starts fresh with the current settings.
  */
-fun EditorViewModelV4.cancelSelectedPersonCutoutV69() {
+fun EditorViewModel.cancelSelectedPersonCutoutV69() {
     val clip = state.value.project.clip(state.value.selectedClipId) ?: return
     val appContext = getApplication<Application>().applicationContext
     val runtime = CutoutAnalysisRuntimeV66.state.value
@@ -120,7 +120,7 @@ fun EditorViewModelV4.cancelSelectedPersonCutoutV69() {
     setEditorStatusV19("Pro Cutout cancelled · $saved saved frame(s) · Export allowed")
 }
 
-fun EditorViewModelV4.analyzeSelectedPersonCutoutV43() {
+fun EditorViewModel.analyzeSelectedPersonCutoutV43() {
     val snapshot = state.value
     val clip = snapshot.project.clip(snapshot.selectedClipId) ?: run {
         setEditorStatusV19("Select a video/image clip for Pro Cutout")
