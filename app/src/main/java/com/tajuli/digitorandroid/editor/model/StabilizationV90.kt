@@ -79,6 +79,8 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
     // a local median/MAD gate. A one- or two-sample tracking failure must not jerk the frame or
     // force the crop envelope into a sudden 150%+ zoom.
     val correction = when {
+        state.analysisVersionV93 >= 93 && state.mode == StabilizationModeV90.TRANSLATION ->
+            state.translationCorrectionV96(sourceTimeUs)
         state.analysisVersionV93 < 93 -> state.baseCorrectionV94(sourceTimeUs)
         state.mode == StabilizationModeV90.CAMERA_LOCK -> state.robustBaseCorrectionV95(sourceTimeUs)
         else -> state.filteredCorrectionV95(sourceTimeUs)
@@ -147,6 +149,136 @@ private fun ClipStabilizationV90.baseCorrectionV94(sourceTimeUs: Long): Stabiliz
     return StabilizationCorrectionV94(dx, dy, rotation, scaleCorrection)
 }
 
+/**
+ * V96 Resolve-style Translation solver.
+ *
+ * Important: stabilize the camera PATH, never smooth the inverse correction. The rendered source
+ * already contains the high-frequency hand shake. If the inverse correction is low-passed, that
+ * shake cannot be fully cancelled and residual micro-jitter remains. Instead:
+ *
+ *   measured path -> robust local constant-velocity target -> exact inverse X/Y correction
+ *
+ * The local linear target behaves like a gimbal: stationary shots converge toward a tripod-like
+ * path, while a deliberate pan becomes a smooth near-constant-velocity move. Rotation/scale remain
+ * untouched in Translation mode.
+ */
+private fun ClipStabilizationV90.translationCorrectionV96(sourceTimeUs: Long): StabilizationCorrectionV94 {
+    val raw = robustRawTranslationPathV96(sourceTimeUs)
+    val target = translationGimbalTargetV96(sourceTimeUs)
+    return StabilizationCorrectionV94(
+        dx = ((target.x - raw.x) * strength).coerceIn(-1.5f, 1.5f),
+        dy = ((target.y - raw.y) * strength).coerceIn(-1.5f, 1.5f),
+        rotation = 0f,
+        scaleCorrection = 1f,
+    )
+}
+
+private fun ClipStabilizationV90.robustRawTranslationPathV96(sourceTimeUs: Long): StabilizationPathValueV90 {
+    val center = pathAtV90(sourceTimeUs)
+    val segment = segmentAtV93(sourceTimeUs)
+    val window = samplesInWindowV94(sourceTimeUs, RAW_PATH_OUTLIER_RADIUS_US_V96, segment)
+    if (window.size < MIN_GIMBAL_FIT_SAMPLES_V96) return center
+
+    val xs = window.map { it.pathX }
+    val ys = window.map { it.pathY }
+    val medianX = medianFloatV95(xs)
+    val medianY = medianFloatV95(ys)
+    val gateX = robustGateV95(xs, medianX, MIN_RAW_PATH_GATE_V96)
+    val gateY = robustGateV95(ys, medianY, MIN_RAW_PATH_GATE_V96)
+
+    return center.copy(
+        x = center.x.coerceIn(medianX - gateX, medianX + gateX),
+        y = center.y.coerceIn(medianY - gateY, medianY + gateY),
+    )
+}
+
+private fun ClipStabilizationV90.translationGimbalTargetV96(sourceTimeUs: Long): StabilizationPathValueV90 {
+    val segment = segmentAtV93(sourceTimeUs)
+    val radius = max(
+        MIN_TRANSLATION_GIMBAL_RADIUS_US_V96,
+        (smoothRadiusUs * TRANSLATION_GIMBAL_RADIUS_MULTIPLIER_V96).toLong(),
+    ).coerceAtMost(MAX_TRANSLATION_GIMBAL_RADIUS_US_V96)
+    val window = samplesInWindowV94(sourceTimeUs, radius, segment)
+    if (window.size < MIN_GIMBAL_FIT_SAMPLES_V96) return smoothedPathAtV90(sourceTimeUs)
+
+    val firstFitX = weightedLinearFitAtV96(window, sourceTimeUs) { it.pathX }
+    val firstFitY = weightedLinearFitAtV96(window, sourceTimeUs) { it.pathY }
+    if (firstFitX == null || firstFitY == null) return smoothedPathAtV90(sourceTimeUs)
+
+    // IRLS-like second pass: reject path samples that sit far from the first constant-velocity fit.
+    val residuals = window.map { sample ->
+        val dt = (sample.sourceTimeUs - sourceTimeUs) / 1_000_000f
+        val predictedX = firstFitX.intercept + firstFitX.slopePerSecond * dt
+        val predictedY = firstFitY.intercept + firstFitY.slopePerSecond * dt
+        kotlin.math.sqrt(
+            (sample.pathX - predictedX) * (sample.pathX - predictedX) +
+                (sample.pathY - predictedY) * (sample.pathY - predictedY),
+        )
+    }
+    val medianResidual = medianFloatV95(residuals)
+    val residualGate = max(
+        MIN_GIMBAL_RESIDUAL_GATE_V96,
+        medianResidual + robustGateV95(residuals, medianResidual, MIN_GIMBAL_RESIDUAL_GATE_V96),
+    )
+    val robustWindow = window.filterIndexed { index, _ -> residuals[index] <= residualGate }
+
+    val fitX = weightedLinearFitAtV96(
+        if (robustWindow.size >= MIN_GIMBAL_FIT_SAMPLES_V96) robustWindow else window,
+        sourceTimeUs,
+    ) { it.pathX } ?: firstFitX
+    val fitY = weightedLinearFitAtV96(
+        if (robustWindow.size >= MIN_GIMBAL_FIT_SAMPLES_V96) robustWindow else window,
+        sourceTimeUs,
+    ) { it.pathY } ?: firstFitY
+
+    return StabilizationPathValueV90(
+        x = fitX.intercept,
+        y = fitY.intercept,
+        rotation = 0f,
+        logScale = 0f,
+    )
+}
+
+private data class LinearFitV96(
+    val intercept: Float,
+    val slopePerSecond: Float,
+)
+
+private fun weightedLinearFitAtV96(
+    samples: List<StabilizationPathSampleV90>,
+    centerTimeUs: Long,
+    value: (StabilizationPathSampleV90) -> Float,
+): LinearFitV96? {
+    if (samples.size < 2) return null
+    var sumW = 0.0
+    var sumT = 0.0
+    var sumV = 0.0
+    var sumTT = 0.0
+    var sumTV = 0.0
+
+    val furthestUs = samples.maxOf { abs(it.sourceTimeUs - centerTimeUs) }.coerceAtLeast(1L)
+    for (sample in samples) {
+        val t = (sample.sourceTimeUs - centerTimeUs).toDouble() / 1_000_000.0
+        val normalizedDistance = abs(sample.sourceTimeUs - centerTimeUs).toDouble() / furthestUs.toDouble()
+        val temporal = (1.0 - normalizedDistance * normalizedDistance).coerceAtLeast(0.0)
+        val confidence = (.15 + .85 * sample.confidence.coerceIn(0f, 1f)).toDouble()
+        val w = temporal * temporal * confidence
+        if (w <= 1e-8) continue
+        val v = value(sample).toDouble()
+        sumW += w
+        sumT += w * t
+        sumV += w * v
+        sumTT += w * t * t
+        sumTV += w * t * v
+    }
+    if (sumW <= 1e-8) return null
+
+    val denominator = sumW * sumTT - sumT * sumT
+    val slope = if (abs(denominator) <= 1e-10) 0.0 else (sumW * sumTV - sumT * sumV) / denominator
+    val intercept = (sumV - slope * sumT) / sumW
+    return LinearFitV96(intercept.toFloat(), slope.toFloat())
+}
+
 private fun ClipStabilizationV90.filteredCorrectionV95(sourceTimeUs: Long): StabilizationCorrectionV94 {
     val segment = segmentAtV93(sourceTimeUs)
     val radius = CORRECTION_FILTER_RADIUS_US_V94
@@ -164,7 +296,11 @@ private fun ClipStabilizationV90.filteredCorrectionV95(sourceTimeUs: Long): Stab
         val kernel = (1f - normalized * normalized).coerceAtLeast(0f)
         val weight = kernel * kernel * (.25f + .75f * sample.confidence.coerceIn(0f, 1f))
         if (weight <= .0001f) continue
-        val correction = robustBaseCorrectionV95(sample.sourceTimeUs)
+        val correction = if (mode == StabilizationModeV90.TRANSLATION) {
+            translationCorrectionV96(sample.sourceTimeUs)
+        } else {
+            robustBaseCorrectionV95(sample.sourceTimeUs)
+        }
         sumW += weight
         dx += correction.dx * weight
         dy += correction.dy * weight
@@ -478,3 +614,10 @@ private const val OUTLIER_SIGMA_MULTIPLIER_V95 = 3.25f
 private const val MIN_TRANSLATION_GATE_V95 = .028f
 private const val MIN_ROTATION_GATE_DEGREES_V95 = .40f
 private const val MIN_LOG_SCALE_GATE_V95 = .008f
+private const val RAW_PATH_OUTLIER_RADIUS_US_V96 = 140_000L
+private const val MIN_RAW_PATH_GATE_V96 = .030f
+private const val MIN_TRANSLATION_GIMBAL_RADIUS_US_V96 = 1_250_000L
+private const val MAX_TRANSLATION_GIMBAL_RADIUS_US_V96 = 3_000_000L
+private const val TRANSLATION_GIMBAL_RADIUS_MULTIPLIER_V96 = 1.75f
+private const val MIN_GIMBAL_FIT_SAMPLES_V96 = 7
+private const val MIN_GIMBAL_RESIDUAL_GATE_V96 = .018f
