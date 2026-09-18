@@ -95,8 +95,11 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
     // Conservative border compensation. It intentionally prefers a little extra crop to black edges.
     val rotationRad = abs(rotation) * (PI.toFloat() / 180f)
     val borderDemand = (abs(dx) * .55f + abs(dy) * .55f + rotationRad * .62f).coerceIn(0f, .45f)
-    val autoZoom = 1f + borderDemand * state.crop
-    val finalScale = max(1f, scaleCorrection * autoZoom).coerceIn(1f, 1.55f)
+    // If correction needs to scale down a measured zoom-in, Crop=1 compensates that border demand;
+    // lower Crop values deliberately preserve more framing and may reveal a small edge.
+    val scaleBorderDemand = max(0f, 1f / scaleCorrection.coerceAtLeast(.01f) - 1f).coerceAtMost(.30f)
+    val autoZoom = 1f + (borderDemand + scaleBorderDemand) * state.crop
+    val finalScale = (scaleCorrection * autoZoom).coerceIn(.78f, 1.55f)
 
     return EvaluatedStabilizationV90(dx, dy, rotation, finalScale)
 }
