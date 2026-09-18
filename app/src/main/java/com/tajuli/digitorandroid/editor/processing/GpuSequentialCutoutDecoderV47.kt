@@ -121,10 +121,15 @@ internal class GpuSequentialCutoutDecoderV47(
                     outputIndex >= 0 -> {
                         progressed = true
                         val pts = info.presentationTimeUs
+                        val isEndOfStream = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
                         val withinTrim = pts >= startUs && pts < endUs
                         val pending = targets.getOrNull(targetIndex)
                         val nearPending = pending != null && pts + FINAL_TARGET_EARLY_TOLERANCE_US_V47 >= pending
-                        val render = withinTrim && (emitEveryFrame || nearPending)
+                        // V96 stabilization decodes every source frame and therefore reaches EOS.
+                        // EOS is a codec control buffer, not a new SurfaceTexture frame. Rendering it
+                        // makes awaitAndUpdateFrame() wait for a frame that will never arrive, causing
+                        // analysis to show 100% and then fail during finalization.
+                        val render = !isEndOfStream && withinTrim && (emitEveryFrame || nearPending)
                         codec.releaseOutputBuffer(outputIndex, render)
                         if (render) {
                             reader.awaitAndUpdateFrame()
