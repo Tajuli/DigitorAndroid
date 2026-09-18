@@ -36,7 +36,7 @@ import com.tajuli.digitorandroid.editor.model.textManualFrameV2
 
 /** Compose-side Text System V2 renderer. Export consumes the same model/evaluators. */
 @Composable
-fun TextOverlayPreviewV2(
+fun TextOverlayPreview(
     overlay: TextOverlayClip,
     timelineUs: Long,
     previewSize: IntSize,
