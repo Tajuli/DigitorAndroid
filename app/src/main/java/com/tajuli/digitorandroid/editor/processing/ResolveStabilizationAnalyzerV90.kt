@@ -139,6 +139,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             analyzedWidth = analyzedWidth,
             analyzedHeight = analyzedHeight,
             samples = samples,
+            analysisVersionV93 = 93,
         ).normalized()
     }
 
