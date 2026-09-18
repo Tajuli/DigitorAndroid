@@ -704,7 +704,7 @@ private fun ClipV4(
         contentAlignment = Alignment.CenterStart,
     ) {
         if (track.kind == TrackKind.AUDIO) {
-            TimelineAudioWaveformV15(clip, Modifier.fillMaxSize())
+            TimelineAudioWaveform(clip, Modifier.fillMaxSize())
         }
 
         if (width > 24.dp) {
