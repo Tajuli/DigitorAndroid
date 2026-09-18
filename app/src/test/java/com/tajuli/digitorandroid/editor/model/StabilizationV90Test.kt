@@ -236,6 +236,33 @@ class StabilizationV90Test {
     }
 
     @Test
+    fun v95CameraLock_rejectsSingleTrackingFailureWithoutSofteningLock() {
+        val samples = (0..20).map { index ->
+            StabilizationPathSampleV90(
+                sourceTimeUs = index * 50_000L,
+                pathX = if (index == 10) .90f else .10f,
+                pathY = 0f,
+                rotationDegrees = if (index == 10) 12f else 1f,
+                confidence = .95f,
+            )
+        }
+        val stabilization = ClipStabilizationV90(
+            mode = StabilizationModeV90.CAMERA_LOCK,
+            strength = 1f,
+            smoothRadiusUs = 500_000L,
+            crop = 1f,
+            samples = samples,
+            analysisVersionV93 = 93,
+        )
+
+        val normal = stabilization.evaluate(450_000L)
+        val badSample = stabilization.evaluate(500_000L)
+        assertTrue("camera lock outlier guard must prevent a huge translation jump", abs(badSample.offsetX) < .20f)
+        assertTrue("camera lock zoom must not explode on one bad sample", badSample.scale < 1.35f)
+        assertTrue("hard-lock correction should remain close around the rejected sample", abs(badSample.offsetX - normal.offsetX) < .10f)
+    }
+
+    @Test
     fun displayTransform_composesManualAndStabilizedMotion() {
         val clip = TimelineClip(
             uri = "content://video",
