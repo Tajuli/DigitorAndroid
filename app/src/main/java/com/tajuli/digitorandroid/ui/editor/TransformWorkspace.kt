@@ -268,12 +268,14 @@ private fun StabilizationWorkspaceV90(
 
         Text(
             when {
+                stabilization.analysisVersionV93 >= 97 ->
+                    "V97 Resolve Lock · ${stabilization.samples.size} frame samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
                 stabilization.analysisVersionV93 >= 96 ->
-                    "V96 Resolve Translation · ${stabilization.samples.size} frame samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
+                    "V96 analysis · Re-analyze for V97 exact Camera Lock"
                 stabilization.analysisVersionV93 >= 93 ->
-                    "V93 analysis · Re-analyze for V96 full-frame tracking"
+                    "V93 analysis · Re-analyze for V97 exact Camera Lock"
                 else ->
-                    "Legacy analysis · Re-analyze for V96 full-frame tracking"
+                    "Legacy analysis · Re-analyze for V97 exact Camera Lock"
             },
             fontSize = 7.sp,
             color = if (stabilization.analysisVersionV93 >= 93) X5Muted else X5Accent,
