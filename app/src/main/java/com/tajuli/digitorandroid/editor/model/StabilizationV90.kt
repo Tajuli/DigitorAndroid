@@ -41,6 +41,8 @@ data class ClipStabilizationV90(
     val analyzedWidth: Int = 0,
     val analyzedHeight: Int = 0,
     val samples: List<StabilizationPathSampleV90> = emptyList(),
+    /** 0 = legacy V90/V92 tracking; 93 = robust bidirectional/RANSAC analysis. */
+    val analysisVersionV93: Int = 0,
 ) {
     val hasAnalysis: Boolean get() = samples.size >= 2
 
