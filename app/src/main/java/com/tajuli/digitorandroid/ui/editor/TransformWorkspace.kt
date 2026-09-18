@@ -34,6 +34,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tajuli.digitorandroid.editor.model.AnimatedFloat
+import com.tajuli.digitorandroid.editor.model.ClipStabilizationV90
+import com.tajuli.digitorandroid.editor.model.StabilizationModeV90
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
@@ -48,9 +50,9 @@ private val X5Muted = Color(0xFF909098)
 private val X5Accent = Color(0xFF30E0C3)
 private val X5Danger = Color(0xFFFF7474)
 
-private enum class EditPageV5 { TIMELINE, TRANSFORM, RETIME, CUTOUT }
+private enum class EditPageV5 { TIMELINE, TRANSFORM, STABILIZE, RETIME, CUTOUT }
 
-/** Timeline, transform, retime and cutout live under Edit; transitions stay on the timeline. */
+/** Timeline, transform, stabilization, retime and cutout live under Edit; transitions stay on the timeline. */
 @Composable
 fun EditWorkspace(
     project: TimelineProject,
@@ -81,7 +83,12 @@ fun EditWorkspace(
 
     Column(modifier.background(X5Panel)) {
         Row(
-            Modifier.fillMaxWidth().height(34.dp).background(Color(0xFF101014)).padding(horizontal = 5.dp),
+            Modifier
+                .fillMaxWidth()
+                .height(34.dp)
+                .horizontalScroll(rememberScrollState())
+                .background(Color(0xFF101014))
+                .padding(horizontal = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
@@ -91,15 +98,17 @@ fun EditWorkspace(
             TextButton(onClick = { page = EditPageV5.TRANSFORM }, enabled = canEditVideo) {
                 Text("Transform", fontSize = 8.sp, color = if (page == EditPageV5.TRANSFORM) X5Accent else X5Muted)
             }
+            TextButton(onClick = { page = EditPageV5.STABILIZE }, enabled = canEditVideo) {
+                Text("Stabilize", fontSize = 8.sp, color = if (page == EditPageV5.STABILIZE) X5Accent else X5Muted)
+            }
             TextButton(onClick = { page = EditPageV5.RETIME }, enabled = canEditVideo) {
                 Text("Retime", fontSize = 8.sp, color = if (page == EditPageV5.RETIME) X5Accent else X5Muted)
             }
             TextButton(onClick = { page = EditPageV5.CUTOUT }, enabled = canEditVideo) {
                 Text("Cutout", fontSize = 8.sp, color = if (page == EditPageV5.CUTOUT) X5Accent else X5Muted)
             }
-            Spacer(Modifier.weight(1f))
             if (page == EditPageV5.TRANSFORM) {
-                Text("◆ keyframe at playhead", fontSize = 7.sp, color = X5Muted)
+                Text("◆ keyframe", fontSize = 7.sp, color = X5Muted, modifier = Modifier.padding(horizontal = 6.dp))
             }
         }
         HorizontalDivider(color = X5Divider)
@@ -134,6 +143,12 @@ fun EditWorkspace(
                 }
             }
 
+            EditPageV5.STABILIZE -> {
+                if (selectedClip != null && canEditVideo) {
+                    StabilizationWorkspaceV90(selectedClip, vm, Modifier.fillMaxSize())
+                }
+            }
+
             EditPageV5.RETIME -> {
                 if (selectedClip != null && canEditVideo) {
                     RetimeWorkspaceV5(selectedClip, cursorUs, vm, Modifier.fillMaxSize())
@@ -145,6 +160,152 @@ fun EditWorkspace(
                     CutoutWorkspace(vm = vm, modifier = Modifier.fillMaxSize())
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun StabilizationWorkspaceV90(
+    clip: TimelineClip,
+    vm: EditorViewModel,
+    modifier: Modifier,
+) {
+    val stabilization = clip.stabilizationV90 ?: ClipStabilizationV90(enabled = false)
+
+    Column(
+        modifier
+            .background(X5Panel)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        Text("Stabilization · ${clip.label}", fontSize = 10.sp, color = Color.White)
+        Text(
+            "Resolve-style offline camera analysis. Translation removes hand-shake, Similarity also corrects rotation/zoom, and Camera Lock pins the shot to the analyzed reference.",
+            fontSize = 7.sp,
+            color = X5Muted,
+        )
+
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            Text(
+                if (stabilization.hasAnalysis) "Re-analyze" else "Analyze",
+                fontSize = 9.sp,
+                color = Color.White,
+                modifier = Modifier
+                    .background(X5Accent.copy(alpha = .18f), RoundedCornerShape(6.dp))
+                    .clickable { vm.analyzeSelectedStabilizationV90() }
+                    .padding(horizontal = 14.dp, vertical = 9.dp),
+            )
+            if (stabilization.hasAnalysis) {
+                Text(
+                    if (stabilization.enabled) "Enabled" else "Disabled",
+                    fontSize = 9.sp,
+                    color = if (stabilization.enabled) X5Accent else X5Muted,
+                    modifier = Modifier
+                        .background(X5Raised, RoundedCornerShape(6.dp))
+                        .clickable { vm.setSelectedStabilizationEnabledV90(!stabilization.enabled) }
+                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                )
+                Text(
+                    "Clear",
+                    fontSize = 9.sp,
+                    color = X5Danger,
+                    modifier = Modifier
+                        .background(X5Raised, RoundedCornerShape(6.dp))
+                        .clickable { vm.clearSelectedStabilizationV90() }
+                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                )
+            }
+        }
+
+        if (!stabilization.hasAnalysis) {
+            Text(
+                "Analyze once, then Strength, Smooth and Crop update instantly without decoding the clip again.",
+                fontSize = 8.sp,
+                color = X5Muted,
+            )
+            return@Column
+        }
+
+        Text(
+            "${stabilization.samples.size} motion samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight} analysis",
+            fontSize = 7.sp,
+            color = X5Muted,
+        )
+
+        Text("Mode", fontSize = 8.sp, color = X5Muted)
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            listOf(
+                StabilizationModeV90.TRANSLATION to "Translation",
+                StabilizationModeV90.SIMILARITY to "Similarity",
+                StabilizationModeV90.CAMERA_LOCK to "Camera Lock",
+            ).forEach { (mode, label) ->
+                Text(
+                    label,
+                    fontSize = 8.sp,
+                    color = if (stabilization.mode == mode) X5Accent else Color.White,
+                    modifier = Modifier
+                        .background(
+                            if (stabilization.mode == mode) X5Accent.copy(alpha = .14f) else X5Raised,
+                            RoundedCornerShape(6.dp),
+                        )
+                        .clickable { vm.setSelectedStabilizationModeV90(mode) }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
+        }
+
+        StabilizationSliderV90(
+            "Strength",
+            stabilization.strength,
+            0f..1f,
+            { "${(it * 100f).roundToInt()}%" },
+            vm::setSelectedStabilizationStrengthV90,
+        )
+        val smoothSeconds = stabilization.smoothRadiusUs / 1_000_000f
+        StabilizationSliderV90(
+            "Smooth",
+            smoothSeconds,
+            .08f..3f,
+            { String.format("%.2fs", it) },
+        ) { vm.setSelectedStabilizationSmoothV90((it * 1_000_000L).toLong()) }
+        StabilizationSliderV90(
+            "Crop",
+            stabilization.crop,
+            0f..1f,
+            { "${(it * 100f).roundToInt()}%" },
+            vm::setSelectedStabilizationCropV90,
+        )
+
+        Text(
+            "For strong handheld shake: Similarity, Strength 85–100%, Smooth 0.6–1.2s, Crop 75–100%. Camera Lock is strongest but can require more crop.",
+            fontSize = 7.sp,
+            color = X5Muted,
+        )
+    }
+}
+
+@Composable
+private fun StabilizationSliderV90(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    display: (Float) -> String,
+    onValue: (Float) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().background(X5Raised, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 4.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, Modifier.width(62.dp), fontSize = 8.sp, color = Color.White.copy(alpha = .78f))
+            Slider(
+                value = value.coerceIn(range.start, range.endInclusive),
+                onValueChange = onValue,
+                valueRange = range,
+                modifier = Modifier.weight(1f),
+            )
+            Text(display(value), Modifier.width(50.dp), fontSize = 7.sp, color = X5Muted)
         }
     }
 }
