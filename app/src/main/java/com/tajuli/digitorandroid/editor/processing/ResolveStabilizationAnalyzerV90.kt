@@ -262,6 +262,14 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val rotation = Math.toDegrees(atan2(b, a)).toFloat()
         val tx = qCx - (a * pCx - b * pCy).toFloat()
         val ty = qCy - (b * pCx + a * pCy).toFloat()
+        // Stabilization transforms rotate around frame center. Convert the fitted top-left-origin
+        // similarity transform into motion of that same center so rotation is not counted twice.
+        val frameCx = (width - 1) * .5f
+        val frameCy = (height - 1) * .5f
+        val mappedCx = (a * frameCx - b * frameCy).toFloat() + tx
+        val mappedCy = (b * frameCx + a * frameCy).toFloat() + ty
+        val centerDx = mappedCx - frameCx
+        val centerDy = mappedCy - frameCy
         val averageSad = robust.sumOf { it.sad.toDouble() }.toFloat() / robust.size
 
         if (scale !in .92f..1.08f || abs(rotation) > MAX_STEP_ROTATION_DEGREES) {
@@ -271,8 +279,8 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val featureConfidence = (robust.size.toFloat() / MAX_FEATURES.toFloat()).coerceIn(0f, 1f)
         val photometricConfidence = (1f - averageSad / REJECT_SAD).coerceIn(0f, 1f)
         return SimilarityV90(
-            txPx = tx.coerceIn(-SEARCH_RADIUS.toFloat(), SEARCH_RADIUS.toFloat()),
-            tyPx = ty.coerceIn(-SEARCH_RADIUS.toFloat(), SEARCH_RADIUS.toFloat()),
+            txPx = centerDx.coerceIn(-SEARCH_RADIUS.toFloat(), SEARCH_RADIUS.toFloat()),
+            tyPx = centerDy.coerceIn(-SEARCH_RADIUS.toFloat(), SEARCH_RADIUS.toFloat()),
             rotationDegrees = rotation,
             scale = scale,
             confidence = (featureConfidence * .7f + photometricConfidence * .3f).coerceIn(0f, 1f),
