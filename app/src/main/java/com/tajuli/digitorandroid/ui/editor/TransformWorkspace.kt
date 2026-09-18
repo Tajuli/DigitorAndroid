@@ -105,7 +105,7 @@ fun EditWorkspace(
         HorizontalDivider(color = X5Divider)
 
         when (page) {
-            EditPageV5.TIMELINE -> TimelineEditorV4(
+            EditPageV5.TIMELINE -> TimelineEditor(
                 project = project,
                 selectedTrackId = selectedTrackId,
                 selectedClipIds = selectedClipIds,
