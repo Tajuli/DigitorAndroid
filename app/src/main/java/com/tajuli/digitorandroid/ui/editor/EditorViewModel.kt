@@ -737,7 +737,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     ),
                 )
             }.onFailure { error ->
-                publish(_state.value.copy(busyOperation = null, status = error.message ?: "Stabilization analysis failed"))
+                val detail = error.message?.takeIf { it.isNotBlank() } ?: error::class.java.simpleName
+                publish(
+                    _state.value.copy(
+                        busyOperation = null,
+                        status = "Stabilization failed: $detail",
+                    ),
+                )
             }
         }
     }
