@@ -154,7 +154,7 @@ fun CreatorMediaWorkspace(
                 if (!selectedIsVideo) {
                     Text("Select the clip after a cut", fontSize = 8.sp, color = C8Muted)
                 } else {
-                    TransitionPickerV22(project, selectedClip!!, vm)
+                    TransitionPicker(project, selectedClip!!, vm)
                 }
             }
 
