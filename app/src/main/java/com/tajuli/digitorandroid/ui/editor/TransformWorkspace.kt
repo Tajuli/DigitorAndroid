@@ -146,7 +146,7 @@ fun EditWorkspace(
 
             EditPageV5.STABILIZE -> {
                 if (selectedClip != null && canEditVideo) {
-                    StabilizationWorkspaceV90(selectedClip, vm, Modifier.fillMaxSize())
+                    StabilizationWorkspaceV90(selectedClip, cursorUs, vm, Modifier.fillMaxSize())
                 }
             }
 
@@ -168,10 +168,13 @@ fun EditWorkspace(
 @Composable
 private fun StabilizationWorkspaceV90(
     clip: TimelineClip,
+    cursorUs: Long,
     vm: EditorViewModel,
     modifier: Modifier,
 ) {
     val stabilization = clip.stabilizationV90 ?: ClipStabilizationV90(enabled = false)
+    val localUs = (cursorUs - clip.timelineStartUs).coerceIn(0L, clip.durationUs)
+    val stabilizationAtPlayhead = stabilization.evaluate(clip.sourceInUs + localUs)
     val uiState by vm.state.collectAsState()
     val analyzing = uiState.busyOperation == "Stabilization"
 
@@ -299,7 +302,7 @@ private fun StabilizationWorkspaceV90(
             { String.format("%.2fs", it) },
         ) { vm.setSelectedStabilizationSmoothV90((it * 1_000_000L).toLong()) }
         StabilizationSliderV90(
-            "Crop",
+            "Crop / Auto Zoom",
             stabilization.crop,
             0f..1f,
             { "${(it * 100f).roundToInt()}%" },
@@ -307,7 +310,12 @@ private fun StabilizationWorkspaceV90(
         )
 
         Text(
-            "For strong handheld shake: Similarity, Strength 85–100%, Smooth 0.6–1.2s, Crop 75–100%. Camera Lock is strongest but can require more crop.",
+            "Auto zoom at playhead: ${(stabilizationAtPlayhead.scale * 100f).roundToInt()}% · Crop 100% guarantees frame coverage for the calculated stabilization transform.",
+            fontSize = 8.sp,
+            color = X5Accent,
+        )
+        Text(
+            "For strong handheld shake: Similarity, Strength 85–100%, Smooth 0.6–1.2s, Crop/Auto Zoom 100%. Camera Lock is strongest but can require much more zoom.",
             fontSize = 7.sp,
             color = X5Muted,
         )
