@@ -99,7 +99,7 @@ private enum class AutoCcOperationV86 {
 }
 
 @Composable
-fun AutoCaptionLauncherV86(
+fun AutoCaptionLauncher(
     vm: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {
