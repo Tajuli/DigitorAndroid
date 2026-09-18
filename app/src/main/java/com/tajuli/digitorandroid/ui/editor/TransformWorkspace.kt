@@ -258,9 +258,13 @@ private fun StabilizationWorkspaceV90(
         }
 
         Text(
-            "${stabilization.samples.size} motion samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight} analysis",
+            if (stabilization.analysisVersionV93 >= 93) {
+                "V93 Pro · ${stabilization.samples.size} motion samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
+            } else {
+                "Legacy analysis · Re-analyze for V93 Pro tracking"
+            },
             fontSize = 7.sp,
-            color = X5Muted,
+            color = if (stabilization.analysisVersionV93 >= 93) X5Muted else X5Accent,
         )
 
         Text("Mode", fontSize = 8.sp, color = X5Muted)
