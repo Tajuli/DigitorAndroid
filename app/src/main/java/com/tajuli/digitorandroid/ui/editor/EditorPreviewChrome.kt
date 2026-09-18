@@ -178,7 +178,7 @@ internal fun EditorFramePreview(
         }
 
         visualOverlays.forEach { overlay ->
-            VisualOverlayPreviewV19(project = project, overlay = overlay, previewSize = previewSize)
+            VisualOverlayPreview(project = project, overlay = overlay, previewSize = previewSize)
         }
         textOverlays.forEach { overlay ->
             TextOverlayPreview(overlay = overlay, timelineUs = timelineUs, previewSize = previewSize)
