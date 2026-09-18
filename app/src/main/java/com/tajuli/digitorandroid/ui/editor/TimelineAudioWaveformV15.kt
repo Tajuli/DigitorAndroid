@@ -20,7 +20,7 @@ import kotlin.math.roundToInt
 
 /** Timeline-only waveform layer. Decode/cache work stays off the UI thread in the repository. */
 @Composable
-internal fun TimelineAudioWaveformV15(
+internal fun TimelineAudioWaveform(
     clip: TimelineClip,
     modifier: Modifier = Modifier,
 ) {
