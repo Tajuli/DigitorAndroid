@@ -219,7 +219,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             )
         }
 
-        val hypothesis = ransacSimilarityFitV93(matches)
+        val hypothesis = ransacSimilarityFitV93(matches, width, height)
             ?: return SimilarityV90(
                 confidence = .05f,
                 sceneCut = frameDifference >= SCENE_CUT_DIFFERENCE,
@@ -235,7 +235,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             )
         }
 
-        val fitted = fitSimilarityFitAllV93(inliers) ?: return SimilarityV90(confidence = .05f)
+        val fitted = fitSimilarityFitAllV93(inliers, width, height) ?: return SimilarityV90(confidence = .05f)
         val fittedPublic = fitted.asSimilarityV90()
         val averageError = inliers.sumOf { reprojectionErrorV93(fitted, it).toDouble() }.toFloat() / inliers.size
         val averageSad = inliers.sumOf { it.sad.toDouble() }.toFloat() / inliers.size
@@ -386,7 +386,11 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         )
     }
 
-    private fun ransacSimilarityFitV93(matches: List<MatchV90>): SimilarityFitV93? {
+    private fun ransacSimilarityFitV93(
+        matches: List<MatchV90>,
+        width: Int,
+        height: Int,
+    ): SimilarityFitV93? {
         var best: SimilarityFitV93? = null
         var bestInliers = -1
         var bestError = Float.POSITIVE_INFINITY
@@ -395,11 +399,16 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         loop@ for (i in 0 until matches.lastIndex) {
             for (j in i + 1 until matches.size) {
                 if (tested++ >= MAX_RANSAC_HYPOTHESES) break@loop
-                val candidate = fitSimilarityFromPairV93(matches[i], matches[j]) ?: continue
+                val candidate = fitSimilarityFromPairV93(
+                    matches[i],
+                    matches[j],
+                    frameCenterX = (width - 1) * .5f,
+                    frameCenterY = (height - 1) * .5f,
+                ) ?: continue
                 var inliers = 0
                 var error = 0f
                 for (match in matches) {
-                    val e = reprojectionErrorV93(candidate.asSimilarityV90(), match)
+                    val e = reprojectionErrorV93(candidate, match)
                     if (e <= RANSAC_INLIER_ERROR_PX) {
                         inliers++
                         error += e
@@ -415,7 +424,12 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         return best
     }
 
-    private fun fitSimilarityFromPairV93(first: MatchV90, second: MatchV90): SimilarityFitV93? {
+    private fun fitSimilarityFromPairV93(
+        first: MatchV90,
+        second: MatchV90,
+        frameCenterX: Float,
+        frameCenterY: Float,
+    ): SimilarityFitV93? {
         val dpx = second.px - first.px
         val dpy = second.py - first.py
         val dqx = second.qx - first.qx
@@ -429,10 +443,14 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         if (scale !in .82f..1.18f) return null
         val tx = first.qx - (a * first.px - b * first.py)
         val ty = first.qy - (b * first.px + a * first.py)
-        return fitFromCoefficientsV93(a, b, tx, ty, frameCenterX = .5f * ANALYSIS_LONG_SIDE, frameCenterY = .5f * ANALYSIS_LONG_SIDE)
+        return fitFromCoefficientsV93(a, b, tx, ty, frameCenterX, frameCenterY)
     }
 
-    private fun fitSimilarityFitAllV93(inliers: List<MatchV90>): SimilarityFitV93? {
+    private fun fitSimilarityFitAllV93(
+        inliers: List<MatchV90>,
+        width: Int,
+        height: Int,
+    ): SimilarityFitV93? {
         if (inliers.size < 2) return null
         val pCx = inliers.sumOf { it.px.toDouble() }.toFloat() / inliers.size
         val pCy = inliers.sumOf { it.py.toDouble() }.toFloat() / inliers.size
@@ -457,9 +475,14 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val b = (cross / denominator).toFloat()
         val tx = qCx - (a * pCx - b * pCy)
         val ty = qCy - (b * pCx + a * pCy)
-        val centerX = inliers.sumOf { it.px.toDouble() }.toFloat() / inliers.size
-        val centerY = inliers.sumOf { it.py.toDouble() }.toFloat() / inliers.size
-        return fitFromCoefficientsV93(a, b, tx, ty, centerX, centerY)
+        return fitFromCoefficientsV93(
+            a,
+            b,
+            tx,
+            ty,
+            frameCenterX = (width - 1) * .5f,
+            frameCenterY = (height - 1) * .5f,
+        )
     }
 
     private fun fitFromCoefficientsV93(
@@ -579,4 +602,6 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         const val MAX_RANSAC_HYPOTHESES = 180
         const val MIN_RANSAC_BASELINE_PX = 18f
         const val SCENE_CUT_DIFFERENCE = 52f
-    }}
+    }
+}
+
