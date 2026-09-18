@@ -53,7 +53,7 @@ private val QAccent = Color(0xFF55B7FF)
 @Composable
 fun ResolveQualifierPanelV4(
     node: ColorNode,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {
     val q = node.advancedColor.qualifier
@@ -180,7 +180,7 @@ fun ResolveQualifierPanelV4(
 }
 
 @Composable
-private fun QualifierToolbar(node: ColorNode, vm: EditorViewModelV4, pickerActive: Boolean) {
+private fun QualifierToolbar(node: ColorNode, vm: EditorViewModel, pickerActive: Boolean) {
     val q = node.advancedColor.qualifier
     Row(
         Modifier.fillMaxWidth().height(38.dp),
@@ -316,7 +316,7 @@ private fun MiniControl(
 }
 
 @Composable
-private fun MatteFinessePanel(node: ColorNode, vm: EditorViewModelV4, modifier: Modifier = Modifier) {
+private fun MatteFinessePanel(node: ColorNode, vm: EditorViewModel, modifier: Modifier = Modifier) {
     Column(modifier.background(Color(0xFF292A2F)).padding(horizontal = 10.dp, vertical = 6.dp)) {
         Text("Matte Finesse", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = Color.White)
         Spacer(Modifier.height(2.dp))
@@ -337,7 +337,7 @@ private fun FinesseControl(
     label: String,
     value: Float,
     range: ClosedFloatingPointRange<Float>,
-    vm: EditorViewModelV4,
+    vm: EditorViewModel,
     key: String,
     percent: Boolean = false,
 ) {
@@ -359,7 +359,7 @@ private fun FinesseControl(
     }
 }
 
-private fun resetQualifier(vm: EditorViewModelV4) {
+private fun resetQualifier(vm: EditorViewModel) {
     vm.setQualifier("hue", 0f)
     vm.setQualifier("width", 360f)
     vm.setQualifier("satmin", 0f)
