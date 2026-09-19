@@ -85,6 +85,8 @@ data class ClipStabilizationV90(
     val zoomEnabledV102: Boolean = true,
     /** Resolve semantics: 1.0 = least/no stabilization, lower values allow more aggressive crop. */
     val croppingRatioV102: Float = .5f,
+    /** V102 clip-wide Perspective Camera Lock crop to avoid zoom breathing. */
+    val cameraLockPerspectiveCoverScaleV102: Float = 1f,
 ) {
     val hasAnalysis: Boolean get() = samples.size >= 2
 
@@ -97,6 +99,8 @@ data class ClipStabilizationV90(
             smoothRadiusUs = smoothRadiusUs.coerceIn(80_000L, 3_000_000L),
             crop = crop.coerceIn(0f, 1f),
             croppingRatioV102 = croppingRatioV102.coerceIn(0f, 1f),
+            cameraLockPerspectiveCoverScaleV102 = cameraLockPerspectiveCoverScaleV102
+                .coerceIn(1f, 2.5f),
             samples = samples
                 .filter { it.sourceTimeUs >= 0L }
                 .sortedBy { it.sourceTimeUs }
