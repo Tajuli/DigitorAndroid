@@ -187,35 +187,20 @@ class VirtualCameraAnalyzerV1(context: Context) {
             if (virtualPathImprovementV1(rawR, smoothR) < MIN_SOLVER_GAIN_V1) smoothR = rawR
             if (virtualPathImprovementV1(rawS, smoothS) < MIN_SOLVER_GAIN_V1) smoothS = rawS
 
-            val tripodAnchorsV2 = items.mapIndexedNotNull { index, item ->
-                val x = item.referenceX ?: return@mapIndexedNotNull null
-                val y = item.referenceY ?: return@mapIndexedNotNull null
-                val rotation = item.referenceRotation ?: return@mapIndexedNotNull null
-                val logScale = item.referenceLogScale ?: return@mapIndexedNotNull null
-                TripodReferenceAnchorV2(
-                    sampleIndex = index,
-                    x = x,
-                    y = y,
-                    rotationDegrees = rotation,
-                    logScale = logScale,
-                    confidence = item.referenceConfidence,
-                )
-            }
-            val tripodPathV2 = correctTripodDriftV2(
-                rawX = rawX,
-                rawY = rawY,
-                rawRotationDegrees = rawR,
-                rawLogScale = rawS,
-                anchors = tripodAnchorsV2,
+            val tripodPathV3 = solvePersistentTripodPathV3(
+                items = items,
+                fallbackX = rawX,
+                fallbackY = rawY,
+                fallbackRotation = rawR,
+                fallbackLogScale = rawS,
             )
 
-            // Tripod is a true fixed-reference target: the first frame of each scene segment.
-            // Pairwise motion still supplies high-frequency shake; sparse reference probes only
-            // remove its low-frequency accumulated drift.
-            val lockX = tripodPathV2.x.firstOrNull() ?: 0f
-            val lockY = tripodPathV2.y.firstOrNull() ?: 0f
-            val lockR = tripodPathV2.rotationDegrees.firstOrNull() ?: 0f
-            val lockS = tripodPathV2.logScale.firstOrNull() ?: 0f
+            // V3 Tripod target is exactly the first-frame background geometry.
+            // The raw Tripod pose comes from the same long-lived background points at every frame.
+            val lockX = 0f
+            val lockY = 0f
+            val lockR = 0f
+            val lockS = 0f
 
             for (i in 0 until n) {
                 val item = items[i]
@@ -227,10 +212,10 @@ class VirtualCameraAnalyzerV1(context: Context) {
                     rawY = rawY[i],
                     rawRotationDegrees = rawR[i],
                     rawLogScale = rawS[i],
-                    tripodRawX = tripodPathV2.x[i],
-                    tripodRawY = tripodPathV2.y[i],
-                    tripodRawRotationDegrees = tripodPathV2.rotationDegrees[i],
-                    tripodRawLogScale = tripodPathV2.logScale[i],
+                    tripodRawX = tripodPathV3.x[i],
+                    tripodRawY = tripodPathV3.y[i],
+                    tripodRawRotationDegrees = tripodPathV3.rotationDegrees[i],
+                    tripodRawLogScale = tripodPathV3.logScale[i],
                     smoothX = smoothX[i],
                     smoothY = smoothY[i],
                     smoothRotationDegrees = smoothR[i],
@@ -243,6 +228,136 @@ class VirtualCameraAnalyzerV1(context: Context) {
             }
         }
         return output.sortedBy { it.sourceTimeUs }
+    }
+
+    private data class TripodPathV3(
+        val x: FloatArray,
+        val y: FloatArray,
+        val rotationDegrees: FloatArray,
+        val logScale: FloatArray,
+    )
+
+    private fun solvePersistentTripodPathV3(
+        items: List<RawCameraSampleV1>,
+        fallbackX: FloatArray,
+        fallbackY: FloatArray,
+        fallbackRotation: FloatArray,
+        fallbackLogScale: FloatArray,
+    ): TripodPathV3 {
+        val n = items.size
+        if (n == 0) {
+            return TripodPathV3(
+                fallbackX.copyOf(),
+                fallbackY.copyOf(),
+                fallbackRotation.copyOf(),
+                fallbackLogScale.copyOf(),
+            )
+        }
+
+        val survivorIds = survivingTripodTrackIdsV3(
+            items.map { it.tripodObservationsV3 },
+        )
+        if (survivorIds.size < MIN_PERSISTENT_TRIPOD_TRACKS_V3) {
+            return TripodPathV3(
+                fallbackX.copyOf(),
+                fallbackY.copyOf(),
+                fallbackRotation.copyOf(),
+                fallbackLogScale.copyOf(),
+            )
+        }
+
+        // Pass 1: identify which final-survivor tracks behave like the dominant static background
+        // for most of the shot. A moving foreground subject can survive in-frame, but it will fail
+        // this consensus test and will not participate in the final fixed-reference solve.
+        val firstPass = items.map { item ->
+            estimateTripodReferencePoseV3(
+                observations = item.tripodObservationsV3,
+                survivorIds = survivorIds,
+                width = item.width,
+                height = item.height,
+            )
+        }
+        val validFirstPass = firstPass.count { it != null }.coerceAtLeast(1)
+        val inlierVotes = HashMap<Int, Int>()
+        firstPass.forEach { pose ->
+            pose?.inlierTrackIds?.forEach { id ->
+                inlierVotes[id] = (inlierVotes[id] ?: 0) + 1
+            }
+        }
+        val requiredVotes = (validFirstPass * BACKGROUND_INLIER_FRACTION_V3)
+            .roundToInt()
+            .coerceAtLeast(2)
+        val backgroundIds = survivorIds.filterTo(linkedSetOf()) { id ->
+            (inlierVotes[id] ?: 0) >= requiredVotes
+        }
+        val finalIds = if (backgroundIds.size >= MIN_PERSISTENT_TRIPOD_TRACKS_V3) {
+            backgroundIds
+        } else {
+            survivorIds
+        }
+
+        val x = FloatArray(n) { Float.NaN }
+        val y = FloatArray(n) { Float.NaN }
+        val r = FloatArray(n) { Float.NaN }
+        val s = FloatArray(n) { Float.NaN }
+
+        // Reference frame is identity by construction.
+        x[0] = 0f
+        y[0] = 0f
+        r[0] = 0f
+        s[0] = 0f
+
+        for (i in 1 until n) {
+            val item = items[i]
+            val pose = estimateTripodReferencePoseV3(
+                observations = item.tripodObservationsV3,
+                survivorIds = finalIds,
+                width = item.width,
+                height = item.height,
+            ) ?: continue
+            if (pose.confidence < MIN_PERSISTENT_TRIPOD_CONFIDENCE_V3) continue
+
+            x[i] = pose.centerDxPx / max(1f, item.width * .5f)
+            y[i] = -pose.centerDyPx / max(1f, item.height * .5f)
+            r[i] = -pose.rotationDegreesImage
+            s[i] = ln(pose.scale.coerceIn(.90f, 1.10f))
+        }
+
+        fillMissingTripodChannelV3(x, fallbackX)
+        fillMissingTripodChannelV3(y, fallbackY)
+        fillMissingTripodChannelV3(r, fallbackRotation)
+        fillMissingTripodChannelV3(s, fallbackLogScale)
+
+        return TripodPathV3(x, y, r, s)
+    }
+
+    private fun fillMissingTripodChannelV3(
+        values: FloatArray,
+        fallback: FloatArray,
+    ) {
+        val known = values.indices.filter { values[it].isFinite() }
+        if (known.size < 2) {
+            for (i in values.indices) values[i] = fallback[i]
+            return
+        }
+
+        var left = known.first()
+        for (right in known.drop(1)) {
+            val span = (right - left).coerceAtLeast(1)
+            for (i in left + 1 until right) {
+                val t = (i - left).toFloat() / span.toFloat()
+                values[i] = values[left] + (values[right] - values[left]) * t
+            }
+            left = right
+        }
+
+        for (i in 0 until known.first()) values[i] = values[known.first()]
+        for (i in known.last() + 1 until values.size) {
+            // Tail fallback only happens if the final persistent set temporarily fails model
+            // confidence. Continue the last known fixed-reference pose rather than injecting a
+            // pairwise-path jump into Tripod output.
+            values[i] = values[known.last()]
+        }
     }
 
     private data class CoverScalesV1(
@@ -389,6 +504,9 @@ class VirtualCameraAnalyzerV1(context: Context) {
         const val ROTATION_LAMBDA_V1 = 210f
         const val SCALE_LAMBDA_V1 = 260f
         const val MIN_SOLVER_GAIN_V1 = .35f
+        const val MIN_PERSISTENT_TRIPOD_TRACKS_V3 = 6
+        const val MIN_PERSISTENT_TRIPOD_CONFIDENCE_V3 = .46f
+        const val BACKGROUND_INLIER_FRACTION_V3 = .65f
         const val MAX_ANALYSIS_ZOOM_V1 = 1.65f
     }
 }
