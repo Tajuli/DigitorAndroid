@@ -65,6 +65,9 @@ data class StabilizationPathSampleV90(
     val perspectivePathV102: PerspectiveQuadV102? = null,
     /** V102 fixed-reference projective path used when Camera Lock is enabled. */
     val cameraLockPerspectivePathV102: PerspectiveQuadV102? = null,
+    /** V103 diagnostics from persistent background-feature tracking. */
+    val persistentBackgroundTracksV103: Int = 0,
+    val backgroundTrackConfidenceV103: Float = 0f,
 )
 
 data class ClipStabilizationV90(
@@ -187,7 +190,7 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
         state.cameraLockV102 && state.analysisVersionV93 >= 100 ->
             max(correction.scaleCorrection, state.cameraLockCoverScaleV100.coerceAtLeast(1f))
         state.analysisVersionV93 >= 93 ->
-            state.zoomEnvelopeV95(sourceTimeUs, correction)
+            correctionState.zoomEnvelopeV95(sourceTimeUs, correction)
         else ->
             max(
                 correction.scaleCorrection,
@@ -271,9 +274,17 @@ private fun ClipStabilizationV90.baseCorrectionV94(sourceTimeUs: Long): Stabiliz
  */
 internal fun ClipStabilizationV90.computeCameraLockCoverScaleV100(): Float {
     if (samples.isEmpty()) return 1f
+
+    // Solve coverage at maximum lock strength regardless of the slider value present when Analyze
+    // ran. Strength may be increased later without re-analysis; precomputing the worst-case cover
+    // prevents black borders from appearing after that edit.
+    val coverageState = normalized().copy(
+        strength = 1f,
+        cameraLockV102 = true,
+    )
     var required = 1f
-    for (sample in samples) {
-        val correction = cameraLockCorrectionV97(sample.sourceTimeUs)
+    for (sample in coverageState.samples) {
+        val correction = coverageState.cameraLockCorrectionV97(sample.sourceTimeUs)
         val cover = max(
             correction.scaleCorrection,
             requiredCoverScaleV92(
@@ -783,10 +794,21 @@ private fun ClipStabilizationV90.zoomEnvelopeV95(
     var sampleIndex = 0
     for (sample in samplesInWindowV94(sourceTimeUs, radius, segment)) {
         if (sampleIndex++ % ZOOM_PROBE_STRIDE_V94 != 0) continue
-        val correction = robustBaseCorrectionV95(sample.sourceTimeUs)
+        val correction = when {
+            analysisVersionV93 >= 96 && mode == StabilizationModeV90.TRANSLATION ->
+                translationCorrectionV96(sample.sourceTimeUs)
+            analysisVersionV93 >= 101 && mode == StabilizationModeV90.SIMILARITY ->
+                similarityCorrectionV101(sample.sourceTimeUs)
+            else ->
+                robustBaseCorrectionV95(sample.sourceTimeUs)
+        }
         val required = max(
             correction.scaleCorrection,
-            requiredCoverScaleV92(correction.dx, correction.dy, correction.rotation) * COVER_SAFETY_V92,
+            requiredCoverScaleV92(
+                correction.dx,
+                correction.dy,
+                correction.rotation,
+            ) * COVER_SAFETY_V92,
         )
         probes += sample.sourceTimeUs to required
     }
