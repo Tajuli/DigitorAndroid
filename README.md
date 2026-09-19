@@ -34,6 +34,10 @@ Native Android mobile video-editor foundation for **Digitor**.
 - Realtime multitrack audio preview
 - Shared 33^3 color LUT and spatial node shader stack
 - Resolve-style video compositor for z-order, position, scale, rotation and opacity
+- Resolve-style clip stabilization with Translation, Similarity and real projective Perspective modes
+- Separate Camera Lock, Zoom, Cropping Ratio, Smooth and Strength controls; Camera Lock disables Cropping Ratio/Smooth
+- Sequential every-frame motion analysis with bidirectional patch validation, RANSAC, fixed-reference tripod anchors and scene-cut segmentation
+- Perspective stabilization uses a true Media3 3×3 NDC homography before the shared clip-transform/compositor stage; multitrack preview/export use the same warp contract
 - Paused-frame self-healing after layer import/topology rebuild, app resume and export hand-off
 - Preview hides a retained decoder surface frame when the playhead is outside every active video clip
 - GPU-first H.264/AAC export with stable single-input and compositor routes
@@ -89,6 +93,7 @@ For supported SDR timelines, the intended parity boundary is:
 
 ```text
 decoded source
+  -> optional V102 Perspective stabilization homography
   -> Transformer-valid ColorInfo
   -> 33^3 color LUT
   -> spatial shader stack
