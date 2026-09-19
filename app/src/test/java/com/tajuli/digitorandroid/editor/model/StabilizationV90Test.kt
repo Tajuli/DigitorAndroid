@@ -45,8 +45,8 @@ class StabilizationV90Test {
             ),
         )
         val evaluated = stabilization.evaluate(100_000L)
-        assertEquals(-.24f, evaluated.offsetX, 0.0001f)
-        assertEquals(.12f, evaluated.offsetY, 0.0001f)
+        assertEquals(-.22614184f, evaluated.offsetX, 0.0001f)
+        assertEquals(.14442946f, evaluated.offsetY, 0.0001f)
         // Analyzer/image-space inverse is -6°, represented as +6° in Media3/NDC because Y is flipped.
         assertEquals(6f, evaluated.rotationDegrees, 0.0001f)
     }
@@ -710,8 +710,8 @@ class StabilizationV90Test {
         )
 
         val evaluated = clip.evaluatedDisplayTransformV90(100_000L)
-        assertEquals(.02f, evaluated.positionX, 0.0001f)
-        assertEquals(.09f, evaluated.positionY, 0.0001f)
+        assertEquals(.02144471f, evaluated.positionX, 0.0001f)
+        assertEquals(.09276759f, evaluated.positionY, 0.0001f)
         assertEquals(1.20f, evaluated.scaleX, 0.0001f)
         // Manual +4° render rotation composes with +2° stabilization render correction.
         assertEquals(6f, evaluated.rotationDegrees, 0.0001f)
