@@ -6,6 +6,8 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.MatrixTransformation
 import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.evaluatedDisplayTransformV1
+import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -23,18 +25,23 @@ import kotlin.math.sin
  */
 @UnstableApi
 object ClipTransformEffect {
-    fun forPreview(clip: TimelineClip): Effect? =
-        create(clip, presentationTimeOffsetUs = clip.sourceInUs, usePreviewClock = true)
+    fun forPreview(clip: TimelineClip): Effect =
+        create(clip, presentationTimeOffsetUs = clip.sourceInUs, usePreviewClock = true, liveProject = true)!!
 
     fun forExport(clip: TimelineClip): Effect? =
-        create(clip, presentationTimeOffsetUs = 0L, usePreviewClock = false)
+        create(clip, presentationTimeOffsetUs = 0L, usePreviewClock = false, liveProject = false)
 
     private fun create(
         clip: TimelineClip,
         presentationTimeOffsetUs: Long,
         usePreviewClock: Boolean,
+        liveProject: Boolean,
     ): Effect? {
-        if (clip.transform.isStaticIdentity) return null
+        if (
+            !liveProject &&
+            clip.transform.isStaticIdentity &&
+            clip.virtualCameraStabilizationV1?.hasAnalysis != true
+        ) return null
 
         var previewRevision = Long.MIN_VALUE
         var previewAnchorPresentationUs = 0L
@@ -61,7 +68,12 @@ object ClipTransformEffect {
                 fallbackLocalUs
             }
 
-            val value = clip.transform.evaluate(localUs)
+            val resolvedClip = if (liveProject) {
+                PreviewProjectRegistry.project()?.clip(clip.id) ?: clip
+            } else {
+                clip
+            }
+            val value = resolvedClip.evaluatedDisplayTransformV1(localUs)
             val radians = Math.toRadians(value.rotationDegrees.toDouble())
             val cos = cos(radians).toFloat()
             val sin = sin(radians).toFloat()
