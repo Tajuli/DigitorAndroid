@@ -6,6 +6,7 @@ import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * V90 Resolve-style clip stabilization.
@@ -127,6 +128,18 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
     val state = normalized()
     if (!state.enabled || !state.hasAnalysis || state.strength <= 0f) return EvaluatedStabilizationV90()
 
+    // Resolve Cropping Ratio limits stabilization aggressiveness. Camera Lock disables this control.
+    val correctionState = if (
+        state.analysisVersionV93 >= 102 &&
+        !state.cameraLockV102 &&
+        state.mode != StabilizationModeV90.PERSPECTIVE
+    ) {
+        val cropAggression = sqrt((1f - state.croppingRatioV102).coerceIn(0f, 1f))
+        state.copy(strength = state.strength * cropAggression)
+    } else {
+        state
+    }
+
     // V95 keeps V94's zero-phase smoothing, but rejects isolated correction spikes first using
     // a local median/MAD gate. A one- or two-sample tracking failure must not jerk the frame or
     // force the crop envelope into a sudden 150%+ zoom.
@@ -134,23 +147,18 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
         state.mode == StabilizationModeV90.PERSPECTIVE ->
             StabilizationCorrectionV94(0f, 0f, 0f, 1f)
         state.cameraLockV102 ->
-            state.cameraLockCorrectionV97(sourceTimeUs)
+            correctionState.cameraLockCorrectionV97(sourceTimeUs)
         state.analysisVersionV93 >= 93 && state.mode == StabilizationModeV90.TRANSLATION ->
-            state.translationCorrectionV96(sourceTimeUs)
-        state.analysisVersionV93 < 93 -> state.baseCorrectionV94(sourceTimeUs)
+            correctionState.translationCorrectionV96(sourceTimeUs)
+        state.analysisVersionV93 < 93 -> correctionState.baseCorrectionV94(sourceTimeUs)
         state.mode == StabilizationModeV90.SIMILARITY && state.analysisVersionV93 >= 101 ->
-            state.similarityCorrectionV101(sourceTimeUs)
-        else -> state.filteredCorrectionV95(sourceTimeUs)
+            correctionState.similarityCorrectionV101(sourceTimeUs)
+        else -> correctionState.filteredCorrectionV95(sourceTimeUs)
     }
 
     // V95 zoom envelope is driven by the same robust filtered correction used by rendering.
     // This removes V94's bug where crop probes re-read raw/base corrections and amplified an
     // otherwise filtered tracking outlier into a visible zoom spike.
-    val resolveAggression = if (state.cameraLockV102) {
-        1f
-    } else {
-        (1f - state.croppingRatioV102).coerceIn(0f, 1f)
-    }
     val coverTarget = when {
         !state.zoomEnabledV102 || state.mode == StabilizationModeV90.PERSPECTIVE ->
             correction.scaleCorrection
@@ -168,11 +176,10 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
                 ) * COVER_SAFETY_V92,
             )
     }
-    val zoomMix = if (state.cameraLockV102) 1f else resolveAggression
     val finalScale = lerpV90(
         correction.scaleCorrection,
         coverTarget,
-        zoomMix,
+        if (state.zoomEnabledV102) 1f else 0f,
     ).coerceIn(.78f, MAX_STABILIZATION_ZOOM_V92)
 
     return EvaluatedStabilizationV90(
