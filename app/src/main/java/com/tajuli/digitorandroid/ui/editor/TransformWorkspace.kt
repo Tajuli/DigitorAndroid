@@ -268,14 +268,16 @@ private fun StabilizationWorkspaceV90(
 
         Text(
             when {
+                stabilization.analysisVersionV93 >= 99 ->
+                    "V99 Background Lock · ${stabilization.samples.size} frame samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
                 stabilization.analysisVersionV93 >= 97 ->
-                    "V97 Resolve Lock · ${stabilization.samples.size} frame samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
+                    "V97 analysis · Re-analyze for V99 background-safe Camera Lock"
                 stabilization.analysisVersionV93 >= 96 ->
-                    "V96 analysis · Re-analyze for V97 exact Camera Lock"
+                    "V96 analysis · Re-analyze for V99 background-safe Camera Lock"
                 stabilization.analysisVersionV93 >= 93 ->
-                    "V93 analysis · Re-analyze for V97 exact Camera Lock"
+                    "V93 analysis · Re-analyze for V99 background-safe Camera Lock"
                 else ->
-                    "Legacy analysis · Re-analyze for V97 exact Camera Lock"
+                    "Legacy analysis · Re-analyze for V99 background-safe Camera Lock"
             },
             fontSize = 7.sp,
             color = if (stabilization.analysisVersionV93 >= 93) X5Muted else X5Accent,
