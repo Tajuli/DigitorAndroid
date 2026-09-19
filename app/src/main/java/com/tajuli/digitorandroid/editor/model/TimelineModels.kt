@@ -139,6 +139,8 @@ data class TimelineClip(
     val sourceMimeTypeV21: String? = null,
     /** V43 clip-level person/chroma cutout. Nullable keeps every older saved project readable. */
     val cutoutV43: ClipCutoutV43? = null,
+    /** Fresh virtual-camera stabilizer. Nullable keeps all existing saved projects compatible. */
+    val virtualCameraStabilizationV1: VirtualCameraStabilizationV1? = null,
 ) {
     val durationUs: Long get() = (sourceOutUs - sourceInUs).coerceAtLeast(1L)
     val timelineEndUs: Long get() = timelineStartUs + durationUs
