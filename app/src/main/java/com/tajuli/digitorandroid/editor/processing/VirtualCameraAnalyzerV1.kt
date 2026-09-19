@@ -264,20 +264,81 @@ class VirtualCameraAnalyzerV1(context: Context) {
         for ((_, items) in grouped) {
             val n = items.size
             val confidence = FloatArray(n) { items[it].confidence.coerceIn(0f, 1f) }
+            val translationConfidence = FloatArray(n) {
+                items[it].translationConfidenceV4.coerceIn(0f, 1f)
+            }
+            val rotationConfidence = FloatArray(n) {
+                items[it].rotationConfidenceV4.coerceIn(0f, 1f)
+            }
+            val scaleConfidence = FloatArray(n) {
+                items[it].scaleConfidenceV4.coerceIn(0f, 1f)
+            }
             val rawX = FloatArray(n) { items[it].x }
             val rawY = FloatArray(n) { items[it].y }
             val rawR = unwrapAnglesV1(FloatArray(n) { items[it].rotation })
             val rawS = FloatArray(n) { items[it].logScale }
 
-            var smoothX = solveVirtualCameraPathV1(rawX, confidence, TRANSLATION_LAMBDA_V1)
-            var smoothY = solveVirtualCameraPathV1(rawY, confidence, TRANSLATION_LAMBDA_V1)
-            var smoothR = solveVirtualCameraPathV1(rawR, confidence, ROTATION_LAMBDA_V1)
-            var smoothS = solveVirtualCameraPathV1(rawS, confidence, SCALE_LAMBDA_V1)
+            // V4 Translation: a global gimbal path that strongly removes alternating shake but
+            // lowers regularization around sustained one-direction pan/tilt motion.
+            var smoothX = solveAdaptiveVirtualCameraPathV4(
+                raw = rawX,
+                confidence = translationConfidence,
+                baseLambda = TRANSLATION_LAMBDA_V4,
+                intentVelocityThreshold = TRANSLATION_INTENT_VELOCITY_V4,
+            )
+            var smoothY = solveAdaptiveVirtualCameraPathV4(
+                raw = rawY,
+                confidence = translationConfidence,
+                baseLambda = TRANSLATION_LAMBDA_V4,
+                intentVelocityThreshold = TRANSLATION_INTENT_VELOCITY_V4,
+            )
+            smoothX = safeSolvedPathV4(rawX, smoothX, MIN_SOLVER_GAIN_TRANSLATION_V4)
+            smoothY = safeSolvedPathV4(rawY, smoothY, MIN_SOLVER_GAIN_TRANSLATION_V4)
+            smoothX = confidenceGatedTargetV4(
+                rawX,
+                smoothX,
+                translationConfidence,
+                MIN_TRANSLATION_TARGET_TRUST_V4,
+            )
+            smoothY = confidenceGatedTargetV4(
+                rawY,
+                smoothY,
+                translationConfidence,
+                MIN_TRANSLATION_TARGET_TRUST_V4,
+            )
+            smoothX = safeSolvedPathV4(rawX, smoothX, MIN_FINAL_GAIN_V4)
+            smoothY = safeSolvedPathV4(rawY, smoothY, MIN_FINAL_GAIN_V4)
 
-            if (virtualPathImprovementV1(rawX, smoothX) < MIN_SOLVER_GAIN_V1) smoothX = rawX
-            if (virtualPathImprovementV1(rawY, smoothY) < MIN_SOLVER_GAIN_V1) smoothY = rawY
-            if (virtualPathImprovementV1(rawR, smoothR) < MIN_SOLVER_GAIN_V1) smoothR = rawR
-            if (virtualPathImprovementV1(rawS, smoothS) < MIN_SOLVER_GAIN_V1) smoothS = rawS
+            // V4 Similarity: rotation and scale use independent, stricter trust and stronger
+            // regularization. Scale is the most noise-sensitive DOF and therefore the smoothest.
+            var smoothR = solveAdaptiveVirtualCameraPathV4(
+                raw = rawR,
+                confidence = rotationConfidence,
+                baseLambda = ROTATION_LAMBDA_V4,
+                intentVelocityThreshold = ROTATION_INTENT_VELOCITY_V4,
+            )
+            var smoothS = solveAdaptiveVirtualCameraPathV4(
+                raw = rawS,
+                confidence = scaleConfidence,
+                baseLambda = SCALE_LAMBDA_V4,
+                intentVelocityThreshold = SCALE_INTENT_VELOCITY_V4,
+            )
+            smoothR = safeSolvedPathV4(rawR, smoothR, MIN_SOLVER_GAIN_ROTATION_V4)
+            smoothS = safeSolvedPathV4(rawS, smoothS, MIN_SOLVER_GAIN_SCALE_V4)
+            smoothR = confidenceGatedTargetV4(
+                rawR,
+                smoothR,
+                rotationConfidence,
+                MIN_ROTATION_TARGET_TRUST_V4,
+            )
+            smoothS = confidenceGatedTargetV4(
+                rawS,
+                smoothS,
+                scaleConfidence,
+                MIN_SCALE_TARGET_TRUST_V4,
+            )
+            smoothR = safeSolvedPathV4(rawR, smoothR, MIN_FINAL_GAIN_V4)
+            smoothS = safeSolvedPathV4(rawS, smoothS, MIN_FINAL_GAIN_V4)
 
             val tripodPathV3 = solvePersistentTripodPathV3(
                 items = items,
@@ -595,10 +656,19 @@ class VirtualCameraAnalyzerV1(context: Context) {
         const val MIN_TRANSLATION_CONFIDENCE_V4 = .28f
         const val MIN_ROTATION_CONFIDENCE_V4 = .42f
         const val MIN_SCALE_CONFIDENCE_V4 = .48f
-        const val TRANSLATION_LAMBDA_V1 = 150f
-        const val ROTATION_LAMBDA_V1 = 210f
-        const val SCALE_LAMBDA_V1 = 260f
-        const val MIN_SOLVER_GAIN_V1 = .35f
+        const val TRANSLATION_LAMBDA_V4 = 175f
+        const val ROTATION_LAMBDA_V4 = 235f
+        const val SCALE_LAMBDA_V4 = 330f
+        const val TRANSLATION_INTENT_VELOCITY_V4 = .0018f
+        const val ROTATION_INTENT_VELOCITY_V4 = .025f
+        const val SCALE_INTENT_VELOCITY_V4 = .00035f
+        const val MIN_TRANSLATION_TARGET_TRUST_V4 = .24f
+        const val MIN_ROTATION_TARGET_TRUST_V4 = .40f
+        const val MIN_SCALE_TARGET_TRUST_V4 = .48f
+        const val MIN_SOLVER_GAIN_TRANSLATION_V4 = .28f
+        const val MIN_SOLVER_GAIN_ROTATION_V4 = .34f
+        const val MIN_SOLVER_GAIN_SCALE_V4 = .42f
+        const val MIN_FINAL_GAIN_V4 = .12f
         const val TRIPOD_REANCHOR_INTERVAL_FRAMES_V3 = 3
         const val MIN_PERSISTENT_TRIPOD_TRACKS_V3 = 6
         const val MIN_PERSISTENT_TRIPOD_CONFIDENCE_V3 = .46f
