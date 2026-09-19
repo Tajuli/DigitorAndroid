@@ -685,6 +685,58 @@ class StabilizationV90Test {
     }
 
     @Test
+    fun v103CameraLockCover_isPrecomputedForFullStrength() {
+        val samples = listOf(
+            StabilizationPathSampleV90(
+                sourceTimeUs = 0L,
+                pathX = 0f,
+                pathY = 0f,
+                rotationDegrees = 0f,
+                cameraLockPathXV101 = 0f,
+                cameraLockPathYV101 = 0f,
+                persistentBackgroundTracksV103 = 12,
+                backgroundTrackConfidenceV103 = .9f,
+            ),
+            StabilizationPathSampleV90(
+                sourceTimeUs = 100_000L,
+                pathX = .12f,
+                pathY = -.08f,
+                rotationDegrees = 2f,
+                cameraLockPathXV101 = .24f,
+                cameraLockPathYV101 = -.14f,
+                cameraLockRotationDegreesV101 = 2f,
+                rotationScaleConfidenceV99 = .95f,
+                persistentBackgroundTracksV103 = 14,
+                backgroundTrackConfidenceV103 = .92f,
+            ),
+        )
+        val lowStrengthAnalysis = ClipStabilizationV90(
+            mode = StabilizationModeV90.SIMILARITY,
+            cameraLockV102 = true,
+            zoomEnabledV102 = true,
+            strength = .25f,
+            samples = samples,
+            analysisVersionV93 = 103,
+        )
+
+        val precomputed = lowStrengthAnalysis.computeCameraLockCoverScaleV100()
+        val fullStrength = lowStrengthAnalysis.copy(
+            strength = 1f,
+            cameraLockCoverScaleV100 = precomputed,
+        )
+        val evaluated = fullStrength.evaluate(100_000L)
+        val required = requiredCoverScaleV92(
+            evaluated.offsetX,
+            evaluated.offsetY,
+            evaluated.rotationDegrees,
+        )
+        assertTrue(
+            "Camera Lock precomputed crop must still cover after Strength is raised post-analysis",
+            evaluated.scale + .0001f >= required,
+        )
+    }
+
+    @Test
     fun displayTransform_composesManualAndStabilizedMotion() {
         val clip = TimelineClip(
             uri = "content://video",
