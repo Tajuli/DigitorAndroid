@@ -29,6 +29,11 @@ data class VirtualCameraSampleV1(
     val rawY: Float = 0f,
     val rawRotationDegrees: Float = 0f,
     val rawLogScale: Float = 0f,
+    /** V2: pairwise path after sparse fixed-reference drift correction, used by Tripod only. */
+    val tripodRawX: Float = 0f,
+    val tripodRawY: Float = 0f,
+    val tripodRawRotationDegrees: Float = 0f,
+    val tripodRawLogScale: Float = 0f,
     val smoothX: Float = 0f,
     val smoothY: Float = 0f,
     val smoothRotationDegrees: Float = 0f,
@@ -87,12 +92,24 @@ fun VirtualCameraStabilizationV1.evaluateVirtualCameraV1(
     }
 
     val sample = state.sampleAtV1(sourceTimeUs) ?: return EvaluatedVirtualCameraV1()
-    val raw = PoseV1(
-        sample.rawX,
-        sample.rawY,
-        sample.rawRotationDegrees,
-        sample.rawLogScale,
-    )
+    val raw = if (
+        state.mode == VirtualStabilizationModeV1.TRIPOD &&
+        state.analysisVersion >= 2
+    ) {
+        PoseV1(
+            sample.tripodRawX,
+            sample.tripodRawY,
+            sample.tripodRawRotationDegrees,
+            sample.tripodRawLogScale,
+        )
+    } else {
+        PoseV1(
+            sample.rawX,
+            sample.rawY,
+            sample.rawRotationDegrees,
+            sample.rawLogScale,
+        )
+    }
     val desired = when (state.mode) {
         VirtualStabilizationModeV1.TRANSLATION,
         VirtualStabilizationModeV1.SIMILARITY -> PoseV1(
@@ -166,6 +183,14 @@ private fun VirtualCameraStabilizationV1.sampleAtV1(sourceTimeUs: Long): Virtual
         rawY = lerpV1(a.rawY, b.rawY, t),
         rawRotationDegrees = lerpV1(a.rawRotationDegrees, b.rawRotationDegrees, t),
         rawLogScale = lerpV1(a.rawLogScale, b.rawLogScale, t),
+        tripodRawX = lerpV1(a.tripodRawX, b.tripodRawX, t),
+        tripodRawY = lerpV1(a.tripodRawY, b.tripodRawY, t),
+        tripodRawRotationDegrees = lerpV1(
+            a.tripodRawRotationDegrees,
+            b.tripodRawRotationDegrees,
+            t,
+        ),
+        tripodRawLogScale = lerpV1(a.tripodRawLogScale, b.tripodRawLogScale, t),
         smoothX = lerpV1(a.smoothX, b.smoothX, t),
         smoothY = lerpV1(a.smoothY, b.smoothY, t),
         smoothRotationDegrees = lerpV1(a.smoothRotationDegrees, b.smoothRotationDegrees, t),
