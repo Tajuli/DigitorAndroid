@@ -4,10 +4,13 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import com.tajuli.digitorandroid.editor.model.ClipStabilizationV90
+import com.tajuli.digitorandroid.editor.model.PerspectiveQuadV102
 import com.tajuli.digitorandroid.editor.model.StabilizationPathSampleV90
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineVisualMediaV21
 import com.tajuli.digitorandroid.editor.model.computeCameraLockCoverScaleV100
+import com.tajuli.digitorandroid.editor.model.computeCameraLockPerspectiveCoverScaleV102
+import com.tajuli.digitorandroid.editor.model.solveHomographyV102
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
@@ -72,6 +75,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         var pathY = 0f
         var pathRotation = 0f
         var pathLogScale = 0f
+        var perspectivePathV102 = PerspectiveQuadV102.IDENTITY
         var segmentV93 = 0
 
         val decoder = GpuSequentialCutoutDecoderV47(
@@ -110,6 +114,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                         pathY = 0f
                         pathRotation = 0f
                         pathLogScale = 0f
+                        perspectivePathV102 = PerspectiveQuadV102.IDENTITY
                         segmentReferenceGray = current.copyOf()
                         framesSinceReferenceProbe = 0
                     } else {
@@ -133,6 +138,12 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                             pathY = incrementalScale * (sinR * previousX + cosR * previousY) + incY
                             pathRotation += trustedRotation
                             pathLogScale += ln(incrementalScale)
+                            motion.perspectiveDeltaV102?.let { incrementalPerspective ->
+                                perspectivePathV102 = composePerspectivePathV102(
+                                    previousPath = perspectivePathV102,
+                                    incremental = incrementalPerspective,
+                                )
+                            }
                         }
 
                         // V97 reference re-lock: incremental tracking is excellent at high-frequency
@@ -176,6 +187,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                                     ),
                                     rotationScaleConfidence =
                                         anchored.rotationScaleConfidenceV99.coerceIn(0f, 1f),
+                                    perspectiveQuadV102 = anchored.perspectiveDeltaV102,
                                 )
                             }
                             framesSinceReferenceProbe = 0
@@ -192,6 +204,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                     confidence = confidence,
                     segmentV93 = segmentV93,
                     rotationScaleConfidenceV99 = rotationScaleConfidence,
+                    perspectivePathV102 = perspectivePathV102,
                 )
                 previousGray = current
 
@@ -213,12 +226,19 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         onProgress(.985f, "Solving tripod lock…")
 
         val tripodSamples = applyReferenceAnchorsV100(samples, referenceAnchorsV100)
-        val multiModeSamples = samples.zip(tripodSamples).map { (raw, tripod) ->
+        val cameraLockPerspective = applyPerspectiveReferenceAnchorsV102(
+            samples = samples,
+            anchors = referenceAnchorsV100,
+        )
+        val multiModeSamples = samples.indices.map { index ->
+            val raw = samples[index]
+            val tripod = tripodSamples[index]
             raw.copy(
                 cameraLockPathXV101 = tripod.pathX,
                 cameraLockPathYV101 = tripod.pathY,
                 cameraLockRotationDegreesV101 = tripod.rotationDegrees,
                 cameraLockLogScaleV101 = tripod.logScale,
+                cameraLockPerspectivePathV102 = cameraLockPerspective[index],
             )
         }
         val solved = base.copy(
@@ -226,13 +246,18 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             analyzedWidth = analyzedWidth,
             analyzedHeight = analyzedHeight,
             samples = multiModeSamples,
-            analysisVersionV93 = 101,
+            analysisVersionV93 = 102,
             cameraLockCoverScaleV100 = 1f,
+            cameraLockPerspectiveCoverScaleV102 = 1f,
         ).normalized()
         val constantCameraLockZoom = solved.computeCameraLockCoverScaleV100()
+        val constantPerspectiveLockZoom = solved.computeCameraLockPerspectiveCoverScaleV102()
 
         onProgress(1f, "Finishing stabilization…")
-        solved.copy(cameraLockCoverScaleV100 = constantCameraLockZoom)
+        solved.copy(
+            cameraLockCoverScaleV100 = constantCameraLockZoom,
+            cameraLockPerspectiveCoverScaleV102 = constantPerspectiveLockZoom,
+        )
     }
 
     private data class ReferenceAnchorV100(
@@ -243,6 +268,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val rotationDegrees: Float,
         val logScale: Float,
         val rotationScaleConfidence: Float,
+        val perspectiveQuadV102: PerspectiveQuadV102? = null,
     )
 
     private data class AnchorResidualV100(
@@ -396,6 +422,8 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val confidence: Float = 0f,
         val sceneCut: Boolean = false,
         val rotationScaleConfidenceV99: Float = 0f,
+        val perspectiveDeltaV102: PerspectiveQuadV102? = null,
+        val perspectiveConfidenceV102: Float = 0f,
     )
 
     /**
@@ -509,6 +537,20 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                 inlierConfidence * .15f
             ).coerceIn(0f, 1f)
 
+        val perspectiveConfidence = (
+            spatialConfidence * .55f +
+                geometricConfidence * .30f +
+                inlierConfidence * .15f
+            ).coerceIn(0f, 1f)
+        val perspectiveDelta = estimatePerspectiveDeltaV102(
+            inliers = inliers,
+            fit = fitted,
+            width = width,
+            height = height,
+            perspectiveTrust = perspectiveConfidence,
+            searchRadius = searchRadius,
+        )
+
         val hardCut = frameDifference >= SCENE_CUT_DIFFERENCE &&
             (inlierRatio < .42f || confidence < .24f)
 
@@ -516,7 +558,170 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             confidence = if (hardCut) 0f else confidence,
             sceneCut = hardCut,
             rotationScaleConfidenceV99 = if (hardCut) 0f else rotationScaleConfidence,
+            perspectiveDeltaV102 = if (hardCut) null else perspectiveDelta,
+            perspectiveConfidenceV102 = if (hardCut) 0f else perspectiveConfidence,
         )
+    }
+
+    private fun estimatePerspectiveDeltaV102(
+        inliers: List<MatchV90>,
+        fit: SimilarityFitV93,
+        width: Int,
+        height: Int,
+        perspectiveTrust: Float,
+        searchRadius: Int,
+    ): PerspectiveQuadV102 {
+        val cornersPx = arrayOf(
+            0f to 0f,
+            (width - 1).toFloat() to 0f,
+            (width - 1).toFloat() to (height - 1).toFloat(),
+            0f to (height - 1).toFloat(),
+        )
+        val diagonal = sqrt((width * width + height * height).toFloat()).coerceAtLeast(1f)
+        val localBlend = (perspectiveTrust * .78f).coerceIn(0f, .78f)
+        val output = FloatArray(8)
+
+        cornersPx.forEachIndexed { index, (cx, cy) ->
+            val similarityX = fit.a * cx - fit.b * cy + fit.tx
+            val similarityY = fit.b * cx + fit.a * cy + fit.ty
+
+            var sumWeight = 0.0
+            var dx = 0.0
+            var dy = 0.0
+            for (match in inliers) {
+                val distanceX = match.px - cx
+                val distanceY = match.py - cy
+                val normalizedDistanceSq =
+                    (distanceX * distanceX + distanceY * distanceY) /
+                        (diagonal * diagonal)
+                val weight = 1.0 / (0.035 + normalizedDistanceSq * 8.0)
+                sumWeight += weight
+                dx += (match.qx - match.px) * weight
+                dy += (match.qy - match.py) * weight
+            }
+
+            val localX = if (sumWeight > 1e-8) cx + (dx / sumWeight).toFloat() else similarityX
+            val localY = if (sumWeight > 1e-8) cy + (dy / sumWeight).toFloat() else similarityY
+
+            val maxResidual = max(2f, searchRadius * .55f)
+            val residualX = (localX - similarityX).coerceIn(-maxResidual, maxResidual)
+            val residualY = (localY - similarityY).coerceIn(-maxResidual, maxResidual)
+            val mappedX = similarityX + residualX * localBlend
+            val mappedY = similarityY + residualY * localBlend
+
+            output[index * 2] = (mappedX / (width - 1).coerceAtLeast(1) * 2f - 1f)
+                .coerceIn(-1.75f, 1.75f)
+            output[index * 2 + 1] = (1f - mappedY / (height - 1).coerceAtLeast(1) * 2f)
+                .coerceIn(-1.75f, 1.75f)
+        }
+
+        return PerspectiveQuadV102(
+            topLeftX = output[0],
+            topLeftY = output[1],
+            topRightX = output[2],
+            topRightY = output[3],
+            bottomRightX = output[4],
+            bottomRightY = output[5],
+            bottomLeftX = output[6],
+            bottomLeftY = output[7],
+        )
+    }
+
+    private fun composePerspectivePathV102(
+        previousPath: PerspectiveQuadV102,
+        incremental: PerspectiveQuadV102,
+    ): PerspectiveQuadV102 {
+        val matrix = solveHomographyV102(
+            PerspectiveQuadV102.IDENTITY.asPoints(),
+            incremental.asPoints(),
+        ) ?: return previousPath
+        val source = previousPath.asPoints()
+        val mapped = FloatArray(8)
+        for (index in 0 until 4) {
+            val point = mapPerspectivePointV102(
+                matrix,
+                source[index * 2],
+                source[index * 2 + 1],
+            ) ?: return previousPath
+            mapped[index * 2] = point.first
+            mapped[index * 2 + 1] = point.second
+        }
+        return PerspectiveQuadV102(
+            mapped[0], mapped[1],
+            mapped[2], mapped[3],
+            mapped[4], mapped[5],
+            mapped[6], mapped[7],
+        )
+    }
+
+    private fun applyPerspectiveReferenceAnchorsV102(
+        samples: List<StabilizationPathSampleV90>,
+        anchors: List<ReferenceAnchorV100>,
+    ): List<PerspectiveQuadV102?> {
+        if (samples.isEmpty()) return emptyList()
+        val bySegment = anchors
+            .filter { it.perspectiveQuadV102 != null }
+            .groupBy { it.segment }
+            .mapValues { (_, values) -> values.sortedBy { it.sampleIndex } }
+
+        return samples.mapIndexed { index, sample ->
+            val segmentAnchors = bySegment[sample.segmentV93].orEmpty()
+            if (segmentAnchors.isEmpty()) {
+                sample.perspectivePathV102
+            } else {
+                var left = segmentAnchors.first()
+                var right = segmentAnchors.last()
+                for (anchor in segmentAnchors) {
+                    if (anchor.sampleIndex <= index) left = anchor
+                    if (anchor.sampleIndex >= index) {
+                        right = anchor
+                        break
+                    }
+                }
+                val leftQuad = left.perspectiveQuadV102 ?: PerspectiveQuadV102.IDENTITY
+                val rightQuad = right.perspectiveQuadV102 ?: leftQuad
+                if (left.sampleIndex == right.sampleIndex) {
+                    leftQuad
+                } else {
+                    val t = ((index - left.sampleIndex).toFloat() /
+                        (right.sampleIndex - left.sampleIndex).toFloat())
+                        .coerceIn(0f, 1f)
+                    val smoothT = t * t * (3f - 2f * t)
+                    lerpPerspectiveQuadV102(leftQuad, rightQuad, smoothT)
+                }
+            }
+        }
+    }
+
+    private fun lerpPerspectiveQuadV102(
+        a: PerspectiveQuadV102,
+        b: PerspectiveQuadV102,
+        t: Float,
+    ): PerspectiveQuadV102 {
+        val ap = a.asPoints()
+        val bp = b.asPoints()
+        val out = FloatArray(8) { ap[it] + (bp[it] - ap[it]) * t }
+        return PerspectiveQuadV102(
+            out[0], out[1],
+            out[2], out[3],
+            out[4], out[5],
+            out[6], out[7],
+        )
+    }
+
+    private fun mapPerspectivePointV102(
+        matrix: FloatArray,
+        x: Float,
+        y: Float,
+    ): Pair<Float, Float>? {
+        if (matrix.size < 9) return null
+        val w = matrix[6] * x + matrix[7] * y + matrix[8]
+        if (abs(w) < 1e-6f) return null
+        return (
+            (matrix[0] * x + matrix[1] * y + matrix[2]) / w
+            ) to (
+            (matrix[3] * x + matrix[4] * y + matrix[5]) / w
+            )
     }
 
     private fun spatialCoverageV99(
