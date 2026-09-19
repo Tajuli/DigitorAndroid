@@ -55,9 +55,9 @@ data class VirtualCameraStabilizationV1(
     val tripodCoverScale: Float = 1f,
     val analysisVersion: Int = 1,
 ) {
-    // V2 changes Tripod path semantics. Old V1 analyses are intentionally invalidated so a
-    // tester cannot unknowingly render the pre-fix accumulated-drift path after updating the app.
-    val hasAnalysis: Boolean get() = analysisVersion >= 2 && samples.size >= 2
+    // V3 changes Tripod from accumulated-path correction to persistent first-frame background
+    // locking. Older analyses are invalid so the previous Tripod math can never render silently.
+    val hasAnalysis: Boolean get() = analysisVersion >= 3 && samples.size >= 2
 
     fun normalized(): VirtualCameraStabilizationV1 = copy(
         strength = strength.coerceIn(0f, 1f),
