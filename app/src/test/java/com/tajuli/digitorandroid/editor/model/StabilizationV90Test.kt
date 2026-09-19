@@ -450,6 +450,60 @@ class StabilizationV90Test {
     }
 
     @Test
+    fun v99CameraLock_lowSpatialConfidenceKeepsTranslationButSuppressesFalseSpinZoom() {
+        val samples = (0..12).map { index ->
+            StabilizationPathSampleV90(
+                sourceTimeUs = index * 50_000L,
+                pathX = .18f,
+                pathY = -.09f,
+                rotationDegrees = 8f,
+                logScale = kotlin.math.ln(1.12f),
+                confidence = .95f,
+                rotationScaleConfidenceV99 = .20f,
+            )
+        }
+        val stabilization = ClipStabilizationV90(
+            mode = StabilizationModeV90.CAMERA_LOCK,
+            strength = 1f,
+            crop = 0f,
+            samples = samples,
+            analysisVersionV93 = 99,
+        )
+
+        val evaluated = stabilization.evaluate(300_000L)
+        assertTrue("X/Y must still hard-lock", abs(evaluated.offsetX) > .10f)
+        assertTrue("X/Y must still hard-lock", abs(evaluated.offsetY) > .04f)
+        assertEquals(0f, evaluated.rotationDegrees, .001f)
+        assertEquals(1f, evaluated.scale, .001f)
+    }
+
+    @Test
+    fun v99CameraLock_broadBackgroundConfidenceAllowsFullPoseLock() {
+        val samples = (0..12).map { index ->
+            StabilizationPathSampleV90(
+                sourceTimeUs = index * 50_000L,
+                pathX = .12f,
+                pathY = -.06f,
+                rotationDegrees = 6f,
+                logScale = kotlin.math.ln(1.08f),
+                confidence = .98f,
+                rotationScaleConfidenceV99 = .95f,
+            )
+        }
+        val stabilization = ClipStabilizationV90(
+            mode = StabilizationModeV90.CAMERA_LOCK,
+            strength = 1f,
+            crop = 0f,
+            samples = samples,
+            analysisVersionV93 = 99,
+        )
+
+        val evaluated = stabilization.evaluate(300_000L)
+        assertEquals(6f, evaluated.rotationDegrees, .01f)
+        assertEquals(1f / 1.08f, evaluated.scale, .002f)
+    }
+
+    @Test
     fun displayTransform_composesManualAndStabilizedMotion() {
         val clip = TimelineClip(
             uri = "content://video",
