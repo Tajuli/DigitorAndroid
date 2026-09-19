@@ -34,6 +34,7 @@ import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 @UnstableApi
 object SharedVideoPipeline {
     fun effectsFor(clip: TimelineClip): List<Effect> = buildList {
+        PerspectiveStabilizationEffectV102.forExport(clip)?.let(::add)
         ClipTransformEffect.forExport(clip)?.let(::add)
         BeautyFaceEffectV36.baseForClip(clip, preview = false)?.let(::add)
         addAll(SharedColorPipeline.effectsFor(clip))
@@ -54,6 +55,7 @@ object SharedVideoPipeline {
         compositedStaticEffectsFor(clip)
 
     private fun compositedStaticEffectsFor(clip: TimelineClip): List<Effect> = buildList {
+        PerspectiveStabilizationEffectV102.forCompositedItem(clip)?.let(::add)
         BeautyFaceEffectV36.baseForClip(clip, preview = false)?.let(::add)
         addAll(SharedColorPipeline.effectsFor(clip))
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = false)?.let(::add)
@@ -68,6 +70,7 @@ object SharedVideoPipeline {
 
     /** Production zero-latency composited preview chain. */
     fun compositedPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
+        PerspectiveStabilizationEffectV102.forCompositedItem(clip)?.let(::add)
         BeautyFaceEffectV36.baseForClip(clip, preview = true)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = true)?.let(::add)
@@ -79,6 +82,7 @@ object SharedVideoPipeline {
     }
 
     fun previewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
+        PerspectiveStabilizationEffectV102.forPreview(clip)?.let(::add)
         ClipTransformEffect.forPreview(clip)?.let(::add)
         BeautyFaceEffectV36.baseForClip(clip, preview = true)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
