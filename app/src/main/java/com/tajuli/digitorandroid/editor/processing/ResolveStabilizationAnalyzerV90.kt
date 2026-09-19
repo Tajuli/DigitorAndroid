@@ -662,7 +662,32 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val bySegment = anchors
             .filter { it.perspectiveQuadV102 != null }
             .groupBy { it.segment }
-            .mapValues { (_, values) -> values.sortedBy { it.sampleIndex } }
+            .mapValues { (_, values) ->
+                val sorted = values.sortedBy { it.sampleIndex }
+                sorted.mapIndexed { index, anchor ->
+                    val from = (index - 2).coerceAtLeast(0)
+                    val to = (index + 2).coerceAtMost(sorted.lastIndex)
+                    val neighborhood = sorted.subList(from, to + 1)
+                    val points = Array(8) { point ->
+                        neighborhood.map {
+                            (it.perspectiveQuadV102 ?: PerspectiveQuadV102.IDENTITY)
+                                .asPoints()[point]
+                        }
+                    }
+                    anchor.copy(
+                        perspectiveQuadV102 = PerspectiveQuadV102(
+                            topLeftX = medianV100(points[0]),
+                            topLeftY = medianV100(points[1]),
+                            topRightX = medianV100(points[2]),
+                            topRightY = medianV100(points[3]),
+                            bottomRightX = medianV100(points[4]),
+                            bottomRightY = medianV100(points[5]),
+                            bottomLeftX = medianV100(points[6]),
+                            bottomLeftY = medianV100(points[7]),
+                        ),
+                    )
+                }
+            }
 
         return samples.mapIndexed { index, sample ->
             val segmentAnchors = bySegment[sample.segmentV93].orEmpty()
