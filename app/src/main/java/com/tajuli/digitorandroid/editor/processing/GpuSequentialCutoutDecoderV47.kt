@@ -124,7 +124,8 @@ internal class GpuSequentialCutoutDecoderV47(
                         val withinTrim = pts >= startUs && pts < endUs
                         val pending = targets.getOrNull(targetIndex)
                         val nearPending = pending != null && pts + FINAL_TARGET_EARLY_TOLERANCE_US_V47 >= pending
-                        val render = withinTrim && (emitEveryFrame || nearPending)
+                        val isEos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                        val render = !isEos && withinTrim && (emitEveryFrame || nearPending)
                         codec.releaseOutputBuffer(outputIndex, render)
                         if (render) {
                             reader.awaitAndUpdateFrame()
