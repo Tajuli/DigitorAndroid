@@ -7,6 +7,7 @@ import com.tajuli.digitorandroid.editor.model.ClipStabilizationV90
 import com.tajuli.digitorandroid.editor.model.StabilizationPathSampleV90
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineVisualMediaV21
+import com.tajuli.digitorandroid.editor.model.computeCameraLockCoverScaleV100
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
@@ -61,6 +62,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         onProgress(0f, "Preparing stabilization decoder…")
 
         val samples = ArrayList<StabilizationPathSampleV90>(targetTimesUs.size)
+        val referenceAnchorsV100 = ArrayList<ReferenceAnchorV100>()
         var previousGray: IntArray? = null
         var segmentReferenceGray: IntArray? = null
         var framesSinceReferenceProbe = 0
@@ -156,19 +158,25 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                                 !anchored.sceneCut &&
                                 anchored.confidence >= REFERENCE_RELOCK_MIN_CONFIDENCE_V97
                             ) {
-                                pathX = anchored.txPx / (width * .5f)
-                                pathY = anchored.tyPx / (height * .5f)
-                                val anchoredRsTrust = anchored.rotationScaleConfidenceV99
-                                    .coerceIn(0f, 1f)
-                                if (anchoredRsTrust >= REFERENCE_RS_RELOCK_MIN_TRUST_V99) {
-                                    pathRotation = anchored.rotationDegrees
-                                    pathLogScale = ln(
+                                // V100 never hard-snaps the live path to the direct reference pose.
+                                // Store the reference observation and solve the drift correction
+                                // offline after the whole clip is decoded. This removes the periodic
+                                // jerk created by V97's every-N-frame re-lock snap.
+                                referenceAnchorsV100 += ReferenceAnchorV100(
+                                    sampleIndex = samples.size,
+                                    segment = segmentV93,
+                                    pathX = anchored.txPx / (width * .5f),
+                                    pathY = anchored.tyPx / (height * .5f),
+                                    rotationDegrees = anchored.rotationDegrees,
+                                    logScale = ln(
                                         anchored.scale.coerceIn(
                                             REFERENCE_MIN_SCALE_V97,
                                             REFERENCE_MAX_SCALE_V97,
                                         ),
-                                    )
-                                }
+                                    ),
+                                    rotationScaleConfidence =
+                                        anchored.rotationScaleConfidenceV99.coerceIn(0f, 1f),
+                                )
                             }
                             framesSinceReferenceProbe = 0
                         }
@@ -202,16 +210,153 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         require(samples.size >= 2) {
             "Stabilization decoder could not read enough frames"
         }
-        onProgress(1f, "Finishing stabilization…")
+        onProgress(.985f, "Solving tripod lock…")
 
-        base.copy(
+        val tripodSamples = applyReferenceAnchorsV100(samples, referenceAnchorsV100)
+        val solved = base.copy(
             enabled = true,
             analyzedWidth = analyzedWidth,
             analyzedHeight = analyzedHeight,
-            samples = samples,
-            analysisVersionV93 = 99,
+            samples = tripodSamples,
+            analysisVersionV93 = 100,
+            cameraLockCoverScaleV100 = 1f,
         ).normalized()
+        val constantCameraLockZoom = solved.computeCameraLockCoverScaleV100()
+
+        onProgress(1f, "Finishing stabilization…")
+        solved.copy(cameraLockCoverScaleV100 = constantCameraLockZoom)
     }
+
+    private data class ReferenceAnchorV100(
+        val sampleIndex: Int,
+        val segment: Int,
+        val pathX: Float,
+        val pathY: Float,
+        val rotationDegrees: Float,
+        val logScale: Float,
+        val rotationScaleConfidence: Float,
+    )
+
+    private data class AnchorResidualV100(
+        val sampleIndex: Int,
+        val segment: Int,
+        val x: Float,
+        val y: Float,
+        val rotation: Float,
+        val logScale: Float,
+    )
+
+    /**
+     * V100 tripod solve.
+     *
+     * Incremental tracking stays continuous and captures high-frequency shake. Fixed-reference
+     * observations are converted into drift residuals, median-cleaned, then interpolated smoothly
+     * across the timeline. Unlike the old hard re-lock, the solved path has no anchor discontinuity.
+     */
+    private fun applyReferenceAnchorsV100(
+        rawSamples: List<StabilizationPathSampleV90>,
+        anchors: List<ReferenceAnchorV100>,
+    ): List<StabilizationPathSampleV90> {
+        if (rawSamples.size < 2 || anchors.isEmpty()) return rawSamples
+
+        val residualsBySegment = LinkedHashMap<Int, MutableList<AnchorResidualV100>>()
+        val firstIndexBySegment = LinkedHashMap<Int, Int>()
+        rawSamples.forEachIndexed { index, sample ->
+            firstIndexBySegment.putIfAbsent(sample.segmentV93, index)
+        }
+        firstIndexBySegment.forEach { (segment, index) ->
+            residualsBySegment.getOrPut(segment) { ArrayList() } += AnchorResidualV100(
+                sampleIndex = index,
+                segment = segment,
+                x = 0f,
+                y = 0f,
+                rotation = 0f,
+                logScale = 0f,
+            )
+        }
+
+        for (anchor in anchors) {
+            val raw = rawSamples.getOrNull(anchor.sampleIndex) ?: continue
+            if (raw.segmentV93 != anchor.segment) continue
+            val rsTrusted = anchor.rotationScaleConfidence >= REFERENCE_RS_RELOCK_MIN_TRUST_V99
+            residualsBySegment.getOrPut(anchor.segment) { ArrayList() } += AnchorResidualV100(
+                sampleIndex = anchor.sampleIndex,
+                segment = anchor.segment,
+                x = anchor.pathX - raw.pathX,
+                y = anchor.pathY - raw.pathY,
+                rotation = if (rsTrusted) anchor.rotationDegrees - raw.rotationDegrees else 0f,
+                logScale = if (rsTrusted) anchor.logScale - raw.logScale else 0f,
+            )
+        }
+
+        val cleanedBySegment = residualsBySegment.mapValues { (_, values) ->
+            val sorted = values.distinctBy { it.sampleIndex }.sortedBy { it.sampleIndex }
+            sorted.mapIndexed { index, value ->
+                if (index == 0 || index == sorted.lastIndex || sorted.size < 3) {
+                    value
+                } else {
+                    val neighborhood = sorted.subList(index - 1, index + 2)
+                    value.copy(
+                        x = medianV100(neighborhood.map { it.x }),
+                        y = medianV100(neighborhood.map { it.y }),
+                        rotation = medianV100(neighborhood.map { it.rotation }),
+                        logScale = medianV100(neighborhood.map { it.logScale }),
+                    )
+                }
+            }
+        }
+
+        return rawSamples.mapIndexed { index, sample ->
+            val anchorsForSegment = cleanedBySegment[sample.segmentV93].orEmpty()
+            if (anchorsForSegment.isEmpty()) return@mapIndexed sample
+
+            var left = anchorsForSegment.first()
+            var right = anchorsForSegment.last()
+            for (candidate in anchorsForSegment) {
+                if (candidate.sampleIndex <= index) left = candidate
+                if (candidate.sampleIndex >= index) {
+                    right = candidate
+                    break
+                }
+            }
+
+            val residual = if (left.sampleIndex == right.sampleIndex) {
+                left
+            } else {
+                val t = ((index - left.sampleIndex).toFloat() /
+                    (right.sampleIndex - left.sampleIndex).toFloat()).coerceIn(0f, 1f)
+                val smoothT = t * t * (3f - 2f * t)
+                AnchorResidualV100(
+                    sampleIndex = index,
+                    segment = sample.segmentV93,
+                    x = lerpV100(left.x, right.x, smoothT),
+                    y = lerpV100(left.y, right.y, smoothT),
+                    rotation = lerpV100(left.rotation, right.rotation, smoothT),
+                    logScale = lerpV100(left.logScale, right.logScale, smoothT),
+                )
+            }
+
+            sample.copy(
+                pathX = sample.pathX + residual.x,
+                pathY = sample.pathY + residual.y,
+                rotationDegrees = sample.rotationDegrees + residual.rotation,
+                logScale = sample.logScale + residual.logScale,
+            )
+        }
+    }
+
+    private fun medianV100(values: List<Float>): Float {
+        if (values.isEmpty()) return 0f
+        val sorted = values.sorted()
+        val middle = sorted.size / 2
+        return if (sorted.size % 2 == 1) {
+            sorted[middle]
+        } else {
+            (sorted[middle - 1] + sorted[middle]) * .5f
+        }
+    }
+
+    private fun lerpV100(a: Float, b: Float, t: Float): Float = a + (b - a) * t
 
     private fun Bitmap.toGrayV90(): IntArray {
         val width = width.coerceAtLeast(1)
@@ -731,8 +876,8 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         const val MAX_RANSAC_HYPOTHESES = 180
         const val MIN_RANSAC_BASELINE_PX = 18f
         const val SCENE_CUT_DIFFERENCE = 52f
-        const val REFERENCE_RELOCK_INTERVAL_FRAMES_V97 = 10
-        const val REFERENCE_SEARCH_RADIUS_V97 = 48
+        const val REFERENCE_RELOCK_INTERVAL_FRAMES_V97 = 6
+        const val REFERENCE_SEARCH_RADIUS_V97 = 56
         const val REFERENCE_COARSE_STEP_V97 = 6
         const val REFERENCE_RELOCK_MIN_CONFIDENCE_V97 = .38f
         const val REFERENCE_MIN_SCALE_V97 = .82f
