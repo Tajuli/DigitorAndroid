@@ -270,11 +270,30 @@ private fun matchPatchOneWayV1(
     val count = (PATCH_RADIUS_V1 * 2 + 1) * (PATCH_RADIUS_V1 * 2 + 1)
     val error = best.toFloat() / count.toFloat()
     if (error > MAX_PATCH_SAD_V1) return null
+
+    // V3: quadratic sub-pixel refinement removes the integer-pixel quantization that otherwise
+    // becomes visible as tripod micro-jitter after the inverse transform is rendered.
+    val centerCost = patchSadV1(from, to, width, x, y, bestDx, bestDy).toFloat()
+    val leftCost = if (bestDx > -SEARCH_RADIUS_V1) {
+        patchSadV1(from, to, width, x, y, bestDx - 1, bestDy).toFloat()
+    } else centerCost
+    val rightCost = if (bestDx < SEARCH_RADIUS_V1) {
+        patchSadV1(from, to, width, x, y, bestDx + 1, bestDy).toFloat()
+    } else centerCost
+    val upCost = if (bestDy > -SEARCH_RADIUS_V1) {
+        patchSadV1(from, to, width, x, y, bestDx, bestDy - 1).toFloat()
+    } else centerCost
+    val downCost = if (bestDy < SEARCH_RADIUS_V1) {
+        patchSadV1(from, to, width, x, y, bestDx, bestDy + 1).toFloat()
+    } else centerCost
+    val subX = quadraticOffsetV3(leftCost, centerCost, rightCost)
+    val subY = quadraticOffsetV3(upCost, centerCost, downCost)
+
     return MatchV1(
         x.toFloat(),
         y.toFloat(),
-        x + bestDx.toFloat(),
-        y + bestDy.toFloat(),
+        x + bestDx.toFloat() + subX,
+        y + bestDy.toFloat() + subY,
         error,
     )
 }
@@ -355,3 +374,229 @@ private const val MIN_STEP_SCALE_V1 = .94f
 private const val MAX_STEP_SCALE_V1 = 1.06f
 private const val MAX_STEP_ROTATION_V1 = 5f
 private const val SCENE_CUT_DIFFERENCE_V1 = 50f
+
+
+/**
+ * V3 Tripod tracker.
+ *
+ * Tracks are born only on the first frame of a scene segment. They are never reseeded. A track is
+ * removed permanently if it leaves the safe image area or fails forward/backward validation.
+ * Therefore IDs still alive on the final frame are exactly the reference points that stayed inside
+ * the frame for the whole segment.
+ */
+internal data class PersistentTripodTrackV3(
+    val id: Int,
+    val referenceX: Float,
+    val referenceY: Float,
+    val currentX: Float,
+    val currentY: Float,
+    val ageFrames: Int = 1,
+    val meanPatchError: Float = 0f,
+)
+
+internal data class TripodTrackObservationV3(
+    val id: Int,
+    val referenceX: Float,
+    val referenceY: Float,
+    val currentX: Float,
+    val currentY: Float,
+    val ageFrames: Int,
+    val meanPatchError: Float,
+)
+
+internal data class TripodReferencePoseV3(
+    val centerDxPx: Float,
+    val centerDyPx: Float,
+    val rotationDegreesImage: Float,
+    val scale: Float,
+    val confidence: Float,
+    val inlierTrackIds: Set<Int>,
+)
+
+internal fun seedPersistentTripodTracksV3(
+    frame: IntArray,
+    width: Int,
+    height: Int,
+): List<PersistentTripodTrackV3> {
+    val margin = TRIPOD_SAFE_MARGIN_V3
+    if (width <= margin * 2 || height <= margin * 2) return emptyList()
+
+    val candidates = ArrayList<CandidateV1>()
+    val usableW = width - margin * 2
+    val usableH = height - margin * 2
+    for (gy in 0 until GRID_ROWS_V1) {
+        val top = margin + usableH * gy / GRID_ROWS_V1
+        val bottom = margin + usableH * (gy + 1) / GRID_ROWS_V1
+        for (gx in 0 until GRID_COLUMNS_V1) {
+            val left = margin + usableW * gx / GRID_COLUMNS_V1
+            val right = margin + usableW * (gx + 1) / GRID_COLUMNS_V1
+            var best: CandidateV1? = null
+            var y = top + FEATURE_SCAN_STEP_V1 / 2
+            while (y < bottom) {
+                var x = left + FEATURE_SCAN_STEP_V1 / 2
+                while (x < right) {
+                    if (x in 4 until width - 4 && y in 4 until height - 4) {
+                        val score = textureScoreV1(frame, width, x, y)
+                        if (best == null || score > best.score) best = CandidateV1(x, y, score)
+                    }
+                    x += FEATURE_SCAN_STEP_V1
+                }
+                y += FEATURE_SCAN_STEP_V1
+            }
+            if (best != null && best.score >= MIN_TEXTURE_V1) candidates += best
+        }
+    }
+
+    return candidates.mapIndexed { index, point ->
+        PersistentTripodTrackV3(
+            id = index + 1,
+            referenceX = point.x.toFloat(),
+            referenceY = point.y.toFloat(),
+            currentX = point.x.toFloat(),
+            currentY = point.y.toFloat(),
+        )
+    }
+}
+
+internal fun advancePersistentTripodTracksV3(
+    previous: IntArray,
+    current: IntArray,
+    width: Int,
+    height: Int,
+    tracks: List<PersistentTripodTrackV3>,
+): List<PersistentTripodTrackV3> {
+    if (tracks.isEmpty()) return emptyList()
+    val safe = TRIPOD_SAFE_MARGIN_V3.toFloat()
+    val output = ArrayList<PersistentTripodTrackV3>(tracks.size)
+
+    for (track in tracks) {
+        val x = track.currentX.roundToInt()
+        val y = track.currentY.roundToInt()
+        if (
+            track.currentX < safe ||
+            track.currentX > width - 1f - safe ||
+            track.currentY < safe ||
+            track.currentY > height - 1f - safe
+        ) continue
+
+        val match = matchPatchBidirectionalV1(previous, current, width, height, x, y)
+            ?: continue
+        if (
+            match.qx < safe ||
+            match.qx > width - 1f - safe ||
+            match.qy < safe ||
+            match.qy > height - 1f - safe
+        ) continue
+
+        val age = track.ageFrames + 1
+        val meanError = (
+            (track.meanPatchError * track.ageFrames.toFloat()) + match.error
+            ) / age.toFloat()
+        if (meanError > TRIPOD_MAX_MEAN_PATCH_ERROR_V3) continue
+
+        output += track.copy(
+            currentX = match.qx,
+            currentY = match.qy,
+            ageFrames = age,
+            meanPatchError = meanError,
+        )
+    }
+    return output
+}
+
+internal fun tripodObservationsV3(
+    tracks: List<PersistentTripodTrackV3>,
+): List<TripodTrackObservationV3> = tracks.map { track ->
+    TripodTrackObservationV3(
+        id = track.id,
+        referenceX = track.referenceX,
+        referenceY = track.referenceY,
+        currentX = track.currentX,
+        currentY = track.currentY,
+        ageFrames = track.ageFrames,
+        meanPatchError = track.meanPatchError,
+    )
+}
+
+internal fun survivingTripodTrackIdsV3(
+    frames: List<List<TripodTrackObservationV3>>,
+): Set<Int> = frames.lastOrNull().orEmpty().mapTo(linkedSetOf()) { it.id }
+
+internal fun estimateTripodReferencePoseV3(
+    observations: List<TripodTrackObservationV3>,
+    survivorIds: Set<Int>,
+    width: Int,
+    height: Int,
+): TripodReferencePoseV3? {
+    val eligible = observations
+        .asSequence()
+        .filter { it.id in survivorIds }
+        .filter { it.meanPatchError <= TRIPOD_MAX_MEAN_PATCH_ERROR_V3 }
+        .map {
+            MatchV1(
+                px = it.referenceX,
+                py = it.referenceY,
+                qx = it.currentX,
+                qy = it.currentY,
+                error = it.meanPatchError,
+            )
+        }
+        .toList()
+
+    if (eligible.size < TRIPOD_MIN_SURVIVORS_V3) return null
+    val hypothesis = ransacSimilarityV1(eligible) ?: return null
+    val inliers = eligible.filter {
+        reprojectionErrorV1(hypothesis, it) <= TRIPOD_REFERENCE_INLIER_PX_V3
+    }
+    if (inliers.size < TRIPOD_MIN_SURVIVORS_V3) return null
+
+    val refined = fitSimilarityAllV1(inliers) ?: return null
+    val scale = sqrt(refined.a * refined.a + refined.b * refined.b)
+    val rotation = Math.toDegrees(atan2(refined.b.toDouble(), refined.a.toDouble())).toFloat()
+    if (scale !in TRIPOD_REFERENCE_MIN_SCALE_V3..TRIPOD_REFERENCE_MAX_SCALE_V3) return null
+
+    val centerX = (width - 1) * .5f
+    val centerY = (height - 1) * .5f
+    val mappedCenterX = refined.a * centerX - refined.b * centerY + refined.tx
+    val mappedCenterY = refined.b * centerX + refined.a * centerY + refined.ty
+    val averageError = inliers.sumOf { reprojectionErrorV1(refined, it).toDouble() }
+        .toFloat() / inliers.size.toFloat()
+    val inlierRatio = inliers.size.toFloat() / eligible.size.toFloat()
+    val coverage = spatialCoverageV1(inliers, width, height)
+    val confidence = (
+        inlierRatio * .40f +
+            coverage * .35f +
+            (1f - averageError / TRIPOD_REFERENCE_INLIER_PX_V3).coerceIn(0f, 1f) * .25f
+        ).coerceIn(0f, 1f)
+
+    val inlierIds = inliers.mapNotNull { match ->
+        observations.firstOrNull {
+            it.id in survivorIds &&
+                abs(it.referenceX - match.px) < .01f &&
+                abs(it.referenceY - match.py) < .01f
+        }?.id
+    }.toSet()
+
+    return TripodReferencePoseV3(
+        centerDxPx = mappedCenterX - centerX,
+        centerDyPx = mappedCenterY - centerY,
+        rotationDegreesImage = rotation,
+        scale = scale,
+        confidence = confidence,
+        inlierTrackIds = inlierIds,
+    )
+}
+
+private const val TRIPOD_SAFE_MARGIN_V3 = 30
+private const val TRIPOD_MIN_SURVIVORS_V3 = 6
+private const val TRIPOD_MAX_MEAN_PATCH_ERROR_V3 = 26f
+private const val TRIPOD_REFERENCE_INLIER_PX_V3 = 2.2f
+private const val TRIPOD_REFERENCE_MIN_SCALE_V3 = .90f
+private const val TRIPOD_REFERENCE_MAX_SCALE_V3 = 1.10f
+
+
+private fun quadraticOffsetV3(minus: Float, center: Float, plus: Float): Float {
+    val denominator = minus - 2f * center + plus
+    if (abs(denominator) < 1e-4f) return 0f
+    return (.5f * (minus - plus) / denominator).coerceIn(-.75f, .75f)
+}
