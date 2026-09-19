@@ -370,7 +370,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             analyzedWidth = analyzedWidth,
             analyzedHeight = analyzedHeight,
             samples = multiModeSamples,
-            analysisVersionV93 = 105,
+            analysisVersionV93 = 106,
             cameraLockCoverScaleV100 = 1f,
             cameraLockPerspectiveCoverScaleV102 = 1f,
         ).normalized()
@@ -1010,16 +1010,29 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val refined = solveHomographyLeastSquaresV102(projectiveInliers, width, height)
             ?: first
 
-        val averageProjectiveError = projectiveInliers
-            .sumOf {
-                perspectiveReprojectionErrorPxV102(refined, it, width, height).toDouble()
-            }
-            .toFloat() / projectiveInliers.size
+        val similarityErrorsV106 = projectiveInliers.map {
+            reprojectionErrorV93(fit, it)
+        }
+        val projectiveErrorsV106 = projectiveInliers.map {
+            perspectiveReprojectionErrorPxV102(refined, it, width, height)
+        }
+        val averageProjectiveError = projectiveErrorsV106.average().toFloat()
         val geometryTrust = (
             1f - averageProjectiveError / PERSPECTIVE_RANSAC_ERROR_PX_V102
             ).coerceIn(0f, 1f)
+        // V106: an 8-DOF homography is only allowed to depart from the safer similarity
+        // baseline when its extra parameters produce a meaningful complexity-penalized
+        // reprojection improvement. Otherwise Perspective overfits tracker noise and the
+        // inverse render warp visibly shakes a shot that was already steadier.
+        val modelTrustV106 = perspectiveModelTrustV106(
+            similarityErrorsPx = similarityErrorsV106,
+            projectiveErrorsPx = projectiveErrorsV106,
+        )
         val projectiveBlend = (
-            perspectiveTrust * coverageTrust * (.35f + .65f * geometryTrust)
+            perspectiveTrust *
+                coverageTrust *
+                (.35f + .65f * geometryTrust) *
+                modelTrustV106
             ).coerceIn(0f, MAX_PERSPECTIVE_BLEND_V102)
 
         if (projectiveBlend <= .001f) return similarityQuad
