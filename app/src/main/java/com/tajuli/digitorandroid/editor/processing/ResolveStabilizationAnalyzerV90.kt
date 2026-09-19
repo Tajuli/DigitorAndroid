@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import com.tajuli.digitorandroid.editor.model.ClipStabilizationV90
 import com.tajuli.digitorandroid.editor.model.PerspectiveQuadV102
+import com.tajuli.digitorandroid.editor.model.StabilizationModeV90
 import com.tajuli.digitorandroid.editor.model.StabilizationPathSampleV90
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineVisualMediaV21
@@ -38,7 +39,8 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
 
     suspend fun analyze(
         clip: TimelineClip,
-        base: ClipStabilizationV90 = clip.stabilizationV90 ?: ClipStabilizationV90(),
+        base: ClipStabilizationV90 = clip.stabilizationV90
+            ?: ClipStabilizationV90(mode = StabilizationModeV90.PERSPECTIVE),
         onProgress: (Float, String) -> Unit = { _, _ -> },
     ): ClipStabilizationV90 = withContext(Dispatchers.Default) {
         val settings = base.normalized()
