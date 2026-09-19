@@ -35,6 +35,7 @@ class VirtualCameraAnalyzerV1(context: Context) {
         val durationUs = endUs - startUs
         val raw = ArrayList<RawCameraSampleV1>()
         var previousGray: IntArray? = null
+        var segmentReferenceGray: IntArray? = null
         var segment = 0
         var pathX = 0f
         var pathY = 0f
@@ -60,6 +61,7 @@ class VirtualCameraAnalyzerV1(context: Context) {
                 val current = bitmap.toGrayV1()
                 val previous = previousGray
                 var confidence = 1f
+                var newReferenceFrame = previous == null
 
                 if (previous != null && previous.size == current.size) {
                     val motion = estimatePairMotionV1(previous, current, width, height)
@@ -71,6 +73,7 @@ class VirtualCameraAnalyzerV1(context: Context) {
                             pathRotation = 0f
                             pathLogScale = 0f
                             confidence = 1f
+                            newReferenceFrame = true
                         }
                         motion.confidence >= MIN_ACCEPTED_CONFIDENCE_V1 -> {
                             confidence = motion.confidence
@@ -95,6 +98,36 @@ class VirtualCameraAnalyzerV1(context: Context) {
                     }
                 }
 
+                if (newReferenceFrame || segmentReferenceGray == null) {
+                    segmentReferenceGray = current.copyOf()
+                }
+
+                var referenceX: Float? = null
+                var referenceY: Float? = null
+                var referenceRotation: Float? = null
+                var referenceLogScale: Float? = null
+                var referenceConfidence = 0f
+
+                val reference = segmentReferenceGray
+                if (
+                    !newReferenceFrame &&
+                    reference != null &&
+                    reference.size == current.size &&
+                    decoded % REFERENCE_PROBE_INTERVAL_FRAMES_V2 == 0
+                ) {
+                    val direct = estimatePairMotionV1(reference, current, width, height)
+                    if (
+                        !direct.sceneCut &&
+                        direct.confidence >= MIN_REFERENCE_CONFIDENCE_V2
+                    ) {
+                        referenceX = direct.centerDxPx / max(1f, width * .5f)
+                        referenceY = -direct.centerDyPx / max(1f, height * .5f)
+                        referenceRotation = -direct.rotationDegreesImage
+                        referenceLogScale = ln(direct.scale.coerceIn(.90f, 1.10f))
+                        referenceConfidence = direct.confidence
+                    }
+                }
+
                 raw += RawCameraSampleV1(
                     sourceTimeUs = sourceTimeUs,
                     segment = segment,
@@ -103,6 +136,11 @@ class VirtualCameraAnalyzerV1(context: Context) {
                     y = pathY,
                     rotation = pathRotation,
                     logScale = pathLogScale,
+                    referenceX = referenceX,
+                    referenceY = referenceY,
+                    referenceRotation = referenceRotation,
+                    referenceLogScale = referenceLogScale,
+                    referenceConfidence = referenceConfidence,
                 )
                 previousGray = current
                 decoded++
@@ -129,7 +167,7 @@ class VirtualCameraAnalyzerV1(context: Context) {
             translationCoverScale = covers.translation,
             similarityCoverScale = covers.similarity,
             tripodCoverScale = covers.tripod,
-            analysisVersion = 1,
+            analysisVersion = 2,
         ).normalized()
     }
 
@@ -141,6 +179,11 @@ class VirtualCameraAnalyzerV1(context: Context) {
         val y: Float,
         val rotation: Float,
         val logScale: Float,
+        val referenceX: Float? = null,
+        val referenceY: Float? = null,
+        val referenceRotation: Float? = null,
+        val referenceLogScale: Float? = null,
+        val referenceConfidence: Float = 0f,
     )
 
     private fun solveSegmentsV1(raw: List<RawCameraSampleV1>): List<VirtualCameraSampleV1> {
@@ -165,10 +208,35 @@ class VirtualCameraAnalyzerV1(context: Context) {
             if (virtualPathImprovementV1(rawR, smoothR) < MIN_SOLVER_GAIN_V1) smoothR = rawR
             if (virtualPathImprovementV1(rawS, smoothS) < MIN_SOLVER_GAIN_V1) smoothS = rawS
 
-            val lockX = weightedMeanV1(rawX, confidence)
-            val lockY = weightedMeanV1(rawY, confidence)
-            val lockR = weightedMeanV1(rawR, confidence)
-            val lockS = weightedMeanV1(rawS, confidence)
+            val tripodAnchorsV2 = items.mapIndexedNotNull { index, item ->
+                val x = item.referenceX ?: return@mapIndexedNotNull null
+                val y = item.referenceY ?: return@mapIndexedNotNull null
+                val rotation = item.referenceRotation ?: return@mapIndexedNotNull null
+                val logScale = item.referenceLogScale ?: return@mapIndexedNotNull null
+                TripodReferenceAnchorV2(
+                    sampleIndex = index,
+                    x = x,
+                    y = y,
+                    rotationDegrees = rotation,
+                    logScale = logScale,
+                    confidence = item.referenceConfidence,
+                )
+            }
+            val tripodPathV2 = correctTripodDriftV2(
+                rawX = rawX,
+                rawY = rawY,
+                rawRotationDegrees = rawR,
+                rawLogScale = rawS,
+                anchors = tripodAnchorsV2,
+            )
+
+            // Tripod is a true fixed-reference target: the first frame of each scene segment.
+            // Pairwise motion still supplies high-frequency shake; sparse reference probes only
+            // remove its low-frequency accumulated drift.
+            val lockX = tripodPathV2.x.firstOrNull() ?: 0f
+            val lockY = tripodPathV2.y.firstOrNull() ?: 0f
+            val lockR = tripodPathV2.rotationDegrees.firstOrNull() ?: 0f
+            val lockS = tripodPathV2.logScale.firstOrNull() ?: 0f
 
             for (i in 0 until n) {
                 val item = items[i]
@@ -180,6 +248,10 @@ class VirtualCameraAnalyzerV1(context: Context) {
                     rawY = rawY[i],
                     rawRotationDegrees = rawR[i],
                     rawLogScale = rawS[i],
+                    tripodRawX = tripodPathV2.x[i],
+                    tripodRawY = tripodPathV2.y[i],
+                    tripodRawRotationDegrees = tripodPathV2.rotationDegrees[i],
+                    tripodRawLogScale = tripodPathV2.logScale[i],
                     smoothX = smoothX[i],
                     smoothY = smoothY[i],
                     smoothRotationDegrees = smoothR[i],
@@ -237,10 +309,10 @@ class VirtualCameraAnalyzerV1(context: Context) {
             )
 
             val tripodCorrection = relativeCorrectionV1(
-                sample.rawX,
-                sample.rawY,
-                sample.rawRotationDegrees,
-                exp(sample.rawLogScale.toDouble()).toFloat(),
+                sample.tripodRawX,
+                sample.tripodRawY,
+                sample.tripodRawRotationDegrees,
+                exp(sample.tripodRawLogScale.toDouble()).toFloat(),
                 sample.lockX,
                 sample.lockY,
                 sample.lockRotationDegrees,
@@ -334,6 +406,8 @@ class VirtualCameraAnalyzerV1(context: Context) {
     private companion object {
         const val ANALYSIS_LONG_EDGE_V1 = 384
         const val MIN_ACCEPTED_CONFIDENCE_V1 = .34f
+        const val REFERENCE_PROBE_INTERVAL_FRAMES_V2 = 6
+        const val MIN_REFERENCE_CONFIDENCE_V2 = .48f
         const val TRANSLATION_LAMBDA_V1 = 150f
         const val ROTATION_LAMBDA_V1 = 210f
         const val SCALE_LAMBDA_V1 = 260f
