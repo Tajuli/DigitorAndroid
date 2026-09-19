@@ -69,6 +69,8 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
 
         val samples = ArrayList<StabilizationPathSampleV90>(targetTimesUs.size)
         val referenceAnchorsV100 = ArrayList<ReferenceAnchorV100>()
+        var persistentTracksV103 = emptyList<PersistentTrackV103>()
+        var nextPersistentTrackIdV103 = 1
         var previousGray: IntArray? = null
         var segmentReferenceGray: IntArray? = null
         var framesSinceReferenceProbe = 0
@@ -102,15 +104,52 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                 val previous = previousGray
                 val confidence: Float
                 val rotationScaleConfidence: Float
+                var backgroundTrackCount = 0
+                var backgroundTrackConfidence = 0f
+
                 if (previous == null || previous.size != current.size) {
                     confidence = 1f
                     rotationScaleConfidence = 1f
                     segmentReferenceGray = current.copyOf()
                     framesSinceReferenceProbe = 0
+                    val seeded = replenishPersistentTracksV103(
+                        frame = current,
+                        width = width,
+                        height = height,
+                        existing = emptyList(),
+                        nextTrackId = nextPersistentTrackIdV103,
+                        seedReference = true,
+                    )
+                    persistentTracksV103 = seeded.tracks
+                    nextPersistentTrackIdV103 = seeded.nextTrackId
                 } else {
-                    val motion = estimateSimilarityV90(previous, current, width, height)
+                    // V103: keep feature identity across frames. Long-lived tracks that repeatedly
+                    // agree with the dominant camera model become high-weight background evidence.
+                    // Foreground tracks lose consensus and are eventually discarded/replenished.
+                    val tracked = trackPersistentFeaturesV103(
+                        previous = previous,
+                        current = current,
+                        width = width,
+                        height = height,
+                        tracks = persistentTracksV103,
+                    )
+                    val motion = if (tracked.matches.size >= MIN_FEATURES) {
+                        estimateSimilarityFromMatchesV103(
+                            previous = previous,
+                            current = current,
+                            width = width,
+                            height = height,
+                            matches = tracked.matches,
+                            searchRadius = PERSISTENT_SEARCH_RADIUS_V103,
+                            detectSceneCut = true,
+                        )
+                    } else {
+                        estimateSimilarityV90(previous, current, width, height)
+                    }
+
                     confidence = motion.confidence
                     rotationScaleConfidence = motion.rotationScaleConfidenceV99
+
                     if (motion.sceneCut) {
                         segmentV93++
                         pathX = 0f
@@ -120,10 +159,48 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                         perspectivePathV102 = PerspectiveQuadV102.IDENTITY
                         segmentReferenceGray = current.copyOf()
                         framesSinceReferenceProbe = 0
+                        val seeded = replenishPersistentTracksV103(
+                            frame = current,
+                            width = width,
+                            height = height,
+                            existing = emptyList(),
+                            nextTrackId = nextPersistentTrackIdV103,
+                            seedReference = true,
+                        )
+                        persistentTracksV103 = seeded.tracks
+                        nextPersistentTrackIdV103 = seeded.nextTrackId
                     } else {
+                        val consensusTracks = if (motion.backgroundInlierTrackIdsV103.isNotEmpty()) {
+                            applyBackgroundConsensusV103(
+                                tracks = tracked.tracks,
+                                inlierTrackIds = motion.backgroundInlierTrackIdsV103,
+                            )
+                        } else {
+                            tracked.tracks
+                        }
+                        val replenished = replenishPersistentTracksV103(
+                            frame = current,
+                            width = width,
+                            height = height,
+                            existing = consensusTracks,
+                            nextTrackId = nextPersistentTrackIdV103,
+                            seedReference = false,
+                        )
+                        persistentTracksV103 = replenished.tracks
+                        nextPersistentTrackIdV103 = replenished.nextTrackId
+                        backgroundTrackCount = persistentTracksV103.count {
+                            stableBackgroundTrackV103(
+                                ageFrames = it.ageFrames,
+                                consensusFrames = it.consensusFrames,
+                                weight = it.weightV103(),
+                            )
+                        }
+                        backgroundTrackConfidence = motion.persistentSupportV103
+
                         if (motion.confidence >= MIN_ACCEPTED_CONFIDENCE) {
-                            // V97 composes the incremental similarity transform instead of adding
-                            // parameters independently.
+                            // Compose the trusted incremental similarity transform. V103 only changes
+                            // where the correspondences come from: long-lived background tracks are
+                            // preferred over one-frame texture.
                             val rsTrust = motion.rotationScaleConfidenceV99
                                 .coerceIn(0f, 1f)
                             val trustedRotation = motion.rotationDegrees * rsTrust
@@ -149,10 +226,10 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                             }
                         }
 
-                        // V97 reference re-lock: incremental tracking is excellent at high-frequency
-                        // shake but slowly drifts. Periodically match the current frame directly to
-                        // the first stable frame of this scene using a wider search. A confident
-                        // direct pose replaces the accumulated pose and removes long-term drift.
+                        // Camera Lock prefers surviving points that were born on the scene reference.
+                        // Their stored reference coordinates provide a direct fixed-background pose
+                        // without re-detecting a moving foreground object. Wide image matching remains
+                        // a fallback when too few persistent reference tracks survive.
                         framesSinceReferenceProbe++
                         val reference = segmentReferenceGray
                         if (
@@ -160,22 +237,31 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                             reference.size == current.size &&
                             framesSinceReferenceProbe >= REFERENCE_RELOCK_INTERVAL_FRAMES_V97
                         ) {
-                            val anchored = estimateSimilarityV90(
-                                previous = reference,
-                                current = current,
-                                width = width,
-                                height = height,
-                                searchRadius = REFERENCE_SEARCH_RADIUS_V97,
-                                coarseStep = REFERENCE_COARSE_STEP_V97,
-                            )
+                            val referenceMatches = persistentReferenceMatchesV103(persistentTracksV103)
+                            val anchored = if (referenceMatches.size >= MIN_REFERENCE_BACKGROUND_TRACKS_V103) {
+                                estimateSimilarityFromMatchesV103(
+                                    previous = reference,
+                                    current = current,
+                                    width = width,
+                                    height = height,
+                                    matches = referenceMatches,
+                                    searchRadius = REFERENCE_SEARCH_RADIUS_V97,
+                                    detectSceneCut = false,
+                                )
+                            } else {
+                                estimateSimilarityV90(
+                                    previous = reference,
+                                    current = current,
+                                    width = width,
+                                    height = height,
+                                    searchRadius = REFERENCE_SEARCH_RADIUS_V97,
+                                    coarseStep = REFERENCE_COARSE_STEP_V97,
+                                )
+                            }
                             if (
                                 !anchored.sceneCut &&
                                 anchored.confidence >= REFERENCE_RELOCK_MIN_CONFIDENCE_V97
                             ) {
-                                // V100 never hard-snaps the live path to the direct reference pose.
-                                // Store the reference observation and solve the drift correction
-                                // offline after the whole clip is decoded. This removes the periodic
-                                // jerk created by V97's every-N-frame re-lock snap.
                                 referenceAnchorsV100 += ReferenceAnchorV100(
                                     sampleIndex = samples.size,
                                     segment = segmentV93,
@@ -208,6 +294,8 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                     segmentV93 = segmentV93,
                     rotationScaleConfidenceV99 = rotationScaleConfidence,
                     perspectivePathV102 = perspectivePathV102,
+                    persistentBackgroundTracksV103 = backgroundTrackCount,
+                    backgroundTrackConfidenceV103 = backgroundTrackConfidence,
                 )
                 previousGray = current
 
@@ -216,7 +304,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                     .coerceIn(0f, 1f)
                 onProgress(
                     progress,
-                    "Analyzing camera motion · ${(progress * 100f).roundToInt()}%",
+                    "Tracking background · $backgroundTrackCount stable points · ${(progress * 100f).roundToInt()}%",
                 )
             } finally {
                 if (!bitmap.isRecycled) bitmap.recycle()
@@ -249,7 +337,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             analyzedWidth = analyzedWidth,
             analyzedHeight = analyzedHeight,
             samples = multiModeSamples,
-            analysisVersionV93 = 102,
+            analysisVersionV93 = 103,
             cameraLockCoverScaleV100 = 1f,
             cameraLockPerspectiveCoverScaleV102 = 1f,
         ).normalized()
@@ -395,6 +483,183 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
 
     private fun lerpV100(a: Float, b: Float, t: Float): Float = a + (b - a) * t
 
+    private data class PersistentTrackV103(
+        val id: Int,
+        val x: Float,
+        val y: Float,
+        val referenceX: Float?,
+        val referenceY: Float?,
+        val ageFrames: Int = 1,
+        val consensusFrames: Int = 0,
+        val outlierFrames: Int = 0,
+        val lastSad: Float = 0f,
+    ) {
+        fun weightV103(): Float = backgroundTrackWeightV103(
+            ageFrames = ageFrames,
+            consensusFrames = consensusFrames,
+            normalizedSad = lastSad,
+        )
+    }
+
+    private data class PersistentTrackSetV103(
+        val tracks: List<PersistentTrackV103>,
+        val nextTrackId: Int,
+    )
+
+    private data class PersistentFrameTrackingV103(
+        val tracks: List<PersistentTrackV103>,
+        val matches: List<MatchV90>,
+    )
+
+    private fun trackPersistentFeaturesV103(
+        previous: IntArray,
+        current: IntArray,
+        width: Int,
+        height: Int,
+        tracks: List<PersistentTrackV103>,
+    ): PersistentFrameTrackingV103 {
+        if (tracks.isEmpty()) return PersistentFrameTrackingV103(emptyList(), emptyList())
+
+        val nextTracks = ArrayList<PersistentTrackV103>(tracks.size)
+        val matches = ArrayList<MatchV90>(tracks.size)
+        for (track in tracks) {
+            val match = matchPatchV90(
+                previous = previous,
+                current = current,
+                width = width,
+                height = height,
+                x = track.x.roundToInt(),
+                y = track.y.roundToInt(),
+                searchRadius = PERSISTENT_SEARCH_RADIUS_V103,
+                coarseStep = PERSISTENT_COARSE_STEP_V103,
+            ) ?: continue
+
+            val next = track.copy(
+                x = match.qx,
+                y = match.qy,
+                ageFrames = track.ageFrames + 1,
+                lastSad = match.sad,
+            )
+            nextTracks += next
+            matches += match.copy(
+                trackIdV103 = next.id,
+                trackAgeV103 = next.ageFrames,
+                backgroundWeightV103 = next.weightV103(),
+            )
+        }
+        return PersistentFrameTrackingV103(nextTracks, matches)
+    }
+
+    private fun applyBackgroundConsensusV103(
+        tracks: List<PersistentTrackV103>,
+        inlierTrackIds: Set<Int>,
+    ): List<PersistentTrackV103> =
+        tracks.mapNotNull { track ->
+            val agreed = track.id in inlierTrackIds
+            val updated = if (agreed) {
+                track.copy(
+                    consensusFrames = track.consensusFrames + 1,
+                    outlierFrames = 0,
+                )
+            } else {
+                track.copy(
+                    consensusFrames = (track.consensusFrames - 2).coerceAtLeast(0),
+                    outlierFrames = track.outlierFrames + 1,
+                )
+            }
+            if (
+                updated.outlierFrames >= MAX_PERSISTENT_OUTLIER_STREAK_V103 &&
+                updated.ageFrames >= MIN_PERSISTENT_DROP_AGE_V103
+            ) {
+                null
+            } else {
+                updated
+            }
+        }
+
+    private fun replenishPersistentTracksV103(
+        frame: IntArray,
+        width: Int,
+        height: Int,
+        existing: List<PersistentTrackV103>,
+        nextTrackId: Int,
+        seedReference: Boolean,
+    ): PersistentTrackSetV103 {
+        if (width <= 0 || height <= 0) return PersistentTrackSetV103(existing, nextTrackId)
+        val tracks = existing.toMutableList()
+        if (tracks.size >= MAX_PERSISTENT_TRACKS_V103) {
+            return PersistentTrackSetV103(tracks, nextTrackId)
+        }
+
+        val margin = PERSISTENT_SEARCH_RADIUS_V103 + PATCH_RADIUS + 3
+        if (width <= margin * 2 || height <= margin * 2) {
+            return PersistentTrackSetV103(tracks, nextTrackId)
+        }
+
+        val candidates = ArrayList<CandidateV90>()
+        for (gy in 1..PERSISTENT_GRID_ROWS_V103) {
+            val y = margin +
+                ((height - margin * 2) * gy / (PERSISTENT_GRID_ROWS_V103 + 1f)).roundToInt()
+            for (gx in 1..PERSISTENT_GRID_COLUMNS_V103) {
+                val x = margin +
+                    ((width - margin * 2) * gx / (PERSISTENT_GRID_COLUMNS_V103 + 1f)).roundToInt()
+                candidates += CandidateV90(x, y, textureScoreV90(frame, width, x, y))
+            }
+        }
+
+        var id = nextTrackId
+        val minimumSpacingSquared =
+            MIN_PERSISTENT_TRACK_SPACING_PX_V103 * MIN_PERSISTENT_TRACK_SPACING_PX_V103
+        for (candidate in candidates.sortedByDescending { it.texture }) {
+            if (tracks.size >= MAX_PERSISTENT_TRACKS_V103) break
+            if (candidate.texture < MIN_PERSISTENT_TEXTURE_V103) continue
+
+            val tooClose = tracks.any { track ->
+                val dx = track.x - candidate.x
+                val dy = track.y - candidate.y
+                dx * dx + dy * dy < minimumSpacingSquared
+            }
+            if (tooClose) continue
+
+            tracks += PersistentTrackV103(
+                id = id++,
+                x = candidate.x.toFloat(),
+                y = candidate.y.toFloat(),
+                referenceX = if (seedReference) candidate.x.toFloat() else null,
+                referenceY = if (seedReference) candidate.y.toFloat() else null,
+            )
+        }
+        return PersistentTrackSetV103(tracks, id)
+    }
+
+    private fun persistentReferenceMatchesV103(
+        tracks: List<PersistentTrackV103>,
+    ): List<MatchV90> =
+        tracks.mapNotNull { track ->
+            val referenceX = track.referenceX ?: return@mapNotNull null
+            val referenceY = track.referenceY ?: return@mapNotNull null
+            val weight = track.weightV103()
+            if (
+                !stableBackgroundTrackV103(
+                    ageFrames = track.ageFrames,
+                    consensusFrames = track.consensusFrames,
+                    weight = weight,
+                )
+            ) {
+                return@mapNotNull null
+            }
+            MatchV90(
+                px = referenceX,
+                py = referenceY,
+                qx = track.x,
+                qy = track.y,
+                sad = track.lastSad,
+                trackIdV103 = track.id,
+                trackAgeV103 = track.ageFrames,
+                backgroundWeightV103 = weight,
+            )
+        }
+
     private fun Bitmap.toGrayV90(): IntArray {
         val width = width.coerceAtLeast(1)
         val height = height.coerceAtLeast(1)
@@ -416,6 +681,9 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val qx: Float,
         val qy: Float,
         val sad: Float,
+        val trackIdV103: Int = -1,
+        val trackAgeV103: Int = 1,
+        val backgroundWeightV103: Float = FRESH_MATCH_WEIGHT_V103,
     )
     private data class SimilarityV90(
         val txPx: Float = 0f,
@@ -427,6 +695,8 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val rotationScaleConfidenceV99: Float = 0f,
         val perspectiveDeltaV102: PerspectiveQuadV102? = null,
         val perspectiveConfidenceV102: Float = 0f,
+        val backgroundInlierTrackIdsV103: Set<Int> = emptySet(),
+        val persistentSupportV103: Float = 0f,
     )
 
     /**
@@ -452,7 +722,6 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val margin = searchRadius + PATCH_RADIUS + 3
         if (width <= margin * 2 || height <= margin * 2) return SimilarityV90()
 
-        val frameDifference = frameDifferenceV93(previous, current)
         val candidates = ArrayList<CandidateV90>()
         for (gy in 1..GRID_ROWS) {
             val y = margin + ((height - margin * 2) * gy / (GRID_ROWS + 1f)).roundToInt()
@@ -461,11 +730,9 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                 candidates += CandidateV90(x, y, textureScoreV90(previous, width, x, y))
             }
         }
-
         val chosen = candidates
             .sortedByDescending { it.texture }
             .take(MAX_FEATURES)
-
         val matches = chosen.mapNotNull { candidate ->
             matchPatchV90(
                 previous,
@@ -478,18 +745,38 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                 coarseStep,
             )
         }
+        return estimateSimilarityFromMatchesV103(
+            previous = previous,
+            current = current,
+            width = width,
+            height = height,
+            matches = matches,
+            searchRadius = searchRadius,
+            detectSceneCut = true,
+        )
+    }
 
+    private fun estimateSimilarityFromMatchesV103(
+        previous: IntArray,
+        current: IntArray,
+        width: Int,
+        height: Int,
+        matches: List<MatchV90>,
+        searchRadius: Int,
+        detectSceneCut: Boolean,
+    ): SimilarityV90 {
+        val frameDifference = frameDifferenceV93(previous, current)
         if (matches.size < MIN_FEATURES) {
             return SimilarityV90(
                 confidence = (matches.size / MIN_FEATURES.toFloat() * .12f).coerceIn(0f, .12f),
-                sceneCut = frameDifference >= SCENE_CUT_DIFFERENCE,
+                sceneCut = detectSceneCut && frameDifference >= SCENE_CUT_DIFFERENCE,
             )
         }
 
         val hypothesis = ransacSimilarityFitV93(matches, width, height)
             ?: return SimilarityV90(
                 confidence = .05f,
-                sceneCut = frameDifference >= SCENE_CUT_DIFFERENCE,
+                sceneCut = detectSceneCut && frameDifference >= SCENE_CUT_DIFFERENCE,
             )
 
         val inliers = matches.filter {
@@ -498,15 +785,28 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         if (inliers.size < MIN_FEATURES) {
             return SimilarityV90(
                 confidence = .08f,
-                sceneCut = frameDifference >= SCENE_CUT_DIFFERENCE,
+                sceneCut = detectSceneCut && frameDifference >= SCENE_CUT_DIFFERENCE,
             )
         }
 
-        val fitted = fitSimilarityFitAllV93(inliers, width, height) ?: return SimilarityV90(confidence = .05f)
+        val fitted = fitSimilarityFitAllV93(inliers, width, height)
+            ?: return SimilarityV90(confidence = .05f)
         val fittedPublic = fitted.asSimilarityV90()
-        val averageError = inliers.sumOf { reprojectionErrorV93(fitted, it).toDouble() }.toFloat() / inliers.size
-        val averageSad = inliers.sumOf { it.sad.toDouble() }.toFloat() / inliers.size
-        val inlierRatio = inliers.size.toFloat() / matches.size.toFloat()
+
+        val inlierWeight = inliers.sumOf {
+            it.backgroundWeightV103.coerceIn(MIN_MATCH_WEIGHT_V103, 1f).toDouble()
+        }.toFloat().coerceAtLeast(.001f)
+        val matchWeight = matches.sumOf {
+            it.backgroundWeightV103.coerceIn(MIN_MATCH_WEIGHT_V103, 1f).toDouble()
+        }.toFloat().coerceAtLeast(.001f)
+        val averageError = inliers.sumOf {
+            reprojectionErrorV93(fitted, it).toDouble() *
+                it.backgroundWeightV103.coerceIn(MIN_MATCH_WEIGHT_V103, 1f)
+        }.toFloat() / inlierWeight
+        val averageSad = inliers.sumOf {
+            it.sad.toDouble() * it.backgroundWeightV103.coerceIn(MIN_MATCH_WEIGHT_V103, 1f)
+        }.toFloat() / inlierWeight
+        val inlierRatio = (inlierWeight / matchWeight).coerceIn(0f, 1f)
 
         if (
             fittedPublic.scale !in MIN_STEP_SCALE..MAX_STEP_SCALE ||
@@ -514,36 +814,48 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         ) {
             return SimilarityV90(
                 confidence = .04f,
-                sceneCut = frameDifference >= SCENE_CUT_DIFFERENCE && inlierRatio < .45f,
+                sceneCut = detectSceneCut &&
+                    frameDifference >= SCENE_CUT_DIFFERENCE &&
+                    inlierRatio < .45f,
             )
         }
 
-        val featureConfidence = (inliers.size.toFloat() / MAX_FEATURES.toFloat()).coerceIn(0f, 1f)
+        val featureConfidence = (inliers.size.toFloat() / MAX_FEATURES.toFloat())
+            .coerceIn(0f, 1f)
         val inlierConfidence = ((inlierRatio - .25f) / .75f).coerceIn(0f, 1f)
-        val geometricConfidence = (1f - averageError / RANSAC_INLIER_ERROR_PX).coerceIn(0f, 1f)
+        val geometricConfidence = (1f - averageError / RANSAC_INLIER_ERROR_PX)
+            .coerceIn(0f, 1f)
         val photometricConfidence = (1f - averageSad / REJECT_SAD).coerceIn(0f, 1f)
         val spatialCoverage = spatialCoverageV99(inliers, width, height)
         val spatialConfidence = (
             (spatialCoverage - MIN_SPATIAL_COVERAGE_V99) /
                 (GOOD_SPATIAL_COVERAGE_V99 - MIN_SPATIAL_COVERAGE_V99)
             ).coerceIn(0f, 1f)
+        val averageBackgroundWeight = (inlierWeight / inliers.size.toFloat()).coerceIn(0f, 1f)
+        val persistentSupport = (
+            (averageBackgroundWeight - .18f) / .82f
+            ).coerceIn(0f, 1f)
+
         val confidence = (
-            featureConfidence * .22f +
-                inlierConfidence * .23f +
+            featureConfidence * .18f +
+                inlierConfidence * .22f +
                 geometricConfidence * .22f +
                 photometricConfidence * .10f +
-                spatialConfidence * .23f
+                spatialConfidence * .20f +
+                persistentSupport * .08f
             ).coerceIn(0f, 1f)
         val rotationScaleConfidence = (
-            spatialConfidence * .60f +
-                geometricConfidence * .25f +
-                inlierConfidence * .15f
+            spatialConfidence * .45f +
+                geometricConfidence * .20f +
+                inlierConfidence * .15f +
+                persistentSupport * .20f
             ).coerceIn(0f, 1f)
 
         val perspectiveConfidence = (
-            spatialConfidence * .55f +
-                geometricConfidence * .30f +
-                inlierConfidence * .15f
+            spatialConfidence * .42f +
+                geometricConfidence * .23f +
+                inlierConfidence * .15f +
+                persistentSupport * .20f
             ).coerceIn(0f, 1f)
         val perspectiveDelta = estimatePerspectiveDeltaV102(
             inliers = inliers,
@@ -554,8 +866,12 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             searchRadius = searchRadius,
         )
 
-        val hardCut = frameDifference >= SCENE_CUT_DIFFERENCE &&
+        val hardCut = detectSceneCut &&
+            frameDifference >= SCENE_CUT_DIFFERENCE &&
             (inlierRatio < .42f || confidence < .24f)
+        val persistentIds = inliers
+            .mapNotNull { match -> match.trackIdV103.takeIf { it >= 0 } }
+            .toSet()
 
         return fittedPublic.copy(
             confidence = if (hardCut) 0f else confidence,
@@ -563,6 +879,8 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             rotationScaleConfidenceV99 = if (hardCut) 0f else rotationScaleConfidence,
             perspectiveDeltaV102 = if (hardCut) null else perspectiveDelta,
             perspectiveConfidenceV102 = if (hardCut) 0f else perspectiveConfidence,
+            backgroundInlierTrackIdsV103 = if (hardCut) emptySet() else persistentIds,
+            persistentSupportV103 = if (hardCut) 0f else persistentSupport,
         )
     }
 
@@ -684,11 +1002,11 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val ata = Array(8) { DoubleArray(8) }
         val atb = DoubleArray(8)
 
-        fun accumulate(row: DoubleArray, value: Double) {
+        fun accumulate(row: DoubleArray, value: Double, weight: Double) {
             for (i in 0 until 8) {
-                atb[i] += row[i] * value
+                atb[i] += row[i] * value * weight
                 for (j in 0 until 8) {
-                    ata[i][j] += row[i] * row[j]
+                    ata[i][j] += row[i] * row[j] * weight
                 }
             }
         }
@@ -698,14 +1016,19 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             val y = pixelToNdcYV102(match.py, height).toDouble()
             val u = pixelToNdcXV102(match.qx, width).toDouble()
             val v = pixelToNdcYV102(match.qy, height).toDouble()
+            val weight = match.backgroundWeightV103
+                .coerceIn(MIN_MATCH_WEIGHT_V103, 1f)
+                .toDouble()
 
             accumulate(
                 doubleArrayOf(x, y, 1.0, 0.0, 0.0, 0.0, -x * u, -y * u),
                 u,
+                weight,
             )
             accumulate(
                 doubleArrayOf(0.0, 0.0, 0.0, x, y, 1.0, -x * v, -y * v),
                 v,
+                weight,
             )
         }
 
@@ -1093,7 +1416,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         height: Int,
     ): SimilarityFitV93? {
         var best: SimilarityFitV93? = null
-        var bestInliers = -1
+        var bestScore = -1f
         var bestError = Float.POSITIVE_INFINITY
         var tested = 0
 
@@ -1106,18 +1429,24 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                     frameCenterX = (width - 1) * .5f,
                     frameCenterY = (height - 1) * .5f,
                 ) ?: continue
-                var inliers = 0
+
+                var score = 0f
                 var error = 0f
                 for (match in matches) {
                     val e = reprojectionErrorV93(candidate, match)
                     if (e <= RANSAC_INLIER_ERROR_PX) {
-                        inliers++
-                        error += e
+                        val weight = match.backgroundWeightV103
+                            .coerceIn(MIN_MATCH_WEIGHT_V103, 1f)
+                        score += weight
+                        error += e * weight
                     }
                 }
-                if (inliers > bestInliers || (inliers == bestInliers && error < bestError)) {
+                if (
+                    score > bestScore + .0001f ||
+                    (abs(score - bestScore) <= .0001f && error < bestError)
+                ) {
                     best = candidate
-                    bestInliers = inliers
+                    bestScore = score
                     bestError = error
                 }
             }
@@ -1153,22 +1482,42 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         height: Int,
     ): SimilarityFitV93? {
         if (inliers.size < 2) return null
-        val pCx = inliers.sumOf { it.px.toDouble() }.toFloat() / inliers.size
-        val pCy = inliers.sumOf { it.py.toDouble() }.toFloat() / inliers.size
-        val qCx = inliers.sumOf { it.qx.toDouble() }.toFloat() / inliers.size
-        val qCy = inliers.sumOf { it.qy.toDouble() }.toFloat() / inliers.size
+        val sumWeight = inliers.sumOf {
+            it.backgroundWeightV103.coerceIn(MIN_MATCH_WEIGHT_V103, 1f).toDouble()
+        }
+        if (sumWeight <= 1e-8) return null
+
+        val pCx = (inliers.sumOf {
+            it.px.toDouble() *
+                it.backgroundWeightV103.coerceIn(MIN_MATCH_WEIGHT_V103, 1f)
+        } / sumWeight).toFloat()
+        val pCy = (inliers.sumOf {
+            it.py.toDouble() *
+                it.backgroundWeightV103.coerceIn(MIN_MATCH_WEIGHT_V103, 1f)
+        } / sumWeight).toFloat()
+        val qCx = (inliers.sumOf {
+            it.qx.toDouble() *
+                it.backgroundWeightV103.coerceIn(MIN_MATCH_WEIGHT_V103, 1f)
+        } / sumWeight).toFloat()
+        val qCy = (inliers.sumOf {
+            it.qy.toDouble() *
+                it.backgroundWeightV103.coerceIn(MIN_MATCH_WEIGHT_V103, 1f)
+        } / sumWeight).toFloat()
 
         var dot = 0.0
         var cross = 0.0
         var denominator = 0.0
         inliers.forEach { point ->
+            val weight = point.backgroundWeightV103
+                .coerceIn(MIN_MATCH_WEIGHT_V103, 1f)
+                .toDouble()
             val px = (point.px - pCx).toDouble()
             val py = (point.py - pCy).toDouble()
             val qx = (point.qx - qCx).toDouble()
             val qy = (point.qy - qCy).toDouble()
-            dot += px * qx + py * qy
-            cross += px * qy - py * qx
-            denominator += px * px + py * py
+            dot += weight * (px * qx + py * qy)
+            cross += weight * (px * qy - py * qx)
+            denominator += weight * (px * px + py * py)
         }
         if (denominator <= 1e-5) return null
 
@@ -1293,6 +1642,18 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         const val GRID_ROWS = 6
         const val MAX_FEATURES = 32
         const val MIN_FEATURES = 7
+        const val MAX_PERSISTENT_TRACKS_V103 = 32
+        const val PERSISTENT_GRID_COLUMNS_V103 = 8
+        const val PERSISTENT_GRID_ROWS_V103 = 6
+        const val PERSISTENT_SEARCH_RADIUS_V103 = 18
+        const val PERSISTENT_COARSE_STEP_V103 = 3
+        const val MIN_PERSISTENT_TRACK_SPACING_PX_V103 = 14f
+        const val MIN_PERSISTENT_TEXTURE_V103 = 55
+        const val MAX_PERSISTENT_OUTLIER_STREAK_V103 = 4
+        const val MIN_PERSISTENT_DROP_AGE_V103 = 6
+        const val MIN_REFERENCE_BACKGROUND_TRACKS_V103 = 6
+        const val FRESH_MATCH_WEIGHT_V103 = .50f
+        const val MIN_MATCH_WEIGHT_V103 = .10f
         const val REJECT_SAD = 42f
         const val MIN_ACCEPTED_CONFIDENCE = .28f
         const val MAX_STEP_ROTATION_DEGREES = 8.5f
