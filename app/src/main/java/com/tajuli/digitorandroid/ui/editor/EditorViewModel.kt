@@ -648,6 +648,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         linkGroupId = linkGroup,
                         transform = clip.transform.retimed(timeRatio),
                         nodeAnimations = NodeAnimations(),
+                        virtualCameraStabilizationV1 = null,
                     )
                     clip.id in linkedIds && track.kind == TrackKind.AUDIO && derived.hasAudio -> rebuilt += clip.copy(
                         uri = derived.uri,
@@ -693,7 +694,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val tracks = project.tracks.map { track ->
             track.copy(clips = track.clips.mapNotNull { clip ->
                 when {
-                    clip.id == live.id -> clip.copy(uri = derived.uri, sourceInUs = 0L, sourceOutUs = derived.durationUs, linkGroupId = null, nodeAnimations = NodeAnimations())
+                    clip.id == live.id -> clip.copy(uri = derived.uri, sourceInUs = 0L, sourceOutUs = derived.durationUs, linkGroupId = null, nodeAnimations = NodeAnimations(), virtualCameraStabilizationV1 = null)
                     clip.id in linkedIds && track.kind == TrackKind.AUDIO -> null
                     else -> clip
                 }
