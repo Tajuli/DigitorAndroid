@@ -30,8 +30,11 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.TransformProperty
+import com.tajuli.digitorandroid.editor.model.VirtualCameraStabilizationV1
+import com.tajuli.digitorandroid.editor.model.VirtualStabilizationModeV1
 import com.tajuli.digitorandroid.editor.model.audioSelection
 import com.tajuli.digitorandroid.editor.processing.CreatorMediaProcessor
+import com.tajuli.digitorandroid.editor.processing.VirtualCameraAnalyzerV1
 import java.util.ArrayDeque
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -66,6 +69,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     private val projectStore = ProjectStore(application)
     private val creatorMedia = CreatorMediaProcessor(application)
+    private val virtualCameraAnalyzerV1 = VirtualCameraAnalyzerV1(application)
     private val undoStack = ArrayDeque<String>()
     private val redoStack = ArrayDeque<String>()
     private var lastHistoryLabel: String? = null
@@ -523,6 +527,90 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
         publish(state.copy(project = state.project.copy(tracks = tracks), status = "Audio updated"))
     }
+
+    fun analyzeSelectedStabilizationV1() {
+        val state = _state.value
+        val selected = state.project.clip(state.selectedClipId) ?: return
+        if (
+            state.project.trackContaining(selected.id)?.kind != TrackKind.VIDEO ||
+            selected.isImageV21 ||
+            state.busyOperation != null
+        ) return
+
+        publish(state.copy(busyOperation = "Stabilize", status = "Preparing stabilization..."))
+        viewModelScope.launch {
+            runCatching {
+                virtualCameraAnalyzerV1.analyze(
+                    clip = selected,
+                    base = selected.virtualCameraStabilizationV1 ?: VirtualCameraStabilizationV1(),
+                ) { _, message ->
+                    val live = _state.value
+                    publish(live.copy(busyOperation = "Stabilize", status = message))
+                }
+            }.onSuccess { solved ->
+                val liveState = _state.value
+                val liveClip = liveState.project.clip(selected.id)
+                if (liveClip == null) {
+                    publish(liveState.copy(busyOperation = null, status = "Clip changed during analysis"))
+                    return@onSuccess
+                }
+                checkpoint("stabilize-analyze")
+                val tracks = liveState.project.tracks.map { track ->
+                    track.copy(
+                        clips = track.clips.map { clip ->
+                            if (clip.id == selected.id) clip.copy(virtualCameraStabilizationV1 = solved)
+                            else clip
+                        },
+                    )
+                }
+                publish(
+                    liveState.copy(
+                        project = liveState.project.copy(tracks = tracks),
+                        busyOperation = null,
+                        status = "Virtual-camera stabilization ready",
+                    ),
+                )
+            }.onFailure { error ->
+                publish(
+                    _state.value.copy(
+                        busyOperation = null,
+                        status = error.message ?: "Stabilization failed",
+                    ),
+                )
+            }
+        }
+    }
+
+    fun setStabilizationModeV1(mode: VirtualStabilizationModeV1) =
+        updatePrimaryClip { clip ->
+            val current = clip.virtualCameraStabilizationV1 ?: return@updatePrimaryClip clip
+            clip.copy(virtualCameraStabilizationV1 = current.copy(mode = mode))
+        }
+
+    fun setStabilizationStrengthV1(strength: Float) =
+        updatePrimaryClip { clip ->
+            val current = clip.virtualCameraStabilizationV1 ?: return@updatePrimaryClip clip
+            clip.copy(
+                virtualCameraStabilizationV1 = current.copy(
+                    strength = strength.coerceIn(0f, 1f),
+                ),
+            )
+        }
+
+    fun setStabilizationZoomV1(enabled: Boolean) =
+        updatePrimaryClip { clip ->
+            val current = clip.virtualCameraStabilizationV1 ?: return@updatePrimaryClip clip
+            clip.copy(virtualCameraStabilizationV1 = current.copy(zoomEnabled = enabled))
+        }
+
+    fun setStabilizationEnabledV1(enabled: Boolean) =
+        updatePrimaryClip { clip ->
+            val current = clip.virtualCameraStabilizationV1 ?: return@updatePrimaryClip clip
+            clip.copy(virtualCameraStabilizationV1 = current.copy(enabled = enabled))
+        }
+
+    fun clearStabilizationV1() =
+        updatePrimaryClip { clip -> clip.copy(virtualCameraStabilizationV1 = null) }
 
     fun bakeSelectedSpeed(speed: Float) {
         val state = _state.value
