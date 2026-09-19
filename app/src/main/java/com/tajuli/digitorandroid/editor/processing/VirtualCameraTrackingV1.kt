@@ -506,6 +506,101 @@ internal fun advancePersistentTripodTracksV3(
     return output
 }
 
+internal fun reanchorPersistentTripodTracksV3(
+    reference: IntArray,
+    current: IntArray,
+    width: Int,
+    height: Int,
+    tracks: List<PersistentTripodTrackV3>,
+): List<PersistentTripodTrackV3> {
+    if (tracks.isEmpty() || reference.size != current.size) return tracks
+    val safe = TRIPOD_SAFE_MARGIN_V3
+    return tracks.map { track ->
+        val refX = track.referenceX.roundToInt()
+        val refY = track.referenceY.roundToInt()
+        val predictedX = track.currentX.roundToInt()
+        val predictedY = track.currentY.roundToInt()
+        if (
+            refX !in safe until width - safe ||
+            refY !in safe until height - safe ||
+            predictedX !in safe until width - safe ||
+            predictedY !in safe until height - safe
+        ) return@map track
+
+        var bestX = predictedX
+        var bestY = predictedY
+        var bestCost = Int.MAX_VALUE
+        for (dy in -TRIPOD_REANCHOR_RADIUS_V3..TRIPOD_REANCHOR_RADIUS_V3) {
+            for (dx in -TRIPOD_REANCHOR_RADIUS_V3..TRIPOD_REANCHOR_RADIUS_V3) {
+                val candidateX = predictedX + dx
+                val candidateY = predictedY + dy
+                val cost = referencePatchSadV3(
+                    reference,
+                    current,
+                    width,
+                    refX,
+                    refY,
+                    candidateX,
+                    candidateY,
+                )
+                if (cost < bestCost) {
+                    bestCost = cost
+                    bestX = candidateX
+                    bestY = candidateY
+                }
+            }
+        }
+
+        val count = (PATCH_RADIUS_V1 * 2 + 1) * (PATCH_RADIUS_V1 * 2 + 1)
+        val meanError = bestCost.toFloat() / count.toFloat()
+        if (meanError > TRIPOD_REANCHOR_MAX_SAD_V3) return@map track
+
+        val center = bestCost.toFloat()
+        val left = referencePatchSadV3(
+            reference, current, width, refX, refY, bestX - 1, bestY,
+        ).toFloat()
+        val right = referencePatchSadV3(
+            reference, current, width, refX, refY, bestX + 1, bestY,
+        ).toFloat()
+        val up = referencePatchSadV3(
+            reference, current, width, refX, refY, bestX, bestY - 1,
+        ).toFloat()
+        val down = referencePatchSadV3(
+            reference, current, width, refX, refY, bestX, bestY + 1,
+        ).toFloat()
+        val subX = quadraticOffsetV3(left, center, right)
+        val subY = quadraticOffsetV3(up, center, down)
+
+        track.copy(
+            currentX = bestX + subX,
+            currentY = bestY + subY,
+        )
+    }
+}
+
+private fun referencePatchSadV3(
+    reference: IntArray,
+    current: IntArray,
+    width: Int,
+    refX: Int,
+    refY: Int,
+    currentX: Int,
+    currentY: Int,
+): Int {
+    var sum = 0
+    for (dy in -PATCH_RADIUS_V1..PATCH_RADIUS_V1) {
+        val refRow = (refY + dy) * width
+        val currentRow = (currentY + dy) * width
+        for (dx in -PATCH_RADIUS_V1..PATCH_RADIUS_V1) {
+            sum += abs(
+                reference[refRow + refX + dx] -
+                    current[currentRow + currentX + dx],
+            )
+        }
+    }
+    return sum
+}
+
 internal fun tripodObservationsV3(
     tracks: List<PersistentTripodTrackV3>,
 ): List<TripodTrackObservationV3> = tracks.map { track ->
@@ -590,6 +685,8 @@ internal fun estimateTripodReferencePoseV3(
 }
 
 private const val TRIPOD_SAFE_MARGIN_V3 = 30
+private const val TRIPOD_REANCHOR_RADIUS_V3 = 4
+private const val TRIPOD_REANCHOR_MAX_SAD_V3 = 32f
 private const val TRIPOD_MIN_SURVIVORS_V3 = 6
 private const val TRIPOD_MAX_MEAN_PATCH_ERROR_V3 = 26f
 private const val TRIPOD_REFERENCE_INLIER_PX_V3 = 2.2f
