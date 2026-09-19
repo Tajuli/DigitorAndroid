@@ -211,6 +211,22 @@ private fun relativePoseV1(
     )
 }
 
+fun TimelineClip.evaluatedDisplayTransformV1(localUs: Long): EvaluatedClipTransform {
+    val safeLocalUs = localUs.coerceIn(0L, durationUs.coerceAtLeast(0L))
+    val manual = transform.evaluate(safeLocalUs)
+    val stabilization = virtualCameraStabilizationV1
+        ?.evaluateVirtualCameraV1(sourceInUs + safeLocalUs)
+        ?: EvaluatedVirtualCameraV1()
+
+    return EvaluatedClipTransform(
+        positionX = (manual.positionX + stabilization.offsetX).coerceIn(-2f, 2f),
+        positionY = (manual.positionY + stabilization.offsetY).coerceIn(-2f, 2f),
+        scaleX = (manual.scaleX * stabilization.scale).coerceIn(.05f, 8f),
+        scaleY = (manual.scaleY * stabilization.scale).coerceIn(.05f, 8f),
+        rotationDegrees = manual.rotationDegrees + stabilization.rotationDegrees,
+    )
+}
+
 internal fun requiredVirtualCameraCoverScaleV1(
     offsetX: Float,
     offsetYNdc: Float,
