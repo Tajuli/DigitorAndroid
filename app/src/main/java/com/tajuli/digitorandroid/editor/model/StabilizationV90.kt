@@ -159,8 +159,21 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
     // V95 zoom envelope is driven by the same robust filtered correction used by rendering.
     // This removes V94's bug where crop probes re-read raw/base corrections and amplified an
     // otherwise filtered tracking outlier into a visible zoom spike.
+    // Saved analyses before V102 used the legacy Crop scalar. Keep that behavior stable when
+    // opening an old project; V102+ uses Resolve's explicit Zoom checkbox instead.
+    val zoomEnabled = if (state.analysisVersionV93 >= 102) {
+        state.zoomEnabledV102
+    } else {
+        state.crop > 0f
+    }
+    val zoomMix = if (state.analysisVersionV93 >= 102) {
+        if (zoomEnabled) 1f else 0f
+    } else {
+        state.crop.coerceIn(0f, 1f)
+    }
+
     val coverTarget = when {
-        !state.zoomEnabledV102 || state.mode == StabilizationModeV90.PERSPECTIVE ->
+        !zoomEnabled || state.mode == StabilizationModeV90.PERSPECTIVE ->
             correction.scaleCorrection
         state.cameraLockV102 && state.analysisVersionV93 >= 100 ->
             max(correction.scaleCorrection, state.cameraLockCoverScaleV100.coerceAtLeast(1f))
@@ -179,7 +192,7 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
     val finalScale = lerpV90(
         correction.scaleCorrection,
         coverTarget,
-        if (state.zoomEnabledV102) 1f else 0f,
+        zoomMix,
     ).coerceIn(.78f, MAX_STABILIZATION_ZOOM_V92)
 
     return EvaluatedStabilizationV90(
