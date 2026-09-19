@@ -572,61 +572,225 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         perspectiveTrust: Float,
         searchRadius: Int,
     ): PerspectiveQuadV102 {
+        val similarityQuad = similarityQuadV102(fit, width, height)
+        if (inliers.size < MIN_PERSPECTIVE_INLIERS_V102) return similarityQuad
+
+        // The similarity RANSAC has already removed gross foreground mismatches. Fit a true
+        // projective model to those robust correspondences, reject projective reprojection
+        // outliers, then refit. This is materially different from an affine/Similarity alias.
+        val first = solveHomographyLeastSquaresV102(inliers, width, height)
+            ?: return similarityQuad
+        val projectiveInliers = inliers.filter {
+            perspectiveReprojectionErrorPxV102(first, it, width, height) <=
+                PERSPECTIVE_RANSAC_ERROR_PX_V102
+        }
+        if (projectiveInliers.size < MIN_PERSPECTIVE_INLIERS_V102) return similarityQuad
+
+        val projectiveCoverage = spatialCoverageV99(projectiveInliers, width, height)
+        val coverageTrust = (
+            (projectiveCoverage - MIN_PERSPECTIVE_COVERAGE_V102) /
+                (GOOD_PERSPECTIVE_COVERAGE_V102 - MIN_PERSPECTIVE_COVERAGE_V102)
+            ).coerceIn(0f, 1f)
+        val refined = solveHomographyLeastSquaresV102(projectiveInliers, width, height)
+            ?: first
+
+        val averageProjectiveError = projectiveInliers
+            .sumOf {
+                perspectiveReprojectionErrorPxV102(refined, it, width, height).toDouble()
+            }
+            .toFloat() / projectiveInliers.size
+        val geometryTrust = (
+            1f - averageProjectiveError / PERSPECTIVE_RANSAC_ERROR_PX_V102
+            ).coerceIn(0f, 1f)
+        val projectiveBlend = (
+            perspectiveTrust * coverageTrust * (.35f + .65f * geometryTrust)
+            ).coerceIn(0f, MAX_PERSPECTIVE_BLEND_V102)
+
+        if (projectiveBlend <= .001f) return similarityQuad
+
+        val identityCorners = PerspectiveQuadV102.IDENTITY.asPoints()
+        val projectiveCorners = FloatArray(8)
+        for (index in 0 until 4) {
+            val mapped = mapPerspectivePointV102(
+                refined,
+                identityCorners[index * 2],
+                identityCorners[index * 2 + 1],
+            ) ?: return similarityQuad
+            projectiveCorners[index * 2] = mapped.first
+            projectiveCorners[index * 2 + 1] = mapped.second
+        }
+
+        val similarityPoints = similarityQuad.asPoints()
+        val maxResidualNdc = (
+            searchRadius.toFloat() / max(1f, minOf(width, height) * .5f)
+            * .72f
+            ).coerceIn(.04f, .42f)
+        val out = FloatArray(8)
+        for (index in 0 until 8) {
+            val residual = (projectiveCorners[index] - similarityPoints[index])
+                .coerceIn(-maxResidualNdc, maxResidualNdc)
+            out[index] = (similarityPoints[index] + residual * projectiveBlend)
+                .coerceIn(-1.80f, 1.80f)
+        }
+
+        return PerspectiveQuadV102(
+            topLeftX = out[0],
+            topLeftY = out[1],
+            topRightX = out[2],
+            topRightY = out[3],
+            bottomRightX = out[4],
+            bottomRightY = out[5],
+            bottomLeftX = out[6],
+            bottomLeftY = out[7],
+        )
+    }
+
+    private fun similarityQuadV102(
+        fit: SimilarityFitV93,
+        width: Int,
+        height: Int,
+    ): PerspectiveQuadV102 {
         val cornersPx = arrayOf(
             0f to 0f,
             (width - 1).toFloat() to 0f,
             (width - 1).toFloat() to (height - 1).toFloat(),
             0f to (height - 1).toFloat(),
         )
-        val diagonal = sqrt((width * width + height * height).toFloat()).coerceAtLeast(1f)
-        val localBlend = (perspectiveTrust * .78f).coerceIn(0f, .78f)
-        val output = FloatArray(8)
-
-        cornersPx.forEachIndexed { index, (cx, cy) ->
-            val similarityX = fit.a * cx - fit.b * cy + fit.tx
-            val similarityY = fit.b * cx + fit.a * cy + fit.ty
-
-            var sumWeight = 0.0
-            var dx = 0.0
-            var dy = 0.0
-            for (match in inliers) {
-                val distanceX = match.px - cx
-                val distanceY = match.py - cy
-                val normalizedDistanceSq =
-                    (distanceX * distanceX + distanceY * distanceY) /
-                        (diagonal * diagonal)
-                val weight = 1.0 / (0.035 + normalizedDistanceSq * 8.0)
-                sumWeight += weight
-                dx += (match.qx - match.px) * weight
-                dy += (match.qy - match.py) * weight
-            }
-
-            val localX = if (sumWeight > 1e-8) cx + (dx / sumWeight).toFloat() else similarityX
-            val localY = if (sumWeight > 1e-8) cy + (dy / sumWeight).toFloat() else similarityY
-
-            val maxResidual = max(2f, searchRadius * .55f)
-            val residualX = (localX - similarityX).coerceIn(-maxResidual, maxResidual)
-            val residualY = (localY - similarityY).coerceIn(-maxResidual, maxResidual)
-            val mappedX = similarityX + residualX * localBlend
-            val mappedY = similarityY + residualY * localBlend
-
-            output[index * 2] = (mappedX / (width - 1).coerceAtLeast(1) * 2f - 1f)
-                .coerceIn(-1.75f, 1.75f)
-            output[index * 2 + 1] = (1f - mappedY / (height - 1).coerceAtLeast(1) * 2f)
-                .coerceIn(-1.75f, 1.75f)
+        val out = FloatArray(8)
+        cornersPx.forEachIndexed { index, (x, y) ->
+            val mappedX = fit.a * x - fit.b * y + fit.tx
+            val mappedY = fit.b * x + fit.a * y + fit.ty
+            out[index * 2] = pixelToNdcXV102(mappedX, width)
+            out[index * 2 + 1] = pixelToNdcYV102(mappedY, height)
         }
-
         return PerspectiveQuadV102(
-            topLeftX = output[0],
-            topLeftY = output[1],
-            topRightX = output[2],
-            topRightY = output[3],
-            bottomRightX = output[4],
-            bottomRightY = output[5],
-            bottomLeftX = output[6],
-            bottomLeftY = output[7],
+            out[0], out[1],
+            out[2], out[3],
+            out[4], out[5],
+            out[6], out[7],
         )
     }
+
+    private fun solveHomographyLeastSquaresV102(
+        matches: List<MatchV90>,
+        width: Int,
+        height: Int,
+    ): FloatArray? {
+        if (matches.size < 4) return null
+
+        // Solve normal equations for eight homography unknowns with h22 fixed to 1.
+        val ata = Array(8) { DoubleArray(8) }
+        val atb = DoubleArray(8)
+
+        fun accumulate(row: DoubleArray, value: Double) {
+            for (i in 0 until 8) {
+                atb[i] += row[i] * value
+                for (j in 0 until 8) {
+                    ata[i][j] += row[i] * row[j]
+                }
+            }
+        }
+
+        for (match in matches) {
+            val x = pixelToNdcXV102(match.px, width).toDouble()
+            val y = pixelToNdcYV102(match.py, height).toDouble()
+            val u = pixelToNdcXV102(match.qx, width).toDouble()
+            val v = pixelToNdcYV102(match.qy, height).toDouble()
+
+            accumulate(
+                doubleArrayOf(x, y, 1.0, 0.0, 0.0, 0.0, -x * u, -y * u),
+                u,
+            )
+            accumulate(
+                doubleArrayOf(0.0, 0.0, 0.0, x, y, 1.0, -x * v, -y * v),
+                v,
+            )
+        }
+
+        val solved = solveLinear8V102(ata, atb) ?: return null
+        val matrix = floatArrayOf(
+            solved[0].toFloat(), solved[1].toFloat(), solved[2].toFloat(),
+            solved[3].toFloat(), solved[4].toFloat(), solved[5].toFloat(),
+            solved[6].toFloat(), solved[7].toFloat(), 1f,
+        )
+
+        // Reject pathological projective denominators at/near the output corners.
+        val corners = PerspectiveQuadV102.IDENTITY.asPoints()
+        for (index in 0 until 4) {
+            val x = corners[index * 2]
+            val y = corners[index * 2 + 1]
+            val w = matrix[6] * x + matrix[7] * y + matrix[8]
+            if (abs(w) < MIN_PROJECTIVE_DENOMINATOR_V102) return null
+        }
+        return matrix
+    }
+
+    private fun solveLinear8V102(
+        matrix: Array<DoubleArray>,
+        rhs: DoubleArray,
+    ): DoubleArray? {
+        val a = Array(8) { row -> DoubleArray(9) { column ->
+            if (column < 8) matrix[row][column] else rhs[row]
+        } }
+
+        for (column in 0 until 8) {
+            var pivot = column
+            var best = abs(a[pivot][column])
+            for (row in column + 1 until 8) {
+                val candidate = abs(a[row][column])
+                if (candidate > best) {
+                    best = candidate
+                    pivot = row
+                }
+            }
+            if (best < 1e-10) return null
+            if (pivot != column) {
+                val swap = a[column]
+                a[column] = a[pivot]
+                a[pivot] = swap
+            }
+
+            val divisor = a[column][column]
+            for (j in column until 9) a[column][j] /= divisor
+            for (row in 0 until 8) {
+                if (row == column) continue
+                val factor = a[row][column]
+                if (abs(factor) < 1e-12) continue
+                for (j in column until 9) {
+                    a[row][j] -= factor * a[column][j]
+                }
+            }
+        }
+        return DoubleArray(8) { a[it][8] }
+    }
+
+    private fun perspectiveReprojectionErrorPxV102(
+        matrix: FloatArray,
+        match: MatchV90,
+        width: Int,
+        height: Int,
+    ): Float {
+        val x = pixelToNdcXV102(match.px, width)
+        val y = pixelToNdcYV102(match.py, height)
+        val mapped = mapPerspectivePointV102(matrix, x, y) ?: return Float.POSITIVE_INFINITY
+        val qx = ndcToPixelXV102(mapped.first, width)
+        val qy = ndcToPixelYV102(mapped.second, height)
+        val dx = qx - match.qx
+        val dy = qy - match.qy
+        return sqrt(dx * dx + dy * dy)
+    }
+
+    private fun pixelToNdcXV102(x: Float, width: Int): Float =
+        x / (width - 1).coerceAtLeast(1).toFloat() * 2f - 1f
+
+    private fun pixelToNdcYV102(y: Float, height: Int): Float =
+        1f - y / (height - 1).coerceAtLeast(1).toFloat() * 2f
+
+    private fun ndcToPixelXV102(x: Float, width: Int): Float =
+        (x + 1f) * .5f * (width - 1).coerceAtLeast(1).toFloat()
+
+    private fun ndcToPixelYV102(y: Float, height: Int): Float =
+        (1f - y) * .5f * (height - 1).coerceAtLeast(1).toFloat()
 
     private fun composePerspectivePathV102(
         previousPath: PerspectiveQuadV102,
@@ -1126,6 +1290,12 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         const val SPATIAL_GRID_ROWS_V99 = 3
         const val MIN_SPATIAL_COVERAGE_V99 = .25f
         const val GOOD_SPATIAL_COVERAGE_V99 = .67f
+        const val MIN_PERSPECTIVE_INLIERS_V102 = 6
+        const val PERSPECTIVE_RANSAC_ERROR_PX_V102 = 3.6f
+        const val MIN_PERSPECTIVE_COVERAGE_V102 = .25f
+        const val GOOD_PERSPECTIVE_COVERAGE_V102 = .58f
+        const val MAX_PERSPECTIVE_BLEND_V102 = .92f
+        const val MIN_PROJECTIVE_DENOMINATOR_V102 = .20f
     }
 }
 
