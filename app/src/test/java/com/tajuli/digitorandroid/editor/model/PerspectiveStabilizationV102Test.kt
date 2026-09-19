@@ -56,18 +56,19 @@ class PerspectiveStabilizationV102Test {
 
         val evaluated = stabilization.evaluatePerspectiveV102(100_000L)
         assertNotNull(evaluated)
+        val resolved = evaluated!!
         val source = raw.asPoints()
         val target = PerspectiveQuadV102.IDENTITY.asPoints()
         for (index in 0 until 4) {
             val mapped = map(
-                evaluated!!.matrixValues,
+                resolved.matrixValues,
                 source[index * 2],
                 source[index * 2 + 1],
             )
             assertEquals(target[index * 2], mapped.first, .002f)
             assertEquals(target[index * 2 + 1], mapped.second, .002f)
         }
-        assertEquals(1f, evaluated.autoZoom, .0001f)
+        assertEquals(1f, resolved.autoZoom, .0001f)
     }
 
     @Test
