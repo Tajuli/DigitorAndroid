@@ -783,6 +783,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(smoothRadiusUs = radiusUs.coerceIn(80_000L, 3_000_000L))
         }
 
+    fun setSelectedStabilizationSmoothV102(value: Float) =
+        updateSelectedStabilizationV90("stabilization-smooth-v102", "Smooth updated", coalesce = true) {
+            val smooth = value.coerceIn(0f, 1f)
+            val radius = (80_000L + (3_280_000.0 * smooth * smooth).toLong())
+                .coerceIn(80_000L, 3_000_000L)
+            it.copy(smoothV102 = smooth, smoothRadiusUs = radius)
+        }
+
     fun setSelectedStabilizationCropV90(value: Float) =
         updateSelectedStabilizationV90("stabilization-crop", "Stabilization crop updated", coalesce = true) {
             it.copy(crop = value.coerceIn(0f, 1f))
