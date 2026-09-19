@@ -42,6 +42,13 @@ class VirtualCameraAnalyzerV1(context: Context) {
         var pathY = 0f
         var pathRotation = 0f
         var pathLogScale = 0f
+        var lastTrustedIncX = 0f
+        var lastTrustedIncY = 0f
+        var lastTrustedIncRotation = 0f
+        var lastTrustedIncLogScale = 0f
+        var untrustedTranslationFrames = 0
+        var untrustedRotationFrames = 0
+        var untrustedScaleFrames = 0
         var decoded = 0
 
         onProgress(0f, "Preparing virtual camera...")
@@ -62,6 +69,9 @@ class VirtualCameraAnalyzerV1(context: Context) {
                 val current = bitmap.toGrayV1()
                 val previous = previousGray
                 var confidence = 1f
+                var translationConfidenceV4 = 1f
+                var rotationConfidenceV4 = 1f
+                var scaleConfidenceV4 = 1f
                 var newReferenceFrame = previous == null
 
                 if (previous != null && previous.size == current.size) {
@@ -73,28 +83,79 @@ class VirtualCameraAnalyzerV1(context: Context) {
                             pathY = 0f
                             pathRotation = 0f
                             pathLogScale = 0f
+                            lastTrustedIncX = 0f
+                            lastTrustedIncY = 0f
+                            lastTrustedIncRotation = 0f
+                            lastTrustedIncLogScale = 0f
+                            untrustedTranslationFrames = 0
+                            untrustedRotationFrames = 0
+                            untrustedScaleFrames = 0
                             confidence = 1f
+                            translationConfidenceV4 = 1f
+                            rotationConfidenceV4 = 1f
+                            scaleConfidenceV4 = 1f
                             newReferenceFrame = true
                         }
-                        motion.confidence >= MIN_ACCEPTED_CONFIDENCE_V1 -> {
-                            confidence = motion.confidence
-                            val incX = motion.centerDxPx / max(1f, width * .5f)
-                            val incY = -motion.centerDyPx / max(1f, height * .5f)
-                            val incRotation = -motion.rotationDegreesImage
-                            val incScale = motion.scale.coerceIn(.94f, 1.06f)
+                        else -> {
+                            confidence = motion.confidence.coerceIn(0f, 1f)
+                            translationConfidenceV4 = motion.translationConfidenceV4.coerceIn(0f, 1f)
+                            rotationConfidenceV4 = motion.rotationConfidenceV4.coerceIn(0f, 1f)
+                            scaleConfidenceV4 = motion.scaleConfidenceV4.coerceIn(0f, 1f)
+
+                            val measuredX = motion.centerDxPx / max(1f, width * .5f)
+                            val measuredY = -motion.centerDyPx / max(1f, height * .5f)
+                            val measuredRotation = -motion.rotationDegreesImage
+                            val measuredLogScale = ln(motion.scale.coerceIn(.94f, 1.06f))
+
+                            val incX: Float
+                            val incY: Float
+                            if (translationConfidenceV4 >= MIN_TRANSLATION_CONFIDENCE_V4) {
+                                incX = measuredX
+                                incY = measuredY
+                                lastTrustedIncX = measuredX
+                                lastTrustedIncY = measuredY
+                                untrustedTranslationFrames = 0
+                            } else {
+                                untrustedTranslationFrames++
+                                val decay = predictedMotionDecayV4(untrustedTranslationFrames)
+                                incX = lastTrustedIncX * decay
+                                incY = lastTrustedIncY * decay
+                            }
+
+                            val incRotation = if (
+                                rotationConfidenceV4 >= MIN_ROTATION_CONFIDENCE_V4
+                            ) {
+                                lastTrustedIncRotation = measuredRotation
+                                untrustedRotationFrames = 0
+                                measuredRotation
+                            } else {
+                                untrustedRotationFrames++
+                                lastTrustedIncRotation *
+                                    predictedMotionDecayV4(untrustedRotationFrames)
+                            }
+
+                            val incLogScale = if (
+                                scaleConfidenceV4 >= MIN_SCALE_CONFIDENCE_V4
+                            ) {
+                                lastTrustedIncLogScale = measuredLogScale
+                                untrustedScaleFrames = 0
+                                measuredLogScale
+                            } else {
+                                untrustedScaleFrames++
+                                lastTrustedIncLogScale *
+                                    predictedMotionDecayV4(untrustedScaleFrames)
+                            }
+                            val incScale = exp(incLogScale.toDouble()).toFloat()
 
                             val radians = Math.toRadians(incRotation.toDouble())
-                            val c = cos(radians).toFloat()
-                            val s = sin(radians).toFloat()
+                            val cosR = cos(radians).toFloat()
+                            val sinR = sin(radians).toFloat()
                             val oldX = pathX
                             val oldY = pathY
-                            pathX = incScale * (c * oldX - s * oldY) + incX
-                            pathY = incScale * (s * oldX + c * oldY) + incY
+                            pathX = incScale * (cosR * oldX - sinR * oldY) + incX
+                            pathY = incScale * (sinR * oldX + cosR * oldY) + incY
                             pathRotation += incRotation
-                            pathLogScale += ln(incScale)
-                        }
-                        else -> {
-                            confidence = motion.confidence.coerceIn(0f, MIN_ACCEPTED_CONFIDENCE_V1)
+                            pathLogScale += incLogScale
                         }
                     }
                 }
@@ -133,6 +194,9 @@ class VirtualCameraAnalyzerV1(context: Context) {
                     sourceTimeUs = sourceTimeUs,
                     segment = segment,
                     confidence = confidence,
+                    translationConfidenceV4 = translationConfidenceV4,
+                    rotationConfidenceV4 = rotationConfidenceV4,
+                    scaleConfidenceV4 = scaleConfidenceV4,
                     x = pathX,
                     y = pathY,
                     rotation = pathRotation,
@@ -166,14 +230,24 @@ class VirtualCameraAnalyzerV1(context: Context) {
             translationCoverScale = covers.translation,
             similarityCoverScale = covers.similarity,
             tripodCoverScale = covers.tripod,
-            analysisVersion = 3,
+            analysisVersion = 4,
         ).normalized()
+    }
+
+    private fun predictedMotionDecayV4(untrustedFrames: Int): Float = when (untrustedFrames) {
+        1 -> .72f
+        2 -> .42f
+        3 -> .18f
+        else -> 0f
     }
 
     private data class RawCameraSampleV1(
         val sourceTimeUs: Long,
         val segment: Int,
         val confidence: Float,
+        val translationConfidenceV4: Float,
+        val rotationConfidenceV4: Float,
+        val scaleConfidenceV4: Float,
         val x: Float,
         val y: Float,
         val rotation: Float,
@@ -518,6 +592,9 @@ class VirtualCameraAnalyzerV1(context: Context) {
     private companion object {
         const val ANALYSIS_LONG_EDGE_V1 = 384
         const val MIN_ACCEPTED_CONFIDENCE_V1 = .34f
+        const val MIN_TRANSLATION_CONFIDENCE_V4 = .28f
+        const val MIN_ROTATION_CONFIDENCE_V4 = .42f
+        const val MIN_SCALE_CONFIDENCE_V4 = .48f
         const val TRANSLATION_LAMBDA_V1 = 150f
         const val ROTATION_LAMBDA_V1 = 210f
         const val SCALE_LAMBDA_V1 = 260f
