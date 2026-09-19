@@ -41,6 +41,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         base: ClipStabilizationV90 = clip.stabilizationV90 ?: ClipStabilizationV90(),
         onProgress: (Float, String) -> Unit = { _, _ -> },
     ): ClipStabilizationV90 = withContext(Dispatchers.Default) {
+        val settings = base.normalized()
         require(clip.visualMediaV21 != TimelineVisualMediaV21.IMAGE) {
             "Stabilization requires a moving-video clip"
         }
@@ -241,7 +242,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                 cameraLockPerspectivePathV102 = cameraLockPerspective[index],
             )
         }
-        val solved = base.copy(
+        val solved = settings.copy(
             enabled = true,
             analyzedWidth = analyzedWidth,
             analyzedHeight = analyzedHeight,
