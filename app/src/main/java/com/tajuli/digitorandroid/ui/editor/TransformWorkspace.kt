@@ -268,16 +268,18 @@ private fun StabilizationWorkspaceV90(
 
         Text(
             when {
+                stabilization.analysisVersionV93 >= 100 ->
+                    "V100 Tripod Lock · ${stabilization.samples.size} frame samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
                 stabilization.analysisVersionV93 >= 99 ->
-                    "V99 Background Lock · ${stabilization.samples.size} frame samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
+                    "V99 analysis · Re-analyze for V100 tripod solve"
                 stabilization.analysisVersionV93 >= 97 ->
-                    "V97 analysis · Re-analyze for V99 background-safe Camera Lock"
+                    "V97 analysis · Re-analyze for V100 tripod solve"
                 stabilization.analysisVersionV93 >= 96 ->
-                    "V96 analysis · Re-analyze for V99 background-safe Camera Lock"
+                    "V96 analysis · Re-analyze for V100 tripod solve"
                 stabilization.analysisVersionV93 >= 93 ->
-                    "V93 analysis · Re-analyze for V99 background-safe Camera Lock"
+                    "V93 analysis · Re-analyze for V100 tripod solve"
                 else ->
-                    "Legacy analysis · Re-analyze for V99 background-safe Camera Lock"
+                    "Legacy analysis · Re-analyze for V100 tripod solve"
             },
             fontSize = 7.sp,
             color = if (stabilization.analysisVersionV93 >= 93) X5Muted else X5Accent,
