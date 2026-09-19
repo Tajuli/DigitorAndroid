@@ -1468,12 +1468,15 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         var bestError = Float.POSITIVE_INFINITY
         var tested = 0
 
-        loop@ for (i in 0 until matches.lastIndex) {
-            for (j in i + 1 until matches.size) {
+        // Try hypotheses from the most trustworthy long-lived background tracks first.
+        // The hypothesis budget is intentionally bounded on mobile, so ordering matters.
+        val ranked = matches.sortedByDescending { it.backgroundWeightV103 }
+        loop@ for (i in 0 until ranked.lastIndex) {
+            for (j in i + 1 until ranked.size) {
                 if (tested++ >= MAX_RANSAC_HYPOTHESES) break@loop
                 val candidate = fitSimilarityFromPairV93(
-                    matches[i],
-                    matches[j],
+                    ranked[i],
+                    ranked[j],
                     frameCenterX = (width - 1) * .5f,
                     frameCenterY = (height - 1) * .5f,
                 ) ?: continue
