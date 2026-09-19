@@ -347,20 +347,14 @@ private fun StabilizationWorkspaceV90(
             onValue = vm::setSelectedCroppingRatioV102,
         )
 
-        val smoothValue = (
-            (stabilization.smoothRadiusUs - 80_000L).toFloat() /
-                (3_000_000L - 80_000L).toFloat()
-            ).coerceIn(0f, 1f)
         StabilizationSliderV90(
             label = "Smooth",
-            value = smoothValue,
+            value = stabilization.smoothV102,
             range = 0f..1f,
             display = { String.format("%.3f", it) },
             enabled = !stabilization.cameraLockV102,
-        ) { value ->
-            val radiusUs = 80_000L + ((3_000_000L - 80_000L) * value).toLong()
-            vm.setSelectedStabilizationSmoothV90(radiusUs)
-        }
+            onValue = vm::setSelectedStabilizationSmoothV102,
+        )
 
         StabilizationSliderV90(
             label = "Strength",
