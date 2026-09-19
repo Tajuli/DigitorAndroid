@@ -29,6 +29,8 @@ data class StabilizationPathSampleV90(
     val confidence: Float = 1f,
     /** V93 scene segment. Smoothing never crosses a detected hard cut. */
     val segmentV93: Int = 0,
+    /** V99: 0..1 confidence that rotation/scale came from spatially broad background motion. */
+    val rotationScaleConfidenceV99: Float = 0f,
 )
 
 data class ClipStabilizationV90(
@@ -166,29 +168,50 @@ private fun ClipStabilizationV90.cameraLockCorrectionV97(sourceTimeUs: Long): St
     val pose = robustCameraPoseV97(sourceTimeUs)
     val amount = strength.coerceIn(0f, 1f)
 
-    // Exact inverse in IMAGE coordinates rotates by -pose.rotation. Media3 renders in NDC where
-    // Y is flipped, so the rotation value handed to the renderer must flip sign once more: +pose.
-    val fullRotationForRender = pose.rotation
-    val fullInverseScale = exp((-pose.logScale).coerceIn(-.35f, .35f).toDouble()).toFloat()
+    // V99 keeps X/Y hard-locked, but rotation/scale are only trusted when the analyzer saw
+    // spatially broad motion. A moving foreground subject can easily fake rotation/zoom while
+    // contributing little evidence near the frame edges; letting that drive Camera Lock makes a
+    // nearly static camera visibly worse.
+    val rotationScaleTrust = if (analysisVersionV93 >= 99) {
+        cameraLockRotationScaleTrustV99(sourceTimeUs)
+    } else {
+        1f
+    }
+    val rsAmount = amount * rotationScaleTrust
 
-    val radians = Math.toRadians((-pose.rotation).toDouble())
+    // Exact inverse in IMAGE coordinates. Media3 renders in NDC (+Y up), therefore image-space
+    // inverse rotation -theta is represented as +theta at the renderer boundary.
+    val inverseImageRotation = -pose.rotation * rsAmount
+    val inverseScale = exp((-pose.logScale * rsAmount).coerceIn(-.35f, .35f).toDouble()).toFloat()
+    val radians = Math.toRadians(inverseImageRotation.toDouble())
     val cosR = cos(radians).toFloat()
     val sinR = sin(radians).toFloat()
-    val inverseTx = -(fullInverseScale * (cosR * pose.x - sinR * pose.y))
-    val inverseTy = -(fullInverseScale * (sinR * pose.x + cosR * pose.y))
 
-    // Strength blends from identity to the exact inverse. Translation is image-space/UI-space,
-    // rotation is converted to render-space above, and scale blends in log space.
-    val blendedScale = exp(
-        (ln(fullInverseScale.coerceAtLeast(.01f)) * amount).toDouble(),
-    ).toFloat()
+    // Translation remains a hard reference lock. Compose it with only the rotation/scale we
+    // actually trust/apply, so low-confidence foreground motion cannot introduce false spin/zoom.
+    val inverseTx = -(inverseScale * (cosR * pose.x - sinR * pose.y))
+    val inverseTy = -(inverseScale * (sinR * pose.x + cosR * pose.y))
 
     return StabilizationCorrectionV94(
         dx = (inverseTx * amount).coerceIn(-1.75f, 1.75f),
         dy = (inverseTy * amount).coerceIn(-1.75f, 1.75f),
-        rotation = (fullRotationForRender * amount).coerceIn(-55f, 55f),
-        scaleCorrection = blendedScale.coerceIn(.70f, 1.45f),
+        rotation = (pose.rotation * rsAmount).coerceIn(-55f, 55f),
+        scaleCorrection = inverseScale.coerceIn(.70f, 1.45f),
     )
+}
+
+private fun ClipStabilizationV90.cameraLockRotationScaleTrustV99(sourceTimeUs: Long): Float {
+    val segment = segmentAtV93(sourceTimeUs)
+    val window = samplesInWindowV94(sourceTimeUs, CAMERA_LOCK_RS_TRUST_RADIUS_US_V99, segment)
+    if (window.size < MIN_CAMERA_LOCK_WINDOW_SAMPLES_V97) return 0f
+
+    val raw = medianFloatV95(window.map { it.rotationScaleConfidenceV99.coerceIn(0f, 1f) })
+    val normalized = (
+        (raw - CAMERA_LOCK_RS_TRUST_LOW_V99) /
+            (CAMERA_LOCK_RS_TRUST_HIGH_V99 - CAMERA_LOCK_RS_TRUST_LOW_V99)
+        ).coerceIn(0f, 1f)
+    // Smoothstep avoids visible mode switching around the confidence boundary.
+    return normalized * normalized * (3f - 2f * normalized)
 }
 
 private fun ClipStabilizationV90.robustCameraPoseV97(sourceTimeUs: Long): StabilizationPathValueV90 {
@@ -706,3 +729,6 @@ private const val MIN_CAMERA_LOCK_WINDOW_SAMPLES_V97 = 5
 private const val MIN_CAMERA_LOCK_TRANSLATION_GATE_V97 = .025f
 private const val MIN_CAMERA_LOCK_ROTATION_GATE_V97 = .35f
 private const val MIN_CAMERA_LOCK_LOG_SCALE_GATE_V97 = .006f
+private const val CAMERA_LOCK_RS_TRUST_RADIUS_US_V99 = 260_000L
+private const val CAMERA_LOCK_RS_TRUST_LOW_V99 = .42f
+private const val CAMERA_LOCK_RS_TRUST_HIGH_V99 = .72f
