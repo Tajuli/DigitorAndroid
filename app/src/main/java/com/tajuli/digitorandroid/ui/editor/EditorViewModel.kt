@@ -710,7 +710,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             runCatching {
                 stabilizationAnalyzerV90.analyze(
                     selected,
-                    selected.stabilizationV90 ?: ClipStabilizationV90(),
+                    selected.stabilizationV90
+                        ?: ClipStabilizationV90(mode = StabilizationModeV90.PERSPECTIVE),
                 ) { _, message ->
                     val live = _state.value
                     if (live.busyOperation == "Stabilization") {
