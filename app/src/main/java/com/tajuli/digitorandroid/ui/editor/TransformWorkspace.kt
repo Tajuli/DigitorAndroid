@@ -48,7 +48,7 @@ private val X5Muted = Color(0xFF909098)
 private val X5Accent = Color(0xFF30E0C3)
 private val X5Danger = Color(0xFFFF7474)
 
-private enum class EditPageV5 { TIMELINE, TRANSFORM, RETIME, CUTOUT }
+private enum class EditPageV5 { TIMELINE, TRANSFORM, STABILIZE, RETIME, CUTOUT }
 
 /** Timeline, transform, retime and cutout live under Edit; transitions stay on the timeline. */
 @Composable
@@ -91,6 +91,9 @@ fun EditWorkspace(
             TextButton(onClick = { page = EditPageV5.TRANSFORM }, enabled = canEditVideo) {
                 Text("Transform", fontSize = 8.sp, color = if (page == EditPageV5.TRANSFORM) X5Accent else X5Muted)
             }
+            TextButton(onClick = { page = EditPageV5.STABILIZE }, enabled = canEditVideo) {
+                Text("Stabilize", fontSize = 8.sp, color = if (page == EditPageV5.STABILIZE) X5Accent else X5Muted)
+            }
             TextButton(onClick = { page = EditPageV5.RETIME }, enabled = canEditVideo) {
                 Text("Retime", fontSize = 8.sp, color = if (page == EditPageV5.RETIME) X5Accent else X5Muted)
             }
@@ -131,6 +134,16 @@ fun EditWorkspace(
             EditPageV5.TRANSFORM -> {
                 if (selectedClip != null && canEditVideo) {
                     TransformWorkspaceV5(selectedClip, cursorUs, project.frameRate, vm, onSeek, Modifier.fillMaxSize())
+                }
+            }
+
+            EditPageV5.STABILIZE -> {
+                if (selectedClip != null && canEditVideo) {
+                    VirtualCameraStabilizationWorkspaceV1(
+                        clip = selectedClip,
+                        vm = vm,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 }
             }
 
