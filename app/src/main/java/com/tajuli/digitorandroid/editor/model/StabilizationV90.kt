@@ -43,8 +43,10 @@ data class ClipStabilizationV90(
     val analyzedWidth: Int = 0,
     val analyzedHeight: Int = 0,
     val samples: List<StabilizationPathSampleV90> = emptyList(),
-    /** 0 = legacy V90/V92 tracking; 93 = robust bidirectional/RANSAC analysis. */
+    /** 0 = legacy V90/V92 tracking; 93+ = robust bidirectional/RANSAC analysis. */
     val analysisVersionV93: Int = 0,
+    /** V100: one clip-wide tripod crop so Camera Lock never breathes/zooms frame-to-frame. */
+    val cameraLockCoverScaleV100: Float = 1f,
 ) {
     val hasAnalysis: Boolean get() = samples.size >= 2
 
@@ -91,17 +93,22 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
     // V95 zoom envelope is driven by the same robust filtered correction used by rendering.
     // This removes V94's bug where crop probes re-read raw/base corrections and amplified an
     // otherwise filtered tracking outlier into a visible zoom spike.
-    val coverTarget = if (state.analysisVersionV93 >= 93 && state.crop > 0f) {
-        state.zoomEnvelopeV95(sourceTimeUs, correction)
-    } else {
-        max(
-            correction.scaleCorrection,
-            requiredCoverScaleV92(
-                offsetX = correction.dx,
-                offsetY = correction.dy,
-                rotationDegrees = correction.rotation,
-            ) * COVER_SAFETY_V92,
-        )
+    val coverTarget = when {
+        state.mode == StabilizationModeV90.CAMERA_LOCK &&
+            state.analysisVersionV93 >= 100 &&
+            state.crop > 0f ->
+            max(correction.scaleCorrection, state.cameraLockCoverScaleV100.coerceAtLeast(1f))
+        state.analysisVersionV93 >= 93 && state.crop > 0f ->
+            state.zoomEnvelopeV95(sourceTimeUs, correction)
+        else ->
+            max(
+                correction.scaleCorrection,
+                requiredCoverScaleV92(
+                    offsetX = correction.dx,
+                    offsetY = correction.dy,
+                    rotationDegrees = correction.rotation,
+                ) * COVER_SAFETY_V92,
+            )
     }
     val finalScale = lerpV90(
         correction.scaleCorrection,
@@ -164,6 +171,31 @@ private fun ClipStabilizationV90.baseCorrectionV94(sourceTimeUs: Long): Stabiliz
  * A short local median/MAD guard rejects isolated tracking failures without low-pass filtering the
  * real pose; low-pass filtering the correction would re-introduce the original hand shake.
  */
+/**
+ * V100 clip-wide Camera Lock crop.
+ *
+ * Camera Lock should look like a tripod, not a digital zoom effect. Compute the maximum geometric
+ * cover demand once after analysis and hold that crop for the entire clip. This intentionally trades
+ * framing for visual stillness.
+ */
+internal fun ClipStabilizationV90.computeCameraLockCoverScaleV100(): Float {
+    if (samples.isEmpty()) return 1f
+    var required = 1f
+    for (sample in samples) {
+        val correction = cameraLockCorrectionV97(sample.sourceTimeUs)
+        val cover = max(
+            correction.scaleCorrection,
+            requiredCoverScaleV92(
+                correction.dx,
+                correction.dy,
+                correction.rotation,
+            ) * COVER_SAFETY_V92,
+        )
+        required = max(required, cover)
+    }
+    return required.coerceIn(1f, MAX_STABILIZATION_ZOOM_V92)
+}
+
 private fun ClipStabilizationV90.cameraLockCorrectionV97(sourceTimeUs: Long): StabilizationCorrectionV94 {
     val pose = robustCameraPoseV97(sourceTimeUs)
     val amount = strength.coerceIn(0f, 1f)
