@@ -201,7 +201,7 @@ private fun StabilizationWorkspaceV90(
     ) {
         Text("Stabilization · ${liveClip.label}", fontSize = 10.sp, color = Color.White)
         Text(
-            "Resolve-style Stabilization: Translation handles pan/tilt, Similarity adds zoom/rotation, Perspective adds projective image warping. Camera Lock is a separate locked-shot option.",
+            "Resolve-style stabilization with persistent background-point tracking: Translation handles X/Y, Similarity adds rotation/scale, Perspective uses projective warping, and Camera Lock targets a fixed tripod reference.",
             fontSize = 7.sp,
             color = X5Muted,
         )
@@ -276,8 +276,15 @@ private fun StabilizationWorkspaceV90(
 
         Text(
             when {
+                stabilization.analysisVersionV93 >= 103 -> {
+                    val averageTracks = stabilization.samples
+                        .map { it.persistentBackgroundTracksV103 }
+                        .filter { it > 0 }
+                        .let { values -> if (values.isEmpty()) 0 else values.average().roundToInt() }
+                    "V103 Persistent Background · ~$averageTracks stable tracks · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
+                }
                 stabilization.analysisVersionV93 >= 102 ->
-                    "V102 Resolve Stabilizer · ${stabilization.samples.size} frame samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
+                    "V102 analysis · Re-analyze for V103 persistent background tracking"
                 stabilization.analysisVersionV93 >= 101 ->
                     "V101 analysis · Re-analyze for V102 Perspective warp"
                 stabilization.analysisVersionV93 >= 100 ->
