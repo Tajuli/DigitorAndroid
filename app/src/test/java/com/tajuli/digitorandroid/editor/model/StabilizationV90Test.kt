@@ -576,6 +576,115 @@ class StabilizationV90Test {
     }
 
     @Test
+    fun v101CameraLock_usesIndependentFixedReferenceTripodPath() {
+        val samples = listOf(
+            StabilizationPathSampleV90(
+                sourceTimeUs = 0L,
+                pathX = 0f,
+                pathY = 0f,
+                rotationDegrees = 0f,
+                cameraLockPathXV101 = 0f,
+                cameraLockPathYV101 = 0f,
+                cameraLockRotationDegreesV101 = 0f,
+            ),
+            StabilizationPathSampleV90(
+                sourceTimeUs = 100_000L,
+                // Raw incremental path intentionally disagrees with the tripod path.
+                pathX = .03f,
+                pathY = -.01f,
+                rotationDegrees = .5f,
+                cameraLockPathXV101 = .22f,
+                cameraLockPathYV101 = -.10f,
+                cameraLockRotationDegreesV101 = 0f,
+                rotationScaleConfidenceV99 = 0f,
+            ),
+        )
+        val lock = ClipStabilizationV90(
+            mode = StabilizationModeV90.CAMERA_LOCK,
+            strength = 1f,
+            crop = 0f,
+            samples = samples,
+            analysisVersionV93 = 101,
+        )
+
+        val evaluated = lock.evaluate(100_000L)
+        assertEquals(-.22f, evaluated.offsetX, .001f)
+        assertEquals(.10f, evaluated.offsetY, .001f)
+        assertEquals(0f, evaluated.rotationDegrees, .001f)
+    }
+
+    @Test
+    fun v101ThreeModes_haveDistinctMotionContracts() {
+        val samples = (0..120).map { index ->
+            val trend = index * .0035f
+            val xyJitter = if (index % 2 == 0) .018f else -.018f
+            val rotationTrend = index * .015f
+            val rotationJitter = if (index % 3 == 0) 1.1f else -.55f
+            StabilizationPathSampleV90(
+                sourceTimeUs = index * 33_333L,
+                pathX = trend + xyJitter,
+                pathY = -.35f * trend - .5f * xyJitter,
+                rotationDegrees = rotationTrend + rotationJitter,
+                logScale = if (index % 2 == 0) .008f else -.008f,
+                confidence = .98f,
+                rotationScaleConfidenceV99 = .95f,
+                // Camera Lock sees the same camera pose against a fixed scene reference.
+                cameraLockPathXV101 = trend + xyJitter,
+                cameraLockPathYV101 = -.35f * trend - .5f * xyJitter,
+                cameraLockRotationDegreesV101 = rotationTrend + rotationJitter,
+                cameraLockLogScaleV101 = if (index % 2 == 0) .008f else -.008f,
+            )
+        }
+
+        val translation = ClipStabilizationV90(
+            mode = StabilizationModeV90.TRANSLATION,
+            strength = 1f,
+            crop = 0f,
+            samples = samples,
+            analysisVersionV93 = 101,
+        )
+        val similarity = translation.copy(mode = StabilizationModeV90.SIMILARITY)
+        val cameraLock = translation.copy(mode = StabilizationModeV90.CAMERA_LOCK)
+
+        val first = samples.first()
+        val last = samples.last()
+        val translationStart = first.pathX + translation.evaluate(first.sourceTimeUs).offsetX
+        val translationEnd = last.pathX + translation.evaluate(last.sourceTimeUs).offsetX
+        val similarityStart = first.pathX + similarity.evaluate(first.sourceTimeUs).offsetX
+        val similarityEnd = last.pathX + similarity.evaluate(last.sourceTimeUs).offsetX
+        val cameraLockEnd = last.cameraLockPathXV101 +
+            cameraLock.evaluate(last.sourceTimeUs).offsetX
+
+        val rawTravel = last.pathX - first.pathX
+        assertTrue(
+            "Translation must preserve deliberate gimbal travel",
+            abs(translationEnd - translationStart) > abs(rawTravel) * .65f,
+        )
+        assertTrue(
+            "Similarity must preserve camera travel instead of becoming a tripod lock",
+            abs(similarityEnd - similarityStart) > abs(rawTravel) * .45f,
+        )
+        assertTrue(
+            "Camera Lock must cancel fixed-reference travel like a tripod",
+            abs(cameraLockEnd) < .03f,
+        )
+
+        val similarityRotationCorrection = samples.map {
+            abs(similarity.evaluate(it.sourceTimeUs).rotationDegrees)
+        }.average()
+        assertTrue(
+            "Similarity must actively correct rotational shake",
+            similarityRotationCorrection > .05,
+        )
+        assertEquals(
+            "Translation must never rotate the image",
+            0f,
+            translation.evaluate(samples[60].sourceTimeUs).rotationDegrees,
+            .0001f,
+        )
+    }
+
+    @Test
     fun displayTransform_composesManualAndStabilizedMotion() {
         val clip = TimelineClip(
             uri = "content://video",
