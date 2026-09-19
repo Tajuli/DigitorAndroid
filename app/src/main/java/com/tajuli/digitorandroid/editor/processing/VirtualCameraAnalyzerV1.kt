@@ -35,7 +35,7 @@ class VirtualCameraAnalyzerV1(context: Context) {
         val durationUs = endUs - startUs
         val raw = ArrayList<RawCameraSampleV1>()
         var previousGray: IntArray? = null
-        var segmentReferenceGray: IntArray? = null
+        var persistentTripodTracksV3 = emptyList<PersistentTripodTrackV3>()
         var segment = 0
         var pathX = 0f
         var pathY = 0f
@@ -98,34 +98,17 @@ class VirtualCameraAnalyzerV1(context: Context) {
                     }
                 }
 
-                if (newReferenceFrame || segmentReferenceGray == null) {
-                    segmentReferenceGray = current.copyOf()
-                }
-
-                var referenceX: Float? = null
-                var referenceY: Float? = null
-                var referenceRotation: Float? = null
-                var referenceLogScale: Float? = null
-                var referenceConfidence = 0f
-
-                val reference = segmentReferenceGray
-                if (
-                    !newReferenceFrame &&
-                    reference != null &&
-                    reference.size == current.size &&
-                    decoded % REFERENCE_PROBE_INTERVAL_FRAMES_V2 == 0
-                ) {
-                    val direct = estimatePairMotionV1(reference, current, width, height)
-                    if (
-                        !direct.sceneCut &&
-                        direct.confidence >= MIN_REFERENCE_CONFIDENCE_V2
-                    ) {
-                        referenceX = direct.centerDxPx / max(1f, width * .5f)
-                        referenceY = -direct.centerDyPx / max(1f, height * .5f)
-                        referenceRotation = -direct.rotationDegreesImage
-                        referenceLogScale = ln(direct.scale.coerceIn(.90f, 1.10f))
-                        referenceConfidence = direct.confidence
-                    }
+                persistentTripodTracksV3 = when {
+                    newReferenceFrame || previous == null || previous.size != current.size ->
+                        seedPersistentTripodTracksV3(current, width, height)
+                    else ->
+                        advancePersistentTripodTracksV3(
+                            previous = previous,
+                            current = current,
+                            width = width,
+                            height = height,
+                            tracks = persistentTripodTracksV3,
+                        )
                 }
 
                 raw += RawCameraSampleV1(
@@ -136,11 +119,9 @@ class VirtualCameraAnalyzerV1(context: Context) {
                     y = pathY,
                     rotation = pathRotation,
                     logScale = pathLogScale,
-                    referenceX = referenceX,
-                    referenceY = referenceY,
-                    referenceRotation = referenceRotation,
-                    referenceLogScale = referenceLogScale,
-                    referenceConfidence = referenceConfidence,
+                    width = width,
+                    height = height,
+                    tripodObservationsV3 = tripodObservationsV3(persistentTripodTracksV3),
                 )
                 previousGray = current
                 decoded++
@@ -167,7 +148,7 @@ class VirtualCameraAnalyzerV1(context: Context) {
             translationCoverScale = covers.translation,
             similarityCoverScale = covers.similarity,
             tripodCoverScale = covers.tripod,
-            analysisVersion = 2,
+            analysisVersion = 3,
         ).normalized()
     }
 
@@ -179,11 +160,9 @@ class VirtualCameraAnalyzerV1(context: Context) {
         val y: Float,
         val rotation: Float,
         val logScale: Float,
-        val referenceX: Float? = null,
-        val referenceY: Float? = null,
-        val referenceRotation: Float? = null,
-        val referenceLogScale: Float? = null,
-        val referenceConfidence: Float = 0f,
+        val width: Int,
+        val height: Int,
+        val tripodObservationsV3: List<TripodTrackObservationV3> = emptyList(),
     )
 
     private fun solveSegmentsV1(raw: List<RawCameraSampleV1>): List<VirtualCameraSampleV1> {
@@ -406,8 +385,6 @@ class VirtualCameraAnalyzerV1(context: Context) {
     private companion object {
         const val ANALYSIS_LONG_EDGE_V1 = 384
         const val MIN_ACCEPTED_CONFIDENCE_V1 = .34f
-        const val REFERENCE_PROBE_INTERVAL_FRAMES_V2 = 6
-        const val MIN_REFERENCE_CONFIDENCE_V2 = .48f
         const val TRANSLATION_LAMBDA_V1 = 150f
         const val ROTATION_LAMBDA_V1 = 210f
         const val SCALE_LAMBDA_V1 = 260f
