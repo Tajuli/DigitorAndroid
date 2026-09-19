@@ -70,7 +70,7 @@ object SharedVideoPipeline {
 
     /** Production zero-latency composited preview chain. */
     fun compositedPreviewEffectsFor(clip: TimelineClip): List<Effect> = buildList {
-        PerspectiveStabilizationEffectV102.forCompositedItem(clip)?.let(::add)
+        PerspectiveStabilizationEffectV102.forCompositedPreview(clip)?.let(::add)
         BeautyFaceEffectV36.baseForClip(clip, preview = true)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = true)?.let(::add)
