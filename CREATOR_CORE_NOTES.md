@@ -28,6 +28,15 @@ This document describes the current creator/editor behavior on the active Androi
 - Audio clip volume, fade-in and fade-out through Media3 `GainProcessor`
 - Source-aware audio waveforms rendered inside A-track clips with background decode and memory/disk caching
 - Home navigation that autosaves before leaving the editor
+- Resolve-style Stabilization inspector:
+  - Mode: Perspective / Similarity / Translation
+  - Camera Lock is a separate option, not a fourth mode
+  - Zoom, Cropping Ratio, Smooth and Strength controls
+  - Camera Lock disables Cropping Ratio and Smooth and targets a locked/tripod shot
+- Translation preserves intentional pan/tilt while smoothing X/Y motion
+- Similarity stabilizes X/Y + rotation + zoom/scale without projective warping
+- Perspective uses a real 3×3 projective homography in the GPU vertex stage
+- V102 analysis stores both incremental projective motion and a separate fixed-reference Camera Lock projective path
 
 ## Audio waveform contract
 
@@ -107,6 +116,23 @@ Text is rendered as a Media3 composition-level `TextOverlay`.
 ## Transition boundary
 
 Media3 1.11 does not provide a general true crossfade between arbitrary composition sequences. The editor therefore ships a stable fade-transition engine evaluated by the same Resolve compositor used by preview/export rather than introducing a separate unsupported crossfade graph.
+
+## Stabilization contract
+
+Stabilization analysis is source-time metadata and is reused by preview/export after analysis.
+
+- **Translation** solves a smooth X/Y camera path and preserves deliberate camera travel; it never rotates or scales the source.
+- **Similarity** solves a smooth full similarity path (X/Y/rotation/scale) while preserving intentional camera movement.
+- **Perspective** derives spatially distributed corner motion from robust inlier tracks and applies a true projective 3×3 homography. Low spatial confidence blends toward the safer similarity estimate instead of allowing unconstrained foreground-driven warping.
+- **Camera Lock** is independent of Mode. It uses the selected mode's degrees of freedom to remove camera motion against a fixed scene reference. Translation + Camera Lock locks X/Y only; Similarity + Camera Lock locks similarity pose; Perspective + Camera Lock locks the projective reference path.
+- **Zoom** controls automatic blank-edge coverage. When off, black/transparent blanking from stabilization is intentionally preserved.
+- **Cropping Ratio** limits non-Camera-Lock stabilization aggressiveness; 1.0 resolves to no stabilization and lower values allow stronger correction.
+- **Smooth** controls path smoothing and is disabled while Camera Lock is active.
+- **Strength** multiplies the solved correction.
+- Camera Lock uses clip-wide cover zoom rather than frame-to-frame zoom pumping.
+- Legacy projects whose saved mode is `CAMERA_LOCK` normalize to `SIMILARITY + Camera Lock ON`.
+
+Perspective stabilization runs before manual clip transforms and before multitrack compositing, so the same projective correction is used by single-input preview/export and compositor routes.
 
 ## Retime boundary
 
