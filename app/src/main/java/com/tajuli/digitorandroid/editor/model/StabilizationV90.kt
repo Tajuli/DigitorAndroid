@@ -31,6 +31,11 @@ data class StabilizationPathSampleV90(
     val segmentV93: Int = 0,
     /** V99: 0..1 confidence that rotation/scale came from spatially broad background motion. */
     val rotationScaleConfidenceV99: Float = 0f,
+    /** V101 fixed-reference tripod pose. Translation/Similarity continue using pathX/pathY above. */
+    val cameraLockPathXV101: Float = 0f,
+    val cameraLockPathYV101: Float = 0f,
+    val cameraLockRotationDegreesV101: Float = 0f,
+    val cameraLockLogScaleV101: Float = 0f,
 )
 
 data class ClipStabilizationV90(
@@ -87,6 +92,8 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
             state.translationCorrectionV96(sourceTimeUs)
         state.analysisVersionV93 < 93 -> state.baseCorrectionV94(sourceTimeUs)
         state.mode == StabilizationModeV90.CAMERA_LOCK -> state.cameraLockCorrectionV97(sourceTimeUs)
+        state.mode == StabilizationModeV90.SIMILARITY && state.analysisVersionV93 >= 101 ->
+            state.similarityCorrectionV101(sourceTimeUs)
         else -> state.filteredCorrectionV95(sourceTimeUs)
     }
 
@@ -197,7 +204,11 @@ internal fun ClipStabilizationV90.computeCameraLockCoverScaleV100(): Float {
 }
 
 private fun ClipStabilizationV90.cameraLockCorrectionV97(sourceTimeUs: Long): StabilizationCorrectionV94 {
-    val pose = robustCameraPoseV97(sourceTimeUs)
+    val pose = if (analysisVersionV93 >= 101) {
+        robustFixedReferencePoseV101(sourceTimeUs)
+    } else {
+        robustCameraPoseV97(sourceTimeUs)
+    }
     val amount = strength.coerceIn(0f, 1f)
 
     // V99 keeps X/Y hard-locked, but rotation/scale are only trusted when the analyzer saw
@@ -280,6 +291,135 @@ private fun ClipStabilizationV90.robustCameraPoseV97(sourceTimeUs: Long): Stabil
         ),
     )
 }
+
+/**
+ * V101 Camera Lock reads a separate fixed-reference path. Translation and Similarity never consume
+ * this path, so Camera Lock can truly freeze the shot without turning the other modes into a tripod.
+ */
+private fun ClipStabilizationV90.fixedReferencePoseAtV101(sourceTimeUs: Long): StabilizationPathValueV90 {
+    val items = samples
+    if (items.isEmpty()) return StabilizationPathValueV90(0f, 0f, 0f, 0f)
+    if (sourceTimeUs <= items.first().sourceTimeUs) return items.first().cameraLockPathValueV101()
+    if (sourceTimeUs >= items.last().sourceTimeUs) return items.last().cameraLockPathValueV101()
+
+    var lo = 0
+    var hi = items.lastIndex
+    while (hi - lo > 1) {
+        val mid = (lo + hi) ushr 1
+        if (items[mid].sourceTimeUs <= sourceTimeUs) lo = mid else hi = mid
+    }
+    val a = items[lo]
+    val b = items[hi]
+    if (a.segmentV93 != b.segmentV93) {
+        val midpoint = a.sourceTimeUs + (b.sourceTimeUs - a.sourceTimeUs) / 2L
+        return if (sourceTimeUs < midpoint) a.cameraLockPathValueV101() else b.cameraLockPathValueV101()
+    }
+    val span = (b.sourceTimeUs - a.sourceTimeUs).coerceAtLeast(1L)
+    val t = ((sourceTimeUs - a.sourceTimeUs).toDouble() / span.toDouble())
+        .toFloat()
+        .coerceIn(0f, 1f)
+    return StabilizationPathValueV90(
+        x = lerpV90(a.cameraLockPathXV101, b.cameraLockPathXV101, t),
+        y = lerpV90(a.cameraLockPathYV101, b.cameraLockPathYV101, t),
+        rotation = lerpV90(a.cameraLockRotationDegreesV101, b.cameraLockRotationDegreesV101, t),
+        logScale = lerpV90(a.cameraLockLogScaleV101, b.cameraLockLogScaleV101, t),
+    )
+}
+
+private fun ClipStabilizationV90.robustFixedReferencePoseV101(sourceTimeUs: Long): StabilizationPathValueV90 {
+    val center = fixedReferencePoseAtV101(sourceTimeUs)
+    val segment = segmentAtV93(sourceTimeUs)
+    val window = samplesInWindowV94(sourceTimeUs, CAMERA_LOCK_REFERENCE_GUARD_RADIUS_US_V101, segment)
+    if (window.size < MIN_CAMERA_LOCK_WINDOW_SAMPLES_V97) return center
+
+    val xs = window.map { it.cameraLockPathXV101 }
+    val ys = window.map { it.cameraLockPathYV101 }
+    val rotations = window.map { it.cameraLockRotationDegreesV101 }
+    val logScales = window.map { it.cameraLockLogScaleV101 }
+
+    val medianX = medianFloatV95(xs)
+    val medianY = medianFloatV95(ys)
+    val medianRotation = medianFloatV95(rotations)
+    val medianLogScale = medianFloatV95(logScales)
+
+    return StabilizationPathValueV90(
+        x = center.x.coerceIn(
+            medianX - robustGateV95(xs, medianX, MIN_CAMERA_LOCK_TRANSLATION_GATE_V97),
+            medianX + robustGateV95(xs, medianX, MIN_CAMERA_LOCK_TRANSLATION_GATE_V97),
+        ),
+        y = center.y.coerceIn(
+            medianY - robustGateV95(ys, medianY, MIN_CAMERA_LOCK_TRANSLATION_GATE_V97),
+            medianY + robustGateV95(ys, medianY, MIN_CAMERA_LOCK_TRANSLATION_GATE_V97),
+        ),
+        rotation = center.rotation.coerceIn(
+            medianRotation - robustGateV95(
+                rotations,
+                medianRotation,
+                MIN_CAMERA_LOCK_ROTATION_GATE_V97,
+            ),
+            medianRotation + robustGateV95(
+                rotations,
+                medianRotation,
+                MIN_CAMERA_LOCK_ROTATION_GATE_V97,
+            ),
+        ),
+        logScale = center.logScale.coerceIn(
+            medianLogScale - robustGateV95(
+                logScales,
+                medianLogScale,
+                MIN_CAMERA_LOCK_LOG_SCALE_GATE_V97,
+            ),
+            medianLogScale + robustGateV95(
+                logScales,
+                medianLogScale,
+                MIN_CAMERA_LOCK_LOG_SCALE_GATE_V97,
+            ),
+        ),
+    )
+}
+
+/**
+ * V101 Similarity = shake-free full-pose stabilization, not Camera Lock.
+ *
+ * Smooth the measured X/Y/rotation/scale camera PATH and solve the exact relative similarity
+ * transform from raw pose to that smooth target. This preserves intentional camera movement while
+ * cancelling high-frequency shake in all similarity degrees of freedom.
+ */
+private fun ClipStabilizationV90.similarityCorrectionV101(sourceTimeUs: Long): StabilizationCorrectionV94 {
+    val raw = robustCameraPoseV97(sourceTimeUs)
+    val desired = smoothedPathAtV90(sourceTimeUs)
+    val amount = strength.coerceIn(0f, 1f)
+
+    val fullImageRotation = desired.rotation - raw.rotation
+    val imageRotation = fullImageRotation * amount
+    val fullLogScaleDelta = desired.logScale - raw.logScale
+    val scaleCorrection = exp(
+        (fullLogScaleDelta * amount).coerceIn(-.30f, .30f).toDouble(),
+    ).toFloat()
+
+    val radians = Math.toRadians(imageRotation.toDouble())
+    val cosR = cos(radians).toFloat()
+    val sinR = sin(radians).toFloat()
+    val transformedRawX = scaleCorrection * (cosR * raw.x - sinR * raw.y)
+    val transformedRawY = scaleCorrection * (sinR * raw.x + cosR * raw.y)
+    val dx = ((desired.x - transformedRawX) * amount).coerceIn(-1.6f, 1.6f)
+    val dy = ((desired.y - transformedRawY) * amount).coerceIn(-1.6f, 1.6f)
+
+    return StabilizationCorrectionV94(
+        dx = dx,
+        dy = dy,
+        // Image-space delta rotation flips sign at the Media3/NDC render boundary.
+        rotation = (-imageRotation).coerceIn(-45f, 45f),
+        scaleCorrection = scaleCorrection.coerceIn(.74f, 1.36f),
+    )
+}
+
+private fun StabilizationPathSampleV90.cameraLockPathValueV101() = StabilizationPathValueV90(
+    x = cameraLockPathXV101,
+    y = cameraLockPathYV101,
+    rotation = cameraLockRotationDegreesV101,
+    logScale = cameraLockLogScaleV101,
+)
 
 /**
  * V96 Resolve-style Translation solver.
@@ -761,6 +901,7 @@ private const val MIN_CAMERA_LOCK_WINDOW_SAMPLES_V97 = 5
 private const val MIN_CAMERA_LOCK_TRANSLATION_GATE_V97 = .025f
 private const val MIN_CAMERA_LOCK_ROTATION_GATE_V97 = .35f
 private const val MIN_CAMERA_LOCK_LOG_SCALE_GATE_V97 = .006f
+private const val CAMERA_LOCK_REFERENCE_GUARD_RADIUS_US_V101 = 90_000L
 private const val CAMERA_LOCK_RS_TRUST_RADIUS_US_V99 = 260_000L
 private const val CAMERA_LOCK_RS_TRUST_LOW_V99 = .42f
 private const val CAMERA_LOCK_RS_TRUST_HIGH_V99 = .72f
