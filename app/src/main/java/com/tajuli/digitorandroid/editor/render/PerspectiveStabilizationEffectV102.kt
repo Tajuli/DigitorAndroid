@@ -5,9 +5,9 @@ import androidx.media3.common.Effect
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.MatrixTransformation
 import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
-import com.tajuli.digitorandroid.editor.model.StabilizationModeV90
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.evaluatePerspectiveV102
+import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 
 /**
  * V102 Resolve-style Perspective stabilization.
@@ -23,6 +23,7 @@ object PerspectiveStabilizationEffectV102 {
             clip = clip,
             presentationTimeOffsetUs = clip.sourceInUs,
             usePreviewClock = true,
+            liveProject = true,
         )
 
     fun forExport(clip: TimelineClip): Effect? =
@@ -30,6 +31,7 @@ object PerspectiveStabilizationEffectV102 {
             clip = clip,
             presentationTimeOffsetUs = 0L,
             usePreviewClock = false,
+            liveProject = false,
         )
 
     /** Composition item effects are item-local; the compositor handles timeline placement later. */
@@ -38,19 +40,28 @@ object PerspectiveStabilizationEffectV102 {
             clip = clip,
             presentationTimeOffsetUs = 0L,
             usePreviewClock = false,
+            liveProject = false,
+        )
+
+    fun forCompositedPreview(clip: TimelineClip): Effect? =
+        create(
+            clip = clip,
+            presentationTimeOffsetUs = 0L,
+            usePreviewClock = false,
+            liveProject = true,
         )
 
     private fun create(
         clip: TimelineClip,
         presentationTimeOffsetUs: Long,
         usePreviewClock: Boolean,
+        liveProject: Boolean,
     ): Effect? {
-        val stabilization = clip.stabilizationV90?.normalized() ?: return null
+        val seed = clip.stabilizationV90?.normalized() ?: return null
         if (
-            !stabilization.enabled ||
-            stabilization.mode != StabilizationModeV90.PERSPECTIVE ||
-            stabilization.analysisVersionV93 < 102 ||
-            !stabilization.hasAnalysis
+            seed.analysisVersionV93 < 102 ||
+            !seed.hasAnalysis ||
+            seed.samples.none { it.perspectivePathV102 != null }
         ) {
             return null
         }
@@ -80,8 +91,14 @@ object PerspectiveStabilizationEffectV102 {
                 fallbackLocalUs
             }
 
-            val sourceTimeUs = clip.sourceInUs + localUs
-            val transform = stabilization.evaluatePerspectiveV102(sourceTimeUs)
+            val liveClip = if (liveProject) {
+                PreviewProjectRegistry.project()?.clip(clip.id) ?: clip
+            } else {
+                clip
+            }
+            val stabilization = liveClip.stabilizationV90?.normalized()
+            val sourceTimeUs = liveClip.sourceInUs + localUs
+            val transform = stabilization?.evaluatePerspectiveV102(sourceTimeUs)
             Matrix().apply {
                 if (transform == null) {
                     reset()
