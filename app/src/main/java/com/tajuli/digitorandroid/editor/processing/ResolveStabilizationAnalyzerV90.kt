@@ -213,12 +213,20 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         onProgress(.985f, "Solving tripod lock…")
 
         val tripodSamples = applyReferenceAnchorsV100(samples, referenceAnchorsV100)
+        val multiModeSamples = samples.zip(tripodSamples).map { (raw, tripod) ->
+            raw.copy(
+                cameraLockPathXV101 = tripod.pathX,
+                cameraLockPathYV101 = tripod.pathY,
+                cameraLockRotationDegreesV101 = tripod.rotationDegrees,
+                cameraLockLogScaleV101 = tripod.logScale,
+            )
+        }
         val solved = base.copy(
             enabled = true,
             analyzedWidth = analyzedWidth,
             analyzedHeight = analyzedHeight,
-            samples = tripodSamples,
-            analysisVersionV93 = 100,
+            samples = multiModeSamples,
+            analysisVersionV93 = 101,
             cameraLockCoverScaleV100 = 1f,
         ).normalized()
         val constantCameraLockZoom = solved.computeCameraLockCoverScaleV100()
@@ -876,7 +884,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         const val MAX_RANSAC_HYPOTHESES = 180
         const val MIN_RANSAC_BASELINE_PX = 18f
         const val SCENE_CUT_DIFFERENCE = 52f
-        const val REFERENCE_RELOCK_INTERVAL_FRAMES_V97 = 6
+        const val REFERENCE_RELOCK_INTERVAL_FRAMES_V97 = 1
         const val REFERENCE_SEARCH_RADIUS_V97 = 56
         const val REFERENCE_COARSE_STEP_V97 = 6
         const val REFERENCE_RELOCK_MIN_CONFIDENCE_V97 = .38f
