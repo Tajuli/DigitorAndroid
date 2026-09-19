@@ -534,14 +534,25 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                 coarseStep = PERSISTENT_COARSE_STEP_V103,
             ) ?: continue
 
+            // The patch search starts at an integer pixel, but keep the track's fractional
+            // coordinate and apply only the measured delta. Otherwise rounding every frame can
+            // accumulate ~0.5 px quantization drift and show up as Camera Lock micro-jitter.
+            val originX = track.x.roundToInt().toFloat()
+            val originY = track.y.roundToInt().toFloat()
+            val nextX = track.x + (match.qx - originX)
+            val nextY = track.y + (match.qy - originY)
             val next = track.copy(
-                x = match.qx,
-                y = match.qy,
+                x = nextX,
+                y = nextY,
                 ageFrames = track.ageFrames + 1,
                 lastSad = match.sad,
             )
             nextTracks += next
             matches += match.copy(
+                px = track.x,
+                py = track.y,
+                qx = nextX,
+                qy = nextY,
                 trackIdV103 = next.id,
                 trackAgeV103 = next.ageFrames,
                 backgroundWeightV103 = next.weightV103(),
