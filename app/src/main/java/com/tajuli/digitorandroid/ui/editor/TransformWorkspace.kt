@@ -193,7 +193,7 @@ private fun StabilizationWorkspaceV90(
     ) {
         Text("Stabilization · ${liveClip.label}", fontSize = 10.sp, color = Color.White)
         Text(
-            "Resolve-style offline camera analysis. Translation removes hand-shake, Similarity also corrects rotation/zoom, and Camera Lock pins the shot to the analyzed reference.",
+            "Three independent stabilizers: Translation = gimbal-like motion, Similarity = shake-free X/Y + rotation + scale, Camera Lock = fixed-reference tripod shot.",
             fontSize = 7.sp,
             color = X5Muted,
         )
@@ -268,8 +268,10 @@ private fun StabilizationWorkspaceV90(
 
         Text(
             when {
+                stabilization.analysisVersionV93 >= 101 ->
+                    "V101 3-Mode Solve · ${stabilization.samples.size} frame samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
                 stabilization.analysisVersionV93 >= 100 ->
-                    "V100 Tripod Lock · ${stabilization.samples.size} frame samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
+                    "V100 analysis · Re-analyze for V101 independent mode paths"
                 stabilization.analysisVersionV93 >= 99 ->
                     "V99 analysis · Re-analyze for V100 tripod solve"
                 stabilization.analysisVersionV93 >= 97 ->
@@ -291,9 +293,9 @@ private fun StabilizationWorkspaceV90(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             listOf(
-                StabilizationModeV90.TRANSLATION to "Translation",
-                StabilizationModeV90.SIMILARITY to "Similarity",
-                StabilizationModeV90.CAMERA_LOCK to "Camera Lock",
+                StabilizationModeV90.TRANSLATION to "Translation · Gimbal",
+                StabilizationModeV90.SIMILARITY to "Similarity · Shake Free",
+                StabilizationModeV90.CAMERA_LOCK to "Camera Lock · Tripod",
             ).forEach { (mode, label) ->
                 Text(
                     label,
