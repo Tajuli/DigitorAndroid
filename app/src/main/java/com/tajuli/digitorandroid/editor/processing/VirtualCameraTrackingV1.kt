@@ -12,6 +12,11 @@ internal data class PairMotionV1(
     val rotationDegreesImage: Float = 0f,
     val scale: Float = 1f,
     val confidence: Float = 0f,
+    val translationConfidenceV4: Float = 0f,
+    val rotationConfidenceV4: Float = 0f,
+    val scaleConfidenceV4: Float = 0f,
+    val spatialCoverageV4: Float = 0f,
+    val inlierRatioV4: Float = 0f,
     val sceneCut: Boolean = false,
 )
 
@@ -90,7 +95,11 @@ internal fun estimatePairMotionV1(
         )
     }
 
-    val fit = fitSimilarityAllV1(inliers) ?: return PairMotionV1(confidence = .05f)
+    // V4: re-fit robust inliers with a mild border/background prior. A centered moving subject
+    // should not outweigh distributed scene geometry merely because it is highly textured.
+    val fit = fitSimilarityBackgroundWeightedV4(inliers, width, height)
+        ?: fitSimilarityAllV1(inliers)
+        ?: return PairMotionV1(confidence = .05f)
     val scale = sqrt(fit.a * fit.a + fit.b * fit.b)
     val rotation = Math.toDegrees(atan2(fit.b.toDouble(), fit.a.toDouble())).toFloat()
     if (scale !in MIN_STEP_SCALE_V1..MAX_STEP_SCALE_V1 || abs(rotation) > MAX_STEP_ROTATION_V1) {
@@ -110,14 +119,37 @@ internal fun estimatePairMotionV1(
     val coverage = spatialCoverageV1(inliers, width, height)
     val countScore = (inliers.size / 22f).coerceIn(0f, 1f)
     val errorScore = (1f - averageError / RANSAC_INLIER_ERROR_V1).coerceIn(0f, 1f)
+    val radialSupport = radialSupportV4(inliers, width, height)
+
+    // V4 separates trust per degree of freedom. Translation can remain reliable with moderate
+    // coverage; rotation and especially scale require points spread far from the image centre.
+    val translationConfidence = (
+        countScore * .22f +
+            inlierRatio * .30f +
+            errorScore * .32f +
+            coverage * .16f
+        ).coerceIn(0f, 1f)
+    val rotationConfidence = (
+        countScore * .10f +
+            inlierRatio * .20f +
+            errorScore * .25f +
+            coverage * .25f +
+            radialSupport * .20f
+        ).coerceIn(0f, 1f)
+    val scaleConfidence = (
+        countScore * .08f +
+            inlierRatio * .18f +
+            errorScore * .30f +
+            coverage * .22f +
+            radialSupport * .22f
+        ).coerceIn(0f, 1f)
     val confidence = (
-        countScore * .24f +
-            inlierRatio * .28f +
-            errorScore * .28f +
-            coverage * .20f
+        translationConfidence * .55f +
+            rotationConfidence * .28f +
+            scaleConfidence * .17f
         ).coerceIn(0f, 1f)
     val hardCut = frameDifference > SCENE_CUT_DIFFERENCE_V1 &&
-        (inlierRatio < .40f || confidence < .25f)
+        (inlierRatio < .40f || translationConfidence < .25f)
 
     return PairMotionV1(
         centerDxPx = mappedCenterX - centerX,
@@ -125,6 +157,11 @@ internal fun estimatePairMotionV1(
         rotationDegreesImage = rotation,
         scale = scale,
         confidence = if (hardCut) 0f else confidence,
+        translationConfidenceV4 = if (hardCut) 0f else translationConfidence,
+        rotationConfidenceV4 = if (hardCut) 0f else rotationConfidence,
+        scaleConfidenceV4 = if (hardCut) 0f else scaleConfidence,
+        spatialCoverageV4 = if (hardCut) 0f else coverage,
+        inlierRatioV4 = if (hardCut) 0f else inlierRatio,
         sceneCut = hardCut,
     )
 }
@@ -198,6 +235,87 @@ private fun fitSimilarityAllV1(matches: List<MatchV1>): SimilarityFitV1? {
         qCx - (a * pCx - b * pCy),
         qCy - (b * pCx + a * pCy),
     )
+}
+
+private fun fitSimilarityBackgroundWeightedV4(
+    matches: List<MatchV1>,
+    width: Int,
+    height: Int,
+): SimilarityFitV1? {
+    if (matches.size < 2) return null
+    val centerX = (width - 1) * .5f
+    val centerY = (height - 1) * .5f
+    val maxRadius = sqrt(centerX * centerX + centerY * centerY).coerceAtLeast(1f)
+
+    fun weight(match: MatchV1): Float {
+        val dx = match.px - centerX
+        val dy = match.py - centerY
+        val radius = (sqrt(dx * dx + dy * dy) / maxRadius).coerceIn(0f, 1f)
+        val geometryPrior = .58f + .42f * radius
+        val photometricPrior = (1f - match.error / MAX_PATCH_SAD_V1)
+            .coerceIn(.35f, 1f)
+        return geometryPrior * photometricPrior
+    }
+
+    var weightSum = 0.0
+    var pCx = 0.0
+    var pCy = 0.0
+    var qCx = 0.0
+    var qCy = 0.0
+    for (m in matches) {
+        val w = weight(m).toDouble()
+        weightSum += w
+        pCx += m.px * w
+        pCy += m.py * w
+        qCx += m.qx * w
+        qCy += m.qy * w
+    }
+    if (weightSum <= 1e-8) return null
+    pCx /= weightSum
+    pCy /= weightSum
+    qCx /= weightSum
+    qCy /= weightSum
+
+    var dot = 0.0
+    var cross = 0.0
+    var denominator = 0.0
+    for (m in matches) {
+        val w = weight(m).toDouble()
+        val px = m.px - pCx
+        val py = m.py - pCy
+        val qx = m.qx - qCx
+        val qy = m.qy - qCy
+        dot += w * (px * qx + py * qy)
+        cross += w * (px * qy - py * qx)
+        denominator += w * (px * px + py * py)
+    }
+    if (denominator < 1e-6) return null
+    val a = (dot / denominator).toFloat()
+    val b = (cross / denominator).toFloat()
+    return SimilarityFitV1(
+        a = a,
+        b = b,
+        tx = (qCx - (a * pCx - b * pCy)).toFloat(),
+        ty = (qCy - (b * pCx + a * pCy)).toFloat(),
+    )
+}
+
+private fun radialSupportV4(
+    matches: List<MatchV1>,
+    width: Int,
+    height: Int,
+): Float {
+    if (matches.isEmpty()) return 0f
+    val centerX = (width - 1) * .5f
+    val centerY = (height - 1) * .5f
+    val maxRadius = sqrt(centerX * centerX + centerY * centerY).coerceAtLeast(1f)
+    return (
+        matches.sumOf { match ->
+            val dx = match.px - centerX
+            val dy = match.py - centerY
+            (sqrt(dx * dx + dy * dy) / maxRadius).toDouble()
+        } / matches.size.toDouble()
+        ).toFloat().coerceIn(0f, 1f)
 }
 
 private fun reprojectionErrorV1(fit: SimilarityFitV1, m: MatchV1): Float {
