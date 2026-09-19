@@ -81,6 +81,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         var pathRotation = 0f
         var pathLogScale = 0f
         var perspectivePathV102 = PerspectiveQuadV102.IDENTITY
+        var globalReferencePerspectiveV104 = PerspectiveQuadV102.IDENTITY
         var segmentV93 = 0
 
         val decoder = GpuSequentialCutoutDecoderV47(
@@ -118,7 +119,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                         height = height,
                         existing = emptyList(),
                         nextTrackId = nextPersistentTrackIdV103,
-                        seedReference = true,
+                        referencePoseV104 = PerspectiveQuadV102.IDENTITY,
                     )
                     persistentTracksV103 = seeded.tracks
                     nextPersistentTrackIdV103 = seeded.nextTrackId
@@ -157,6 +158,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                         pathRotation = 0f
                         pathLogScale = 0f
                         perspectivePathV102 = PerspectiveQuadV102.IDENTITY
+                        globalReferencePerspectiveV104 = PerspectiveQuadV102.IDENTITY
                         segmentReferenceGray = current.copyOf()
                         framesSinceReferenceProbe = 0
                         val seeded = replenishPersistentTracksV103(
@@ -165,7 +167,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                             height = height,
                             existing = emptyList(),
                             nextTrackId = nextPersistentTrackIdV103,
-                            seedReference = true,
+                            referencePoseV104 = PerspectiveQuadV102.IDENTITY,
                         )
                         persistentTracksV103 = seeded.tracks
                         nextPersistentTrackIdV103 = seeded.nextTrackId
@@ -184,7 +186,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                             height = height,
                             existing = consensusTracks,
                             nextTrackId = nextPersistentTrackIdV103,
-                            seedReference = false,
+                            referencePoseV104 = globalReferencePerspectiveV104,
                         )
                         persistentTracksV103 = replenished.tracks
                         nextPersistentTrackIdV103 = replenished.nextTrackId
@@ -262,6 +264,15 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                                 !anchored.sceneCut &&
                                 anchored.confidence >= REFERENCE_RELOCK_MIN_CONFIDENCE_V97
                             ) {
+                                // V104 treats persistent reference correspondences as a global
+                                // scene coordinate system. Re-seeded points are mapped back into this
+                                // reference, so tracks can leave the frame without losing the lock.
+                                // Perspective also consumes this direct global pose instead of
+                                // integrating projective deltas indefinitely.
+                                anchored.perspectiveDeltaV102?.let { directReferencePose ->
+                                    globalReferencePerspectiveV104 = directReferencePose
+                                    perspectivePathV102 = directReferencePose
+                                }
                                 referenceAnchorsV100 += ReferenceAnchorV100(
                                     sampleIndex = samples.size,
                                     segment = segmentV93,
@@ -337,7 +348,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             analyzedWidth = analyzedWidth,
             analyzedHeight = analyzedHeight,
             samples = multiModeSamples,
-            analysisVersionV93 = 103,
+            analysisVersionV93 = 104,
             cameraLockCoverScaleV100 = 1f,
             cameraLockPerspectiveCoverScaleV102 = 1f,
         ).normalized()
@@ -594,7 +605,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         height: Int,
         existing: List<PersistentTrackV103>,
         nextTrackId: Int,
-        seedReference: Boolean,
+        referencePoseV104: PerspectiveQuadV102?,
     ): PersistentTrackSetV103 {
         if (width <= 0 || height <= 0) return PersistentTrackSetV103(existing, nextTrackId)
         val tracks = existing.toMutableList()
@@ -628,12 +639,27 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             }
             if (tooClose) continue
 
+            val referencePoint = referencePoseV104?.let { referencePose ->
+                val referenceToCurrent = solveHomographyV102(
+                    PerspectiveQuadV102.IDENTITY.asPoints(),
+                    referencePose.asPoints(),
+                )
+                referenceToCurrent?.let { matrix ->
+                    mapCurrentPointToReferenceV104(
+                        currentX = candidate.x.toFloat(),
+                        currentY = candidate.y.toFloat(),
+                        width = width,
+                        height = height,
+                        referenceToCurrent = matrix,
+                    )
+                }
+            }
             tracks += PersistentTrackV103(
                 id = id++,
                 x = candidate.x.toFloat(),
                 y = candidate.y.toFloat(),
-                referenceX = if (seedReference) candidate.x.toFloat() else null,
-                referenceY = if (seedReference) candidate.y.toFloat() else null,
+                referenceX = referencePoint?.first,
+                referenceY = referencePoint?.second,
             )
         }
         return PersistentTrackSetV103(tracks, id)
