@@ -824,10 +824,32 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         anchors: List<ReferenceAnchorV100>,
     ): List<PerspectiveQuadV102?> {
         if (samples.isEmpty()) return emptyList()
-        val bySegment = anchors
+        val rawAnchorsBySegment = anchors
             .filter { it.perspectiveQuadV102 != null }
             .groupBy { it.segment }
-            .mapValues { (_, values) ->
+            .mapValues { (_, values) -> values.toMutableList() }
+            .toMutableMap()
+
+        // The first decoded frame of every scene segment IS the fixed reference by definition.
+        // Seed it explicitly so frames before the first successful wide-search match cannot inherit
+        // a later camera pose.
+        samples.forEachIndexed { index, sample ->
+            val list = rawAnchorsBySegment.getOrPut(sample.segmentV93) { ArrayList() }
+            if (list.none { it.sampleIndex == index } && samples.getOrNull(index - 1)?.segmentV93 != sample.segmentV93) {
+                list += ReferenceAnchorV100(
+                    sampleIndex = index,
+                    segment = sample.segmentV93,
+                    pathX = 0f,
+                    pathY = 0f,
+                    rotationDegrees = 0f,
+                    logScale = 0f,
+                    rotationScaleConfidence = 1f,
+                    perspectiveQuadV102 = PerspectiveQuadV102.IDENTITY,
+                )
+            }
+        }
+
+        val bySegment = rawAnchorsBySegment.mapValues { (_, values) ->
                 val sorted = values.sortedBy { it.sampleIndex }
                 sorted.mapIndexed { index, anchor ->
                     val from = (index - 2).coerceAtLeast(0)
