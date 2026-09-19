@@ -17,7 +17,31 @@ import kotlin.math.sin
 enum class StabilizationModeV90 {
     TRANSLATION,
     SIMILARITY,
+    PERSPECTIVE,
+    /** Legacy persisted value; normalized to Similarity + Camera Lock on load/use. */
     CAMERA_LOCK,
+}
+
+data class PerspectiveQuadV102(
+    val topLeftX: Float = -1f,
+    val topLeftY: Float = 1f,
+    val topRightX: Float = 1f,
+    val topRightY: Float = 1f,
+    val bottomRightX: Float = 1f,
+    val bottomRightY: Float = -1f,
+    val bottomLeftX: Float = -1f,
+    val bottomLeftY: Float = -1f,
+) {
+    fun asPoints(): FloatArray = floatArrayOf(
+        topLeftX, topLeftY,
+        topRightX, topRightY,
+        bottomRightX, bottomRightY,
+        bottomLeftX, bottomLeftY,
+    )
+
+    companion object {
+        val IDENTITY = PerspectiveQuadV102()
+    }
 }
 
 data class StabilizationPathSampleV90(
@@ -36,6 +60,10 @@ data class StabilizationPathSampleV90(
     val cameraLockPathYV101: Float = 0f,
     val cameraLockRotationDegreesV101: Float = 0f,
     val cameraLockLogScaleV101: Float = 0f,
+    /** V102 cumulative projective camera path for Resolve-style Perspective mode. */
+    val perspectivePathV102: PerspectiveQuadV102? = null,
+    /** V102 fixed-reference projective path used when Camera Lock is enabled. */
+    val cameraLockPerspectivePathV102: PerspectiveQuadV102? = null,
 )
 
 data class ClipStabilizationV90(
@@ -52,18 +80,29 @@ data class ClipStabilizationV90(
     val analysisVersionV93: Int = 0,
     /** V100: one clip-wide tripod crop so Camera Lock never breathes/zooms frame-to-frame. */
     val cameraLockCoverScaleV100: Float = 1f,
+    /** V102 Resolve controls. Camera Lock is an option, not a stabilization mode. */
+    val cameraLockV102: Boolean = false,
+    val zoomEnabledV102: Boolean = true,
+    /** Resolve semantics: 1.0 = least/no stabilization, lower values allow more aggressive crop. */
+    val croppingRatioV102: Float = .5f,
 ) {
     val hasAnalysis: Boolean get() = samples.size >= 2
 
-    fun normalized(): ClipStabilizationV90 = copy(
-        strength = strength.coerceIn(0f, 1f),
-        smoothRadiusUs = smoothRadiusUs.coerceIn(80_000L, 3_000_000L),
-        crop = crop.coerceIn(0f, 1f),
-        samples = samples
-            .filter { it.sourceTimeUs >= 0L }
-            .sortedBy { it.sourceTimeUs }
-            .distinctBy { it.sourceTimeUs },
-    )
+    fun normalized(): ClipStabilizationV90 {
+        val legacyCameraLock = mode == StabilizationModeV90.CAMERA_LOCK
+        return copy(
+            mode = if (legacyCameraLock) StabilizationModeV90.SIMILARITY else mode,
+            cameraLockV102 = cameraLockV102 || legacyCameraLock,
+            strength = strength.coerceIn(0f, 1f),
+            smoothRadiusUs = smoothRadiusUs.coerceIn(80_000L, 3_000_000L),
+            crop = crop.coerceIn(0f, 1f),
+            croppingRatioV102 = croppingRatioV102.coerceIn(0f, 1f),
+            samples = samples
+                .filter { it.sourceTimeUs >= 0L }
+                .sortedBy { it.sourceTimeUs }
+                .distinctBy { it.sourceTimeUs },
+        )
+    }
 }
 
 data class EvaluatedStabilizationV90(
@@ -88,10 +127,13 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
     // a local median/MAD gate. A one- or two-sample tracking failure must not jerk the frame or
     // force the crop envelope into a sudden 150%+ zoom.
     val correction = when {
+        state.mode == StabilizationModeV90.PERSPECTIVE ->
+            StabilizationCorrectionV94(0f, 0f, 0f, 1f)
+        state.cameraLockV102 ->
+            state.cameraLockCorrectionV97(sourceTimeUs)
         state.analysisVersionV93 >= 93 && state.mode == StabilizationModeV90.TRANSLATION ->
             state.translationCorrectionV96(sourceTimeUs)
         state.analysisVersionV93 < 93 -> state.baseCorrectionV94(sourceTimeUs)
-        state.mode == StabilizationModeV90.CAMERA_LOCK -> state.cameraLockCorrectionV97(sourceTimeUs)
         state.mode == StabilizationModeV90.SIMILARITY && state.analysisVersionV93 >= 101 ->
             state.similarityCorrectionV101(sourceTimeUs)
         else -> state.filteredCorrectionV95(sourceTimeUs)
@@ -100,12 +142,17 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
     // V95 zoom envelope is driven by the same robust filtered correction used by rendering.
     // This removes V94's bug where crop probes re-read raw/base corrections and amplified an
     // otherwise filtered tracking outlier into a visible zoom spike.
+    val resolveAggression = if (state.cameraLockV102) {
+        1f
+    } else {
+        (1f - state.croppingRatioV102).coerceIn(0f, 1f)
+    }
     val coverTarget = when {
-        state.mode == StabilizationModeV90.CAMERA_LOCK &&
-            state.analysisVersionV93 >= 100 &&
-            state.crop > 0f ->
+        !state.zoomEnabledV102 || state.mode == StabilizationModeV90.PERSPECTIVE ->
+            correction.scaleCorrection
+        state.cameraLockV102 && state.analysisVersionV93 >= 100 ->
             max(correction.scaleCorrection, state.cameraLockCoverScaleV100.coerceAtLeast(1f))
-        state.analysisVersionV93 >= 93 && state.crop > 0f ->
+        state.analysisVersionV93 >= 93 ->
             state.zoomEnvelopeV95(sourceTimeUs, correction)
         else ->
             max(
@@ -117,10 +164,11 @@ fun ClipStabilizationV90.evaluate(sourceTimeUs: Long): EvaluatedStabilizationV90
                 ) * COVER_SAFETY_V92,
             )
     }
+    val zoomMix = if (state.cameraLockV102) 1f else resolveAggression
     val finalScale = lerpV90(
         correction.scaleCorrection,
         coverTarget,
-        state.crop,
+        zoomMix,
     ).coerceIn(.78f, MAX_STABILIZATION_ZOOM_V92)
 
     return EvaluatedStabilizationV90(
@@ -144,7 +192,8 @@ private fun ClipStabilizationV90.baseCorrectionV94(sourceTimeUs: Long): Stabiliz
     val desired = when (mode) {
         StabilizationModeV90.CAMERA_LOCK -> StabilizationPathValueV90(0f, 0f, 0f, 0f)
         StabilizationModeV90.TRANSLATION,
-        StabilizationModeV90.SIMILARITY -> smoothedPathAtV90(sourceTimeUs)
+        StabilizationModeV90.SIMILARITY,
+        StabilizationModeV90.PERSPECTIVE -> smoothedPathAtV90(sourceTimeUs)
     }
 
     val amount = strength
@@ -153,6 +202,7 @@ private fun ClipStabilizationV90.baseCorrectionV94(sourceTimeUs: Long): Stabiliz
     val rotation = when (mode) {
         StabilizationModeV90.TRANSLATION -> 0f
         StabilizationModeV90.SIMILARITY,
+        StabilizationModeV90.PERSPECTIVE,
         StabilizationModeV90.CAMERA_LOCK ->
             // Analyzer angles live in image coordinates (+Y down), while Media3's transform
             // matrix lives in NDC (+Y up). The coordinate flip reverses rotation sign at the
@@ -162,6 +212,7 @@ private fun ClipStabilizationV90.baseCorrectionV94(sourceTimeUs: Long): Stabiliz
     val scaleCorrection = when (mode) {
         StabilizationModeV90.TRANSLATION -> 1f
         StabilizationModeV90.SIMILARITY,
+        StabilizationModeV90.PERSPECTIVE,
         StabilizationModeV90.CAMERA_LOCK ->
             exp(((desired.logScale - raw.logScale) * amount).coerceIn(-.22f, .22f).toDouble()).toFloat()
     }
@@ -215,10 +266,10 @@ private fun ClipStabilizationV90.cameraLockCorrectionV97(sourceTimeUs: Long): St
     // spatially broad motion. A moving foreground subject can easily fake rotation/zoom while
     // contributing little evidence near the frame edges; letting that drive Camera Lock makes a
     // nearly static camera visibly worse.
-    val rotationScaleTrust = if (analysisVersionV93 >= 99) {
-        cameraLockRotationScaleTrustV99(sourceTimeUs)
-    } else {
-        1f
+    val rotationScaleTrust = when {
+        mode == StabilizationModeV90.TRANSLATION -> 0f
+        analysisVersionV93 >= 99 -> cameraLockRotationScaleTrustV99(sourceTimeUs)
+        else -> 1f
     }
     val rsAmount = amount * rotationScaleTrust
 
@@ -790,7 +841,12 @@ internal fun requiredCoverScaleV92(
 fun TimelineClip.evaluatedDisplayTransformV90(localUs: Long): EvaluatedClipTransform {
     val safeLocal = localUs.coerceIn(0L, durationUs.coerceAtLeast(0L))
     val manual = transform.evaluate(safeLocal)
-    val stabilization = stabilizationV90?.evaluate(sourceInUs + safeLocal) ?: EvaluatedStabilizationV90()
+    val resolvedStabilization = stabilizationV90?.normalized()
+    val stabilization = if (resolvedStabilization?.mode == StabilizationModeV90.PERSPECTIVE) {
+        EvaluatedStabilizationV90()
+    } else {
+        resolvedStabilization?.evaluate(sourceInUs + safeLocal) ?: EvaluatedStabilizationV90()
+    }
     return EvaluatedClipTransform(
         positionX = (manual.positionX + stabilization.offsetX).coerceIn(-2f, 2f),
         positionY = (manual.positionY + stabilization.offsetY).coerceIn(-2f, 2f),
