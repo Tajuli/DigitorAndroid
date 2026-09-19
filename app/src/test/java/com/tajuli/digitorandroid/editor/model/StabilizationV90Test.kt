@@ -504,6 +504,78 @@ class StabilizationV90Test {
     }
 
     @Test
+    fun v100CameraLock_usesConstantTripodCropAcrossClip() {
+        val samples = listOf(
+            StabilizationPathSampleV90(
+                0L, 0f, 0f, 0f,
+                confidence = .98f,
+                rotationScaleConfidenceV99 = .95f,
+            ),
+            StabilizationPathSampleV90(
+                100_000L, .08f, -.03f, 1f,
+                confidence = .98f,
+                rotationScaleConfidenceV99 = .95f,
+            ),
+            StabilizationPathSampleV90(
+                200_000L, .18f, -.08f, 2f,
+                confidence = .98f,
+                rotationScaleConfidenceV99 = .95f,
+            ),
+        )
+        val stabilization = ClipStabilizationV90(
+            mode = StabilizationModeV90.CAMERA_LOCK,
+            strength = 1f,
+            crop = 1f,
+            samples = samples,
+            analysisVersionV93 = 100,
+            cameraLockCoverScaleV100 = 1.42f,
+        )
+
+        val start = stabilization.evaluate(0L)
+        val middle = stabilization.evaluate(100_000L)
+        val end = stabilization.evaluate(200_000L)
+        assertEquals(1.42f, start.scale, .0001f)
+        assertEquals(1.42f, middle.scale, .0001f)
+        assertEquals(1.42f, end.scale, .0001f)
+    }
+
+    @Test
+    fun v100ComputedTripodCrop_coversEveryCameraLockSample() {
+        val samples = listOf(
+            StabilizationPathSampleV90(
+                0L, 0f, 0f, 0f,
+                confidence = .98f,
+                rotationScaleConfidenceV99 = .95f,
+            ),
+            StabilizationPathSampleV90(
+                100_000L, .12f, -.07f, 3f,
+                logScale = kotlin.math.ln(1.03f),
+                confidence = .98f,
+                rotationScaleConfidenceV99 = .95f,
+            ),
+            StabilizationPathSampleV90(
+                200_000L, -.20f, .09f, -4f,
+                logScale = kotlin.math.ln(.98f),
+                confidence = .98f,
+                rotationScaleConfidenceV99 = .95f,
+            ),
+        )
+        val base = ClipStabilizationV90(
+            mode = StabilizationModeV90.CAMERA_LOCK,
+            strength = 1f,
+            crop = 1f,
+            samples = samples,
+            analysisVersionV93 = 100,
+        )
+        val crop = base.computeCameraLockCoverScaleV100()
+        val solved = base.copy(cameraLockCoverScaleV100 = crop)
+
+        val scales = samples.map { solved.evaluate(it.sourceTimeUs).scale }
+        assertTrue(crop >= 1f)
+        assertTrue(scales.all { abs(it - crop) < .0001f })
+    }
+
+    @Test
     fun displayTransform_composesManualAndStabilizedMotion() {
         val clip = TimelineClip(
             uri = "content://video",
