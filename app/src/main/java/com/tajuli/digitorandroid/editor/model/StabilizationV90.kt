@@ -138,7 +138,10 @@ private fun ClipStabilizationV90.baseCorrectionV94(sourceTimeUs: Long): Stabiliz
         StabilizationModeV90.TRANSLATION -> 0f
         StabilizationModeV90.SIMILARITY,
         StabilizationModeV90.CAMERA_LOCK ->
-            ((desired.rotation - raw.rotation) * amount).coerceIn(-45f, 45f)
+            // Analyzer angles live in image coordinates (+Y down), while Media3's transform
+            // matrix lives in NDC (+Y up). The coordinate flip reverses rotation sign at the
+            // render boundary. Image-space correction is desired-raw; render-space is raw-desired.
+            ((raw.rotation - desired.rotation) * amount).coerceIn(-45f, 45f)
     }
     val scaleCorrection = when (mode) {
         StabilizationModeV90.TRANSLATION -> 1f
@@ -163,7 +166,9 @@ private fun ClipStabilizationV90.cameraLockCorrectionV97(sourceTimeUs: Long): St
     val pose = robustCameraPoseV97(sourceTimeUs)
     val amount = strength.coerceIn(0f, 1f)
 
-    val fullRotation = -pose.rotation
+    // Exact inverse in IMAGE coordinates rotates by -pose.rotation. Media3 renders in NDC where
+    // Y is flipped, so the rotation value handed to the renderer must flip sign once more: +pose.
+    val fullRotationForRender = pose.rotation
     val fullInverseScale = exp((-pose.logScale).coerceIn(-.35f, .35f).toDouble()).toFloat()
 
     val radians = Math.toRadians((-pose.rotation).toDouble())
@@ -172,7 +177,8 @@ private fun ClipStabilizationV90.cameraLockCorrectionV97(sourceTimeUs: Long): St
     val inverseTx = -(fullInverseScale * (cosR * pose.x - sinR * pose.y))
     val inverseTy = -(fullInverseScale * (sinR * pose.x + cosR * pose.y))
 
-    // Strength blends from identity to the exact inverse. Scale blends in log space.
+    // Strength blends from identity to the exact inverse. Translation is image-space/UI-space,
+    // rotation is converted to render-space above, and scale blends in log space.
     val blendedScale = exp(
         (ln(fullInverseScale.coerceAtLeast(.01f)) * amount).toDouble(),
     ).toFloat()
@@ -180,7 +186,7 @@ private fun ClipStabilizationV90.cameraLockCorrectionV97(sourceTimeUs: Long): St
     return StabilizationCorrectionV94(
         dx = (inverseTx * amount).coerceIn(-1.75f, 1.75f),
         dy = (inverseTy * amount).coerceIn(-1.75f, 1.75f),
-        rotation = (fullRotation * amount).coerceIn(-55f, 55f),
+        rotation = (fullRotationForRender * amount).coerceIn(-55f, 55f),
         scaleCorrection = blendedScale.coerceIn(.70f, 1.45f),
     )
 }
