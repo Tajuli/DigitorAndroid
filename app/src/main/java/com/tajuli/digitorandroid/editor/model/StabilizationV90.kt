@@ -86,6 +86,8 @@ data class ClipStabilizationV90(
     val zoomEnabledV102: Boolean = true,
     /** Resolve semantics: 1.0 = least/no stabilization, lower values allow more aggressive crop. */
     val croppingRatioV102: Float = .5f,
+    /** Resolve Smooth value; V102 keeps the public control in the same normalized 0..1 domain. */
+    val smoothV102: Float = .5f,
     /** V102 clip-wide Perspective Camera Lock crop to avoid zoom breathing. */
     val cameraLockPerspectiveCoverScaleV102: Float = 1f,
 ) {
@@ -93,13 +95,20 @@ data class ClipStabilizationV90(
 
     fun normalized(): ClipStabilizationV90 {
         val legacyCameraLock = mode == StabilizationModeV90.CAMERA_LOCK
+        val preResolveV102 = analysisVersionV93 < 102
+        val legacySmooth = sqrt(
+            ((smoothRadiusUs.coerceIn(80_000L, 3_000_000L) - 80_000L).toDouble() /
+                3_280_000.0).coerceIn(0.0, 1.0),
+        ).toFloat()
         return copy(
             mode = if (legacyCameraLock) StabilizationModeV90.SIMILARITY else mode,
             cameraLockV102 = cameraLockV102 || legacyCameraLock,
+            zoomEnabledV102 = if (preResolveV102) true else zoomEnabledV102,
             strength = strength.coerceIn(0f, 1f),
             smoothRadiusUs = smoothRadiusUs.coerceIn(80_000L, 3_000_000L),
+            smoothV102 = if (preResolveV102) legacySmooth else smoothV102.coerceIn(0f, 1f),
             crop = crop.coerceIn(0f, 1f),
-            croppingRatioV102 = croppingRatioV102.coerceIn(0f, 1f),
+            croppingRatioV102 = if (preResolveV102) .5f else croppingRatioV102.coerceIn(0f, 1f),
             cameraLockPerspectiveCoverScaleV102 = cameraLockPerspectiveCoverScaleV102
                 .coerceIn(1f, 2.5f),
             samples = samples
