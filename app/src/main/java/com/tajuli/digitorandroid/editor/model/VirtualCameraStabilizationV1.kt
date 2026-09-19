@@ -55,9 +55,9 @@ data class VirtualCameraStabilizationV1(
     val tripodCoverScale: Float = 1f,
     val analysisVersion: Int = 1,
 ) {
-    // V3 changes Tripod from accumulated-path correction to persistent first-frame background
-    // locking. Older analyses are invalid so the previous Tripod math can never render silently.
-    val hasAnalysis: Boolean get() = analysisVersion >= 3 && samples.size >= 2
+    // V4 changes Translation/Similarity path semantics (adaptive intent + per-DOF trust).
+    // Older analyses are invalid so stale camera paths cannot silently render after an update.
+    val hasAnalysis: Boolean get() = analysisVersion >= 4 && samples.size >= 2
 
     fun normalized(): VirtualCameraStabilizationV1 = copy(
         strength = strength.coerceIn(0f, 1f),
