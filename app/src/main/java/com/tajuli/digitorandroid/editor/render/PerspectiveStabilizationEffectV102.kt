@@ -57,13 +57,19 @@ object PerspectiveStabilizationEffectV102 {
         usePreviewClock: Boolean,
         liveProject: Boolean,
     ): Effect? {
-        val seed = clip.stabilizationV90?.normalized() ?: return null
-        if (
-            seed.analysisVersionV93 < 102 ||
-            !seed.hasAnalysis ||
-            seed.samples.none { it.perspectivePathV102 != null }
-        ) {
-            return null
+        val seed = clip.stabilizationV90?.normalized()
+        // Preview graphs are long-lived. Keep one identity-capable MatrixTransformation resident
+        // even before the user analyzes the clip, then resolve live V102 state every frame. Export
+        // can remain sparse because it is rebuilt from the final project snapshot.
+        if (!liveProject) {
+            if (
+                seed == null ||
+                seed.analysisVersionV93 < 102 ||
+                !seed.hasAnalysis ||
+                seed.samples.none { it.perspectivePathV102 != null }
+            ) {
+                return null
+            }
         }
 
         var previewRevision = Long.MIN_VALUE
