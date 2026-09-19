@@ -758,6 +758,21 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(mode = mode)
         }
 
+    fun setSelectedCameraLockV102(enabled: Boolean) =
+        updateSelectedStabilizationV90("stabilization-camera-lock", "Camera Lock ${if (enabled) "on" else "off"}") {
+            it.copy(cameraLockV102 = enabled)
+        }
+
+    fun setSelectedStabilizationZoomV102(enabled: Boolean) =
+        updateSelectedStabilizationV90("stabilization-zoom", "Stabilization Zoom ${if (enabled) "on" else "off"}") {
+            it.copy(zoomEnabledV102 = enabled)
+        }
+
+    fun setSelectedCroppingRatioV102(value: Float) =
+        updateSelectedStabilizationV90("stabilization-cropping-ratio", "Cropping Ratio updated", coalesce = true) {
+            it.copy(croppingRatioV102 = value.coerceIn(0f, 1f))
+        }
+
     fun setSelectedStabilizationStrengthV90(value: Float) =
         updateSelectedStabilizationV90("stabilization-strength", "Stabilization strength updated", coalesce = true) {
             it.copy(strength = value.coerceIn(0f, 1f))
