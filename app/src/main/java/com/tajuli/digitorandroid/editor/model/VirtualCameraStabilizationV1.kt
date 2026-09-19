@@ -55,7 +55,9 @@ data class VirtualCameraStabilizationV1(
     val tripodCoverScale: Float = 1f,
     val analysisVersion: Int = 1,
 ) {
-    val hasAnalysis: Boolean get() = samples.size >= 2
+    // V2 changes Tripod path semantics. Old V1 analyses are intentionally invalidated so a
+    // tester cannot unknowingly render the pre-fix accumulated-drift path after updating the app.
+    val hasAnalysis: Boolean get() = analysisVersion >= 2 && samples.size >= 2
 
     fun normalized(): VirtualCameraStabilizationV1 = copy(
         strength = strength.coerceIn(0f, 1f),
