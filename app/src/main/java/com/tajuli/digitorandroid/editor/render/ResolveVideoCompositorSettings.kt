@@ -12,6 +12,7 @@ import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.TransitionPairV22
 import com.tajuli.digitorandroid.editor.model.TransitionStyleV22
 import com.tajuli.digitorandroid.editor.model.transitionPairForIncomingV22
+import com.tajuli.digitorandroid.editor.model.evaluatedDisplayTransformV1
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 import kotlin.math.abs
 import kotlin.math.min
@@ -103,7 +104,7 @@ internal class ResolveVideoCompositorSettings(
         val clip = track.activeVideoClipAt(presentationTimeUs) ?: return null
         val localUs = (presentationTimeUs - clip.timelineStartUs)
             .coerceIn(0L, clip.durationUs.coerceAtLeast(0L))
-        val transform = clip.transform.evaluate(localUs)
+        val transform = clip.evaluatedDisplayTransformV1(localUs)
         var state = ResolveOverlayState(
             alphaScale = (clip.opacity.coerceIn(0f, 1f) * legacyTransitionAlpha(clip, localUs)).coerceIn(0f, 1f),
             backgroundX = transform.positionX,
@@ -144,7 +145,7 @@ internal class ResolveVideoCompositorSettings(
         val elapsedUs = (presentationTimeUs - pair.startUs).coerceIn(0L, pair.durationUs)
         val outgoingLocalUs = (outgoing.durationUs - pair.durationUs + elapsedUs)
             .coerceIn(0L, outgoing.durationUs.coerceAtLeast(0L))
-        val transform = outgoing.transform.evaluate(outgoingLocalUs)
+        val transform = outgoing.evaluatedDisplayTransformV1(outgoingLocalUs)
         val progress = (elapsedUs.toDouble() / pair.durationUs.toDouble()).toFloat().coerceIn(0f, 1f)
         val base = ResolveOverlayState(
             alphaScale = outgoing.opacity.coerceIn(0f, 1f),
