@@ -91,13 +91,16 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
 
                 val previous = previousGray
                 val confidence: Float
+                val rotationScaleConfidence: Float
                 if (previous == null || previous.size != current.size) {
                     confidence = 1f
+                    rotationScaleConfidence = 1f
                     segmentReferenceGray = current.copyOf()
                     framesSinceReferenceProbe = 0
                 } else {
                     val motion = estimateSimilarityV90(previous, current, width, height)
                     confidence = motion.confidence
+                    rotationScaleConfidence = motion.rotationScaleConfidenceV99
                     if (motion.sceneCut) {
                         segmentV93++
                         pathX = 0f
@@ -110,8 +113,13 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                         if (motion.confidence >= MIN_ACCEPTED_CONFIDENCE) {
                             // V97 composes the incremental similarity transform instead of adding
                             // parameters independently.
-                            val incrementalScale = motion.scale.coerceIn(MIN_STEP_SCALE, MAX_STEP_SCALE)
-                            val radians = Math.toRadians(motion.rotationDegrees.toDouble())
+                            val rsTrust = motion.rotationScaleConfidenceV99
+                                .coerceIn(0f, 1f)
+                            val trustedRotation = motion.rotationDegrees * rsTrust
+                            val incrementalScale = exp(
+                                (ln(motion.scale.coerceIn(MIN_STEP_SCALE, MAX_STEP_SCALE)) * rsTrust).toDouble(),
+                            ).toFloat()
+                            val radians = Math.toRadians(trustedRotation.toDouble())
                             val cosR = cos(radians).toFloat()
                             val sinR = sin(radians).toFloat()
                             val previousX = pathX
@@ -120,7 +128,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                             val incY = motion.tyPx / (height * .5f)
                             pathX = incrementalScale * (cosR * previousX - sinR * previousY) + incX
                             pathY = incrementalScale * (sinR * previousX + cosR * previousY) + incY
-                            pathRotation += motion.rotationDegrees
+                            pathRotation += trustedRotation
                             pathLogScale += ln(incrementalScale)
                         }
 
@@ -149,13 +157,17 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                             ) {
                                 pathX = anchored.txPx / (width * .5f)
                                 pathY = anchored.tyPx / (height * .5f)
-                                pathRotation = anchored.rotationDegrees
-                                pathLogScale = ln(
-                                    anchored.scale.coerceIn(
-                                        REFERENCE_MIN_SCALE_V97,
-                                        REFERENCE_MAX_SCALE_V97,
-                                    ),
-                                )
+                                val anchoredRsTrust = anchored.rotationScaleConfidenceV99
+                                    .coerceIn(0f, 1f)
+                                if (anchoredRsTrust >= REFERENCE_RS_RELOCK_MIN_TRUST_V99) {
+                                    pathRotation = anchored.rotationDegrees
+                                    pathLogScale = ln(
+                                        anchored.scale.coerceIn(
+                                            REFERENCE_MIN_SCALE_V97,
+                                            REFERENCE_MAX_SCALE_V97,
+                                        ),
+                                    )
+                                }
                             }
                             framesSinceReferenceProbe = 0
                         }
@@ -170,6 +182,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                     logScale = pathLogScale,
                     confidence = confidence,
                     segmentV93 = segmentV93,
+                    rotationScaleConfidenceV99 = rotationScaleConfidence,
                 )
                 previousGray = current
 
@@ -195,7 +208,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             analyzedWidth = analyzedWidth,
             analyzedHeight = analyzedHeight,
             samples = samples,
-            analysisVersionV93 = 97,
+            analysisVersionV93 = 99,
         ).normalized()
     }
 
@@ -228,6 +241,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val scale: Float = 1f,
         val confidence: Float = 0f,
         val sceneCut: Boolean = false,
+        val rotationScaleConfidenceV99: Float = 0f,
     )
 
     /**
@@ -323,11 +337,22 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         val inlierConfidence = ((inlierRatio - .25f) / .75f).coerceIn(0f, 1f)
         val geometricConfidence = (1f - averageError / RANSAC_INLIER_ERROR_PX).coerceIn(0f, 1f)
         val photometricConfidence = (1f - averageSad / REJECT_SAD).coerceIn(0f, 1f)
+        val spatialCoverage = spatialCoverageV99(inliers, width, height)
+        val spatialConfidence = (
+            (spatialCoverage - MIN_SPATIAL_COVERAGE_V99) /
+                (GOOD_SPATIAL_COVERAGE_V99 - MIN_SPATIAL_COVERAGE_V99)
+            ).coerceIn(0f, 1f)
         val confidence = (
-            featureConfidence * .30f +
-                inlierConfidence * .30f +
+            featureConfidence * .22f +
+                inlierConfidence * .23f +
+                geometricConfidence * .22f +
+                photometricConfidence * .10f +
+                spatialConfidence * .23f
+            ).coerceIn(0f, 1f)
+        val rotationScaleConfidence = (
+            spatialConfidence * .60f +
                 geometricConfidence * .25f +
-                photometricConfidence * .15f
+                inlierConfidence * .15f
             ).coerceIn(0f, 1f)
 
         val hardCut = frameDifference >= SCENE_CUT_DIFFERENCE &&
@@ -336,7 +361,27 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         return fittedPublic.copy(
             confidence = if (hardCut) 0f else confidence,
             sceneCut = hardCut,
+            rotationScaleConfidenceV99 = if (hardCut) 0f else rotationScaleConfidence,
         )
+    }
+
+    private fun spatialCoverageV99(
+        inliers: List<MatchV90>,
+        width: Int,
+        height: Int,
+    ): Float {
+        if (inliers.isEmpty() || width <= 0 || height <= 0) return 0f
+        val occupied = BooleanArray(SPATIAL_GRID_COLUMNS_V99 * SPATIAL_GRID_ROWS_V99)
+        for (match in inliers) {
+            val gx = ((match.px / width.toFloat()) * SPATIAL_GRID_COLUMNS_V99)
+                .toInt()
+                .coerceIn(0, SPATIAL_GRID_COLUMNS_V99 - 1)
+            val gy = ((match.py / height.toFloat()) * SPATIAL_GRID_ROWS_V99)
+                .toInt()
+                .coerceIn(0, SPATIAL_GRID_ROWS_V99 - 1)
+            occupied[gy * SPATIAL_GRID_COLUMNS_V99 + gx] = true
+        }
+        return occupied.count { it }.toFloat() / occupied.size.toFloat()
     }
 
     private fun matchPatchV90(
@@ -691,6 +736,11 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         const val REFERENCE_RELOCK_MIN_CONFIDENCE_V97 = .38f
         const val REFERENCE_MIN_SCALE_V97 = .82f
         const val REFERENCE_MAX_SCALE_V97 = 1.18f
+        const val REFERENCE_RS_RELOCK_MIN_TRUST_V99 = .62f
+        const val SPATIAL_GRID_COLUMNS_V99 = 4
+        const val SPATIAL_GRID_ROWS_V99 = 3
+        const val MIN_SPATIAL_COVERAGE_V99 = .25f
+        const val GOOD_SPATIAL_COVERAGE_V99 = .67f
     }
 }
 
