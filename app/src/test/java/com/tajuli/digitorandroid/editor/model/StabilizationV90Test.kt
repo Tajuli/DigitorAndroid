@@ -371,13 +371,16 @@ class StabilizationV90Test {
         val cameraRadians = Math.toRadians(rotationDegrees.toDouble())
         val cameraCos = kotlin.math.cos(cameraRadians).toFloat()
         val cameraSin = kotlin.math.sin(cameraRadians).toFloat()
-        val correctionRadians = Math.toRadians(correction.rotationDegrees.toDouble())
+        // Evaluated rotation is render/NDC-space (+Y up). Convert it back to image-space
+        // (+Y down) before composing with the analyzer's image-space camera pose.
+        val correctionImageRotation = -correction.rotationDegrees
+        val correctionRadians = Math.toRadians(correctionImageRotation.toDouble())
         val correctionCos = kotlin.math.cos(correctionRadians).toFloat()
         val correctionSin = kotlin.math.sin(correctionRadians).toFloat()
 
-        // Compose correction ∘ camera in the same center-space similarity convention.
+        // Compose image-space correction ∘ camera in the same center-space similarity convention.
         val composedScale = correction.scale * scale
-        val composedRotation = correction.rotationDegrees + rotationDegrees
+        val composedRotation = correctionImageRotation + rotationDegrees
         val transformedPathX = correction.scale * (
             correctionCos * pathX - correctionSin * pathY
         ) + correction.offsetX
@@ -389,6 +392,32 @@ class StabilizationV90Test {
         assertEquals(0f, composedRotation, .0005f)
         assertEquals(0f, transformedPathX, .001f)
         assertEquals(0f, transformedPathY, .001f)
+    }
+
+    @Test
+    fun v98CameraLock_convertsImageRotationSignAtRenderBoundary() {
+        val samples = (0..8).map { index ->
+            StabilizationPathSampleV90(
+                sourceTimeUs = index * 50_000L,
+                pathX = 0f,
+                pathY = 0f,
+                rotationDegrees = 7f,
+                logScale = 0f,
+                confidence = .99f,
+            )
+        }
+        val stabilization = ClipStabilizationV90(
+            mode = StabilizationModeV90.CAMERA_LOCK,
+            strength = 1f,
+            crop = 0f,
+            samples = samples,
+            analysisVersionV93 = 97,
+        )
+
+        val correction = stabilization.evaluate(200_000L)
+        // +7° in image coordinates is clockwise on screen. Its inverse is -7° image-space,
+        // which is +7° in Media3/NDC render coordinates because Y is inverted.
+        assertEquals(7f, correction.rotationDegrees, .001f)
     }
 
     @Test
