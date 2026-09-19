@@ -607,16 +607,12 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             return PersistentTrackSetV103(tracks, nextTrackId)
         }
 
-        val candidates = ArrayList<CandidateV90>()
-        for (gy in 1..PERSISTENT_GRID_ROWS_V103) {
-            val y = margin +
-                ((height - margin * 2) * gy / (PERSISTENT_GRID_ROWS_V103 + 1f)).roundToInt()
-            for (gx in 1..PERSISTENT_GRID_COLUMNS_V103) {
-                val x = margin +
-                    ((width - margin * 2) * gx / (PERSISTENT_GRID_COLUMNS_V103 + 1f)).roundToInt()
-                candidates += CandidateV90(x, y, textureScoreV90(frame, width, x, y))
-            }
-        }
+        val candidates = persistentFeatureCandidatesV103(
+            frame = frame,
+            width = width,
+            height = height,
+            margin = margin,
+        )
 
         var id = nextTrackId
         val minimumSpacingSquared =
@@ -641,6 +637,47 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             )
         }
         return PersistentTrackSetV103(tracks, id)
+    }
+
+    private fun persistentFeatureCandidatesV103(
+        frame: IntArray,
+        width: Int,
+        height: Int,
+        margin: Int,
+    ): List<CandidateV90> {
+        val usableWidth = width - margin * 2
+        val usableHeight = height - margin * 2
+        if (usableWidth <= 0 || usableHeight <= 0) return emptyList()
+
+        val out = ArrayList<CandidateV90>(
+            PERSISTENT_GRID_COLUMNS_V103 * PERSISTENT_GRID_ROWS_V103,
+        )
+        for (gy in 0 until PERSISTENT_GRID_ROWS_V103) {
+            val cellTop = margin + usableHeight * gy / PERSISTENT_GRID_ROWS_V103
+            val cellBottom = margin + usableHeight * (gy + 1) / PERSISTENT_GRID_ROWS_V103
+            for (gx in 0 until PERSISTENT_GRID_COLUMNS_V103) {
+                val cellLeft = margin + usableWidth * gx / PERSISTENT_GRID_COLUMNS_V103
+                val cellRight = margin + usableWidth * (gx + 1) / PERSISTENT_GRID_COLUMNS_V103
+
+                var best: CandidateV90? = null
+                var y = cellTop + PERSISTENT_FEATURE_SCAN_STEP_V103 / 2
+                while (y < cellBottom) {
+                    var x = cellLeft + PERSISTENT_FEATURE_SCAN_STEP_V103 / 2
+                    while (x < cellRight) {
+                        if (x in 5 until width - 5 && y in 5 until height - 5) {
+                            val score = textureScoreV90(frame, width, x, y)
+                            if (best == null || score > best.texture) {
+                                best = CandidateV90(x, y, score)
+                            }
+                        }
+                        x += PERSISTENT_FEATURE_SCAN_STEP_V103
+                    }
+                    y += PERSISTENT_FEATURE_SCAN_STEP_V103
+                }
+                best?.let(out::add)
+            }
+        }
+        return out
     }
 
     private fun persistentReferenceMatchesV103(
@@ -1659,6 +1696,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         const val PERSISTENT_SEARCH_RADIUS_V103 = 18
         const val PERSISTENT_COARSE_STEP_V103 = 3
         const val MIN_PERSISTENT_TRACK_SPACING_PX_V103 = 14f
+        const val PERSISTENT_FEATURE_SCAN_STEP_V103 = 4
         const val MIN_PERSISTENT_TEXTURE_V103 = 55
         const val MAX_PERSISTENT_OUTLIER_STREAK_V103 = 4
         const val MIN_PERSISTENT_DROP_AGE_V103 = 6
