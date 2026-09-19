@@ -270,8 +270,12 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
                                 // Perspective also consumes this direct global pose instead of
                                 // integrating projective deltas indefinitely.
                                 anchored.perspectiveDeltaV102?.let { directReferencePose ->
+                                    // V105: keep the normal Perspective path incremental. The
+                                    // direct fixed-reference fit is intentionally NOT installed
+                                    // frame-by-frame because its estimator noise becomes visible
+                                    // correction jitter. It remains the global coordinate anchor
+                                    // for newly seeded tracks and is fused offline as slow drift.
                                     globalReferencePerspectiveV104 = directReferencePose
-                                    perspectivePathV102 = directReferencePose
                                 }
                                 referenceAnchorsV100 += ReferenceAnchorV100(
                                     sampleIndex = samples.size,
@@ -327,13 +331,31 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
         }
         onProgress(.985f, "Solving tripod lock…")
 
-        val tripodSamples = applyReferenceAnchorsV100(samples, referenceAnchorsV100)
-        val cameraLockPerspective = applyPerspectiveReferenceAnchorsV102(
+        // V105 keeps high-frequency motion from the incremental projective path so the renderer
+        // can cancel real shake, while fixed-reference observations only correct slow integration
+        // drift. This prevents noisy direct homographies from being injected as frame-to-frame
+        // camera motion.
+        val perspectiveDriftAnchorsV105 = referenceAnchorsV100.mapNotNull { anchor ->
+            anchor.perspectiveQuadV102?.let { quad ->
+                PerspectiveDriftAnchorV105(
+                    sampleIndex = anchor.sampleIndex,
+                    segment = anchor.segment,
+                    quad = quad,
+                )
+            }
+        }
+        val perspectiveSamplesV105 = applyGlobalPerspectiveDriftV105(
             samples = samples,
+            anchors = perspectiveDriftAnchorsV105,
+        )
+
+        val tripodSamples = applyReferenceAnchorsV100(perspectiveSamplesV105, referenceAnchorsV100)
+        val cameraLockPerspective = applyPerspectiveReferenceAnchorsV102(
+            samples = perspectiveSamplesV105,
             anchors = referenceAnchorsV100,
         )
-        val multiModeSamples = samples.indices.map { index ->
-            val raw = samples[index]
+        val multiModeSamples = perspectiveSamplesV105.indices.map { index ->
+            val raw = perspectiveSamplesV105[index]
             val tripod = tripodSamples[index]
             raw.copy(
                 cameraLockPathXV101 = tripod.pathX,
@@ -348,7 +370,7 @@ class ResolveStabilizationAnalyzerV90(context: Context) {
             analyzedWidth = analyzedWidth,
             analyzedHeight = analyzedHeight,
             samples = multiModeSamples,
-            analysisVersionV93 = 104,
+            analysisVersionV93 = 105,
             cameraLockCoverScaleV100 = 1f,
             cameraLockPerspectiveCoverScaleV102 = 1f,
         ).normalized()
