@@ -489,9 +489,11 @@ internal fun advancePersistentTripodTracksV3(
         ) continue
 
         val age = track.ageFrames + 1
+        val previousErrorSamples = (track.ageFrames - 1).coerceAtLeast(0)
+        val errorSamples = previousErrorSamples + 1
         val meanError = (
-            (track.meanPatchError * track.ageFrames.toFloat()) + match.error
-            ) / age.toFloat()
+            track.meanPatchError * previousErrorSamples.toFloat() + match.error
+            ) / errorSamples.toFloat()
         if (meanError > TRIPOD_MAX_MEAN_PATCH_ERROR_V3) continue
 
         output += track.copy(
