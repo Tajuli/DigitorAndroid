@@ -38,6 +38,7 @@ import com.tajuli.digitorandroid.editor.model.AnimatedFloat
 import com.tajuli.digitorandroid.editor.model.ClipStabilizationV90
 import com.tajuli.digitorandroid.editor.model.StabilizationModeV90
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.evaluatePerspectiveV102
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.TransformProperty
@@ -179,9 +180,16 @@ private fun StabilizationWorkspaceV90(
     // Stabilize.
     val uiState by vm.state.collectAsState()
     val liveClip = uiState.project.clip(clip.id) ?: clip
-    val stabilization = liveClip.stabilizationV90 ?: ClipStabilizationV90(enabled = false)
+    val stabilization = (liveClip.stabilizationV90 ?: ClipStabilizationV90(enabled = false)).normalized()
     val localUs = (cursorUs - liveClip.timelineStartUs).coerceIn(0L, liveClip.durationUs)
-    val stabilizationAtPlayhead = stabilization.evaluate(liveClip.sourceInUs + localUs)
+    val sourceTimeUs = liveClip.sourceInUs + localUs
+    val stabilizationAtPlayhead = stabilization.evaluate(sourceTimeUs)
+    val perspectiveAtPlayhead = stabilization.evaluatePerspectiveV102(sourceTimeUs)
+    val autoZoomAtPlayhead = if (stabilization.mode == StabilizationModeV90.PERSPECTIVE) {
+        perspectiveAtPlayhead?.autoZoom ?: 1f
+    } else {
+        stabilizationAtPlayhead.scale
+    }
     val analyzing = uiState.busyOperation == "Stabilization"
 
     Column(
@@ -193,7 +201,7 @@ private fun StabilizationWorkspaceV90(
     ) {
         Text("Stabilization · ${liveClip.label}", fontSize = 10.sp, color = Color.White)
         Text(
-            "Three independent stabilizers: Translation = gimbal-like motion, Similarity = shake-free X/Y + rotation + scale, Camera Lock = fixed-reference tripod shot.",
+            "Resolve-style Stabilization: Translation handles pan/tilt, Similarity adds zoom/rotation, Perspective adds projective image warping. Camera Lock is a separate locked-shot option.",
             fontSize = 7.sp,
             color = X5Muted,
         )
@@ -268,8 +276,10 @@ private fun StabilizationWorkspaceV90(
 
         Text(
             when {
+                stabilization.analysisVersionV93 >= 102 ->
+                    "V102 Resolve Stabilizer · ${stabilization.samples.size} frame samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
                 stabilization.analysisVersionV93 >= 101 ->
-                    "V101 3-Mode Solve · ${stabilization.samples.size} frame samples · ${stabilization.analyzedWidth}×${stabilization.analyzedHeight}"
+                    "V101 analysis · Re-analyze for V102 Perspective warp"
                 stabilization.analysisVersionV93 >= 100 ->
                     "V100 analysis · Re-analyze for V101 independent mode paths"
                 stabilization.analysisVersionV93 >= 99 ->
@@ -293,9 +303,9 @@ private fun StabilizationWorkspaceV90(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             listOf(
-                StabilizationModeV90.TRANSLATION to "Translation · Gimbal",
-                StabilizationModeV90.SIMILARITY to "Similarity · Shake Free",
-                StabilizationModeV90.CAMERA_LOCK to "Camera Lock · Tripod",
+                StabilizationModeV90.PERSPECTIVE to "Perspective",
+                StabilizationModeV90.SIMILARITY to "Similarity",
+                StabilizationModeV90.TRANSLATION to "Translation",
             ).forEach { (mode, label) ->
                 Text(
                     label,
@@ -312,39 +322,98 @@ private fun StabilizationWorkspaceV90(
             }
         }
 
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            ResolveToggleV102(
+                label = "Camera Lock",
+                checked = stabilization.cameraLockV102,
+                onClick = { vm.setSelectedCameraLockV102(!stabilization.cameraLockV102) },
+            )
+            ResolveToggleV102(
+                label = "Zoom",
+                checked = stabilization.zoomEnabledV102,
+                onClick = { vm.setSelectedStabilizationZoomV102(!stabilization.zoomEnabledV102) },
+            )
+        }
+
         StabilizationSliderV90(
-            "Strength",
-            stabilization.strength,
-            0f..1f,
-            { "${(it * 100f).roundToInt()}%" },
-            vm::setSelectedStabilizationStrengthV90,
+            label = "Cropping Ratio",
+            value = stabilization.croppingRatioV102,
+            range = 0f..1f,
+            display = { String.format("%.3f", it) },
+            enabled = !stabilization.cameraLockV102,
+            onValue = vm::setSelectedCroppingRatioV102,
         )
-        val smoothSeconds = stabilization.smoothRadiusUs / 1_000_000f
+
+        val smoothValue = (
+            (stabilization.smoothRadiusUs - 80_000L).toFloat() /
+                (3_000_000L - 80_000L).toFloat()
+            ).coerceIn(0f, 1f)
         StabilizationSliderV90(
-            "Smooth",
-            smoothSeconds,
-            .08f..3f,
-            { String.format("%.2fs", it) },
-        ) { vm.setSelectedStabilizationSmoothV90((it * 1_000_000L).toLong()) }
+            label = "Smooth",
+            value = smoothValue,
+            range = 0f..1f,
+            display = { String.format("%.3f", it) },
+            enabled = !stabilization.cameraLockV102,
+        ) { value ->
+            val radiusUs = 80_000L + ((3_000_000L - 80_000L) * value).toLong()
+            vm.setSelectedStabilizationSmoothV90(radiusUs)
+        }
+
         StabilizationSliderV90(
-            "Crop / Auto Zoom",
-            stabilization.crop,
-            0f..1f,
-            { "${(it * 100f).roundToInt()}%" },
-            vm::setSelectedStabilizationCropV90,
+            label = "Strength",
+            value = stabilization.strength,
+            range = 0f..1f,
+            display = { String.format("%.3f", it) },
+            onValue = vm::setSelectedStabilizationStrengthV90,
         )
 
         Text(
-            "Auto zoom at playhead: ${(stabilizationAtPlayhead.scale * 100f).roundToInt()}% · Crop 100% guarantees frame coverage for the calculated stabilization transform.",
+            if (stabilization.zoomEnabledV102) {
+                "Zoom at playhead: ${(autoZoomAtPlayhead * 100f).roundToInt()}%"
+            } else {
+                "Zoom off · blanking/black edges are intentionally preserved."
+            },
             fontSize = 8.sp,
             color = X5Accent,
         )
         Text(
-            "For strong handheld shake: Similarity, Strength 85–100%, Smooth 0.6–1.2s, Crop/Auto Zoom 100%. Camera Lock is strongest but can require much more zoom.",
+            when {
+                stabilization.cameraLockV102 ->
+                    "Camera Lock removes camera motion for a locked/tripod-style shot. Cropping Ratio and Smooth are disabled, matching Resolve behavior."
+                stabilization.mode == StabilizationModeV90.PERSPECTIVE ->
+                    "Perspective corrects pan, tilt, zoom, rotation and projective distortion using a real 3×3 warp."
+                stabilization.mode == StabilizationModeV90.SIMILARITY ->
+                    "Similarity corrects pan, tilt, zoom and rotation without projective warping."
+                else ->
+                    "Translation corrects horizontal/vertical camera motion only."
+            },
             fontSize = 7.sp,
             color = X5Muted,
         )
     }
+}
+
+@Composable
+private fun ResolveToggleV102(
+    label: String,
+    checked: Boolean,
+    onClick: () -> Unit,
+) {
+    Text(
+        "${if (checked) "☑" else "☐"}  $label",
+        fontSize = 8.sp,
+        color = if (checked) X5Accent else Color.White,
+        modifier = Modifier
+            .background(
+                if (checked) X5Accent.copy(alpha = .12f) else X5Raised,
+                RoundedCornerShape(6.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    )
 }
 
 @Composable
@@ -353,15 +422,22 @@ private fun StabilizationSliderV90(
     value: Float,
     range: ClosedFloatingPointRange<Float>,
     display: (Float) -> String,
+    enabled: Boolean = true,
     onValue: (Float) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().background(X5Raised, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 4.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(label, Modifier.width(62.dp), fontSize = 8.sp, color = Color.White.copy(alpha = .78f))
+            Text(
+                label,
+                Modifier.width(82.dp),
+                fontSize = 8.sp,
+                color = if (enabled) Color.White.copy(alpha = .78f) else X5Muted.copy(alpha = .55f),
+            )
             Slider(
                 value = value.coerceIn(range.start, range.endInclusive),
                 onValueChange = onValue,
                 valueRange = range,
+                enabled = enabled,
                 modifier = Modifier.weight(1f),
             )
             Text(display(value), Modifier.width(50.dp), fontSize = 7.sp, color = X5Muted)
