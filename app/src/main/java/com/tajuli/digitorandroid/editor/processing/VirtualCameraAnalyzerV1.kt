@@ -35,6 +35,7 @@ class VirtualCameraAnalyzerV1(context: Context) {
         val durationUs = endUs - startUs
         val raw = ArrayList<RawCameraSampleV1>()
         var previousGray: IntArray? = null
+        var segmentReferenceGrayV3: IntArray? = null
         var persistentTripodTracksV3 = emptyList<PersistentTripodTrackV3>()
         var segment = 0
         var pathX = 0f
@@ -99,16 +100,33 @@ class VirtualCameraAnalyzerV1(context: Context) {
                 }
 
                 persistentTripodTracksV3 = when {
-                    newReferenceFrame || previous == null || previous.size != current.size ->
+                    newReferenceFrame || previous == null || previous.size != current.size -> {
+                        segmentReferenceGrayV3 = current.copyOf()
                         seedPersistentTripodTracksV3(current, width, height)
-                    else ->
-                        advancePersistentTripodTracksV3(
+                    }
+                    else -> {
+                        var advanced = advancePersistentTripodTracksV3(
                             previous = previous,
                             current = current,
                             width = width,
                             height = height,
                             tracks = persistentTripodTracksV3,
                         )
+                        val referenceFrame = segmentReferenceGrayV3
+                        if (
+                            referenceFrame != null &&
+                            decoded % TRIPOD_REANCHOR_INTERVAL_FRAMES_V3 == 0
+                        ) {
+                            advanced = reanchorPersistentTripodTracksV3(
+                                reference = referenceFrame,
+                                current = current,
+                                width = width,
+                                height = height,
+                                tracks = advanced,
+                            )
+                        }
+                        advanced
+                    }
                 }
 
                 raw += RawCameraSampleV1(
@@ -504,6 +522,7 @@ class VirtualCameraAnalyzerV1(context: Context) {
         const val ROTATION_LAMBDA_V1 = 210f
         const val SCALE_LAMBDA_V1 = 260f
         const val MIN_SOLVER_GAIN_V1 = .35f
+        const val TRIPOD_REANCHOR_INTERVAL_FRAMES_V3 = 3
         const val MIN_PERSISTENT_TRIPOD_TRACKS_V3 = 6
         const val MIN_PERSISTENT_TRIPOD_CONFIDENCE_V3 = .46f
         const val BACKGROUND_INLIER_FRACTION_V3 = .65f
