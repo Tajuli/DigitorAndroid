@@ -368,6 +368,38 @@ fun CreatorAudioWorkspace(
                 }
             }
 
+            SectionCardV8("Noise reduction") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (mix.noiseReduction <= 0f) "Off" else "${(mix.noiseReduction * 100).toInt()}%",
+                        fontSize = 8.sp,
+                        color = if (mix.noiseReduction <= 0f) C8Muted else C8Accent,
+                        modifier = Modifier.width(42.dp),
+                    )
+                    Slider(
+                        value = mix.noiseReduction.coerceIn(0f, 1f),
+                        onValueChange = vm::setSelectedAudioNoiseReduction,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    listOf(0f to "Off", .30f to "Light", .60f to "Medium", 1f to "Strong")
+                        .forEach { (value, label) ->
+                            FilledTonalButton(onClick = { vm.setSelectedAudioNoiseReduction(value) }) {
+                                Text(label, fontSize = 8.sp)
+                            }
+                        }
+                }
+                Text(
+                    "Reduces low-level background noise while keeping speech and louder audio natural.",
+                    fontSize = 8.sp,
+                    color = C8Muted,
+                )
+            }
+
             SectionCardV8("Fades") {
                 DurationSliderV8("Fade in", mix.fadeInUs, maxFadeUs, vm::setSelectedAudioFadeIn)
                 DurationSliderV8("Fade out", mix.fadeOutUs, maxFadeUs, vm::setSelectedAudioFadeOut)
