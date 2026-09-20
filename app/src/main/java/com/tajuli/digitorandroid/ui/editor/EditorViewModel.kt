@@ -37,6 +37,9 @@ import com.tajuli.digitorandroid.editor.processing.CreatorMediaProcessor
 import com.tajuli.digitorandroid.editor.processing.VirtualCameraAnalyzerV1
 import java.util.ArrayDeque
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -74,6 +77,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val redoStack = ArrayDeque<String>()
     private var lastHistoryLabel: String? = null
     private var lastHistoryTimeMs = 0L
+    private var stabilizationAnalysisJob: Job? = null
 
     init {
         val restored = projectStore.load()
@@ -538,21 +542,24 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         ) return
 
         publish(state.copy(busyOperation = "Stabilize", status = "Preparing stabilization..."))
-        viewModelScope.launch {
-            runCatching {
-                virtualCameraAnalyzerV1.analyze(
+        stabilizationAnalysisJob = viewModelScope.launch {
+            try {
+                val solved = virtualCameraAnalyzerV1.analyze(
                     clip = selected,
                     base = selected.virtualCameraStabilizationV1 ?: VirtualCameraStabilizationV1(),
                 ) { _, message ->
                     val live = _state.value
-                    publish(live.copy(busyOperation = "Stabilize", status = message))
+                    if (live.busyOperation == "Stabilize") {
+                        publish(live.copy(status = message))
+                    }
                 }
-            }.onSuccess { solved ->
+                coroutineContext.ensureActive()
+
                 val liveState = _state.value
                 val liveClip = liveState.project.clip(selected.id)
                 if (liveClip == null) {
                     publish(liveState.copy(busyOperation = null, status = "Clip changed during analysis"))
-                    return@onSuccess
+                    return@launch
                 }
                 checkpoint("stabilize-analyze")
                 val tracks = liveState.project.tracks.map { track ->
@@ -570,15 +577,31 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         status = "Virtual-camera stabilization ready",
                     ),
                 )
-            }.onFailure { error ->
+            } catch (_: CancellationException) {
+                publish(
+                    _state.value.copy(
+                        busyOperation = null,
+                        status = "Stabilization cancelled",
+                    ),
+                )
+            } catch (error: Throwable) {
                 publish(
                     _state.value.copy(
                         busyOperation = null,
                         status = error.message ?: "Stabilization failed",
                     ),
                 )
+            } finally {
+                stabilizationAnalysisJob = null
             }
         }
+    }
+
+    fun cancelStabilizationAnalysisV1() {
+        val job = stabilizationAnalysisJob ?: return
+        if (_state.value.busyOperation != "Stabilize") return
+        publish(_state.value.copy(status = "Cancelling stabilization..."))
+        job.cancel(CancellationException("Stabilization cancelled"))
     }
 
     fun setStabilizationModeV1(mode: VirtualStabilizationModeV1) =

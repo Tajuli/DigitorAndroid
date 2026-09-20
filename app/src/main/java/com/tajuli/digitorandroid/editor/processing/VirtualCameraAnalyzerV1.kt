@@ -15,6 +15,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 class VirtualCameraAnalyzerV1(context: Context) {
@@ -52,6 +53,8 @@ class VirtualCameraAnalyzerV1(context: Context) {
         var decoded = 0
 
         onProgress(0f, "Preparing virtual camera...")
+        val analysisContext = coroutineContext
+        analysisContext.ensureActive()
         val decoder = GpuSequentialCutoutDecoderV47(
             context = appContext,
             analysisLongEdge = ANALYSIS_LONG_EDGE_V1,
@@ -64,6 +67,7 @@ class VirtualCameraAnalyzerV1(context: Context) {
             emitEveryFrame = true,
         ) { sourceTimeUs, bitmap ->
             try {
+                analysisContext.ensureActive()
                 val width = bitmap.width.coerceAtLeast(1)
                 val height = bitmap.height.coerceAtLeast(1)
                 val current = bitmap.toGrayV1()
