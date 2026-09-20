@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.media3.common.util.UnstableApi
 import com.tajuli.digitorandroid.editor.model.AnimatedFloat
 import com.tajuli.digitorandroid.editor.model.AudioMix
+import com.tajuli.digitorandroid.editor.model.VoiceStyleV78
 import com.tajuli.digitorandroid.editor.model.ClipNodeGraph
 import com.tajuli.digitorandroid.editor.model.ClipTransform
 import com.tajuli.digitorandroid.editor.model.ClipTransition
@@ -522,6 +523,30 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setSelectedAudioNoiseReduction(amount: Float) = updateSelectedAudio("audio-noise-reduction") { clip ->
         clip.copy(audioMix = clip.audioMix.copy(noiseReduction = amount.coerceIn(0f, 1f)))
+    }
+
+    fun setSelectedAudioVoiceEnhance(amount: Float) = updateSelectedAudio("audio-voice-enhance") { clip ->
+        clip.copy(audioMix = clip.audioMix.copy(voiceEnhance = amount.coerceIn(0f, 1f)))
+    }
+
+    fun setSelectedAudioVocalFocus(amount: Float) = updateSelectedAudio("audio-vocal-focus") { clip ->
+        clip.copy(audioMix = clip.audioMix.copy(vocalFocus = amount.coerceIn(0f, 1f)))
+    }
+
+    fun setSelectedAudioBassDb(db: Float) = updateSelectedAudio("audio-eq-bass") { clip ->
+        clip.copy(audioMix = clip.audioMix.copy(bassDb = db.coerceIn(-12f, 12f)))
+    }
+
+    fun setSelectedAudioMidDb(db: Float) = updateSelectedAudio("audio-eq-mid") { clip ->
+        clip.copy(audioMix = clip.audioMix.copy(midDb = db.coerceIn(-12f, 12f)))
+    }
+
+    fun setSelectedAudioTrebleDb(db: Float) = updateSelectedAudio("audio-eq-treble") { clip ->
+        clip.copy(audioMix = clip.audioMix.copy(trebleDb = db.coerceIn(-12f, 12f)))
+    }
+
+    fun setSelectedAudioVoiceStyleV78(style: VoiceStyleV78) = updateSelectedAudio("audio-voice-style") { clip ->
+        clip.copy(audioMix = clip.audioMix.copy(voiceStyleV78 = style))
     }
 
     fun resetSelectedAudioMix() = updateSelectedAudio("audio-reset") { clip ->

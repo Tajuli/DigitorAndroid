@@ -8,7 +8,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
-import com.tajuli.digitorandroid.editor.model.AdaptiveNoiseReducer
+import com.tajuli.digitorandroid.editor.model.ClipAudioDspV78
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
@@ -180,11 +180,11 @@ internal class NativeAudioMixdownV76(
             var outputEnded = false
             var lastTargetFrameExclusive = 0L
             var idleLoops = 0
-            val noiseReducer = clip.audioMix
-                .normalizedFor(clip.durationUs)
-                .noiseReduction
-                .takeIf { it > 0f }
-                ?.let(::AdaptiveNoiseReducer)
+            val normalizedMix = clip.audioMix.normalizedFor(clip.durationUs)
+            val audioDsp = normalizedMix
+                .takeIf { it.needsDspV78 }
+                ?.let { ClipAudioDspV78(it, TARGET_SAMPLE_RATE, TARGET_CHANNELS) }
+            val audioFrame = FloatArray(TARGET_CHANNELS)
 
             while (!outputEnded) {
                 var didWork = false
@@ -243,7 +243,8 @@ internal class NativeAudioMixdownV76(
                                     output = output,
                                     totalTargetFrames = totalTargetFrames,
                                     lastTargetFrameExclusive = lastTargetFrameExclusive,
-                                    noiseReducer = noiseReducer,
+                                    audioDsp = audioDsp,
+                                    audioFrame = audioFrame,
                                 )
                             }
                             if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputEnded = true
@@ -286,7 +287,8 @@ internal class NativeAudioMixdownV76(
         output: RandomAccessFile,
         totalTargetFrames: Long,
         lastTargetFrameExclusive: Long,
-        noiseReducer: AdaptiveNoiseReducer?,
+        audioDsp: ClipAudioDspV78?,
+        audioFrame: FloatArray,
     ): Long {
         val bytesPerSample = pcmBytesPerSampleV76(pcmEncoding)
         val sourceFrameBytes = bytesPerSample * channelCount
@@ -344,11 +346,12 @@ internal class NativeAudioMixdownV76(
             } else {
                 readPcmSampleV76(source, frameOffset + bytesPerSample, pcmEncoding)
             }
-            if (noiseReducer != null) {
-                val frameLevel = max(kotlin.math.abs(left), kotlin.math.abs(right))
-                val denoiseGain = noiseReducer.processFrame(frameLevel, TARGET_SAMPLE_RATE)
-                left *= denoiseGain
-                right *= denoiseGain
+            if (audioDsp != null) {
+                audioFrame[0] = left
+                audioFrame[1] = right
+                audioDsp.processFrame(audioFrame)
+                left = audioFrame[0]
+                right = audioFrame[1]
             }
             val localUs = (sourceUs - clip.sourceInUs).coerceIn(0L, clip.durationUs)
             var gain = mix.volume

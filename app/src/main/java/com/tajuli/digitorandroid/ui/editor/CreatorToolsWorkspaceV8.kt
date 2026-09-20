@@ -51,6 +51,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.US_PER_SECOND
+import com.tajuli.digitorandroid.editor.model.VoiceStyleV78
 import com.tajuli.digitorandroid.editor.model.audioSelection
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.model.resolvedEntryAnimationV2
@@ -400,6 +401,86 @@ fun CreatorAudioWorkspace(
                 )
             }
 
+            SectionCardV8("Voice Enhance") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (mix.voiceEnhance <= 0f) "Off" else "${(mix.voiceEnhance * 100).toInt()}%",
+                        fontSize = 8.sp,
+                        color = if (mix.voiceEnhance <= 0f) C8Muted else C8Accent,
+                        modifier = Modifier.width(42.dp),
+                    )
+                    Slider(
+                        value = mix.voiceEnhance.coerceIn(0f, 1f),
+                        onValueChange = vm::setSelectedAudioVoiceEnhance,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    listOf(0f to "Off", .35f to "Clean", .70f to "Clear", 1f to "Strong")
+                        .forEach { (value, label) ->
+                            FilledTonalButton(onClick = { vm.setSelectedAudioVoiceEnhance(value) }) {
+                                Text(label, fontSize = 8.sp)
+                            }
+                        }
+                }
+                Text(
+                    "Rumble cleanup + speech presence + soft compression. Runs locally in preview and export.",
+                    fontSize = 8.sp,
+                    color = C8Muted,
+                )
+            }
+
+            SectionCardV8("Vocal Focus") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (mix.vocalFocus <= 0f) "Off" else "${(mix.vocalFocus * 100).toInt()}%",
+                        fontSize = 8.sp,
+                        color = if (mix.vocalFocus <= 0f) C8Muted else C8Accent,
+                        modifier = Modifier.width(42.dp),
+                    )
+                    Slider(
+                        value = mix.vocalFocus.coerceIn(0f, 1f),
+                        onValueChange = vm::setSelectedAudioVocalFocus,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Text(
+                    "Emphasizes center-panned speech/vocals by reducing stereo side content. This is realtime center focus, not AI stem separation.",
+                    fontSize = 8.sp,
+                    color = C8Muted,
+                )
+            }
+
+            SectionCardV8("3-band EQ") {
+                AudioDbSliderV78("Bass", mix.bassDb, vm::setSelectedAudioBassDb)
+                AudioDbSliderV78("Mid", mix.midDb, vm::setSelectedAudioMidDb)
+                AudioDbSliderV78("Treble", mix.trebleDb, vm::setSelectedAudioTrebleDb)
+            }
+
+            SectionCardV8("Voice styles") {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    VoiceStyleV78.entries.forEach { style ->
+                        FilledTonalButton(onClick = { vm.setSelectedAudioVoiceStyleV78(style) }) {
+                            Text(
+                                if (mix.resolvedVoiceStyleV78 == style) "✓ ${style.label}" else style.label,
+                                fontSize = 8.sp,
+                            )
+                        }
+                    }
+                }
+                Text(
+                    "Deep/Bright reshape tone; Robot uses realtime modulation. These are local voice styles, not pitch-shift voice conversion.",
+                    fontSize = 8.sp,
+                    color = C8Muted,
+                )
+            }
+
             SectionCardV8("Fades") {
                 DurationSliderV8("Fade in", mix.fadeInUs, maxFadeUs, vm::setSelectedAudioFadeIn)
                 DurationSliderV8("Fade out", mix.fadeOutUs, maxFadeUs, vm::setSelectedAudioFadeOut)
@@ -426,6 +507,30 @@ fun CreatorAudioWorkspace(
                 color = C8Muted,
             )
         }
+    }
+}
+
+@Composable
+private fun AudioDbSliderV78(
+    label: String,
+    value: Float,
+    onValueChange: (Float) -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, fontSize = 8.sp, color = C8Muted, modifier = Modifier.width(52.dp))
+        Slider(
+            value = value.coerceIn(-12f, 12f),
+            onValueChange = onValueChange,
+            valueRange = -12f..12f,
+            modifier = Modifier.weight(1f),
+        )
+        val rounded = value.coerceIn(-12f, 12f).toInt()
+        Text(
+            if (rounded > 0) "+${rounded} dB" else "${rounded} dB",
+            fontSize = 8.sp,
+            color = if (rounded == 0) C8Muted else C8Accent,
+            modifier = Modifier.width(48.dp),
+        )
     }
 }
 

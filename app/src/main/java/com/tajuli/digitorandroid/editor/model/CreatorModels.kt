@@ -75,9 +75,34 @@ data class AudioMix(
     val volume: Float = 1f,
     val fadeInUs: Long = 0L,
     val fadeOutUs: Long = 0L,
-    /** 0 = off, 1 = strongest lightweight speech/background-noise suppression. */
+    /** UI stays 0..100%; the DSP maps this to roughly twice the previous attenuation in dB. */
     val noiseReduction: Float = 0f,
+    /** Speech cleanup/presence + soft compression. */
+    val voiceEnhance: Float = 0f,
+    /** Stereo mid/center emphasis for centered dialogue/vocals. */
+    val vocalFocus: Float = 0f,
+    /** Simple realtime 3-band EQ in dB. */
+    val bassDb: Float = 0f,
+    val midDb: Float = 0f,
+    val trebleDb: Float = 0f,
+    /**
+     * Nullable on purpose: legacy Gson projects leave newly-added reference fields null.
+     * Null resolves to NORMAL.
+     */
+    val voiceStyleV78: VoiceStyleV78? = null,
 ) {
+    val resolvedVoiceStyleV78: VoiceStyleV78
+        get() = voiceStyleV78 ?: VoiceStyleV78.NORMAL
+
+    val needsDspV78: Boolean
+        get() = noiseReduction > 0f ||
+            voiceEnhance > 0f ||
+            vocalFocus > 0f ||
+            bassDb != 0f ||
+            midDb != 0f ||
+            trebleDb != 0f ||
+            resolvedVoiceStyleV78 != VoiceStyleV78.NORMAL
+
     fun normalizedFor(durationUs: Long): AudioMix {
         val safeDuration = durationUs.coerceAtLeast(1L)
         return copy(
@@ -85,6 +110,12 @@ data class AudioMix(
             fadeInUs = fadeInUs.coerceIn(0L, safeDuration),
             fadeOutUs = fadeOutUs.coerceIn(0L, safeDuration),
             noiseReduction = noiseReduction.coerceIn(0f, 1f),
+            voiceEnhance = voiceEnhance.coerceIn(0f, 1f),
+            vocalFocus = vocalFocus.coerceIn(0f, 1f),
+            bassDb = bassDb.coerceIn(-12f, 12f),
+            midDb = midDb.coerceIn(-12f, 12f),
+            trebleDb = trebleDb.coerceIn(-12f, 12f),
+            voiceStyleV78 = resolvedVoiceStyleV78,
         )
     }
 }
@@ -138,7 +169,9 @@ class AdaptiveNoiseReducer(
         val minimumThreshold = 0.0045f + 0.009f * strength
         val threshold = kotlin.math.max(minimumThreshold, noiseFloor * (1.55f + 0.75f * strength))
         val kneeEnd = threshold * (2.2f + 0.35f * (1f - strength))
-        val floorGain = 1f - 0.84f * strength
+        // Square the old linear floor gain: same 0..100% UI, about 2x attenuation in dB.
+        val oldFloorGain = 1f - 0.84f * strength
+        val floorGain = oldFloorGain * oldFloorGain
 
         val targetGain = when {
             envelope <= threshold -> floorGain
