@@ -143,7 +143,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: |
-            gradle :app:connectedDebugAndroidTest -PdigitorAbi=x86_64 -Pandroid.testInstrumentationRunnerArguments.class=com.tajuli.digitorandroid.editor.render.PreviewExportPixelParityInstrumentedTest,com.tajuli.digitorandroid.editor.render.PureTextExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.NativeImageExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.TransitionExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.BeautyFilterExportInstrumentedTest,com.tajuli.digitorandroid.editor.processing.HairSegmentationInstrumentedTest,com.tajuli.digitorandroid.editor.processing.FaceSkinSegmentationInstrumentedTest
+            gradle :app:connectedDebugAndroidTest -PdigitorAbi=x86_64 -Pandroid.testInstrumentationRunnerArguments.class=com.tajuli.digitorandroid.editor.render.PreviewExportPixelParityInstrumentedTest,com.tajuli.digitorandroid.editor.render.PureTextExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.NativeImageExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.TransitionExportInstrumentedTest,com.tajuli.digitorandroid.editor.render.BeautyFilterExportInstrumentedTest,com.tajuli.digitorandroid.editor.processing.HairSegmentationInstrumentedTest,com.tajuli.digitorandroid.editor.processing.FaceSkinSegmentationInstrumentedTest,com.tajuli.digitorandroid.editor.render.FilterEffectThumbnailRendererV98InstrumentedTest
             gradle :app:assemblePhone -PdigitorAbi=x86_64
             adb install -r app/build/outputs/apk/phone/app-phone.apk
             adb shell pm clear com.tajuli.digitorandroid

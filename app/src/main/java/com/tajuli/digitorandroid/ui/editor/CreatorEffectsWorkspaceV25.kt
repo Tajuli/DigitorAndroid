@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -30,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -68,6 +71,8 @@ fun CreatorEffectsWorkspace(
         ?.effectId
     var category by remember { mutableStateOf("Basic") }
     val categoryPresets = remember(category) { CreatorEffectCatalogV25.inCategory(category) }
+    val nodeEffects = node.visibleEffects()
+    val selectedEffectName = nodeEffects.firstOrNull { it.id == selectedEffectId }?.name
 
     fun selectEffect(effectId: String) {
         TimelineTextSelectionBusV10.clear()
@@ -103,30 +108,55 @@ fun CreatorEffectsWorkspace(
             }
         }
 
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp),
+        LazyRow(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            categoryPresets.forEach { preset ->
-                Box(
+            items(categoryPresets, key = { it.name }) { preset ->
+                val applied = nodeEffects.any { it.name == preset.name }
+                val selected = selectedEffectName == preset.name
+                Column(
                     Modifier
-                        .width(82.dp)
-                        .height(52.dp)
+                        .width(130.dp)
                         .background(Fx25Raised, RoundedCornerShape(8.dp))
+                        .border(
+                            if (selected) 1.5.dp else if (applied) 1.dp else .5.dp,
+                            if (selected) Fx25Accent else if (applied) Color.White.copy(alpha = .45f) else Color.White.copy(alpha = .08f),
+                            RoundedCornerShape(8.dp),
+                        )
                         .clickable {
                             vm.addEffectToSelectedNode(preset.name)
                             val updatedNode = vm.state.value.project.clip(clip.id)
                                 ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
                             updatedNode?.effects?.lastOrNull { it.name == preset.name }?.let { selectEffect(it.id) }
                         }
-                        .padding(horizontal = 7.dp, vertical = 6.dp),
-                    contentAlignment = Alignment.Center,
+                        .padding(5.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
+                    Box(
+                        Modifier.fillMaxWidth().height(68.dp)
+                            .clip(RoundedCornerShape(6.dp)),
+                    ) {
+                        EffectThumbnailV98(
+                            effectName = preset.name,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        if (applied) {
+                            Text(
+                                "✓",
+                                fontSize = 10.sp,
+                                color = Color.White,
+                                modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
                     Text(
                         preset.name,
                         fontSize = 8.sp,
                         fontWeight = FontWeight.Medium,
                         color = Color.White.copy(alpha = .90f),
+                        maxLines = 1,
                     )
                 }
             }
@@ -138,7 +168,7 @@ fun CreatorEffectsWorkspace(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            val effects = node.visibleEffects()
+            val effects = nodeEffects
             if (effects.isEmpty()) {
                 Text("Choose an effect above to add it to this node", fontSize = 9.sp, color = Fx25Muted)
             } else {

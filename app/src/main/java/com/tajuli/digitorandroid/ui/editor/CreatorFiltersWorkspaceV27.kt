@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
@@ -28,8 +30,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -61,27 +63,6 @@ private val Filter27Raised = Color(0xFF17171C)
 private val Filter27Divider = Color(0xFF292930)
 private val Filter27Muted = Color(0xFF909098)
 private val Filter27Accent = Color(0xFF30E0C3)
-
-private data class FilterSwatchV36(val a: Color, val b: Color)
-
-private fun swatchV36(id: String): FilterSwatchV36 = when (id) {
-    "fresh_lime" -> FilterSwatchV36(Color(0xFF84DDA4), Color(0xFFEAF8B4))
-    "vivid_verse" -> FilterSwatchV36(Color(0xFF865DFF), Color(0xFFFF7E70))
-    "soft_light" -> FilterSwatchV36(Color(0xFFF8D9D3), Color(0xFFF5F0E8))
-    "vhs" -> FilterSwatchV36(Color(0xFF6B7AA8), Color(0xFFD88793))
-    "teal_orange" -> FilterSwatchV36(Color(0xFF238B91), Color(0xFFE79B63))
-    "warm_film" -> FilterSwatchV36(Color(0xFF8B694F), Color(0xFFE6B47E))
-    "golden_hour" -> FilterSwatchV36(Color(0xFFD78845), Color(0xFFFFD982))
-    "moody_cinema" -> FilterSwatchV36(Color(0xFF243541), Color(0xFF8A6B59))
-    "natural_portrait" -> FilterSwatchV36(Color(0xFFC68E78), Color(0xFFF0C9B4))
-    "fade_film" -> FilterSwatchV36(Color(0xFF77736B), Color(0xFFC9B99B))
-    "skin_bright" -> FilterSwatchV36(Color(0xFFD6A98F), Color(0xFFFFE3CE))
-    "skin_smooth" -> FilterSwatchV36(Color(0xFFC89582), Color(0xFFF1C6B7))
-    "pink_lips" -> FilterSwatchV36(Color(0xFF9B4E61), Color(0xFFF08FA8))
-    "hair_brows" -> FilterSwatchV36(Color(0xFF111115), Color(0xFF4E4240))
-    "eye_pop" -> FilterSwatchV36(Color(0xFF394D65), Color(0xFFD9E7F2))
-    else -> FilterSwatchV36(Color(0xFFB66F72), Color(0xFFF3C7A9))
-}
 
 @Composable
 fun CreatorFiltersWorkspace(
@@ -188,19 +169,15 @@ fun CreatorFiltersWorkspace(
                 }
             }
         }
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 6.dp),
+        LazyRow(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(7.dp),
         ) {
-            visiblePresets.forEach { preset ->
-                val swatch = swatchV36(preset.id)
+            items(visiblePresets, key = { it.id }) { preset ->
                 FilterCardV36(
-                    name = preset.name,
-                    description = preset.description,
+                    preset = preset,
                     applied = preset.id in applied,
                     selected = preset.id == selectedPresetId,
-                    swatchA = swatch.a,
-                    swatchB = swatch.b,
                     onClick = { applyPreset(preset) },
                 )
             }
@@ -244,16 +221,13 @@ fun CreatorFiltersWorkspace(
 
 @Composable
 private fun FilterCardV36(
-    name: String,
-    description: String,
+    preset: CreatorFilterPresetV36,
     applied: Boolean,
     selected: Boolean,
-    swatchA: Color,
-    swatchB: Color,
     onClick: () -> Unit,
 ) {
     Column(
-        Modifier.width(94.dp)
+        Modifier.width(130.dp)
             .background(Filter27Raised, RoundedCornerShape(9.dp))
             .border(
                 if (selected) 1.7.dp else if (applied) 1.dp else .5.dp,
@@ -265,15 +239,25 @@ private fun FilterCardV36(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(
-            Modifier.fillMaxWidth().height(43.dp)
-                .background(Brush.linearGradient(listOf(swatchA, swatchB)), RoundedCornerShape(6.dp)),
-            contentAlignment = Alignment.TopEnd,
+            Modifier.fillMaxWidth().height(68.dp)
+                .clip(RoundedCornerShape(6.dp)),
         ) {
-            if (applied) Text("✓", fontSize = 10.sp, color = Color.White, modifier = Modifier.padding(4.dp))
+            FilterThumbnailV98(
+                presetId = preset.id,
+                modifier = Modifier.fillMaxSize(),
+            )
+            if (applied) {
+                Text(
+                    "✓",
+                    fontSize = 10.sp,
+                    color = Color.White,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                )
+            }
         }
         Spacer(Modifier.height(4.dp))
-        Text(name, fontSize = 8.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, textAlign = TextAlign.Center)
-        Text(description, fontSize = 6.sp, color = Filter27Muted, maxLines = 1, textAlign = TextAlign.Center)
+        Text(preset.name, fontSize = 8.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, textAlign = TextAlign.Center)
+        Text(preset.description, fontSize = 6.sp, color = Filter27Muted, maxLines = 1, textAlign = TextAlign.Center)
     }
 }
 

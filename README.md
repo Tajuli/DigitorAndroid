@@ -114,6 +114,20 @@ Audio waveforms are source-derived editor metadata. A single cached source envel
 
 CPU fallback exports video MP4 and handles visual multitrack compositing/color. **CPU audio mixing and the full GPU text/title feature set are not yet parity-complete on the CPU fallback path.** GPU export supports audio tracks through Media3 Composition/AAC.
 
+## Filter / effect thumbnails
+
+Filter/Effect thumbnails are generated from one shared neutral source image using Digitor’s real render pipeline.
+
+- The bundled CC0 portrait is center-cropped once to a logical 640×360 (16:9) base; UI results are rendered/cached at 320×180.
+- Every card is a true 50/50 comparison: original on the left, the selected preset/effect on the right.
+- Creator filters come from CreatorFilterCatalogV36 markers; visual effects come from CreatorEffectCatalogV25.
+- The processed side runs through SharedVideoPipeline.compositedExportEffectsFor(...), reusing the production LUT/node, beauty and creator-effect shaders instead of fake color overlays.
+- Time-dependent effects use a deterministic 0.35 s source timestamp.
+- Lazy picker rows, Dispatchers.Default rendering and a bounded LruCache keep the UI thread and normal app launch path free of thumbnail rendering work.
+- Failed renders fall back to original | original with a small warning indicator instead of crashing.
+
+See docs/filter-effect-thumbnails.md for asset provenance, cache behavior and the current beauty-analysis limitation.
+
 ## Build versions
 
 - compileSdk 37
