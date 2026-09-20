@@ -8,9 +8,9 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
+import com.tajuli.digitorandroid.editor.model.AdaptiveNoiseReducer
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
-import com.tajuli.digitorandroid.editor.model.audioNoiseReductionGain
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import java.io.File
 import java.io.FileInputStream
@@ -142,6 +142,11 @@ internal class NativeAudioMixdownV76(
             var outputEnded = false
             var lastTargetFrameExclusive = 0L
             var idleLoops = 0
+            val noiseReducer = clip.audioMix
+                .normalizedFor(clip.durationUs)
+                .noiseReduction
+                .takeIf { it > 0f }
+                ?.let(::AdaptiveNoiseReducer)
 
             while (!outputEnded) {
                 var didWork = false
@@ -200,6 +205,7 @@ internal class NativeAudioMixdownV76(
                                     output = output,
                                     totalTargetFrames = totalTargetFrames,
                                     lastTargetFrameExclusive = lastTargetFrameExclusive,
+                                    noiseReducer = noiseReducer,
                                 )
                             }
                             if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputEnded = true
@@ -242,6 +248,7 @@ internal class NativeAudioMixdownV76(
         output: RandomAccessFile,
         totalTargetFrames: Long,
         lastTargetFrameExclusive: Long,
+        noiseReducer: AdaptiveNoiseReducer?,
     ): Long {
         val bytesPerSample = pcmBytesPerSampleV76(pcmEncoding)
         val sourceFrameBytes = bytesPerSample * channelCount
@@ -299,9 +306,9 @@ internal class NativeAudioMixdownV76(
             } else {
                 readPcmSampleV76(source, frameOffset + bytesPerSample, pcmEncoding)
             }
-            if (mix.noiseReduction > 0f) {
+            if (noiseReducer != null) {
                 val frameLevel = max(kotlin.math.abs(left), kotlin.math.abs(right))
-                val denoiseGain = audioNoiseReductionGain(frameLevel, mix.noiseReduction)
+                val denoiseGain = noiseReducer.processFrame(frameLevel, TARGET_SAMPLE_RATE)
                 left *= denoiseGain
                 right *= denoiseGain
             }
