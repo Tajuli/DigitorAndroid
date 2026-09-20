@@ -97,7 +97,7 @@ private class ClipAudioDspAudioProcessorV78(
                 val frameBytes = channels * 4
                 while (input.remaining() >= frameBytes) {
                     for (channel in 0 until channels) {
-                        frame[channel] = input.float.coerceIn(-1f, 1f)
+                        frame[channel] = input.getFloat().coerceIn(-1f, 1f)
                     }
                     processor.processFrame(frame)
                     for (channel in 0 until channels) {
@@ -109,7 +109,7 @@ private class ClipAudioDspAudioProcessorV78(
                 val frameBytes = channels * 2
                 while (input.remaining() >= frameBytes) {
                     for (channel in 0 until channels) {
-                        frame[channel] = input.short.toInt() / 32768f
+                        frame[channel] = input.getShort().toInt() / 32768f
                     }
                     processor.processFrame(frame)
                     for (channel in 0 until channels) {
