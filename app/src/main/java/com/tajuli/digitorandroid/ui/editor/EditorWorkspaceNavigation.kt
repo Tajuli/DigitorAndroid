@@ -181,6 +181,7 @@ internal fun applyEditorWorkspaceSelection(
                 next == EditorWorkspaceTab.EFFECTS ||
                 next == EditorWorkspaceTab.FILTERS ||
                 next == EditorWorkspaceTab.COLOR ||
+                next == EditorWorkspaceTab.AUDIO ||
                 next == EditorWorkspaceTab.NODES ||
                 next == EditorWorkspaceTab.MEDIA
             val selectedIsActiveVideo = selectedClip?.let { clip ->
