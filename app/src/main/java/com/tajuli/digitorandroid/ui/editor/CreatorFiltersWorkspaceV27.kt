@@ -125,7 +125,8 @@ fun CreatorFiltersWorkspace(
             vm.setEditorStatusV19("Select a Serial or Parallel node before applying a filter")
             return
         }
-        val wasApplied = preset.id in applied
+        val liveHost = vm.state.value.project.clip(clip.id)?.selectedCreatorFilterHostV41()
+        val wasApplied = liveHost?.appliedCreatorFiltersV41()?.containsKey(preset.id) == true
         if (wasApplied) {
             updateFilterMarkerV36(vm, clip.id, preset.id, 0f, coalesce = false)
             if (selectedPresetId == preset.id) selectedPresetId = null
