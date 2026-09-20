@@ -120,17 +120,21 @@ fun CreatorFiltersWorkspace(
         }
     }
 
-    fun applyPreset(preset: CreatorFilterPresetV36) {
+    fun togglePreset(preset: CreatorFilterPresetV36) {
         if (host == null) {
             vm.setEditorStatusV19("Select a Serial or Parallel node before applying a filter")
             return
         }
-        selectedPresetId = preset.id
         val wasApplied = preset.id in applied
-        if (!wasApplied || preset.group == CreatorFilterGroupV36.LOOKS) {
-            updateFilterMarkerV36(vm, clip.id, preset.id, preset.defaultIntensity, coalesce = false)
+        if (wasApplied) {
+            updateFilterMarkerV36(vm, clip.id, preset.id, 0f, coalesce = false)
+            if (selectedPresetId == preset.id) selectedPresetId = null
+            return
         }
-        if (!wasApplied && preset.group == CreatorFilterGroupV36.BEAUTY) refineBeautyInBackground(preset)
+
+        selectedPresetId = preset.id
+        updateFilterMarkerV36(vm, clip.id, preset.id, preset.defaultIntensity, coalesce = false)
+        if (preset.group == CreatorFilterGroupV36.BEAUTY) refineBeautyInBackground(preset)
     }
 
     Column(modifier.background(Filter27Panel)) {
@@ -178,7 +182,7 @@ fun CreatorFiltersWorkspace(
                     preset = preset,
                     applied = preset.id in applied,
                     selected = preset.id == selectedPresetId,
-                    onClick = { applyPreset(preset) },
+                    onClick = { togglePreset(preset) },
                 )
             }
         }
@@ -208,9 +212,9 @@ fun CreatorFiltersWorkspace(
             )
             Text(
                 if (group == CreatorFilterGroupV36.LOOKS) {
-                    "LOOKS execute inside Node ${host?.label ?: "—"}. Serial order and Parallel branches now affect the rendered result."
+                    "Tap a filter once to apply; tap the same thumbnail again to remove it. LOOKS execute inside Node ${host?.label ?: "—"}."
                 } else {
-                    "Beauty is owned by Node ${host?.label ?: "—"}; spatial beauty processing remains outside the 3D color LUT."
+                    "Tap a beauty preset once to apply; tap it again to remove it. Beauty remains owned by Node ${host?.label ?: "—"}."
                 },
                 fontSize = 7.sp,
                 color = Filter27Muted,
@@ -227,7 +231,7 @@ private fun FilterCardV36(
     onClick: () -> Unit,
 ) {
     Column(
-        Modifier.width(130.dp)
+        Modifier.width(170.dp)
             .background(Filter27Raised, RoundedCornerShape(9.dp))
             .border(
                 if (selected) 1.7.dp else if (applied) 1.dp else .5.dp,
@@ -239,7 +243,7 @@ private fun FilterCardV36(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(
-            Modifier.fillMaxWidth().height(68.dp)
+            Modifier.fillMaxWidth().height(90.dp)
                 .clip(RoundedCornerShape(6.dp)),
         ) {
             FilterThumbnailV98(
