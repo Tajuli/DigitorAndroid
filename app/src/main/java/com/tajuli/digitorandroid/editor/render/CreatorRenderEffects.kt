@@ -17,8 +17,8 @@ import androidx.media3.common.audio.GainProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.effect.TextOverlay
+import com.tajuli.digitorandroid.editor.model.AdaptiveNoiseReducer
 import com.tajuli.digitorandroid.editor.model.AudioMix
-import com.tajuli.digitorandroid.editor.model.audioNoiseReductionGain
 import com.tajuli.digitorandroid.editor.model.TextAlignmentV2
 import com.tajuli.digitorandroid.editor.model.TextFontV2
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
@@ -61,8 +61,10 @@ internal fun audioProcessorsFor(clip: TimelineClip): List<AudioProcessor> {
  */
 @UnstableApi
 private class BasicNoiseReductionAudioProcessor(
-    private val amount: Float,
+    amount: Float,
 ) : BaseAudioProcessor() {
+    private val reducer = AdaptiveNoiseReducer(amount)
+
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         if (
             inputAudioFormat.encoding != C.ENCODING_PCM_16BIT &&
@@ -77,27 +79,49 @@ private class BasicNoiseReductionAudioProcessor(
         if (!inputBuffer.hasRemaining()) return
         val input = inputBuffer.duplicate().order(ByteOrder.nativeOrder())
         val output = replaceOutputBuffer(input.remaining()).order(ByteOrder.nativeOrder())
+        val channels = inputAudioFormat.channelCount.coerceAtLeast(1)
+        val sampleRate = inputAudioFormat.sampleRate.coerceAtLeast(1)
 
         when (inputAudioFormat.encoding) {
             C.ENCODING_PCM_FLOAT -> {
-                while (input.remaining() >= 4) {
-                    val sample = input.float.coerceIn(-1f, 1f)
-                    output.putFloat((sample * audioNoiseReductionGain(sample, amount)).coerceIn(-1f, 1f))
+                val frameBytes = channels * 4
+                while (input.remaining() >= frameBytes) {
+                    val start = input.position()
+                    var level = 0f
+                    for (channel in 0 until channels) {
+                        level = kotlin.math.max(level, abs(input.getFloat(start + channel * 4)))
+                    }
+                    val gain = reducer.processFrame(level, sampleRate)
+                    for (channel in 0 until channels) {
+                        val sample = input.getFloat(start + channel * 4).coerceIn(-1f, 1f)
+                        output.putFloat((sample * gain).coerceIn(-1f, 1f))
+                    }
+                    input.position(start + frameBytes)
                 }
             }
             else -> {
-                while (input.remaining() >= 2) {
-                    val sample = input.short
-                    val normalized = sample.toInt() / 32768f
-                    val gain = audioNoiseReductionGain(normalized, amount)
-                    val processed = (sample.toInt() * gain)
-                        .toInt()
-                        .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                    output.putShort(processed.toShort())
+                val frameBytes = channels * 2
+                while (input.remaining() >= frameBytes) {
+                    val start = input.position()
+                    var level = 0f
+                    for (channel in 0 until channels) {
+                        val sample = input.getShort(start + channel * 2).toInt() / 32768f
+                        level = kotlin.math.max(level, abs(sample))
+                    }
+                    val gain = reducer.processFrame(level, sampleRate)
+                    for (channel in 0 until channels) {
+                        val sample = input.getShort(start + channel * 2).toInt()
+                        val processed = (sample * gain).toInt()
+                            .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                        output.putShort(processed.toShort())
+                    }
+                    input.position(start + frameBytes)
                 }
             }
         }
 
+        // Preserve any incomplete trailing bytes unchanged; Media3 normally sends aligned PCM.
+        while (input.hasRemaining()) output.put(input.get())
         inputBuffer.position(inputBuffer.limit())
         output.flip()
     }
