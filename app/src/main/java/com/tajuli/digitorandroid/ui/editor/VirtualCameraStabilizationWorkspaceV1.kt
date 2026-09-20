@@ -3,6 +3,7 @@ package com.tajuli.digitorandroid.ui.editor
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -39,7 +40,9 @@ internal fun VirtualCameraStabilizationWorkspaceV1(
     val busy = editorState.busyOperation == "Stabilize"
 
     Column(
-        modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+        modifier
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text("Virtual Camera · ${liveClip.label}", fontSize = 10.sp, color = Color.White)
