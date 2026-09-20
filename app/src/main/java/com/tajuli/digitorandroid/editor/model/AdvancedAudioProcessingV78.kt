@@ -84,7 +84,8 @@ class ClipAudioDspV78(
             val right = frame[1]
             val mid = (left + right) * .5f
             val side = (left - right) * .5f
-            val sideGain = 1f - .88f * vocalFocus
+            // 100% becomes an exact stereo-center extraction; lower values blend naturally.
+            val sideGain = 1f - vocalFocus
             frame[0] = mid + side * sideGain
             frame[1] = mid - side * sideGain
         }
