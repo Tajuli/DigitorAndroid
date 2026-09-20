@@ -460,7 +460,7 @@ fun CreatorAudioWorkspace(
                 AudioDbSliderV78("Treble", mix.trebleDb, vm::setSelectedAudioTrebleDb)
             }
 
-            SectionCardV8("Voice changer") {
+            SectionCardV8("Voice styles") {
                 Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -475,7 +475,7 @@ fun CreatorAudioWorkspace(
                     }
                 }
                 Text(
-                    "Deep/Bright reshape tone; Robot uses realtime modulation. These lightweight styles avoid cloud processing.",
+                    "Deep/Bright reshape tone; Robot uses realtime modulation. These are local voice styles, not pitch-shift voice conversion.",
                     fontSize = 8.sp,
                     color = C8Muted,
                 )
