@@ -126,9 +126,12 @@ fun CreatorEffectsWorkspace(
                             RoundedCornerShape(8.dp),
                         )
                         .clickable {
-                            if (appliedEffect != null) {
+                            val liveNode = vm.state.value.project.clip(clip.id)
+                                ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
+                            val liveEffect = liveNode?.visibleEffects()?.lastOrNull { it.name == preset.name }
+                            if (liveEffect != null) {
                                 vm.deleteEffectTimelineV26(
-                                    EffectTimelineSelectionV26(clip.id, node.id, appliedEffect.id),
+                                    EffectTimelineSelectionV26(clip.id, node.id, liveEffect.id),
                                 )
                             } else {
                                 vm.addEffectToSelectedNode(preset.name)
