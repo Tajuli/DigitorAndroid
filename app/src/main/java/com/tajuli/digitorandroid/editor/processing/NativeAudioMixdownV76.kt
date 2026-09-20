@@ -414,6 +414,7 @@ internal class NativeAudioMixdownV76(
                             val input = codec.getInputBuffer(index)
                                 ?: error("Native AAC encoder input buffer unavailable")
                             input.clear()
+                            input.order(ByteOrder.LITTLE_ENDIAN)
                             val outputFrameBytes = outputChannelCount * 2
                             val frameCapacity = min(
                                 input.remaining() / outputFrameBytes,
