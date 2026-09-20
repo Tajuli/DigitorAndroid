@@ -104,6 +104,12 @@ class AdaptiveNoiseReducer(
     private var noiseFloor = 0.006f
     private var smoothedGain = 1f
 
+    fun reset() {
+        envelope = 0f
+        noiseFloor = 0.006f
+        smoothedGain = 1f
+    }
+
     fun processFrame(level: Float, sampleRate: Int): Float {
         if (strength <= 0f) return 1f
         val safeRate = sampleRate.coerceAtLeast(1)
@@ -154,7 +160,7 @@ class AdaptiveNoiseReducer(
 
     private fun smoothingAlpha(timeMs: Float, sampleRate: Int): Float {
         val samples = (timeMs * sampleRate.toFloat() / 1000f).coerceAtLeast(1f)
-        return (1f - kotlin.math.exp(-1f / samples)).coerceIn(0f, 1f)
+        return (1f - kotlin.math.exp((-1f / samples).toDouble()).toFloat()).coerceIn(0f, 1f)
     }
 }
 
