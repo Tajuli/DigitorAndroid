@@ -12,11 +12,13 @@ import androidx.media3.common.C
 import androidx.media3.common.Effect
 import androidx.media3.common.OverlaySettings
 import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.audio.GainProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.effect.TextOverlay
 import com.tajuli.digitorandroid.editor.model.AudioMix
+import com.tajuli.digitorandroid.editor.model.audioNoiseReductionGain
 import com.tajuli.digitorandroid.editor.model.TextAlignmentV2
 import com.tajuli.digitorandroid.editor.model.TextFontV2
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
@@ -26,6 +28,9 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.resolvedTextStyleV2
 import com.tajuli.digitorandroid.editor.model.textAnimationFrameV2
 import com.tajuli.digitorandroid.editor.model.textManualFrameV2
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.min
 
@@ -37,8 +42,65 @@ internal fun projectTextEffects(project: TimelineProject): List<Effect> =
 @UnstableApi
 internal fun audioProcessorsFor(clip: TimelineClip): List<AudioProcessor> {
     val mix = clip.audioMix.normalizedFor(clip.durationUs)
-    if (mix.volume == 1f && mix.fadeInUs == 0L && mix.fadeOutUs == 0L) return emptyList()
-    return listOf(GainProcessor(ClipGainProvider(mix, clip.durationUs)))
+    return buildList {
+        if (mix.noiseReduction > 0f) {
+            add(BasicNoiseReductionAudioProcessor(mix.noiseReduction))
+        }
+        if (mix.volume != 1f || mix.fadeInUs > 0L || mix.fadeOutUs > 0L) {
+            add(GainProcessor(ClipGainProvider(mix, clip.durationUs)))
+        }
+    }
+}
+
+/**
+ * Mobile-friendly basic noise reducer for selected clips.
+ *
+ * This intentionally uses a soft amplitude gate instead of a heavyweight ML model so realtime
+ * preview stays responsive on mid-range Android devices. Louder speech/music passes untouched;
+ * low-level background noise is progressively attenuated according to the selected strength.
+ */
+@UnstableApi
+private class BasicNoiseReductionAudioProcessor(
+    private val amount: Float,
+) : BaseAudioProcessor() {
+    override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
+        if (
+            inputAudioFormat.encoding != C.ENCODING_PCM_16BIT &&
+            inputAudioFormat.encoding != C.ENCODING_PCM_FLOAT
+        ) {
+            throw AudioProcessor.UnhandledAudioFormatException(inputAudioFormat)
+        }
+        return inputAudioFormat
+    }
+
+    override fun queueInput(inputBuffer: ByteBuffer) {
+        if (!inputBuffer.hasRemaining()) return
+        val input = inputBuffer.duplicate().order(ByteOrder.nativeOrder())
+        val output = replaceOutputBuffer(input.remaining()).order(ByteOrder.nativeOrder())
+
+        when (inputAudioFormat.encoding) {
+            C.ENCODING_PCM_FLOAT -> {
+                while (input.remaining() >= 4) {
+                    val sample = input.float.coerceIn(-1f, 1f)
+                    output.putFloat((sample * audioNoiseReductionGain(sample, amount)).coerceIn(-1f, 1f))
+                }
+            }
+            else -> {
+                while (input.remaining() >= 2) {
+                    val sample = input.short
+                    val normalized = sample.toInt() / 32768f
+                    val gain = audioNoiseReductionGain(normalized, amount)
+                    val processed = (sample.toInt() * gain)
+                        .toInt()
+                        .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                    output.putShort(processed.toShort())
+                }
+            }
+        }
+
+        inputBuffer.position(inputBuffer.limit())
+        output.flip()
+    }
 }
 
 @UnstableApi
