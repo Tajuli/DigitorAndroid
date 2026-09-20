@@ -113,11 +113,12 @@ fun CreatorEffectsWorkspace(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             items(categoryPresets, key = { it.name }) { preset ->
-                val applied = nodeEffects.any { it.name == preset.name }
+                val appliedEffect = nodeEffects.lastOrNull { it.name == preset.name }
+                val applied = appliedEffect != null
                 val selected = selectedEffectName == preset.name
                 Column(
                     Modifier
-                        .width(130.dp)
+                        .width(170.dp)
                         .background(Fx25Raised, RoundedCornerShape(8.dp))
                         .border(
                             if (selected) 1.5.dp else if (applied) 1.dp else .5.dp,
@@ -125,16 +126,22 @@ fun CreatorEffectsWorkspace(
                             RoundedCornerShape(8.dp),
                         )
                         .clickable {
-                            vm.addEffectToSelectedNode(preset.name)
-                            val updatedNode = vm.state.value.project.clip(clip.id)
-                                ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
-                            updatedNode?.effects?.lastOrNull { it.name == preset.name }?.let { selectEffect(it.id) }
+                            if (appliedEffect != null) {
+                                vm.deleteEffectTimelineV26(
+                                    EffectTimelineSelectionV26(clip.id, node.id, appliedEffect.id),
+                                )
+                            } else {
+                                vm.addEffectToSelectedNode(preset.name)
+                                val updatedNode = vm.state.value.project.clip(clip.id)
+                                    ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
+                                updatedNode?.effects?.lastOrNull { it.name == preset.name }?.let { selectEffect(it.id) }
+                            }
                         }
                         .padding(5.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Box(
-                        Modifier.fillMaxWidth().height(68.dp)
+                        Modifier.fillMaxWidth().height(90.dp)
                             .clip(RoundedCornerShape(6.dp)),
                     ) {
                         EffectThumbnailV98(
@@ -170,10 +177,10 @@ fun CreatorEffectsWorkspace(
         ) {
             val effects = nodeEffects
             if (effects.isEmpty()) {
-                Text("Choose an effect above to add it to this node", fontSize = 9.sp, color = Fx25Muted)
+                Text("Tap an effect once to add it; tap the same thumbnail again to remove it.", fontSize = 9.sp, color = Fx25Muted)
             } else {
                 Text(
-                    "Select an effect here or on its timeline bar. Drag the bar edges for duration; hold-drag the bar to move it.",
+                    "Tap an active thumbnail again to remove it. Select an effect here or on its timeline bar to edit amount/timing.",
                     fontSize = 7.sp,
                     color = Fx25Muted,
                 )
