@@ -17,7 +17,7 @@ import androidx.media3.common.audio.GainProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.effect.TextOverlay
-import com.tajuli.digitorandroid.editor.model.AdaptiveNoiseReducer
+import com.tajuli.digitorandroid.editor.model.ClipAudioDspV78
 import com.tajuli.digitorandroid.editor.model.AudioMix
 import com.tajuli.digitorandroid.editor.model.TextAlignmentV2
 import com.tajuli.digitorandroid.editor.model.TextFontV2
@@ -30,7 +30,6 @@ import com.tajuli.digitorandroid.editor.model.textAnimationFrameV2
 import com.tajuli.digitorandroid.editor.model.textManualFrameV2
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.min
 
@@ -43,8 +42,8 @@ internal fun projectTextEffects(project: TimelineProject): List<Effect> =
 internal fun audioProcessorsFor(clip: TimelineClip): List<AudioProcessor> {
     val mix = clip.audioMix.normalizedFor(clip.durationUs)
     return buildList {
-        if (mix.noiseReduction > 0f) {
-            add(BasicNoiseReductionAudioProcessor(mix.noiseReduction))
+        if (mix.needsDspV78) {
+            add(ClipAudioDspAudioProcessorV78(mix))
         }
         if (mix.volume != 1f || mix.fadeInUs > 0L || mix.fadeOutUs > 0L) {
             add(GainProcessor(ClipGainProvider(mix, clip.durationUs)))
@@ -53,17 +52,14 @@ internal fun audioProcessorsFor(clip: TimelineClip): List<AudioProcessor> {
 }
 
 /**
- * Mobile-friendly basic noise reducer for selected clips.
- *
- * This intentionally uses a soft amplitude gate instead of a heavyweight ML model so realtime
- * preview stays responsive on mid-range Android devices. Louder speech/music passes untouched;
- * low-level background noise is progressively attenuated according to the selected strength.
+ * One shared realtime processor for denoise + Voice Enhance + Vocal Focus + 3-band EQ + voice style.
+ * The actual DSP lives in ClipAudioDspV78 and is also used by the native fallback exporter.
  */
 @UnstableApi
-private class BasicNoiseReductionAudioProcessor(
-    amount: Float,
+private class ClipAudioDspAudioProcessorV78(
+    private val mix: AudioMix,
 ) : BaseAudioProcessor() {
-    private val reducer = AdaptiveNoiseReducer(amount)
+    private var dsp: ClipAudioDspV78? = null
 
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         if (
@@ -72,11 +68,16 @@ private class BasicNoiseReductionAudioProcessor(
         ) {
             throw AudioProcessor.UnhandledAudioFormatException(inputAudioFormat)
         }
+        dsp = ClipAudioDspV78(
+            mix = mix,
+            sampleRate = inputAudioFormat.sampleRate,
+            channelCount = inputAudioFormat.channelCount,
+        )
         return inputAudioFormat
     }
 
     override fun onFlush() {
-        reducer.reset()
+        dsp?.reset()
     }
 
     override fun queueInput(inputBuffer: ByteBuffer) {
@@ -84,47 +85,43 @@ private class BasicNoiseReductionAudioProcessor(
         val input = inputBuffer.duplicate().order(ByteOrder.nativeOrder())
         val output = replaceOutputBuffer(input.remaining()).order(ByteOrder.nativeOrder())
         val channels = inputAudioFormat.channelCount.coerceAtLeast(1)
-        val sampleRate = inputAudioFormat.sampleRate.coerceAtLeast(1)
+        val frame = FloatArray(channels)
+        val processor = dsp ?: ClipAudioDspV78(
+            mix = mix,
+            sampleRate = inputAudioFormat.sampleRate,
+            channelCount = channels,
+        ).also { dsp = it }
 
         when (inputAudioFormat.encoding) {
             C.ENCODING_PCM_FLOAT -> {
                 val frameBytes = channels * 4
                 while (input.remaining() >= frameBytes) {
-                    val start = input.position()
-                    var level = 0f
                     for (channel in 0 until channels) {
-                        level = kotlin.math.max(level, abs(input.getFloat(start + channel * 4)))
+                        frame[channel] = input.float.coerceIn(-1f, 1f)
                     }
-                    val gain = reducer.processFrame(level, sampleRate)
+                    processor.processFrame(frame)
                     for (channel in 0 until channels) {
-                        val sample = input.getFloat(start + channel * 4).coerceIn(-1f, 1f)
-                        output.putFloat((sample * gain).coerceIn(-1f, 1f))
+                        output.putFloat(frame[channel].coerceIn(-1f, 1f))
                     }
-                    input.position(start + frameBytes)
                 }
             }
             else -> {
                 val frameBytes = channels * 2
                 while (input.remaining() >= frameBytes) {
-                    val start = input.position()
-                    var level = 0f
                     for (channel in 0 until channels) {
-                        val sample = input.getShort(start + channel * 2).toInt() / 32768f
-                        level = kotlin.math.max(level, abs(sample))
+                        frame[channel] = input.short.toInt() / 32768f
                     }
-                    val gain = reducer.processFrame(level, sampleRate)
+                    processor.processFrame(frame)
                     for (channel in 0 until channels) {
-                        val sample = input.getShort(start + channel * 2).toInt()
-                        val processed = (sample * gain).toInt()
+                        val processed = (frame[channel] * Short.MAX_VALUE).toInt()
                             .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
                         output.putShort(processed.toShort())
                     }
-                    input.position(start + frameBytes)
                 }
             }
         }
 
-        // Preserve any incomplete trailing bytes unchanged; Media3 normally sends aligned PCM.
+        // Media3 normally supplies aligned PCM; preserve any trailing bytes defensively.
         while (input.hasRemaining()) output.put(input.get())
         inputBuffer.position(inputBuffer.limit())
         output.flip()
