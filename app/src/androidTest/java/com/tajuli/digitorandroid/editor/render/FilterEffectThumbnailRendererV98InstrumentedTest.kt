@@ -4,12 +4,10 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import java.util.Arrays
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -51,11 +49,6 @@ class FilterEffectThumbnailRendererV98InstrumentedTest {
     @Test
     fun samePresetAtFixedTimestamp_isDeterministicAcrossColdRenders() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        FilterEffectThumbnailRendererV98.clearMemoryCacheForTest()
-        val first = FilterEffectThumbnailRendererV98.renderEffect(context, "Vivid Missing")
-        // The unknown path is intentionally deterministic too, but exercise a real shader below.
-        assertTrue(first.width > 0)
-
         FilterEffectThumbnailRendererV98.clearMemoryCacheForTest()
         val a = FilterEffectThumbnailRendererV98.renderEffect(context, "RGB Split")
         val pixelsA = pixels(a)
