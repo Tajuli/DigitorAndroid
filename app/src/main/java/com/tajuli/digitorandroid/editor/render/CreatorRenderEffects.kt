@@ -12,10 +12,12 @@ import androidx.media3.common.C
 import androidx.media3.common.Effect
 import androidx.media3.common.OverlaySettings
 import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.audio.GainProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.effect.TextOverlay
+import com.tajuli.digitorandroid.editor.model.AdaptiveNoiseReducer
 import com.tajuli.digitorandroid.editor.model.AudioMix
 import com.tajuli.digitorandroid.editor.model.TextAlignmentV2
 import com.tajuli.digitorandroid.editor.model.TextFontV2
@@ -26,6 +28,9 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.resolvedTextStyleV2
 import com.tajuli.digitorandroid.editor.model.textAnimationFrameV2
 import com.tajuli.digitorandroid.editor.model.textManualFrameV2
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.min
 
@@ -37,8 +42,93 @@ internal fun projectTextEffects(project: TimelineProject): List<Effect> =
 @UnstableApi
 internal fun audioProcessorsFor(clip: TimelineClip): List<AudioProcessor> {
     val mix = clip.audioMix.normalizedFor(clip.durationUs)
-    if (mix.volume == 1f && mix.fadeInUs == 0L && mix.fadeOutUs == 0L) return emptyList()
-    return listOf(GainProcessor(ClipGainProvider(mix, clip.durationUs)))
+    return buildList {
+        if (mix.noiseReduction > 0f) {
+            add(BasicNoiseReductionAudioProcessor(mix.noiseReduction))
+        }
+        if (mix.volume != 1f || mix.fadeInUs > 0L || mix.fadeOutUs > 0L) {
+            add(GainProcessor(ClipGainProvider(mix, clip.durationUs)))
+        }
+    }
+}
+
+/**
+ * Mobile-friendly basic noise reducer for selected clips.
+ *
+ * This intentionally uses a soft amplitude gate instead of a heavyweight ML model so realtime
+ * preview stays responsive on mid-range Android devices. Louder speech/music passes untouched;
+ * low-level background noise is progressively attenuated according to the selected strength.
+ */
+@UnstableApi
+private class BasicNoiseReductionAudioProcessor(
+    amount: Float,
+) : BaseAudioProcessor() {
+    private val reducer = AdaptiveNoiseReducer(amount)
+
+    override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
+        if (
+            inputAudioFormat.encoding != C.ENCODING_PCM_16BIT &&
+            inputAudioFormat.encoding != C.ENCODING_PCM_FLOAT
+        ) {
+            throw AudioProcessor.UnhandledAudioFormatException(inputAudioFormat)
+        }
+        return inputAudioFormat
+    }
+
+    override fun onFlush() {
+        reducer.reset()
+    }
+
+    override fun queueInput(inputBuffer: ByteBuffer) {
+        if (!inputBuffer.hasRemaining()) return
+        val input = inputBuffer.duplicate().order(ByteOrder.nativeOrder())
+        val output = replaceOutputBuffer(input.remaining()).order(ByteOrder.nativeOrder())
+        val channels = inputAudioFormat.channelCount.coerceAtLeast(1)
+        val sampleRate = inputAudioFormat.sampleRate.coerceAtLeast(1)
+
+        when (inputAudioFormat.encoding) {
+            C.ENCODING_PCM_FLOAT -> {
+                val frameBytes = channels * 4
+                while (input.remaining() >= frameBytes) {
+                    val start = input.position()
+                    var level = 0f
+                    for (channel in 0 until channels) {
+                        level = kotlin.math.max(level, abs(input.getFloat(start + channel * 4)))
+                    }
+                    val gain = reducer.processFrame(level, sampleRate)
+                    for (channel in 0 until channels) {
+                        val sample = input.getFloat(start + channel * 4).coerceIn(-1f, 1f)
+                        output.putFloat((sample * gain).coerceIn(-1f, 1f))
+                    }
+                    input.position(start + frameBytes)
+                }
+            }
+            else -> {
+                val frameBytes = channels * 2
+                while (input.remaining() >= frameBytes) {
+                    val start = input.position()
+                    var level = 0f
+                    for (channel in 0 until channels) {
+                        val sample = input.getShort(start + channel * 2).toInt() / 32768f
+                        level = kotlin.math.max(level, abs(sample))
+                    }
+                    val gain = reducer.processFrame(level, sampleRate)
+                    for (channel in 0 until channels) {
+                        val sample = input.getShort(start + channel * 2).toInt()
+                        val processed = (sample * gain).toInt()
+                            .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                        output.putShort(processed.toShort())
+                    }
+                    input.position(start + frameBytes)
+                }
+            }
+        }
+
+        // Preserve any incomplete trailing bytes unchanged; Media3 normally sends aligned PCM.
+        while (input.hasRemaining()) output.put(input.get())
+        inputBuffer.position(inputBuffer.limit())
+        output.flip()
+    }
 }
 
 @UnstableApi

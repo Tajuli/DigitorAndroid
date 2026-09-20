@@ -520,6 +520,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         clip.copy(audioMix = clip.audioMix.copy(fadeOutUs = durationUs.coerceAtLeast(0L)).normalizedFor(clip.durationUs))
     }
 
+    fun setSelectedAudioNoiseReduction(amount: Float) = updateSelectedAudio("audio-noise-reduction") { clip ->
+        clip.copy(audioMix = clip.audioMix.copy(noiseReduction = amount.coerceIn(0f, 1f)))
+    }
+
+    fun resetSelectedAudioMix() = updateSelectedAudio("audio-reset") { clip ->
+        clip.copy(audioMix = AudioMix())
+    }
+
     private fun updateSelectedAudio(label: String, transform: (TimelineClip) -> TimelineClip) {
         val state = _state.value
         val selected = state.project.audioSelection(state.selectedClipId, state.selectedClipIds)

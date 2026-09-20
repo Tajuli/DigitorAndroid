@@ -8,6 +8,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
+import com.tajuli.digitorandroid.editor.model.AdaptiveNoiseReducer
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
@@ -32,6 +33,14 @@ internal data class NativeAudioMixResultV76(
 
 internal fun TimelineProject.hasActiveNativeAudioV76(): Boolean =
     tracks.any { track -> track.kind == TrackKind.AUDIO && !track.muted && track.clips.isNotEmpty() }
+
+/**
+ * Preserve a true mono timeline as mono. Encoding the same mono PCM at full scale into L + R
+ * creates a dual-mono file that loudness meters report about +3.01 dB louder even though the
+ * per-channel waveform is unchanged. Any unknown or multi-channel source keeps the safe stereo path.
+ */
+internal fun preferredNativeAudioOutputChannelsV77(sourceChannelCounts: List<Int?>): Int =
+    if (sourceChannelCounts.isNotEmpty() && sourceChannelCounts.all { it == 1 }) 1 else 2
 
 /**
  * Offline multitrack audio mixdown implemented only with Android platform media APIs.
@@ -60,6 +69,12 @@ internal class NativeAudioMixdownV76(
         require(clips.isNotEmpty()) { "Native audio mix requested without active audio clips" }
         require(project.durationUs > 0L) { "Native audio mix requires a positive timeline duration" }
 
+        val sourceChannelCounts = clips
+            .map { it.uri }
+            .distinct()
+            .map(::probeSourceAudioChannelCountV77)
+        val outputChannelCount = preferredNativeAudioOutputChannelsV77(sourceChannelCounts)
+
         val totalFrames = ceil(
             project.durationUs.toDouble() * TARGET_SAMPLE_RATE.toDouble() / 1_000_000.0,
         ).toLong().coerceAtLeast(1L)
@@ -84,15 +99,39 @@ internal class NativeAudioMixdownV76(
                 }
             }
             onProgress(ExportProgress.Stage("Native AAC hardware encode", 0.32f))
-            encodePcmToAacMp4V76(pcmFile, totalFrames, output)
+            encodePcmToAacMp4V76(
+                pcmFile = pcmFile,
+                totalFrames = totalFrames,
+                output = output,
+                outputChannelCount = outputChannelCount,
+            )
             return NativeAudioMixResultV76(
                 mixedClipCount = clips.size,
                 sampleRate = TARGET_SAMPLE_RATE,
-                channelCount = TARGET_CHANNELS,
+                channelCount = outputChannelCount,
                 bitrate = TARGET_AAC_BITRATE,
             )
         } finally {
             runCatching { pcmFile.delete() }
+        }
+    }
+
+    private fun probeSourceAudioChannelCountV77(uri: String): Int? {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(appContext, Uri.parse(uri), null)
+            for (index in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(index)
+                if (format.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
+                    return format.intValueV76(MediaFormat.KEY_CHANNEL_COUNT, 0)
+                        .takeIf { it > 0 }
+                }
+            }
+            null
+        } catch (_: Throwable) {
+            null
+        } finally {
+            runCatching { extractor.release() }
         }
     }
 
@@ -141,6 +180,11 @@ internal class NativeAudioMixdownV76(
             var outputEnded = false
             var lastTargetFrameExclusive = 0L
             var idleLoops = 0
+            val noiseReducer = clip.audioMix
+                .normalizedFor(clip.durationUs)
+                .noiseReduction
+                .takeIf { it > 0f }
+                ?.let(::AdaptiveNoiseReducer)
 
             while (!outputEnded) {
                 var didWork = false
@@ -199,6 +243,7 @@ internal class NativeAudioMixdownV76(
                                     output = output,
                                     totalTargetFrames = totalTargetFrames,
                                     lastTargetFrameExclusive = lastTargetFrameExclusive,
+                                    noiseReducer = noiseReducer,
                                 )
                             }
                             if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputEnded = true
@@ -241,6 +286,7 @@ internal class NativeAudioMixdownV76(
         output: RandomAccessFile,
         totalTargetFrames: Long,
         lastTargetFrameExclusive: Long,
+        noiseReducer: AdaptiveNoiseReducer?,
     ): Long {
         val bytesPerSample = pcmBytesPerSampleV76(pcmEncoding)
         val sourceFrameBytes = bytesPerSample * channelCount
@@ -292,11 +338,17 @@ internal class NativeAudioMixdownV76(
                 relativeUs.toDouble() * sampleRate.toDouble() / 1_000_000.0,
             ).toInt().coerceIn(0, sourceFrameCount - 1)
             val frameOffset = info.offset + sourceFrame * sourceFrameBytes
-            val left = readPcmSampleV76(source, frameOffset, pcmEncoding)
-            val right = if (channelCount == 1) {
+            var left = readPcmSampleV76(source, frameOffset, pcmEncoding)
+            var right = if (channelCount == 1) {
                 left
             } else {
                 readPcmSampleV76(source, frameOffset + bytesPerSample, pcmEncoding)
+            }
+            if (noiseReducer != null) {
+                val frameLevel = max(kotlin.math.abs(left), kotlin.math.abs(right))
+                val denoiseGain = noiseReducer.processFrame(frameLevel, TARGET_SAMPLE_RATE)
+                left *= denoiseGain
+                right *= denoiseGain
             }
             val localUs = (sourceUs - clip.sourceInUs).coerceIn(0L, clip.durationUs)
             var gain = mix.volume
@@ -324,7 +376,12 @@ internal class NativeAudioMixdownV76(
         return max(lastTargetFrameExclusive, targetEndFrame)
     }
 
-    private fun encodePcmToAacMp4V76(pcmFile: File, totalFrames: Long, output: File) {
+    private fun encodePcmToAacMp4V76(
+        pcmFile: File,
+        totalFrames: Long,
+        output: File,
+        outputChannelCount: Int,
+    ) {
         output.parentFile?.mkdirs()
         if (output.exists()) output.delete()
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
@@ -334,7 +391,7 @@ internal class NativeAudioMixdownV76(
             val format = MediaFormat.createAudioFormat(
                 MediaFormat.MIMETYPE_AUDIO_AAC,
                 TARGET_SAMPLE_RATE,
-                TARGET_CHANNELS,
+                outputChannelCount,
             ).apply {
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
                 setInteger(MediaFormat.KEY_BIT_RATE, TARGET_AAC_BITRATE)
@@ -357,11 +414,15 @@ internal class NativeAudioMixdownV76(
                             val input = codec.getInputBuffer(index)
                                 ?: error("Native AAC encoder input buffer unavailable")
                             input.clear()
-                            val capacity = input.remaining() - (input.remaining() % TARGET_FRAME_BYTES)
-                            val request = min(capacity, AAC_INPUT_BYTES)
-                            val bytes = ByteArray(request)
-                            val read = inputFile.read(bytes)
-                            if (read < 0 || framesQueued >= totalFrames) {
+                            input.order(ByteOrder.LITTLE_ENDIAN)
+                            val outputFrameBytes = outputChannelCount * 2
+                            val frameCapacity = min(
+                                input.remaining() / outputFrameBytes,
+                                AAC_INPUT_BYTES / TARGET_FRAME_BYTES,
+                            )
+                            val remainingFrames = (totalFrames - framesQueued).coerceAtLeast(0L)
+                            val requestedFrames = min(frameCapacity.toLong(), remainingFrames).toInt()
+                            if (requestedFrames <= 0) {
                                 codec.queueInputBuffer(
                                     index,
                                     0,
@@ -371,8 +432,10 @@ internal class NativeAudioMixdownV76(
                                 )
                                 inputEnded = true
                             } else {
-                                val alignedRead = read - (read % TARGET_FRAME_BYTES)
-                                if (alignedRead <= 0) {
+                                val sourceBytes = ByteArray(requestedFrames * TARGET_FRAME_BYTES)
+                                val read = inputFile.read(sourceBytes)
+                                val sourceFrames = if (read <= 0) 0 else read / TARGET_FRAME_BYTES
+                                if (sourceFrames <= 0) {
                                     codec.queueInputBuffer(
                                         index,
                                         0,
@@ -382,10 +445,24 @@ internal class NativeAudioMixdownV76(
                                     )
                                     inputEnded = true
                                 } else {
-                                    input.put(bytes, 0, alignedRead)
+                                    if (outputChannelCount == 1) {
+                                        val sourcePcm = ByteBuffer.wrap(sourceBytes)
+                                            .order(ByteOrder.LITTLE_ENDIAN)
+                                        repeat(sourceFrames) { frame ->
+                                            val byteOffset = frame * TARGET_FRAME_BYTES
+                                            val left = sourcePcm.getShort(byteOffset).toInt()
+                                            val right = sourcePcm.getShort(byteOffset + 2).toInt()
+                                            val mono = ((left + right) / 2)
+                                                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                                            input.putShort(mono.toShort())
+                                        }
+                                    } else {
+                                        input.put(sourceBytes, 0, sourceFrames * TARGET_FRAME_BYTES)
+                                    }
+                                    val queuedBytes = sourceFrames * outputFrameBytes
                                     val ptsUs = framesQueued * 1_000_000L / TARGET_SAMPLE_RATE.toLong()
-                                    codec.queueInputBuffer(index, 0, alignedRead, ptsUs, 0)
-                                    framesQueued += alignedRead / TARGET_FRAME_BYTES
+                                    codec.queueInputBuffer(index, 0, queuedBytes, ptsUs, 0)
+                                    framesQueued += sourceFrames
                                 }
                             }
                         }

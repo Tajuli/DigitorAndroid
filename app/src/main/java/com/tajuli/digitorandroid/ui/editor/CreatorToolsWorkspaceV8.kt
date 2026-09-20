@@ -328,12 +328,15 @@ fun CreatorAudioWorkspace(
 
         if (clip == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Select an audio clip or linked video clip", fontSize = 9.sp, color = C8Muted)
+                Text("Select an audio clip or a video clip with linked audio", fontSize = 9.sp, color = C8Muted)
             }
             return@Column
         }
 
+        val mix = clip.audioMix.normalizedFor(clip.durationUs)
         val maxFadeUs = min(clip.durationUs, 5_000_000L).coerceAtLeast(1L)
+        val volumePercent = (mix.volume * 100).toInt()
+
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -341,22 +344,87 @@ fun CreatorAudioWorkspace(
             SectionCardV8("Volume") {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "${(clip.audioMix.volume * 100).toInt()}%",
+                        "${volumePercent}%",
                         fontSize = 8.sp,
-                        color = C8Accent,
+                        color = if (mix.volume <= 0f) C8Muted else C8Accent,
                         modifier = Modifier.width(42.dp),
                     )
                     Slider(
-                        value = clip.audioMix.volume.coerceIn(0f, 1f),
+                        value = mix.volume,
                         onValueChange = vm::setSelectedAudioVolume,
                         modifier = Modifier.weight(1f),
                     )
                 }
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    listOf(0f to "Mute", .25f to "25%", .50f to "50%", .75f to "75%", 1f to "100%")
+                        .forEach { (value, label) ->
+                            FilledTonalButton(onClick = { vm.setSelectedAudioVolume(value) }) {
+                                Text(label, fontSize = 8.sp)
+                            }
+                        }
+                }
             }
+
+            SectionCardV8("Noise reduction") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (mix.noiseReduction <= 0f) "Off" else "${(mix.noiseReduction * 100).toInt()}%",
+                        fontSize = 8.sp,
+                        color = if (mix.noiseReduction <= 0f) C8Muted else C8Accent,
+                        modifier = Modifier.width(42.dp),
+                    )
+                    Slider(
+                        value = mix.noiseReduction.coerceIn(0f, 1f),
+                        onValueChange = vm::setSelectedAudioNoiseReduction,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    listOf(0f to "Off", .30f to "Light", .60f to "Medium", 1f to "Strong")
+                        .forEach { (value, label) ->
+                            FilledTonalButton(onClick = { vm.setSelectedAudioNoiseReduction(value) }) {
+                                Text(label, fontSize = 8.sp)
+                            }
+                        }
+                }
+                Text(
+                    "Reduces low-level background noise while keeping speech and louder audio natural.",
+                    fontSize = 8.sp,
+                    color = C8Muted,
+                )
+            }
+
             SectionCardV8("Fades") {
-                DurationSliderV8("Fade in", clip.audioMix.fadeInUs, maxFadeUs, vm::setSelectedAudioFadeIn)
-                DurationSliderV8("Fade out", clip.audioMix.fadeOutUs, maxFadeUs, vm::setSelectedAudioFadeOut)
+                DurationSliderV8("Fade in", mix.fadeInUs, maxFadeUs, vm::setSelectedAudioFadeIn)
+                DurationSliderV8("Fade out", mix.fadeOutUs, maxFadeUs, vm::setSelectedAudioFadeOut)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    TextButton(onClick = { vm.setSelectedAudioFadeIn(0L) }) {
+                        Text("Clear in", fontSize = 8.sp)
+                    }
+                    TextButton(onClick = { vm.setSelectedAudioFadeOut(0L) }) {
+                        Text("Clear out", fontSize = 8.sp)
+                    }
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = vm::resetSelectedAudioMix) {
+                        Text("Reset audio", fontSize = 8.sp)
+                    }
+                }
             }
+
+            Text(
+                "Changes apply only to the selected audio clip (or the audio linked to the selected video) and are used in preview and export.",
+                fontSize = 8.sp,
+                color = C8Muted,
+            )
         }
     }
 }
