@@ -49,15 +49,22 @@ internal fun VirtualCameraStabilizationWorkspaceV1(
             color = S1Muted,
         )
 
-        ActionChipV1(
-            label = when {
-                busy -> editorState.status
-                stabilization?.hasAnalysis == true -> "Re-analyze"
-                else -> "Analyze"
-            },
-            enabled = !busy,
-        ) {
-            vm.analyzeSelectedStabilizationV1()
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            ActionChipV1(
+                label = when {
+                    busy -> editorState.status
+                    stabilization?.hasAnalysis == true -> "Re-analyze"
+                    else -> "Analyze"
+                },
+                enabled = !busy,
+            ) {
+                vm.analyzeSelectedStabilizationV1()
+            }
+            if (busy) {
+                ActionChipV1(label = "Cancel") {
+                    vm.cancelStabilizationAnalysisV1()
+                }
+            }
         }
 
         if (stabilization?.hasAnalysis == true) {
