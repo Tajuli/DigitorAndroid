@@ -75,6 +75,10 @@ private class BasicNoiseReductionAudioProcessor(
         return inputAudioFormat
     }
 
+    override fun onFlush() {
+        reducer.reset()
+    }
+
     override fun queueInput(inputBuffer: ByteBuffer) {
         if (!inputBuffer.hasRemaining()) return
         val input = inputBuffer.duplicate().order(ByteOrder.nativeOrder())
