@@ -75,6 +75,8 @@ data class AudioMix(
     val volume: Float = 1f,
     val fadeInUs: Long = 0L,
     val fadeOutUs: Long = 0L,
+    /** 0 = off, 1 = strongest lightweight speech/background-noise suppression. */
+    val noiseReduction: Float = 0f,
 ) {
     fun normalizedFor(durationUs: Long): AudioMix {
         val safeDuration = durationUs.coerceAtLeast(1L)
@@ -82,7 +84,30 @@ data class AudioMix(
             volume = volume.coerceIn(0f, 1f),
             fadeInUs = fadeInUs.coerceIn(0L, safeDuration),
             fadeOutUs = fadeOutUs.coerceIn(0L, safeDuration),
+            noiseReduction = noiseReduction.coerceIn(0f, 1f),
         )
+    }
+}
+
+/**
+ * Lightweight soft noise gate shared by realtime/Media3 and native export paths.
+ * It intentionally preserves louder speech/music while progressively attenuating low-level
+ * background noise. This is a mobile-friendly basic reducer, not an ML voice-isolation model.
+ */
+fun audioNoiseReductionGain(amplitude: Float, amount: Float): Float {
+    val strength = amount.coerceIn(0f, 1f)
+    if (strength <= 0f) return 1f
+    val level = kotlin.math.abs(amplitude).coerceIn(0f, 1f)
+    val threshold = 0.008f + 0.035f * strength
+    val kneeEnd = threshold * 2.5f
+    val floorGain = 1f - 0.88f * strength
+    return when {
+        level <= threshold -> floorGain
+        level >= kneeEnd -> 1f
+        else -> {
+            val t = ((level - threshold) / (kneeEnd - threshold)).coerceIn(0f, 1f)
+            floorGain + (1f - floorGain) * t * t * (3f - 2f * t)
+        }
     }
 }
 
