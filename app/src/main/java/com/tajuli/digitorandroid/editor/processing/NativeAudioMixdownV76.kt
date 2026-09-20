@@ -10,6 +10,7 @@ import android.media.MediaMuxer
 import android.net.Uri
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.editor.model.audioNoiseReductionGain
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import java.io.File
 import java.io.FileInputStream
@@ -292,11 +293,17 @@ internal class NativeAudioMixdownV76(
                 relativeUs.toDouble() * sampleRate.toDouble() / 1_000_000.0,
             ).toInt().coerceIn(0, sourceFrameCount - 1)
             val frameOffset = info.offset + sourceFrame * sourceFrameBytes
-            val left = readPcmSampleV76(source, frameOffset, pcmEncoding)
-            val right = if (channelCount == 1) {
+            var left = readPcmSampleV76(source, frameOffset, pcmEncoding)
+            var right = if (channelCount == 1) {
                 left
             } else {
                 readPcmSampleV76(source, frameOffset + bytesPerSample, pcmEncoding)
+            }
+            if (mix.noiseReduction > 0f) {
+                val frameLevel = max(kotlin.math.abs(left), kotlin.math.abs(right))
+                val denoiseGain = audioNoiseReductionGain(frameLevel, mix.noiseReduction)
+                left *= denoiseGain
+                right *= denoiseGain
             }
             val localUs = (sourceUs - clip.sourceInUs).coerceIn(0L, clip.durationUs)
             var gain = mix.volume
