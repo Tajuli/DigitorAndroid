@@ -110,7 +110,7 @@ internal fun VirtualCameraStabilizationWorkspaceV1(
                 ) {
                     vm.setStabilizationZoomV1(!stabilization.zoomEnabled)
                 }
-                ActionChipV1(label = "Clear") {
+                ActionChipV1(label = "Remove Analysis") {
                     vm.clearStabilizationV1()
                 }
             }
