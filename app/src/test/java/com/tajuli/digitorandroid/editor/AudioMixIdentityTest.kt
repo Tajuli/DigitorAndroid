@@ -28,11 +28,13 @@ class AudioMixIdentityTest {
 
         // Speech should open the gate quickly without a hard discontinuity.
         val beforeSpeech = gain
-        repeat(480) {
+        // Give the smoothed gain about 20 ms to open; the 7 ms attack intentionally avoids
+        // a hard jump while still reaching near-unity well within a normal syllable.
+        repeat(960) {
             gain = reducer.processFrame(.45f, 48_000)
         }
         assert(gain > beforeSpeech)
-        assert(gain > .85f)
+        assert(gain > .90f)
 
         // Release should be gradual rather than snapping back to the noise floor.
         val firstQuietFrame = reducer.processFrame(.006f, 48_000)
