@@ -118,8 +118,9 @@ CPU fallback exports video MP4 and handles visual multitrack compositing/color. 
 
 Filter/Effect thumbnails are generated from one shared neutral source image using Digitor’s real render pipeline.
 
-- The bundled CC0 portrait is center-cropped once to a logical 640×360 (16:9) base; UI results are rendered/cached at 320×180.
-- Every card is a true 50/50 comparison: original on the left, the selected preset/effect on the right.
+- One shared 640×360 WebP youthful outdoor portrait/illustration is used for every preset; UI results are rendered/cached at 320×180.
+- Every 170 dp-wide card has a larger 90 dp-tall 16:9 preview: original on the left, the selected preset/effect on the right.
+- Picker cards toggle directly: first tap applies; tapping the same active filter/effect again removes it.
 - Creator filters come from CreatorFilterCatalogV36 markers; visual effects come from CreatorEffectCatalogV25.
 - The processed side runs through SharedVideoPipeline.compositedExportEffectsFor(...), reusing the production LUT/node, beauty and creator-effect shaders instead of fake color overlays.
 - Time-dependent effects use a deterministic 0.35 s source timestamp.
