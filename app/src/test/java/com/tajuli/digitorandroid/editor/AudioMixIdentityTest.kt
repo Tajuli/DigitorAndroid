@@ -2,6 +2,7 @@ package com.tajuli.digitorandroid.editor
 
 import com.tajuli.digitorandroid.editor.model.AdaptiveNoiseReducer
 import com.tajuli.digitorandroid.editor.model.AudioMix
+import com.tajuli.digitorandroid.editor.processing.preferredNativeAudioOutputChannelsV77
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -49,5 +50,17 @@ class AudioMixIdentityTest {
             reducer.processFrame(.015f, 48_000)
         }
         assert(reducer.currentNoiseFloorForTest() > initialFloor)
+    }
+
+    @Test
+    fun nativeAudioKeepsAllMonoSourcesMono() {
+        assertEquals(1, preferredNativeAudioOutputChannelsV77(listOf(1, 1, 1)))
+    }
+
+    @Test
+    fun nativeAudioUsesStereoForStereoOrUnknownSources() {
+        assertEquals(2, preferredNativeAudioOutputChannelsV77(listOf(1, 2)))
+        assertEquals(2, preferredNativeAudioOutputChannelsV77(listOf(1, null)))
+        assertEquals(2, preferredNativeAudioOutputChannelsV77(emptyList()))
     }
 }
