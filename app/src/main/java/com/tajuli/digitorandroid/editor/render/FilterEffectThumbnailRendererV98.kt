@@ -1,5 +1,3 @@
-@file:OptIn(androidx.media3.common.util.UnstableApi::class)
-
 package com.tajuli.digitorandroid.editor.render
 
 import android.content.Context
@@ -25,6 +23,7 @@ import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.VideoFrameProcessor
 import androidx.media3.common.VideoGraph
 import androidx.media3.common.util.TimestampIterator
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.MultipleInputVideoGraph
 import com.tajuli.digitorandroid.R
 import com.tajuli.digitorandroid.editor.model.ClipNodeGraph
@@ -56,6 +55,7 @@ import kotlinx.coroutines.withContext
  * Cache misses are serialized and run off the main thread. This avoids concurrent EGL churn while
  * [LruCache] prevents work from being repeated during Compose recomposition/list scrolling.
  */
+@UnstableApi
 internal object FilterEffectThumbnailRendererV98 {
     const val THUMBNAIL_WIDTH = 320
     const val THUMBNAIL_HEIGHT = 180
@@ -289,7 +289,7 @@ internal object FilterEffectThumbnailRendererV98 {
     }
 
     private fun queueBitmapWhenReady(
-        graph: VideoGraph,
+        graph: MultipleInputVideoGraph,
         bitmap: Bitmap,
         timestampUs: Long,
     ): Boolean {
