@@ -90,24 +90,71 @@ data class AudioMix(
 }
 
 /**
- * Lightweight soft noise gate shared by realtime/Media3 and native export paths.
- * It intentionally preserves louder speech/music while progressively attenuating low-level
- * background noise. This is a mobile-friendly basic reducer, not an ML voice-isolation model.
+ * Stateful mobile-friendly noise reducer shared by realtime/Media3 and native export.
+ *
+ * The reducer learns the low-level background floor, uses a soft knee instead of a hard gate,
+ * opens quickly for speech transients and closes slowly after speech. This avoids the abrupt
+ * silence/pumping sound of a sample-by-sample gate while remaining lightweight enough for preview.
  */
-fun audioNoiseReductionGain(amplitude: Float, amount: Float): Float {
-    val strength = amount.coerceIn(0f, 1f)
-    if (strength <= 0f) return 1f
-    val level = kotlin.math.abs(amplitude).coerceIn(0f, 1f)
-    val threshold = 0.008f + 0.035f * strength
-    val kneeEnd = threshold * 2.5f
-    val floorGain = 1f - 0.88f * strength
-    return when {
-        level <= threshold -> floorGain
-        level >= kneeEnd -> 1f
-        else -> {
-            val t = ((level - threshold) / (kneeEnd - threshold)).coerceIn(0f, 1f)
-            floorGain + (1f - floorGain) * t * t * (3f - 2f * t)
+class AdaptiveNoiseReducer(
+    amount: Float,
+) {
+    private val strength = amount.coerceIn(0f, 1f)
+    private var envelope = 0f
+    private var noiseFloor = 0.006f
+    private var smoothedGain = 1f
+
+    fun processFrame(level: Float, sampleRate: Int): Float {
+        if (strength <= 0f) return 1f
+        val safeRate = sampleRate.coerceAtLeast(1)
+        val inputLevel = kotlin.math.abs(level).coerceIn(0f, 1f)
+
+        // Fast attack catches the start of words; slower release avoids chatter between syllables.
+        val envelopeTimeMs = if (inputLevel > envelope) 4f else 75f
+        envelope += (inputLevel - envelope) * smoothingAlpha(envelopeTimeMs, safeRate)
+
+        // Learn only near the current floor. A slow upward learner adapts to fans/AC without
+        // mistaking normal speech for background noise; downward adaptation is deliberately faster.
+        val floorTarget = envelope.coerceAtLeast(0.0005f)
+        val floorTimeMs = when {
+            floorTarget < noiseFloor -> 220f
+            floorTarget <= noiseFloor * 1.65f -> 1400f
+            else -> 9000f
         }
+        val boundedFloorTarget = if (floorTarget > noiseFloor * 1.65f) {
+            noiseFloor * 1.65f
+        } else {
+            floorTarget
+        }
+        noiseFloor += (boundedFloorTarget - noiseFloor) * smoothingAlpha(floorTimeMs, safeRate)
+        noiseFloor = noiseFloor.coerceIn(0.0005f, 0.12f)
+
+        val minimumThreshold = 0.0045f + 0.009f * strength
+        val threshold = kotlin.math.max(minimumThreshold, noiseFloor * (1.55f + 0.75f * strength))
+        val kneeEnd = threshold * (2.2f + 0.35f * (1f - strength))
+        val floorGain = 1f - 0.84f * strength
+
+        val targetGain = when {
+            envelope <= threshold -> floorGain
+            envelope >= kneeEnd -> 1f
+            else -> {
+                val t = ((envelope - threshold) / (kneeEnd - threshold)).coerceIn(0f, 1f)
+                val smooth = t * t * (3f - 2f * t)
+                floorGain + (1f - floorGain) * smooth
+            }
+        }
+
+        // Opening is quick so consonants remain crisp; closing is intentionally slow/natural.
+        val gainTimeMs = if (targetGain > smoothedGain) 7f else 170f
+        smoothedGain += (targetGain - smoothedGain) * smoothingAlpha(gainTimeMs, safeRate)
+        return smoothedGain.coerceIn(floorGain, 1f)
+    }
+
+    internal fun currentNoiseFloorForTest(): Float = noiseFloor
+
+    private fun smoothingAlpha(timeMs: Float, sampleRate: Int): Float {
+        val samples = (timeMs * sampleRate.toFloat() / 1000f).coerceAtLeast(1f)
+        return (1f - kotlin.math.exp(-1f / samples)).coerceIn(0f, 1f)
     }
 }
 
