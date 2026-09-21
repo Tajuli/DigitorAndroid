@@ -63,6 +63,7 @@ internal object FilterEffectThumbnailRendererV98 {
     const val LOGICAL_BASE_WIDTH = 640
     const val LOGICAL_BASE_HEIGHT = 360
     const val PREVIEW_TIME_US = 350_000L
+    const val FULL_PREVIEW_AMOUNT = 1f
 
     private const val CLIP_DURATION_US = 1_000_000L
     private const val CACHE_VERSION = "v2"
@@ -91,7 +92,7 @@ internal object FilterEffectThumbnailRendererV98 {
                 id = "thumb-filter-" + preset.id,
                 effect = NodeEffect(
                     name = creatorFilterMarkerNameV36(preset.id),
-                    amount = 1f,
+                    amount = FULL_PREVIEW_AMOUNT,
                 ),
             )
             renderProductionFrame(appContext, clip, base)
@@ -103,7 +104,7 @@ internal object FilterEffectThumbnailRendererV98 {
                 ?: error("Unknown creator effect preset: " + effectName)
             val clip = clipWithEffect(
                 id = "thumb-effect-" + effectName.lowercase().replace(' ', '-'),
-                effect = NodeEffect(name = preset.name, amount = 1f),
+                effect = NodeEffect(name = preset.name, amount = FULL_PREVIEW_AMOUNT),
             )
             renderProductionFrame(appContext, clip, base)
         }
