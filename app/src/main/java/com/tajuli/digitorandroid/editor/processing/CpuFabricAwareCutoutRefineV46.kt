@@ -23,7 +23,7 @@ import kotlin.math.sqrt
 object CpuFabricAwareCutoutRefineV46 {
     fun refine(source: Bitmap, clip: TimelineClip): Bitmap {
         val settings = clip.resolvedCutoutV43()
-        if (settings.mode != CutoutModeV43.PERSON || source.width <= 1 || source.height <= 1) return source
+        if (settings.mode != CutoutModeV43.PERSON || settings.portraitLensBlurV99 || source.width <= 1 || source.height <= 1) return source
 
         val width = source.width
         val height = source.height

@@ -107,6 +107,8 @@ internal class CutoutEffectV43 private constructor(
                 program.setFloatUniform("uHasMaskA", if (hasMaskA) 1f else 0f)
                 program.setFloatUniform("uHasMaskB", if (hasMaskB) 1f else 0f)
                 program.setFloatUniform("uTemporalMix", bracket.mix)
+                program.setFloatUniform("uLensBlur", if (settings.portraitLensBlurV99) 1f else 0f)
+                program.setFloatUniform("uLensRadius", settings.lensBlurAmountV99 * 24f * minOf(inputWidth, inputHeight) / 1080f)
                 program.setFloatUniform("uPersonThreshold", settings.personThreshold)
                 program.setFloatUniform("uPersonFeather", settings.personFeather)
                 program.setFloatUniform("uEdgeShiftV44", settings.edgeShiftV44)
@@ -271,6 +273,8 @@ internal class CutoutEffectV43 private constructor(
                 uniform float uHasMaskA;
                 uniform float uHasMaskB;
                 uniform float uTemporalMix;
+                uniform float uLensBlur;
+                uniform float uLensRadius;
                 uniform float uPersonThreshold;
                 uniform float uPersonFeather;
                 uniform float uEdgeShiftV44;
@@ -375,8 +379,44 @@ internal class CutoutEffectV43 private constructor(
                     return pow(clamp(baseMask / softness, 0.0, 1.0), 1.5);
                 }
 
+                // Deterministic equal-area disk samples, shared with CPU fallback. Reject person
+                // samples before normalization: bright skin/clothes cannot bleed into the bokeh.
+                vec4 portraitLensBlur(vec4 source) {
+                    if (uLensRadius <= 0.0001 || (uHasMaskA < 0.5 && uHasMaskB < 0.5)) return source;
+                    float matte = clamp(rawPersonAt(vTexCoord), 0.0, 1.0);
+                    if (matte >= 0.999) return source;
+                    vec3 sum = vec3(0.0);
+                    float weightSum = 0.0;
+                    for (int i = 0; i < 96; i++) {
+                        float index = float(i);
+                        float radius = sqrt((index + 0.5) / 96.0);
+                        float angle = index * 2.39996323;
+                        vec2 offset = vec2(cos(angle), sin(angle)) * radius * uLensRadius * uTexelSize;
+                        vec2 uv = clamp(vTexCoord + offset, vec2(0.0), vec2(1.0));
+                        // Cover the bilinear color footprint too; a sharp silhouette must not
+                        // leak foreground color through a background-side subpixel sample.
+                        vec2 halfPx = uTexelSize * 0.5;
+                        float alpha = max(max(rawPersonAt(uv - halfPx), rawPersonAt(uv + halfPx)),
+                            max(rawPersonAt(uv + vec2(halfPx.x, -halfPx.y)),
+                                rawPersonAt(uv + vec2(-halfPx.x, halfPx.y))));
+                        alpha = clamp(alpha, 0.0, 1.0);
+                        vec4 sampleColor = texture2D(uTexSampler, uv);
+                        // Exclude uncertain boundary colors as well as the solid foreground.
+                        float weight = (1.0 - smoothstep(0.02, 0.20, alpha)) * sampleColor.a;
+                        sum += sampleColor.rgb * weight;
+                        weightSum += weight;
+                    }
+                    if (weightSum < 0.0001) return source;
+                    // Keep original alpha; this is defocus, never background removal.
+                    return vec4(mix(sum / weightSum, source.rgb, matte), source.a);
+                }
+
                 void main() {
                     vec4 source = texture2D(uTexSampler, vTexCoord);
+                    if (uMode > 0.5 && uMode < 1.5 && uLensBlur > 0.5) {
+                        gl_FragColor = portraitLensBlur(source);
+                        return;
+                    }
                     float matte = 1.0;
                     vec3 rgb = source.rgb;
 

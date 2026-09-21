@@ -49,6 +49,11 @@ class CpuCutoutProcessorV43(
         fun rawMask(u: Float, v: Float): Float =
             lerp(a.sample(u, v), b.sample(u, v), bracket.mix)
 
+        if (settings.portraitLensBlurV99) {
+            val result = PortraitLensBlurV99.apply(sourcePixels, width, height, settings.lensBlurAmountV99, ::rawMask)
+            return Bitmap.createBitmap(result, width, height, Bitmap.Config.ARGB_8888)
+        }
+
         val du = if (width <= 1) 0f else 1f / (width - 1).toFloat()
         val dv = if (height <= 1) 0f else 1f / (height - 1).toFloat()
 

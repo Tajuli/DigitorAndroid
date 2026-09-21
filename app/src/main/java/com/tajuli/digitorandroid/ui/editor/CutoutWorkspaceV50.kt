@@ -139,7 +139,7 @@ fun CutoutWorkspace(
                 onClick = { vm.enablePersonCutoutV43(settings) },
             ) {
                 Text(
-                    if (settings.mode == CutoutModeV43.PERSON) "✓ Pro Cutout" else "Pro Cutout",
+                    if (settings.mode == CutoutModeV43.PERSON && !settings.portraitLensBlurV99) "✓ Pro Cutout" else "Pro Cutout",
                     fontSize = 8.sp,
                 )
             }
@@ -171,6 +171,9 @@ fun CutoutWorkspace(
             }
 
             CutoutModeV43.PERSON -> {
+                if (settings.portraitLensBlurV99) {
+                    Text("Portrait Lens Blur active · adjust strength in Effects → Portrait", fontSize = 9.sp, color = C50Text)
+                }
                 val displayBackend = backendLabel?.replace(
                     "PP-MattingV2 384 resize",
                     "PP-MattingV2 ${settings.mattingSizeV69} resize",
@@ -378,15 +381,17 @@ fun CutoutWorkspace(
                     Text(analysisStatus, fontSize = 8.sp, color = C50Text.copy(alpha = .70f))
                 }
 
-                Text("Realtime edge refinement", fontSize = 9.sp, color = C50Text)
-                CutoutSliderV50("Shrink / Grow", settings.edgeShiftV44, -.18f..0.18f) {
-                    vm.setSelectedCutoutV43(settings.copy(edgeShiftV44 = it), status = "Pro Cutout edge shift updated")
-                }
-                CutoutSliderV50("Edge Clean", settings.edgeCleanV44, 0f..1f) {
-                    vm.setSelectedCutoutV43(settings.copy(edgeCleanV44 = it), status = "Pro Cutout edge clean updated")
-                }
-                CutoutSliderV50("Dehalo", settings.dehaloV44, 0f..1f) {
-                    vm.setSelectedCutoutV43(settings.copy(dehaloV44 = it), status = "Pro Cutout dehalo updated")
+                if (!settings.portraitLensBlurV99) {
+                    Text("Realtime edge refinement", fontSize = 9.sp, color = C50Text)
+                    CutoutSliderV50("Shrink / Grow", settings.edgeShiftV44, -.18f..0.18f) {
+                        vm.setSelectedCutoutV43(settings.copy(edgeShiftV44 = it), status = "Pro Cutout edge shift updated")
+                    }
+                    CutoutSliderV50("Edge Clean", settings.edgeCleanV44, 0f..1f) {
+                        vm.setSelectedCutoutV43(settings.copy(edgeCleanV44 = it), status = "Pro Cutout edge clean updated")
+                    }
+                    CutoutSliderV50("Dehalo", settings.dehaloV44, 0f..1f) {
+                        vm.setSelectedCutoutV43(settings.copy(dehaloV44 = it), status = "Pro Cutout dehalo updated")
+                    }
                 }
 
                 Text("Analysis-time refinement", fontSize = 9.sp, color = C50Text)
@@ -413,16 +418,19 @@ fun CutoutWorkspace(
                     )
                 }
 
-                Text("Advanced alpha shaping", fontSize = 9.sp, color = C50Text)
-                CutoutSliderV50("Alpha Bias", settings.personThreshold, .05f..0.95f) {
-                    vm.setSelectedCutoutV43(settings.copy(personThreshold = it), status = "Pro Cutout alpha bias updated")
-                }
-                CutoutSliderV50("Edge Softness", settings.personFeather, .005f..0.45f) {
-                    vm.setSelectedCutoutV43(settings.copy(personFeather = it), status = "Pro Cutout edge softness updated")
+                if (!settings.portraitLensBlurV99) {
+                    Text("Advanced alpha shaping", fontSize = 9.sp, color = C50Text)
+                    CutoutSliderV50("Alpha Bias", settings.personThreshold, .05f..0.95f) {
+                        vm.setSelectedCutoutV43(settings.copy(personThreshold = it), status = "Pro Cutout alpha bias updated")
+                    }
+                    CutoutSliderV50("Edge Softness", settings.personFeather, .005f..0.45f) {
+                        vm.setSelectedCutoutV43(settings.copy(personFeather = it), status = "Pro Cutout edge softness updated")
+                    }
                 }
 
                 Text(
-                    "Resolution, Quality, Hair Detail and Temporal Stability are baked into the analyzed matte. Edge controls update in realtime and do not invalidate a checkpoint.",
+                    if (settings.portraitLensBlurV99) "Resolution, Quality, Hair Detail and Temporal Stability are baked into the analyzed matte. Blur strength updates live in Effects → Portrait."
+                    else "Resolution, Quality, Hair Detail and Temporal Stability are baked into the analyzed matte. Edge controls update in realtime and do not invalidate a checkpoint.",
                     fontSize = 8.sp,
                     color = C50Text.copy(alpha = .62f),
                 )

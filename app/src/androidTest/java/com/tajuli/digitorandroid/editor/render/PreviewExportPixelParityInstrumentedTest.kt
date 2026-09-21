@@ -203,6 +203,59 @@ class PreviewExportPixelParityInstrumentedTest {
         assertArrayEquals(previewPixels, exportPixels)
     }
 
+    @Test
+    fun portraitLensBlur_livePreviewMatchesExportAndMissingMatteIsIdentity() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val width = 128
+        val height = 128
+        val uri = "content://synthetic/lens-${System.nanoTime()}"
+        val settings = com.tajuli.digitorandroid.editor.model.ClipCutoutV43(
+            mode = com.tajuli.digitorandroid.editor.model.CutoutModeV43.PERSON,
+            portraitLensBlurV99 = true,
+            lensBlurAmountV99 = 1f,
+        )
+        val clip = TimelineClip(id = "lens-parity", uri = uri, label = "Lens",
+            timelineStartUs = 0L, sourceOutUs = 1_000_000L, cutoutV43 = settings)
+        val track = TimelineTrack(id = "lens-track", name = "V1", kind = TrackKind.VIDEO, clips = listOf(clip))
+        val project = TimelineProject(width = width, height = height, tracks = listOf(track))
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val mask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        for (y in 0 until height) for (x in 0 until width) {
+            bitmap.setPixel(x, y, if (x < width / 2) Color.RED else if ((x + y) % 2 == 0) Color.WHITE else Color.BLACK)
+            mask.setPixel(x, y, if (x < width / 2) Color.WHITE else Color.BLACK)
+        }
+        val maskFile = com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43.save(context, uri, 0L, mask)
+        mask.recycle()
+        val format = Format.Builder().setWidth(width).setHeight(height).setColorInfo(
+            ColorInfo.Builder().setColorSpace(C.COLOR_SPACE_BT709).setColorRange(C.COLOR_RANGE_FULL)
+                .setColorTransfer(C.COLOR_TRANSFER_SRGB).build(),
+        ).build()
+        fun render(testClip: TimelineClip, preview: Boolean): ByteArray {
+            val testTrack = track.copy(clips = listOf(testClip))
+            val testProject = project.copy(tracks = listOf(testTrack))
+            PreviewProjectRegistry.update(testProject)
+            return renderOneFrame(context, testProject, listOf(testTrack), listOf(testClip), format,
+                listOf(0L), listOf(0L), listOf(if (preview) SharedVideoPipeline.compositedPreviewEffectsFor(testClip)
+                else SharedVideoPipeline.compositedExportEffectsFor(testClip)), preview, bitmap)
+        }
+        try {
+            val preview = render(clip, true)
+            val export = render(clip, false)
+            assertArrayEquals("Portrait live preview/export mismatch", export, preview)
+            val identity = render(clip.copy(cutoutV43 = null), false)
+            for (y in 4 until height - 4) for (x in 4 until width / 2 - 2) for (c in 0..3) {
+                val index = (y * width + x) * 4 + c
+                org.junit.Assert.assertEquals("Subject details changed", identity[index], export[index])
+            }
+            assertTrue("Background must visibly change", !export.contentEquals(identity))
+            assertArrayEquals(identity, render(clip.copy(cutoutV43 = settings.copy(lensBlurAmountV99 = 0f)), false))
+            assertArrayEquals(identity, render(clip.copy(uri = uri + "-missing"), false))
+        } finally {
+            maskFile.delete()
+            bitmap.recycle()
+        }
+    }
+
     private fun renderOneFrame(
         context: android.content.Context,
         project: TimelineProject,

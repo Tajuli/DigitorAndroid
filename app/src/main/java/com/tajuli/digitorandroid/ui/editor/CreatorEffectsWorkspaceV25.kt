@@ -41,6 +41,8 @@ import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.visibleEffects
+import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
+import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 
 private val Fx25Panel = Color(0xFF0B0B0F)
 private val Fx25Raised = Color(0xFF17171C)
@@ -96,7 +98,7 @@ fun CreatorEffectsWorkspace(
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            CreatorEffectCatalogV25.categories.forEach { name ->
+            (CreatorEffectCatalogV25.categories + "Portrait").forEach { name ->
                 val selected = name == category
                 Box(
                     Modifier
@@ -109,13 +111,18 @@ fun CreatorEffectsWorkspace(
             }
         }
 
+        if (category == "Portrait") {
+            PortraitLensBlurControlsV99(clip, vm, Modifier.weight(1f))
+            return@Column
+        }
+
         LazyRow(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             item(key = "none-" + category) {
                 EffectNoneCardV98(
-                    active = nodeEffects.isEmpty(),
+                    active = nodeEffects.isEmpty() && !(clip.resolvedCutoutV43().mode == CutoutModeV43.PERSON && clip.resolvedCutoutV43().portraitLensBlurV99),
                     onClick = { clearCreatorEffectsV25(vm, clip.id, node.id) },
                 )
             }
@@ -370,7 +377,8 @@ private fun clearCreatorEffectsV25(vm: EditorViewModel, clipId: String, nodeId: 
         .filter { CreatorEffectCatalogV25.find(it.name) != null }
         .map { it.id }
         .toSet()
-    if (creatorEffectIds.isEmpty()) return
+    val clearPortrait = liveClip.resolvedCutoutV43().let { it.mode == CutoutModeV43.PERSON && it.portraitLensBlurV99 }
+    if (creatorEffectIds.isEmpty() && !clearPortrait) return
 
     val next = current.copy(
         tracks = current.tracks.map { track ->
@@ -378,6 +386,9 @@ private fun clearCreatorEffectsV25(vm: EditorViewModel, clipId: String, nodeId: 
                 clips = track.clips.map { currentClip ->
                     if (currentClip.id != clipId) currentClip
                     else currentClip.copy(
+                        cutoutV43 = if (clearPortrait) currentClip.resolvedCutoutV43().copy(
+                            mode = CutoutModeV43.NONE, portraitLensBlurV99 = false,
+                        ) else currentClip.cutoutV43,
                         nodeGraph = currentClip.nodeGraph.copy(
                             nodes = currentClip.nodeGraph.nodes.map { currentNode ->
                                 if (currentNode.id != nodeId) currentNode

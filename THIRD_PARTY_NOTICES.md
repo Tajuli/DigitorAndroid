@@ -97,3 +97,15 @@ former WhisperKit FFmpeg runtime. The downloadable speech models in this feature
 Zipformer2 models. Transducer packs use greedy or modified-beam decoding; the Hindi Zipformer2-CTC
 pack uses sherpa-onnx's streaming CTC path. Speech recognition stays on-device; audio/video is not
 uploaded to a speech service. Internet permission is used only for explicit language-pack downloads.
+
+## Portrait Lens Blur / PP-MattingV2
+
+Portrait Lens Blur reuses the existing PP-MattingV2/STDC1 human matte, semantic hair refinement,
+and temporal stabilization. No additional model, paid SDK, cloud service, or restrictive model
+license is introduced. The disk blur and foreground rejection code are implemented in this repo.
+
+- PP-MattingV2 upstream: https://github.com/PaddlePaddle/PaddleSeg/tree/release/2.10/Matting
+- PaddleSeg code and released pretrained models: Apache License 2.0
+- License: https://github.com/PaddlePaddle/PaddleSeg/blob/release/2.10/LICENSE
+- Existing runtime: ncnn (BSD 3-Clause), with the existing MIT-licensed ONNX Runtime fallback.
+- The build's pinned existing PP-MattingV2 ONNX checksum and model packaging remain unchanged.
