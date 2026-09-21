@@ -118,7 +118,7 @@ CPU fallback exports video MP4 and handles visual multitrack compositing/color. 
 
 Filter/Effect thumbnails are generated from one shared neutral source image using Digitor’s real render pipeline.
 
-- One shared 640×360 WebP youthful outdoor portrait/illustration is used for every preset; UI results are rendered/cached at 320×180.
+- One shared realistic AI-generated 16:9 portrait is used for every preset: face-forward subject plus green trees, blue sky, lake and mountains; UI results are rendered/cached at 320×180.
 - Every 170 dp-wide card has a larger 90 dp-tall 16:9 preview: original on the left, the selected preset/effect on the right.
 - Picker cards toggle directly: first tap applies; tapping the same active filter/effect again removes it.
 - Creator filters come from CreatorFilterCatalogV36 markers; visual effects come from CreatorEffectCatalogV25.
