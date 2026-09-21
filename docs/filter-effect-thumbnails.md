@@ -28,9 +28,9 @@ There is no hand-authored color overlay or thumbnail-only approximation.
 
 ## Performance and failure behavior
 
-Compose picker rows are LazyRow-based, so visible cards request work first. Picker cards are 170 dp wide with a 90 dp-tall 16:9 preview area for better visibility. Rendering runs on Dispatchers.Default, and cache misses are serialized to avoid concurrent EGL graph churn. Finished thumbnails live in a 12 MiB LruCache and are reused across recomposition and scrolling.
+Compose picker rows are LazyRow-based, so visible cards request work first. Filter and effect cards both use a 170 dp-wide card with a 90 dp-tall 16:9 preview area and one label only, so their visual height matches. Rendering runs on Dispatchers.Default, and cache misses are serialized to avoid concurrent EGL graph churn. Finished thumbnails live in a 12 MiB LruCache and are reused across recomposition and scrolling.
 
-Picker interaction is a direct toggle: first tap applies the filter/effect, and tapping the same active thumbnail again removes it. None is the first card: for filters it clears the current filter group on the selected node; for effects it clears creator effects on the selected node. Existing amount sliders and explicit Remove/Delete controls remain available.
+Picker interaction is a direct toggle: first tap applies the filter/effect, and tapping the same active thumbnail again removes it. The selected effect amount bar is placed immediately below the effect thumbnail row, with effect name, percentage, Remove and slider controls visible without scrolling into the detailed effect list. None is the first card: for filters it clears the current filter group on the selected node; for effects it clears creator effects on the selected node. Existing amount sliders and explicit Remove/Delete controls remain available.
 
 The current implementation creates a short-lived Media3 offscreen graph for each cache miss. It does not recreate one per UI frame or recomposition, but a future optimization could batch several misses into one persistent offscreen graph.
 
