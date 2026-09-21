@@ -119,13 +119,14 @@ CPU fallback exports video MP4 and handles visual multitrack compositing/color. 
 Filter/Effect thumbnails are generated from one shared neutral source image using Digitor’s real render pipeline.
 
 - One shared realistic AI-generated 16:9 portrait is used for every preset: face-forward subject plus green trees, blue sky, lake and mountains; UI results are rendered/cached at 320×180.
-- Every 170 dp-wide card has a larger 90 dp-tall 16:9 preview: original on the left, the selected preset/effect on the right.
-- Picker cards toggle directly: first tap applies; tapping the same active filter/effect again removes it.
+- Every 170 dp-wide card has a 90 dp-tall 16:9 full-frame preview. There is no BEFORE/AFTER split or center divider.
+- None shows the untouched source image. Every filter/effect preset renders across the entire image at 100% thumbnail preview strength.
+- Picker cards toggle directly: first tap applies; tapping the same active filter/effect again removes it. Tapping None clears the relevant filter group or creator effects.
 - Creator filters come from CreatorFilterCatalogV36 markers; visual effects come from CreatorEffectCatalogV25.
-- The processed side runs through SharedVideoPipeline.compositedExportEffectsFor(...), reusing the production LUT/node, beauty and creator-effect shaders instead of fake color overlays.
+- Preset thumbnails run the full frame through SharedVideoPipeline.compositedExportEffectsFor(...), reusing the production LUT/node, beauty and creator-effect shaders instead of fake color overlays.
 - Time-dependent effects use a deterministic 0.35 s source timestamp.
 - Lazy picker rows, Dispatchers.Default rendering and a bounded LruCache keep the UI thread and normal app launch path free of thumbnail rendering work.
-- Failed renders fall back to original | original with a small warning indicator instead of crashing.
+- Failed renders fall back to the untouched original with a small warning indicator instead of crashing.
 
 See docs/filter-effect-thumbnails.md for asset provenance, cache behavior and the current beauty-analysis limitation.
 
