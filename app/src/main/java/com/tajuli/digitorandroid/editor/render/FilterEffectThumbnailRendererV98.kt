@@ -45,12 +45,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
- * Generates 16:9 BEFORE / AFTER thumbnails from one shared neutral source image.
+ * Generates 16:9 full-frame preset thumbnails from one shared neutral source image.
  *
- * The processed half intentionally runs through [SharedVideoPipeline.compositedExportEffectsFor].
- * There is no thumbnail-only filter/effect approximation: creator LOOK markers, beauty stages and
- * V25 creator effects therefore execute through the same production Media3/OpenGL stages used for
- * footage export. Time-varying effects receive one deterministic source timestamp.
+ * Every non-None thumbnail intentionally runs the whole image through
+ * [SharedVideoPipeline.compositedExportEffectsFor]. There is no thumbnail-only filter/effect
+ * approximation: creator LOOK markers, beauty stages and V25 creator effects therefore execute
+ * through the same production Media3/OpenGL stages used for footage export. The explicit None
+ * thumbnail is untouched source. Time-varying effects receive one deterministic source timestamp.
  *
  * Cache misses are serialized and run off the main thread. This avoids concurrent EGL churn while
  * [LruCache] prevents work from being repeated during Compose recomposition/list scrolling.
@@ -64,7 +65,7 @@ internal object FilterEffectThumbnailRendererV98 {
     const val PREVIEW_TIME_US = 350_000L
 
     private const val CLIP_DURATION_US = 1_000_000L
-    private const val CACHE_VERSION = "v1"
+    private const val CACHE_VERSION = "v2"
     private const val TAG = "DigitorFxThumb"
     private const val CACHE_KB = 12 * 1024
 
@@ -90,7 +91,7 @@ internal object FilterEffectThumbnailRendererV98 {
                 id = "thumb-filter-" + preset.id,
                 effect = NodeEffect(
                     name = creatorFilterMarkerNameV36(preset.id),
-                    amount = preset.defaultIntensity,
+                    amount = 1f,
                 ),
             )
             renderProductionFrame(appContext, clip, base)
@@ -133,10 +134,10 @@ internal object FilterEffectThumbnailRendererV98 {
                     .getOrNull()
 
                 val output = if (processed == null) {
-                    composeBeforeAfterV98(base, base, failed = true)
+                    fullFramePreviewV98(base, base, failed = true)
                 } else {
                     try {
-                        composeBeforeAfterV98(base, processed, failed = false)
+                        fullFramePreviewV98(base, processed, failed = false)
                     } finally {
                         if (processed !== base && !processed.isRecycled) processed.recycle()
                     }
@@ -356,39 +357,17 @@ internal object FilterEffectThumbnailRendererV98 {
         return output
     }
 
-    internal fun composeBeforeAfterV98(
+    internal fun fullFramePreviewV98(
         original: Bitmap,
         processed: Bitmap,
         failed: Boolean,
     ): Bitmap {
         require(original.width == processed.width && original.height == processed.height) {
-            "Before/after bitmaps must have matching dimensions"
+            "Preview bitmaps must have matching dimensions"
         }
-        val width = original.width
-        val height = original.height
-        val middle = width / 2
-        val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
-        val full = Rect(0, 0, width, height)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-
-        canvas.save()
-        canvas.clipRect(0, 0, middle, height)
-        canvas.drawBitmap(original, null, full, paint)
-        canvas.restore()
-
-        canvas.save()
-        canvas.clipRect(middle, 0, width, height)
-        canvas.drawBitmap(processed, null, full, paint)
-        canvas.restore()
-
-        val divider = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(205, 255, 255, 255)
-            strokeWidth = 2f
-        }
-        canvas.drawLine(middle.toFloat(), 0f, middle.toFloat(), height.toFloat(), divider)
-
-        if (failed) drawFailureIndicator(canvas, width)
+        val source = if (failed) original else processed
+        val output = source.copy(Bitmap.Config.ARGB_8888, true)
+        if (failed) drawFailureIndicator(Canvas(output), output.width)
         return output
     }
 
