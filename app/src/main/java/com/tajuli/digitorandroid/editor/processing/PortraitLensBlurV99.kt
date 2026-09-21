@@ -8,7 +8,7 @@ import kotlin.math.sqrt
 
 /** CPU fallback for the normalized, foreground-rejecting disk kernel in CutoutEffectV43. */
 object PortraitLensBlurV99 {
-    private const val SAMPLES = 96
+    private const val SAMPLES = 32
     private val offsets = FloatArray(SAMPLES * 2).also { result ->
         for (i in 0 until SAMPLES) {
             val radius = sqrt((i + .5f) / SAMPLES)
