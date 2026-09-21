@@ -15,20 +15,25 @@ import org.junit.runner.RunWith
 class FilterEffectThumbnailRendererV98InstrumentedTest {
 
     @Test
-    fun beforeAfterComposition_keepsExactLeftAndRightHalves() {
+    fun fullFramePreview_usesProcessedImageAcrossWholeThumbnail() {
         val original = solidBitmap(16, 9, Color.RED)
         val processed = solidBitmap(16, 9, Color.BLUE)
 
-        val output = FilterEffectThumbnailRendererV98.composeBeforeAfterV98(
+        val output = FilterEffectThumbnailRendererV98.fullFramePreviewV98(
             original,
             processed,
             failed = false,
         )
 
-        assertEquals(Color.RED, output.getPixel(2, 4))
+        assertEquals(Color.BLUE, output.getPixel(2, 4))
         assertEquals(Color.BLUE, output.getPixel(13, 4))
         assertEquals(16, output.width)
         assertEquals(9, output.height)
+    }
+
+    @Test
+    fun previewStrength_isFullForEveryPreset() {
+        assertEquals(1f, FilterEffectThumbnailRendererV98.FULL_PREVIEW_AMOUNT, 0f)
     }
 
     @Test
@@ -74,7 +79,7 @@ class FilterEffectThumbnailRendererV98InstrumentedTest {
     }
 
     @Test
-    fun identityThumbnail_preservesOriginalOnBothSides() = runBlocking {
+    fun identityThumbnail_preservesUntouchedOriginal() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         FilterEffectThumbnailRendererV98.clearMemoryCacheForTest()
         val base = FilterEffectThumbnailRendererV98.baseThumbnailForTest(context)
