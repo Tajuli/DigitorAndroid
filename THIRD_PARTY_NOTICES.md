@@ -102,7 +102,7 @@ uploaded to a speech service. Internet permission is used only for explicit lang
 
 Portrait Lens Blur reuses the existing PP-MattingV2/STDC1 human matte, semantic hair refinement,
 and temporal stabilization. No additional model, paid SDK, cloud service, or restrictive model
-license is introduced. The disk blur and foreground rejection code are implemented in this repo.
+license is introduced. The mobile-tuned 32-tap disk blur and foreground rejection code are implemented in this repo.
 
 - PP-MattingV2 upstream: https://github.com/PaddlePaddle/PaddleSeg/tree/release/2.10/Matting
 - PaddleSeg code and released pretrained models: Apache License 2.0
