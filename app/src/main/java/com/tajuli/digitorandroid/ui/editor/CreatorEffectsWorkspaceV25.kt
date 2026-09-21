@@ -72,7 +72,8 @@ fun CreatorEffectsWorkspace(
     var category by remember { mutableStateOf("Basic") }
     val categoryPresets = remember(category) { CreatorEffectCatalogV25.inCategory(category) }
     val nodeEffects = node.visibleEffects()
-    val selectedEffectName = nodeEffects.firstOrNull { it.id == selectedEffectId }?.name
+    val selectedEffect = nodeEffects.firstOrNull { it.id == selectedEffectId }
+    val selectedEffectName = selectedEffect?.name
 
     fun selectEffect(effectId: String) {
         TimelineTextSelectionBusV10.clear()
@@ -176,6 +177,63 @@ fun CreatorEffectsWorkspace(
                     )
                 }
             }
+        }
+
+        HorizontalDivider(color = Fx25Divider)
+
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(selectedEffect?.name ?: "Select an effect", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.weight(1f))
+                if (selectedEffect != null) {
+                    Text("${(selectedEffect.amount.coerceIn(0f, 1f) * 100f).toInt()}%", fontSize = 9.sp, color = Fx25Accent)
+                    TextButton(
+                        onClick = {
+                            vm.deleteEffectTimelineV26(
+                                EffectTimelineSelectionV26(clip.id, node.id, selectedEffect.id),
+                            )
+                        },
+                    ) {
+                        Text("Remove", fontSize = 7.sp, color = Color(0xFFFF7777))
+                    }
+                }
+            }
+            Slider(
+                value = selectedEffect?.amount?.coerceIn(0f, 1f) ?: 0f,
+                onValueChange = { amount ->
+                    selectedEffect?.let { effect ->
+                        selectEffect(effect.id)
+                        val safe = amount.coerceIn(0f, 1f)
+                        if (animationSourceTimeUs != null &&
+                            clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
+                        ) {
+                            val keyedNode = node.copy(
+                                effects = node.effects.map { current ->
+                                    if (current.id == effect.id) current.copy(amount = safe, enabled = true) else current
+                                },
+                            )
+                            clip.nodeAnimations.upsertIfAnimated(
+                                keyedNode,
+                                NodeAnimationDomain.EFFECTS,
+                                animationSourceTimeUs,
+                            )
+                        }
+                        vm.addEffectToSelectedNode(effect.name, safe)
+                    }
+                },
+                valueRange = 0f..1f,
+                enabled = selectedEffect != null,
+                modifier = Modifier.fillMaxWidth().height(30.dp),
+            )
+            Text(
+                if (selectedEffect == null) {
+                    "Tap an effect thumbnail to select it, then adjust its amount here."
+                } else {
+                    "Effect amount control. Duration and timeline controls remain below."
+                },
+                fontSize = 7.sp,
+                color = Fx25Muted,
+            )
         }
 
         HorizontalDivider(color = Fx25Divider)
