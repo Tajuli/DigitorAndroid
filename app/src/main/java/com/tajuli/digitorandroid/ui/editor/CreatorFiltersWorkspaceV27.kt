@@ -267,7 +267,6 @@ private fun FilterNoneCardV98(
         }
         Spacer(Modifier.height(4.dp))
         Text("None", fontSize = 8.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, textAlign = TextAlign.Center)
-        Text("Original", fontSize = 6.sp, color = Filter27Muted, maxLines = 1, textAlign = TextAlign.Center)
     }
 }
 
