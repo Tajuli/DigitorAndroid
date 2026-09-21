@@ -114,6 +114,24 @@ Audio waveforms are source-derived editor metadata. A single cached source envel
 
 CPU fallback exports video MP4 and handles visual multitrack compositing/color. **CPU audio mixing and the full GPU text/title feature set are not yet parity-complete on the CPU fallback path.** GPU export supports audio tracks through Media3 Composition/AAC.
 
+## Filter / effect thumbnails
+
+Filter/Effect thumbnails are generated from one shared neutral source image using Digitor’s real render pipeline.
+
+- One shared realistic AI-generated 16:9 portrait is used for every preset: face-forward subject plus green trees, blue sky, lake and mountains; UI results are rendered/cached at 320×180.
+- Every 170 dp-wide card has a 90 dp-tall 16:9 full-frame preview. There is no BEFORE/AFTER split or center divider.
+- None shows the untouched source image. Every filter/effect preset renders across the entire image at 100% thumbnail preview strength.
+- Picker cards toggle directly: first tap applies; tapping the same active filter/effect again removes it. Tapping None clears the relevant filter group or creator effects.
+- Filter and effect cards now use the same 170 dp × 90 dp thumbnail layout with one label only.
+- Effect picker exposes the selected effect amount control directly below the thumbnail row (name, percentage, Remove, and slider), matching the filter workflow.
+- Creator filters come from CreatorFilterCatalogV36 markers; visual effects come from CreatorEffectCatalogV25.
+- Preset thumbnails run the full frame through SharedVideoPipeline.compositedExportEffectsFor(...), reusing the production LUT/node, beauty and creator-effect shaders instead of fake color overlays.
+- Time-dependent effects use a deterministic 0.35 s source timestamp.
+- Lazy picker rows, Dispatchers.Default rendering and a bounded LruCache keep the UI thread and normal app launch path free of thumbnail rendering work.
+- Failed renders fall back to the untouched original with a small warning indicator instead of crashing.
+
+See docs/filter-effect-thumbnails.md for asset provenance, cache behavior and the current beauty-analysis limitation.
+
 ## Build versions
 
 - compileSdk 37

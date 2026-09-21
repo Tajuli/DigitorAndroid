@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -30,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -68,6 +71,9 @@ fun CreatorEffectsWorkspace(
         ?.effectId
     var category by remember { mutableStateOf("Basic") }
     val categoryPresets = remember(category) { CreatorEffectCatalogV25.inCategory(category) }
+    val nodeEffects = node.visibleEffects()
+    val selectedEffect = nodeEffects.firstOrNull { it.id == selectedEffectId }
+    val selectedEffectName = selectedEffect?.name
 
     fun selectEffect(effectId: String) {
         TimelineTextSelectionBusV10.clear()
@@ -103,33 +109,131 @@ fun CreatorEffectsWorkspace(
             }
         }
 
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp),
+        LazyRow(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            categoryPresets.forEach { preset ->
-                Box(
+            item(key = "none-" + category) {
+                EffectNoneCardV98(
+                    active = nodeEffects.isEmpty(),
+                    onClick = { clearCreatorEffectsV25(vm, clip.id, node.id) },
+                )
+            }
+            items(categoryPresets, key = { it.name }) { preset ->
+                val appliedEffect = nodeEffects.lastOrNull { it.name == preset.name }
+                val applied = appliedEffect != null
+                val selected = selectedEffectName == preset.name
+                Column(
                     Modifier
-                        .width(82.dp)
-                        .height(52.dp)
+                        .width(170.dp)
                         .background(Fx25Raised, RoundedCornerShape(8.dp))
+                        .border(
+                            if (selected) 1.5.dp else if (applied) 1.dp else .5.dp,
+                            if (selected) Fx25Accent else if (applied) Color.White.copy(alpha = .45f) else Color.White.copy(alpha = .08f),
+                            RoundedCornerShape(8.dp),
+                        )
                         .clickable {
-                            vm.addEffectToSelectedNode(preset.name)
-                            val updatedNode = vm.state.value.project.clip(clip.id)
+                            val liveNode = vm.state.value.project.clip(clip.id)
                                 ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
-                            updatedNode?.effects?.lastOrNull { it.name == preset.name }?.let { selectEffect(it.id) }
+                            val liveEffect = liveNode?.visibleEffects()?.lastOrNull { it.name == preset.name }
+                            if (liveEffect != null) {
+                                vm.deleteEffectTimelineV26(
+                                    EffectTimelineSelectionV26(clip.id, node.id, liveEffect.id),
+                                )
+                            } else {
+                                vm.addEffectToSelectedNode(preset.name)
+                                val updatedNode = vm.state.value.project.clip(clip.id)
+                                    ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
+                                updatedNode?.effects?.lastOrNull { it.name == preset.name }?.let { selectEffect(it.id) }
+                            }
                         }
-                        .padding(horizontal = 7.dp, vertical = 6.dp),
-                    contentAlignment = Alignment.Center,
+                        .padding(5.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
+                    Box(
+                        Modifier.fillMaxWidth().height(90.dp)
+                            .clip(RoundedCornerShape(6.dp)),
+                    ) {
+                        EffectThumbnailV98(
+                            effectName = preset.name,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        if (applied) {
+                            Text(
+                                "✓",
+                                fontSize = 10.sp,
+                                color = Color.White,
+                                modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
                     Text(
                         preset.name,
                         fontSize = 8.sp,
                         fontWeight = FontWeight.Medium,
                         color = Color.White.copy(alpha = .90f),
+                        maxLines = 1,
                     )
                 }
             }
+        }
+
+        HorizontalDivider(color = Fx25Divider)
+
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(selectedEffect?.name ?: "Select an effect", fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.weight(1f))
+                if (selectedEffect != null) {
+                    Text("${(selectedEffect.amount.coerceIn(0f, 1f) * 100f).toInt()}%", fontSize = 9.sp, color = Fx25Accent)
+                    TextButton(
+                        onClick = {
+                            vm.deleteEffectTimelineV26(
+                                EffectTimelineSelectionV26(clip.id, node.id, selectedEffect.id),
+                            )
+                        },
+                    ) {
+                        Text("Remove", fontSize = 7.sp, color = Color(0xFFFF7777))
+                    }
+                }
+            }
+            Slider(
+                value = selectedEffect?.amount?.coerceIn(0f, 1f) ?: 0f,
+                onValueChange = { amount ->
+                    selectedEffect?.let { effect ->
+                        selectEffect(effect.id)
+                        val safe = amount.coerceIn(0f, 1f)
+                        if (animationSourceTimeUs != null &&
+                            clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
+                        ) {
+                            val keyedNode = node.copy(
+                                effects = node.effects.map { current ->
+                                    if (current.id == effect.id) current.copy(amount = safe, enabled = true) else current
+                                },
+                            )
+                            clip.nodeAnimations.upsertIfAnimated(
+                                keyedNode,
+                                NodeAnimationDomain.EFFECTS,
+                                animationSourceTimeUs,
+                            )
+                        }
+                        vm.addEffectToSelectedNode(effect.name, safe)
+                    }
+                },
+                valueRange = 0f..1f,
+                enabled = selectedEffect != null,
+                modifier = Modifier.fillMaxWidth().height(30.dp),
+            )
+            Text(
+                if (selectedEffect == null) {
+                    "Tap an effect thumbnail to select it, then adjust its amount here."
+                } else {
+                    "Effect amount control. Duration and timeline controls remain below."
+                },
+                fontSize = 7.sp,
+                color = Fx25Muted,
+            )
         }
 
         HorizontalDivider(color = Fx25Divider)
@@ -138,12 +242,12 @@ fun CreatorEffectsWorkspace(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            val effects = node.visibleEffects()
+            val effects = nodeEffects
             if (effects.isEmpty()) {
-                Text("Choose an effect above to add it to this node", fontSize = 9.sp, color = Fx25Muted)
+                Text("None keeps the image untouched. Every effect thumbnail shows the full effect at 100% preview strength.", fontSize = 9.sp, color = Fx25Muted)
             } else {
                 Text(
-                    "Select an effect here or on its timeline bar. Drag the bar edges for duration; hold-drag the bar to move it.",
+                    "Preset thumbnails show the full effect on the whole image. Tap None to clear effects, or tap an active effect again to remove it.",
                     fontSize = 7.sp,
                     color = Fx25Muted,
                 )
@@ -212,6 +316,84 @@ fun CreatorEffectsWorkspace(
             }
         }
     }
+}
+
+@Composable
+private fun EffectNoneCardV98(
+    active: Boolean,
+    onClick: () -> Unit,
+) {
+    Column(
+        Modifier
+            .width(170.dp)
+            .background(Fx25Raised, RoundedCornerShape(8.dp))
+            .border(
+                if (active) 1.5.dp else .5.dp,
+                if (active) Fx25Accent else Color.White.copy(alpha = .08f),
+                RoundedCornerShape(8.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(5.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier.fillMaxWidth().height(90.dp)
+                .clip(RoundedCornerShape(6.dp)),
+        ) {
+            IdentityThumbnailV98(modifier = Modifier.fillMaxSize())
+            if (active) {
+                Text(
+                    "✓",
+                    fontSize = 10.sp,
+                    color = Color.White,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "None",
+            fontSize = 8.sp,
+            fontWeight = FontWeight.Medium,
+            color = Color.White.copy(alpha = .90f),
+            maxLines = 1,
+        )
+    }
+}
+
+private fun clearCreatorEffectsV25(vm: EditorViewModel, clipId: String, nodeId: String) {
+    val target = ActiveEditorVmRegistry.current() ?: vm
+    val current = target.state.value.project
+    val liveClip = current.clip(clipId) ?: return
+    val liveNode = liveClip.nodeGraph.nodes.firstOrNull { it.id == nodeId } ?: return
+    val creatorEffectIds = liveNode.effects
+        .filter { CreatorEffectCatalogV25.find(it.name) != null }
+        .map { it.id }
+        .toSet()
+    if (creatorEffectIds.isEmpty()) return
+
+    val next = current.copy(
+        tracks = current.tracks.map { track ->
+            track.copy(
+                clips = track.clips.map { currentClip ->
+                    if (currentClip.id != clipId) currentClip
+                    else currentClip.copy(
+                        nodeGraph = currentClip.nodeGraph.copy(
+                            nodes = currentClip.nodeGraph.nodes.map { currentNode ->
+                                if (currentNode.id != nodeId) currentNode
+                                else currentNode.copy(
+                                    effects = currentNode.effects.filterNot { it.id in creatorEffectIds },
+                                )
+                            },
+                            revision = currentClip.nodeGraph.revision + 1L,
+                        ),
+                    )
+                },
+            )
+        },
+    )
+    target.commitProjectV19("effect-none-v98", next, "All creator effects removed")
+    EffectTimelineSelectionBusV26.clear()
 }
 
 @Composable
