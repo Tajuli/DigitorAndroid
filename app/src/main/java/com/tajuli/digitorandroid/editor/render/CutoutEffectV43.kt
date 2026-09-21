@@ -379,7 +379,7 @@ internal class CutoutEffectV43 private constructor(
                     return pow(clamp(baseMask / softness, 0.0, 1.0), 1.5);
                 }
 
-                // Deterministic equal-area disk samples, shared with CPU fallback. Reject person
+                // Export-safe 32-tap equal-area disk samples, shared with CPU fallback. Reject person
                 // samples before normalization: bright skin/clothes cannot bleed into the bokeh.
                 vec4 portraitLensBlur(vec4 source) {
                     if (uLensRadius <= 0.0001 || (uHasMaskA < 0.5 && uHasMaskB < 0.5)) return source;
@@ -387,9 +387,9 @@ internal class CutoutEffectV43 private constructor(
                     if (matte >= 0.999) return source;
                     vec3 sum = vec3(0.0);
                     float weightSum = 0.0;
-                    for (int i = 0; i < 96; i++) {
+                    for (int i = 0; i < 32; i++) {
                         float index = float(i);
-                        float radius = sqrt((index + 0.5) / 96.0);
+                        float radius = sqrt((index + 0.5) / 32.0);
                         float angle = index * 2.39996323;
                         vec2 offset = vec2(cos(angle), sin(angle)) * radius * uLensRadius * uTexelSize;
                         vec2 uv = clamp(vTexCoord + offset, vec2(0.0), vec2(1.0));
