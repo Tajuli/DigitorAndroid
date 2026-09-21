@@ -86,6 +86,7 @@ fun CreatorFiltersWorkspace(
     val selectedPreset = CREATOR_FILTERS_V36.firstOrNull { it.id == selectedPresetId }
     val selectedIntensity = selectedPresetId?.let { applied[it] } ?: 0f
     val visiblePresets = CREATOR_FILTERS_V36.filter { it.group == group }
+    val noneActive = visiblePresets.none { it.id in applied }
 
     fun refineBeautyInBackground(preset: CreatorFilterPresetV36) {
         val needsHairMask = preset.beautyWeights.containsKey(BEAUTY_HAIR_BROW_DARK_V28)
@@ -178,6 +179,15 @@ fun CreatorFiltersWorkspace(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(7.dp),
         ) {
+            item(key = "none-" + group.name) {
+                FilterNoneCardV98(
+                    active = noneActive,
+                    onClick = {
+                        clearFilterGroupV36(vm, clip.id, group)
+                        if (selectedPreset?.group == group) selectedPresetId = null
+                    },
+                )
+            }
             items(visiblePresets, key = { it.id }) { preset ->
                 FilterCardV36(
                     preset = preset,
@@ -213,14 +223,51 @@ fun CreatorFiltersWorkspace(
             )
             Text(
                 if (group == CreatorFilterGroupV36.LOOKS) {
-                    "Tap a filter once to apply; tap the same thumbnail again to remove it. LOOKS execute inside Node ${host?.label ?: "—"}."
+                    "None keeps the image untouched. Preset thumbnails show the full filter at 100% preview strength. Tap an active filter again to remove it."
                 } else {
-                    "Tap a beauty preset once to apply; tap it again to remove it. Beauty remains owned by Node ${host?.label ?: "—"}."
+                    "None keeps the image untouched. Beauty thumbnails show the full preset preview. Tap an active beauty preset again to remove it."
                 },
                 fontSize = 7.sp,
                 color = Filter27Muted,
             )
         }
+    }
+}
+
+@Composable
+private fun FilterNoneCardV98(
+    active: Boolean,
+    onClick: () -> Unit,
+) {
+    Column(
+        Modifier.width(170.dp)
+            .background(Filter27Raised, RoundedCornerShape(9.dp))
+            .border(
+                if (active) 1.7.dp else .5.dp,
+                if (active) Filter27Accent else Color.White.copy(alpha = .08f),
+                RoundedCornerShape(9.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(5.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier.fillMaxWidth().height(90.dp)
+                .clip(RoundedCornerShape(6.dp)),
+        ) {
+            IdentityThumbnailV98(modifier = Modifier.fillMaxSize())
+            if (active) {
+                Text(
+                    "✓",
+                    fontSize = 10.sp,
+                    color = Color.White,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text("None", fontSize = 8.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, textAlign = TextAlign.Center)
+        Text("Original", fontSize = 6.sp, color = Filter27Muted, maxLines = 1, textAlign = TextAlign.Center)
     }
 }
 
@@ -317,6 +364,36 @@ private fun updateFilterMarkerV36(
             "${preset?.name ?: presetId} removed from Node ${host.label}"
         },
         coalesce = coalesce,
+    )
+}
+
+private fun clearFilterGroupV36(
+    vm: EditorViewModel,
+    clipId: String,
+    group: CreatorFilterGroupV36,
+) {
+    val state = vm.state.value
+    val liveClip = state.project.clip(clipId) ?: return
+    var graph = liveClip.nodeGraph
+    graph.nodes.filter { it.isLegacyCreatorFilterNodeV36() }.map { it.id }.forEach { id ->
+        graph = graph.deleteEditableNodeV4(id)
+    }
+    val migratedClip = liveClip.copy(nodeGraph = graph)
+    val host = migratedClip.selectedCreatorFilterHostV41() ?: return
+    val updatedHost = host.copy(
+        effects = host.effects.filter { effect ->
+            val presetId = effect.creatorFilterPresetIdV36() ?: return@filter true
+            creatorFilterPresetV36(presetId)?.group != group
+        },
+    )
+    graph = graph.copy(
+        nodes = graph.nodes.map { if (it.id == host.id) updatedHost else it },
+        revision = graph.revision + 1L,
+    )
+    vm.commitProjectV19(
+        label = "filter-none-v98",
+        project = state.project.withUpdatedClipV36(liveClip.copy(nodeGraph = graph)),
+        status = if (group == CreatorFilterGroupV36.LOOKS) "Looks cleared" else "Beauty cleared",
     )
 }
 
