@@ -7,7 +7,7 @@ then resizes that crop to the fixed 256×256 ncnn graph, at every source frame. 
 existing durable analysis workflow. Edit → Cutout exposes analysis resolution, cadence, hair
 and temporal settings. Blur strength is live and does not require reanalysis.
 
-The normalized 96-sample circular kernel excludes foreground and uncertain boundary samples,
+The normalized 32-sample circular kernel excludes foreground and uncertain boundary samples,
 including the bilinear color footprint. Fully opaque subject pixels use the original source
 sample exactly, with no denoise, skin smoothing, or dehalo. Soft matte edges retain continuous
 alpha blending. Radius scales with the frame's short edge (0–24 pixels at 1080). Input alpha is
@@ -23,8 +23,7 @@ Effects None also removes the portrait effect.
 Missing/cancelled/unprocessed matte coverage passes through unchanged instead of blurring the
 subject or applying a stale silhouette. Finish analysis before final export. This is a person
 portrait effect, not arbitrary object matting or a depth-map lens simulation. Fast motion,
-translucent hair and difficult backgrounds remain limited by the existing matte quality. The
-96-sample shader and maximum-detail analysis have a device-dependent performance cost.
+translucent hair and difficult backgrounds remain limited by the existing matte quality. The 32-sample shader is tuned for mobile export while retaining foreground rejection; maximum-detail analysis still has a device-dependent performance cost.
 
 Validation:
 - Six pure JVM pixel tests cover subject identity, background defocus, no foreground color bleed,
