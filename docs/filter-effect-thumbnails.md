@@ -5,9 +5,9 @@ Digitor's filter/effect picker thumbnails use one shared neutral portrait source
 ## Source image
 
 - App resource: app/src/main/res/drawable-nodpi/filter_effect_preview_base.webp
-- Bundled master: 640×360 WebP, already 16:9; decoded once and rendered/cached at 320×180.
-- Subject/background: centered wholesome youthful illustrated girl with a lake, mountains, trees and greenery, so portrait tones, hair, greens, highlights and shadows are all easy to compare.
-- The source is a project-owned preview asset supplied for Digitor's picker; no per-preset preview images are stored.
+- Bundled source: 320×180 WebP, already 16:9; decoded once, normalized to the renderer's logical 640×360 base, then rendered/cached at 320×180.
+- Subject/background: realistic AI-generated photographic portrait of a young adult woman, face-forward and centered, with vivid green trees, blue sky, lake and mountains. This keeps skin, hair, foliage, water and sky visible so both portrait and landscape filter/effect changes are easy to judge.
+- The image was generated specifically for Digitor's picker and is reused by every preset; no per-preset preview images are stored.
 
 Only this one source image is bundled for filter/effect previews. No per-preset preview images are stored.
 
