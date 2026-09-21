@@ -309,7 +309,6 @@ private fun FilterCardV36(
         }
         Spacer(Modifier.height(4.dp))
         Text(preset.name, fontSize = 8.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, textAlign = TextAlign.Center)
-        Text(preset.description, fontSize = 6.sp, color = Filter27Muted, maxLines = 1, textAlign = TextAlign.Center)
     }
 }
 
