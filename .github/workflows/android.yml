@@ -159,3 +159,14 @@ jobs:
             PID="$(adb shell pidof com.tajuli.digitorandroid | tr -d '\r')"; if [ -z "$PID" ]; then echo '=== 16:9 project creation crashed Digitor ==='; adb logcat -d -v threadtime | grep -E -A 120 -B 40 'FATAL EXCEPTION|AndroidRuntime|com.tajuli.digitorandroid' | tail -600 || true; exit 1; fi
             python3 -c 'import subprocess,xml.etree.ElementTree as ET; subprocess.run(["adb","shell","uiautomator","dump","/sdcard/window.xml"],check=True,stdout=subprocess.DEVNULL); root=ET.fromstring(subprocess.check_output(["adb","shell","cat","/sdcard/window.xml"],text=True)); assert any(e.attrib.get("text")=="Export" for e in root.iter("node")), "Editor did not open after New Project -> 16:9"'
             echo "Phone New Project flow passed"
+
+      - name: Upload emulator diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DigitorAndroid-emulator-diagnostics
+          path: |
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
+          if-no-files-found: warn
+          retention-days: 7

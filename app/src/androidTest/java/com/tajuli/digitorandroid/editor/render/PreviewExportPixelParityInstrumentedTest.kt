@@ -209,10 +209,12 @@ class PreviewExportPixelParityInstrumentedTest {
         val width = 128
         val height = 128
         val uri = "content://synthetic/lens-${System.nanoTime()}"
+        val timestampUs = 500_000L
         val settings = com.tajuli.digitorandroid.editor.model.ClipCutoutV43(
             mode = com.tajuli.digitorandroid.editor.model.CutoutModeV43.PERSON,
             portraitLensBlurV99 = true,
             lensBlurAmountV99 = 1f,
+            mattingSizeV69 = 256,
         )
         val clip = TimelineClip(id = "lens-parity", uri = uri, label = "Lens",
             timelineStartUs = 0L, sourceOutUs = 1_000_000L, cutoutV43 = settings)
@@ -224,7 +226,7 @@ class PreviewExportPixelParityInstrumentedTest {
             bitmap.setPixel(x, y, if (x < width / 2) Color.RED else if ((x + y) % 2 == 0) Color.WHITE else Color.BLACK)
             mask.setPixel(x, y, if (x < width / 2) Color.WHITE else Color.BLACK)
         }
-        val maskFile = com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43.save(context, uri, 0L, mask)
+        val maskFile = com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43.save(context, uri, timestampUs, mask)
         mask.recycle()
         val format = Format.Builder().setWidth(width).setHeight(height).setColorInfo(
             ColorInfo.Builder().setColorSpace(C.COLOR_SPACE_BT709).setColorRange(C.COLOR_RANGE_FULL)
@@ -235,8 +237,12 @@ class PreviewExportPixelParityInstrumentedTest {
             val testProject = project.copy(tracks = listOf(testTrack))
             PreviewProjectRegistry.update(testProject)
             return renderOneFrame(context, testProject, listOf(testTrack), listOf(testClip), format,
-                listOf(0L), listOf(0L), listOf(if (preview) SharedVideoPipeline.compositedPreviewEffectsFor(testClip)
-                else SharedVideoPipeline.compositedExportEffectsFor(testClip)), preview, bitmap)
+                listOf(timestampUs), listOf(0L), listOf(if (preview) SharedVideoPipeline.compositedPreviewEffectsFor(testClip)
+                else SharedVideoPipeline.compositedExportEffectsFor(testClip)), preview, bitmap,
+                // The real live chain includes resident beauty/creator shaders as well as lens
+                // blur. SwiftShader compiles these on first frame; retain all pixel assertions
+                // but allow a bounded cold-start budget instead of the minimal static chain's 10s.
+                outputTimeoutSeconds = 60L)
         }
         try {
             val preview = render(clip, true)
@@ -267,6 +273,7 @@ class PreviewExportPixelParityInstrumentedTest {
         effects: List<List<androidx.media3.common.Effect>>,
         livePreview: Boolean,
         bitmap: Bitmap,
+        outputTimeoutSeconds: Long = 10L,
     ): ByteArray {
         require(tracks.size == clips.size)
         require(tracks.size == inputTimestampsUs.size)
@@ -364,7 +371,7 @@ class PreviewExportPixelParityInstrumentedTest {
             // waiting indefinitely for a later timestamp.
             tracks.indices.forEach { index -> graph.signalEndOfInput(index) }
 
-            assertTrue("Timed out waiting for graph output", outputLatch.await(10, TimeUnit.SECONDS))
+            assertTrue("Timed out waiting for graph output", outputLatch.await(outputTimeoutSeconds, TimeUnit.SECONDS))
             throwIfGraphFailed(error.get())
             assertTrue("Timed out waiting for RGBA output", imageLatch.await(10, TimeUnit.SECONDS))
             throwIfGraphFailed(error.get())

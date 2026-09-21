@@ -2,7 +2,8 @@
 
 Select a visual clip, open **Effects → Portrait → Apply & Analyze**. The effect applies to the
 whole clip after node effects, using the same PP-MattingV2 soft matte as Pro Cutout. Initial
-analysis uses 512 px person ROI and every source frame. Pause/resume and cancellation reuse the
+analysis first detects a motion-safe person ROI, crops it, square-pads without stretching,
+then resizes that crop to the fixed 256×256 ncnn graph, at every source frame. Pause/resume and cancellation reuse the
 existing durable analysis workflow. Edit → Cutout exposes analysis resolution, cadence, hair
 and temporal settings. Blur strength is live and does not require reanalysis.
 

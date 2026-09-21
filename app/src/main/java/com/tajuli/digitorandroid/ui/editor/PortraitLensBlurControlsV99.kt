@@ -37,7 +37,7 @@ fun PortraitLensBlurControlsV99(clip: TimelineClip, vm: EditorViewModel, modifie
                 vm.setSelectedCutoutV43(
                     settings.copy(
                         mode = CutoutModeV43.PERSON, portraitLensBlurV99 = true,
-                        lensBlurAmountV99 = .55f, mattingSizeV69 = 512,
+                        lensBlurAmountV99 = .55f, mattingSizeV69 = 256,
                         analysisQualityV47 = CutoutAnalysisQualityV47.HIGH,
                     ),
                     status = "Portrait Lens Blur · preparing subject", coalesce = false,
@@ -63,7 +63,7 @@ fun PortraitLensBlurControlsV99(clip: TimelineClip, vm: EditorViewModel, modifie
                     OutlinedButton(onClick = { vm.cancelSelectedPersonCutoutV69() }) { Text("Cancel") }
                 }
             }
-            Text("Maximum detail: 512 px subject analysis, every frame. Analysis can take time. More analysis quality options are in Edit → Cutout.", fontSize = 11.sp)
+            Text("Motion-safe person crop first, then 256 px analysis, every frame. Analysis can take time. More analysis quality options are in Edit → Cutout.", fontSize = 11.sp)
         }
         Text("For people. Hair, motion blur and complex backgrounds depend on the matte quality. This effect replaces background removal or chroma key on this clip.", fontSize = 11.sp)
     }
