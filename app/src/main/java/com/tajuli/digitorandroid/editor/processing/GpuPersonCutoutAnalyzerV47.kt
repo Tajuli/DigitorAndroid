@@ -6,6 +6,8 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.ImageDecoder
 import android.media.MediaMetadataRetriever
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.net.Uri
 import android.os.Build
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
@@ -69,6 +71,7 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         onAnchorStored: ((Int) -> Unit)?,
         onBackendResolved: ((String) -> Unit)?,
     ): Int {
+        CutoutAnalysisRuntimeV66.updateExpectedFrames(1)
         if (generation.resumed && generation.durableTimesUs.any { abs(it - clip.sourceInUs) <= 1_000L }) {
             onAnchorStored?.invoke(generation.savedFrames)
             return 0
@@ -103,6 +106,12 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
         val quality = settings.analysisQualityV47
         val cadence = personCutoutCadenceV47(quality)
         val allTargetTimes = personCutoutTargetTimesV47(start, end, quality)
+        val expectedFrames = if (cadence.everyDecodedFrame) {
+            estimateDecodedFrameCountV100(clip, start, end)
+        } else {
+            allTargetTimes.size.coerceAtLeast(1)
+        }
+        CutoutAnalysisRuntimeV66.updateExpectedFrames(expectedFrames)
         val existing = generation.durableTimesUs
 
         val targetTimes = if (cadence.everyDecodedFrame) {
@@ -213,6 +222,28 @@ class GpuPersonCutoutAnalyzerV47(private val context: Context) {
             }
             runCatching { worker.close() }
         }
+    }
+
+    private fun estimateDecodedFrameCountV100(clip: TimelineClip, startUs: Long, endUs: Long): Int {
+        val durationUs = (endUs - startUs).coerceAtLeast(1L)
+        val fps = runCatching {
+            val extractor = MediaExtractor()
+            try {
+                extractor.setDataSource(context, Uri.parse(clip.uri), null)
+                val videoTrack = (0 until extractor.trackCount).firstOrNull { index ->
+                    extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true
+                } ?: return@runCatching 30
+                val format = extractor.getTrackFormat(videoTrack)
+                if (format.containsKey(MediaFormat.KEY_FRAME_RATE)) {
+                    format.getInteger(MediaFormat.KEY_FRAME_RATE).coerceIn(1, 240)
+                } else {
+                    30
+                }
+            } finally {
+                extractor.release()
+            }
+        }.getOrDefault(30)
+        return ((durationUs / 1_000_000.0) * fps).roundToInt().coerceAtLeast(1)
     }
 
     private fun existingCoversTargetV66(
