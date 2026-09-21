@@ -122,6 +122,8 @@ Filter/Effect thumbnails are generated from one shared neutral source image usin
 - Every 170 dp-wide card has a 90 dp-tall 16:9 full-frame preview. There is no BEFORE/AFTER split or center divider.
 - None shows the untouched source image. Every filter/effect preset renders across the entire image at 100% thumbnail preview strength.
 - Picker cards toggle directly: first tap applies; tapping the same active filter/effect again removes it. Tapping None clears the relevant filter group or creator effects.
+- Filter and effect cards now use the same 170 dp × 90 dp thumbnail layout with one label only.
+- Effect picker exposes the selected effect amount control directly below the thumbnail row (name, percentage, Remove, and slider), matching the filter workflow.
 - Creator filters come from CreatorFilterCatalogV36 markers; visual effects come from CreatorEffectCatalogV25.
 - Preset thumbnails run the full frame through SharedVideoPipeline.compositedExportEffectsFor(...), reusing the production LUT/node, beauty and creator-effect shaders instead of fake color overlays.
 - Time-dependent effects use a deterministic 0.35 s source timestamp.
