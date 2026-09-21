@@ -112,6 +112,12 @@ fun CreatorEffectsWorkspace(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
+            item(key = "none-" + category) {
+                EffectNoneCardV98(
+                    active = nodeEffects.isEmpty(),
+                    onClick = { clearCreatorEffectsV25(vm, clip.id, node.id) },
+                )
+            }
             items(categoryPresets, key = { it.name }) { preset ->
                 val appliedEffect = nodeEffects.lastOrNull { it.name == preset.name }
                 val applied = appliedEffect != null
@@ -180,10 +186,10 @@ fun CreatorEffectsWorkspace(
         ) {
             val effects = nodeEffects
             if (effects.isEmpty()) {
-                Text("Tap an effect once to add it; tap the same thumbnail again to remove it.", fontSize = 9.sp, color = Fx25Muted)
+                Text("None keeps the image untouched. Every effect thumbnail shows the full effect at 100% preview strength.", fontSize = 9.sp, color = Fx25Muted)
             } else {
                 Text(
-                    "Tap an active thumbnail again to remove it. Select an effect here or on its timeline bar to edit amount/timing.",
+                    "Preset thumbnails show the full effect on the whole image. Tap None to clear effects, or tap an active effect again to remove it.",
                     fontSize = 7.sp,
                     color = Fx25Muted,
                 )
@@ -252,6 +258,84 @@ fun CreatorEffectsWorkspace(
             }
         }
     }
+}
+
+@Composable
+private fun EffectNoneCardV98(
+    active: Boolean,
+    onClick: () -> Unit,
+) {
+    Column(
+        Modifier
+            .width(170.dp)
+            .background(Fx25Raised, RoundedCornerShape(8.dp))
+            .border(
+                if (active) 1.5.dp else .5.dp,
+                if (active) Fx25Accent else Color.White.copy(alpha = .08f),
+                RoundedCornerShape(8.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(5.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier.fillMaxWidth().height(90.dp)
+                .clip(RoundedCornerShape(6.dp)),
+        ) {
+            IdentityThumbnailV98(modifier = Modifier.fillMaxSize())
+            if (active) {
+                Text(
+                    "✓",
+                    fontSize = 10.sp,
+                    color = Color.White,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "None",
+            fontSize = 8.sp,
+            fontWeight = FontWeight.Medium,
+            color = Color.White.copy(alpha = .90f),
+            maxLines = 1,
+        )
+    }
+}
+
+private fun clearCreatorEffectsV25(vm: EditorViewModel, clipId: String, nodeId: String) {
+    val target = ActiveEditorVmRegistry.current() ?: vm
+    val current = target.state.value.project
+    val liveClip = current.clip(clipId) ?: return
+    val liveNode = liveClip.nodeGraph.nodes.firstOrNull { it.id == nodeId } ?: return
+    val creatorEffectIds = liveNode.effects
+        .filter { CreatorEffectCatalogV25.find(it.name) != null }
+        .map { it.id }
+        .toSet()
+    if (creatorEffectIds.isEmpty()) return
+
+    val next = current.copy(
+        tracks = current.tracks.map { track ->
+            track.copy(
+                clips = track.clips.map { currentClip ->
+                    if (currentClip.id != clipId) currentClip
+                    else currentClip.copy(
+                        nodeGraph = currentClip.nodeGraph.copy(
+                            nodes = currentClip.nodeGraph.nodes.map { currentNode ->
+                                if (currentNode.id != nodeId) currentNode
+                                else currentNode.copy(
+                                    effects = currentNode.effects.filterNot { it.id in creatorEffectIds },
+                                )
+                            },
+                            revision = currentClip.nodeGraph.revision + 1L,
+                        ),
+                    )
+                },
+            )
+        },
+    )
+    target.commitProjectV19("effect-none-v98", next, "All creator effects removed")
+    EffectTimelineSelectionBusV26.clear()
 }
 
 @Composable
