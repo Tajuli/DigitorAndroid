@@ -35,6 +35,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.creatorFilterMarkerNameV36
 import com.tajuli.digitorandroid.editor.model.creatorFilterPresetV36
+import com.tajuli.digitorandroid.editor.processing.PortraitLensBlurV99
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -107,6 +108,33 @@ internal object FilterEffectThumbnailRendererV98 {
                 effect = NodeEffect(name = preset.name, amount = FULL_PREVIEW_AMOUNT),
             )
             renderProductionFrame(appContext, clip, base)
+        }
+
+    suspend fun renderPortraitLensBlur(context: Context): Bitmap =
+        renderCached(context.applicationContext, "portrait-lens-blur::" + CACHE_VERSION) { _, base ->
+            val width = base.width
+            val height = base.height
+            val pixels = IntArray(width * height)
+            base.getPixels(pixels, 0, width, 0, 0, width, height)
+
+            // Thumbnail-only matte: the shared source is composed with the person centered.
+            // Keep a softly feathered portrait silhouette sharp while the full background receives
+            // the same mobile 32-tap disk kernel used by the production effect.
+            fun matteAt(u: Float, v: Float): Float {
+                val dx = (u - 0.5f) / 0.24f
+                val dy = (v - 0.47f) / 0.50f
+                val d = kotlin.math.sqrt(dx * dx + dy * dy)
+                return ((1.10f - d) / 0.18f).coerceIn(0f, 1f)
+            }
+
+            val blurred = PortraitLensBlurV99.apply(
+                source = pixels,
+                width = width,
+                height = height,
+                amount = .78f,
+                matteAt = ::matteAt,
+            )
+            Bitmap.createBitmap(blurred, width, height, Bitmap.Config.ARGB_8888)
         }
 
     /** Used by tests and by any future explicit "None" item. */
