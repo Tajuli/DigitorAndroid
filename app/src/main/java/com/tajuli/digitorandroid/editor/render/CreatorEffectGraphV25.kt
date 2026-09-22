@@ -250,6 +250,11 @@ internal class CreatorEffectGraphV25 private constructor(
             program.setFloatUniform("uFlicker", v.flicker)
             program.setFloatUniform("uWarm", v.warm)
             program.setFloatUniform("uDenoise", v.denoise)
+            program.setFloatUniform("uCrossShift", v.crossShift)
+            program.setFloatUniform("uClone", v.clone)
+            program.setFloatUniform("uSmear", v.smear)
+            program.setFloatUniform("uEdgeGlow", v.edgeGlow)
+            program.setFloatUniform("uElectric", v.electric)
             program.setFloatUniform("uTime", (sourceUs % 10_000_000L).toFloat() / 1_000_000f)
             program.setFloatUniform("uSeed", ((nodeId.hashCode() ushr 1) % 10_000).toFloat() / 10_000f)
             program.bindAttributesAndUniforms()
@@ -335,6 +340,11 @@ internal class CreatorEffectGraphV25 private constructor(
                 uniform float uFlicker;
                 uniform float uWarm;
                 uniform float uDenoise;
+                uniform float uCrossShift;
+                uniform float uClone;
+                uniform float uSmear;
+                uniform float uEdgeGlow;
+                uniform float uElectric;
                 uniform float uTime;
                 uniform float uSeed;
                 varying vec2 vTexCoord;
@@ -352,6 +362,19 @@ internal class CreatorEffectGraphV25 private constructor(
                 float denoiseWeight(vec3 sampleRgb, float centerLuma, float sigma) {
                     float delta = abs(lumaOf(sampleRgb) - centerLuma);
                     return exp(-delta / max(sigma, 0.001));
+                }
+
+                vec3 sampleCreator(vec2 uv) {
+                    return texture2D(uTexSampler, clamp(uv, 0.001, 0.999)).rgb;
+                }
+
+                float electricBand(vec2 uv, float phase) {
+                    float path = 0.50
+                        + 0.18 * sin(uv.x * 19.0 + uTime * 4.3 + phase)
+                        + 0.065 * sin(uv.x * 53.0 - uTime * 7.1 + phase * 1.7)
+                        + 0.025 * sin(uv.x * 113.0 + uTime * 11.0 + phase * 0.7);
+                    float d = abs(uv.y - path);
+                    return exp(-d * 180.0) + 0.32 * exp(-d * 38.0);
                 }
 
                 vec2 creatorUv(vec2 uv) {
@@ -433,12 +456,75 @@ internal class CreatorEffectGraphV25 private constructor(
                         rgb = mix(rgb, max(rgb, ghost), clamp(uGhost * 0.46, 0.0, 0.72));
                     }
 
+                    if (uClone > 0.001) {
+                        float cloneStrength = clamp(uClone, 0.0, 1.5);
+                        float spread = 0.055 + 0.065 * min(cloneStrength, 1.0);
+                        float breathe = 0.012 * sin(uTime * 1.7);
+                        vec2 leftOffset = vec2(spread + breathe, 0.010 * sin(uTime * 1.2));
+                        vec2 rightOffset = vec2(-spread - breathe, -0.010 * sin(uTime * 1.2));
+                        vec3 leftClone = sampleCreator(uv + leftOffset);
+                        vec3 rightClone = sampleCreator(uv + rightOffset);
+                        vec3 cloneMix = (center.rgb + leftClone + rightClone) / 3.0;
+                        rgb = mix(rgb, cloneMix, clamp(cloneStrength * 0.66, 0.0, 0.84));
+                    }
+
+                    if (uSmear > 0.001) {
+                        float smearStrength = clamp(uSmear, 0.0, 1.5);
+                        vec2 smearStep = vec2(
+                            0.010 + 0.006 * sin(uTime * 1.4),
+                            0.003 + 0.004 * cos(uTime * 1.1)
+                        ) * smearStrength;
+                        vec3 smear = center.rgb;
+                        smear += sampleCreator(uv - smearStep);
+                        smear += sampleCreator(uv - smearStep * 2.0);
+                        smear += sampleCreator(uv - smearStep * 3.0);
+                        smear += sampleCreator(uv - smearStep * 4.0);
+                        smear *= 0.20;
+                        rgb = mix(rgb, max(rgb, smear), clamp(smearStrength * 0.62, 0.0, 0.82));
+                    }
+
+                    if (uCrossShift > 0.001) {
+                        float crossStrength = clamp(uCrossShift, 0.0, 1.5);
+                        vec2 p = vTexCoord - vec2(0.5);
+                        vec2 cross = vec2(p.y, -p.x) * (0.055 + 0.025 * sin(uTime * 1.3)) * crossStrength;
+                        vec3 crossA = sampleCreator(uv + cross);
+                        vec3 crossB = sampleCreator(uv - cross);
+                        float quadrant = step(0.0, p.x * p.y);
+                        vec3 shifted = mix(crossA, crossB, quadrant);
+                        rgb = mix(rgb, shifted, clamp(crossStrength * 0.68, 0.0, 0.86));
+                    }
+
                     if (uRgbSplit > 0.001) {
                         vec2 ro = vec2(uTexelSize.x * (3.0 + 12.0 * uRgbSplit), 0.0);
                         float rr = texture2D(uTexSampler, clamp(uv + ro, 0.001, 0.999)).r;
                         float bb = texture2D(uTexSampler, clamp(uv - ro, 0.001, 0.999)).b;
                         rgb.r = mix(rgb.r, rr, clamp(uRgbSplit, 0.0, 1.0));
                         rgb.b = mix(rgb.b, bb, clamp(uRgbSplit, 0.0, 1.0));
+                    }
+
+                    if (uEdgeGlow > 0.001) {
+                        float edgeH = abs(lumaOf(e) - lumaOf(w));
+                        float edgeV = abs(lumaOf(n) - lumaOf(s));
+                        float edgeD = abs(lumaOf(ne) - lumaOf(sw)) + abs(lumaOf(nw) - lumaOf(se));
+                        float edge = smoothstep(0.035, 0.42, edgeH + edgeV + edgeD * 0.45);
+                        float neonPhase = sin(uTime * 2.0 + vTexCoord.x * 7.0 + vTexCoord.y * 5.0) * 0.5 + 0.5;
+                        vec3 neon = mix(vec3(0.08, 0.78, 1.00), vec3(0.88, 0.16, 1.00), neonPhase);
+                        rgb += neon * edge * clamp(uEdgeGlow, 0.0, 1.5) * 0.58;
+                    }
+
+                    if (uElectric > 0.001) {
+                        float electricStrength = clamp(uElectric, 0.0, 1.5);
+                        float boltA = electricBand(vTexCoord, 0.0);
+                        float boltB = electricBand(vec2(vTexCoord.x, 1.0 - vTexCoord.y), 2.4) * 0.72;
+                        float pulse = 0.78 + 0.22 * sin(uTime * 18.0);
+                        float bolt = clamp((boltA + boltB) * pulse, 0.0, 1.5);
+                        vec3 electricColor = mix(
+                            vec3(0.10, 0.72, 1.00),
+                            vec3(0.70, 0.20, 1.00),
+                            sin(uTime * 2.8 + vTexCoord.x * 8.0) * 0.5 + 0.5
+                        );
+                        rgb += electricColor * bolt * electricStrength * 0.52;
+                        rgb += vec3(1.0) * smoothstep(0.60, 1.15, bolt) * electricStrength * 0.18;
                     }
 
                     float grain = (hash21(vTexCoord * vec2(1920.0, 1080.0)) - 0.5) * 2.0;
