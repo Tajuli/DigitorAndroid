@@ -7,12 +7,12 @@ import org.junit.Test
 
 class CreatorEffectV25Test {
     @Test
-    fun catalogHasSixtySevenUniqueCreatorEffects() {
+    fun catalogHasSeventyTwoUniqueCreatorEffects() {
         val presets = CreatorEffectCatalogV25.presets
-        assertEquals(67, presets.size)
-        assertEquals(67, presets.map { it.name.lowercase() }.toSet().size)
+        assertEquals(72, presets.size)
+        assertEquals(72, presets.map { it.name.lowercase() }.toSet().size)
         assertEquals(
-            listOf("Trending", "Basic", "Glitch", "Retro", "Lens", "Motion", "Clone", "Glow"),
+            listOf("Trending", "Basic", "Glitch", "Retro", "Lens", "Motion", "Body", "Clone", "Glow"),
             CreatorEffectCatalogV25.categories,
         )
         assertEquals(6, CreatorEffectCatalogV25.inCategory("Trending").size)
@@ -20,6 +20,7 @@ class CreatorEffectV25Test {
         listOf("Glitch", "Retro", "Lens", "Motion").forEach { category ->
             assertEquals(10, CreatorEffectCatalogV25.inCategory(category).size)
         }
+        assertEquals(5, CreatorEffectCatalogV25.inCategory("Body").size)
         assertEquals(5, CreatorEffectCatalogV25.inCategory("Clone").size)
         assertEquals(5, CreatorEffectCatalogV25.inCategory("Glow").size)
     }
@@ -57,16 +58,25 @@ class CreatorEffectV25Test {
         val smear = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Luminous Smear", amount = 1f)))
         val electric = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Electric Current", amount = 1f)))
         val outline = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Neon Outline", amount = 1f)))
+        val fireEyes = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Fire Eyes", amount = 1f)))
+        val current = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Current Passing", amount = 1f)))
+        val aura = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Neon Body", amount = 1f)))
 
         assertTrue(crossFull.crossShift > crossHalf.crossShift && crossHalf.crossShift > 0f)
         assertTrue(clone.clone > 0f)
         assertTrue(smear.smear > 0f)
         assertTrue(electric.electric > 0f && electric.edgeGlow > 0f)
         assertTrue(outline.edgeGlow > 0f)
+        assertTrue(fireEyes.fireEyes > 0f)
+        assertTrue(current.bodyElectric > 0f)
+        assertTrue(aura.bodyAura > 0f)
         assertFalse(crossFull.isIdentity)
         assertFalse(clone.isIdentity)
         assertFalse(smear.isIdentity)
         assertFalse(electric.isIdentity)
+        assertFalse(fireEyes.isIdentity)
+        assertFalse(current.isIdentity)
+        assertFalse(aura.isIdentity)
     }
 
     @Test
