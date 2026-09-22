@@ -53,6 +53,29 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
         const val BACKOFF_CRITICAL_MS = 1_800L
         const val BACKOFF_EMERGENCY_MS = 3_000L
         const val FAILURE_RELEASE_DELAY_MS = 180L
+        const val INTERRUPT_SAFE_VULKAN_RESTART_QUIET_MS = 1_200L
+
+        private val vulkanLifecycleLock = Any()
+        private var lastVulkanReleaseElapsedMs: Long = Long.MIN_VALUE
+
+        private fun createVulkanBackendSafely(context: Context): NcnnVulkanPortraitMatteV52? =
+            synchronized(vulkanLifecycleLock) {
+                if (useInterruptionSafeSerialCutoutV66() && lastVulkanReleaseElapsedMs != Long.MIN_VALUE) {
+                    val elapsed = SystemClock.elapsedRealtime() - lastVulkanReleaseElapsedMs
+                    val remaining = INTERRUPT_SAFE_VULKAN_RESTART_QUIET_MS - elapsed
+                    if (remaining > 0L) SystemClock.sleep(remaining)
+                }
+                NcnnVulkanPortraitMatteV52.tryCreate(context)
+            }
+
+        private fun closeVulkanBackendSafely(backend: NcnnVulkanPortraitMatteV52) {
+            synchronized(vulkanLifecycleLock) {
+                backend.close()
+                if (useInterruptionSafeSerialCutoutV66()) {
+                    lastVulkanReleaseElapsedMs = SystemClock.elapsedRealtime()
+                }
+            }
+        }
     }
 
     private data class BackendSession(
@@ -72,7 +95,7 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     }
 
     private var vulkanBackend: NcnnVulkanPortraitMatteV52? =
-        NcnnVulkanPortraitMatteV52.tryCreate(appContext)
+        createVulkanBackendSafely(appContext)
 
     private val environment: OrtEnvironment by lazy { OrtEnvironment.getEnvironment() }
     private var backend: BackendSession? = null
@@ -394,7 +417,7 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
 
         // At this point the Vulkan call already returned a Java-visible failure, so leave the normal
         // inference path before releasing native state. This is the only runtime GPU -> CPU switch.
-        runCatching { old.close() }
+        runCatching { closeVulkanBackendSafely(old) }
         SystemClock.sleep(FAILURE_RELEASE_DELAY_MS)
 
         val fallback = ensureCpuAfterVulkanFailure()
@@ -521,7 +544,7 @@ internal class PpMattingV2PortraitMatteV50(context: Context) : PortraitMatteBack
     }
 
     override fun close() {
-        vulkanBackend?.let { runCatching { it.close() } }
+        vulkanBackend?.let { runCatching { closeVulkanBackendSafely(it) } }
         vulkanBackend = null
         closeCpuBackend()
         if (!inputSquare.isRecycled) inputSquare.recycle()
