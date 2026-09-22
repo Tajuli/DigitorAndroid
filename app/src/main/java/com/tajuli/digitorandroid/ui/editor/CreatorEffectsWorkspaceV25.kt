@@ -71,7 +71,7 @@ fun CreatorEffectsWorkspace(
     val selectedEffectId = timelineSelection
         ?.takeIf { it.clipId == clip.id && it.nodeId == node.id }
         ?.effectId
-    var category by remember { mutableStateOf("Basic") }
+    var category by remember { mutableStateOf("Trending") }
     val categoryPresets = remember(category) { CreatorEffectCatalogV25.inCategory(category) }
     val nodeEffects = node.visibleEffects()
     val selectedEffect = nodeEffects.firstOrNull { it.id == selectedEffectId }
