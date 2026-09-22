@@ -2,6 +2,7 @@ package com.tajuli.digitorandroid.editor.render
 
 import android.content.Context
 import android.opengl.GLES20
+import android.os.SystemClock
 import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.util.GlProgram
 import androidx.media3.common.util.GlUtil
@@ -10,6 +11,9 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.BaseGlShaderProgram
 import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
+import com.tajuli.digitorandroid.editor.model.BeautyFaceGeometryV28
+import com.tajuli.digitorandroid.editor.model.BeautyFaceTrackV28
+import com.tajuli.digitorandroid.editor.model.BeautyRectV28
 import com.tajuli.digitorandroid.editor.model.CreatorEffectVectorV25
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.NodeKind
@@ -19,6 +23,7 @@ import com.tajuli.digitorandroid.editor.model.resolveCreatorEffectsV25
 import com.tajuli.digitorandroid.editor.model.resolveTimedCreatorEffectsV26
 import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
+import com.tajuli.digitorandroid.editor.processing.BeautyFaceTrackStoreV28
 
 /**
  * V25 creator-effects renderer with V26 timed effect spans.
@@ -36,7 +41,7 @@ internal class CreatorEffectGraphV25 private constructor(
 ) : GlEffect {
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram =
-        Program(clip, preview, useHdr)
+        Program(context, clip, preview, useHdr)
 
     companion object {
         fun forClip(clip: TimelineClip, preview: Boolean): CreatorEffectGraphV25? {
@@ -55,6 +60,7 @@ internal class CreatorEffectGraphV25 private constructor(
     }
 
     private class Program(
+        context: Context,
         private val clip: TimelineClip,
         private val preview: Boolean,
         private val useHighPrecisionColorComponents: Boolean,
@@ -62,6 +68,7 @@ internal class CreatorEffectGraphV25 private constructor(
         /* useHighPrecisionColorComponents = */ useHighPrecisionColorComponents,
         /* texturePoolCapacity = */ 1,
     ) {
+        private val appContext = context.applicationContext
         private val plan = SpatialNodeGraphPlan.compile(clip.nodeGraph)
         private val nodeProgram: GlProgram
         private val mixProgram: GlProgram
@@ -70,6 +77,8 @@ internal class CreatorEffectGraphV25 private constructor(
         private var inputHeight = 1
         private var scratchTextures = IntArray(0)
         private var scratchFbos = IntArray(0)
+        private var faceTrack: BeautyFaceTrackV28? = BeautyFaceTrackStoreV28.load(appContext, clip)
+        private var lastFaceTrackRefreshMs = 0L
 
         init {
             try {
@@ -111,6 +120,7 @@ internal class CreatorEffectGraphV25 private constructor(
                 val media3OutputFbo = outputFboHolder[0]
                 val currentClip = if (preview) PreviewProjectRegistry.clip(clip.id) ?: clip else clip
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
+                val faceGeometry = refreshFaceTrack(currentClip)?.geometryAt(sourceUs)
                 val slotTextures = IntArray(plan.operations.size) { inputTexId }
                 var scratchCursor = 0
 
@@ -159,7 +169,7 @@ internal class CreatorEffectGraphV25 private constructor(
                             } else {
                                 val (texture, fbo) = nextScratch()
                                 focus(fbo)
-                                renderNode(nodeProgram, input, vector, evaluated.id, sourceUs)
+                                renderNode(nodeProgram, input, vector, evaluated.id, sourceUs, faceGeometry)
                                 slotTextures[operation.slot] = texture
                             }
                         }
@@ -210,6 +220,37 @@ internal class CreatorEffectGraphV25 private constructor(
             }
         }
 
+        private fun refreshFaceTrack(currentClip: TimelineClip): BeautyFaceTrackV28? {
+            val now = SystemClock.elapsedRealtime()
+            if (faceTrack == null || now - lastFaceTrackRefreshMs >= FACE_TRACK_REFRESH_MS) {
+                lastFaceTrackRefreshMs = now
+                BeautyFaceTrackStoreV28.load(appContext, currentClip)?.let { faceTrack = it }
+            }
+            return faceTrack
+        }
+
+        private fun bodyRect(geometry: BeautyFaceGeometryV28?): BeautyRectV28? {
+            val face = geometry?.face?.normalized() ?: return null
+            val faceWidth = (face.right - face.left).coerceAtLeast(.01f)
+            val faceHeight = (face.bottom - face.top).coerceAtLeast(.01f)
+            val centerX = (face.left + face.right) * .5f
+            return BeautyRectV28(
+                left = (centerX - faceWidth * 1.25f).coerceAtLeast(0f),
+                top = (face.top - faceHeight * .08f).coerceAtLeast(0f),
+                right = (centerX + faceWidth * 1.25f).coerceAtMost(1f),
+                bottom = (face.bottom + faceHeight * 3.25f).coerceAtMost(1f),
+            ).normalized()
+        }
+
+        private fun setRect(program: GlProgram, name: String, rect: BeautyRectV28?) {
+            val r = rect?.normalized()
+            program.setFloatsUniform(
+                name,
+                if (r == null) floatArrayOf(0f, 0f, 0f, 0f)
+                else floatArrayOf(r.left, r.top, r.right, r.bottom),
+            )
+        }
+
         private fun textureForSlot(
             slots: IntArray,
             slot: Int,
@@ -228,6 +269,7 @@ internal class CreatorEffectGraphV25 private constructor(
             v: CreatorEffectVectorV25,
             nodeId: String,
             sourceUs: Long,
+            geometry: BeautyFaceGeometryV28?,
         ) {
             program.use()
             program.setSamplerTexIdUniform("uTexSampler", inputTexture, 0)
@@ -255,6 +297,13 @@ internal class CreatorEffectGraphV25 private constructor(
             program.setFloatUniform("uSmear", v.smear)
             program.setFloatUniform("uEdgeGlow", v.edgeGlow)
             program.setFloatUniform("uElectric", v.electric)
+            program.setFloatUniform("uFireEyes", v.fireEyes)
+            program.setFloatUniform("uBodyElectric", v.bodyElectric)
+            program.setFloatUniform("uBodyAura", v.bodyAura)
+            program.setFloatUniform("uHasFace", if (geometry == null) 0f else 1f)
+            setRect(program, "uLeftEyeRect", geometry?.leftEye)
+            setRect(program, "uRightEyeRect", geometry?.rightEye)
+            setRect(program, "uBodyRect", bodyRect(geometry))
             program.setFloatUniform("uTime", (sourceUs % 10_000_000L).toFloat() / 1_000_000f)
             program.setFloatUniform("uSeed", ((nodeId.hashCode() ushr 1) % 10_000).toFloat() / 10_000f)
             program.bindAttributesAndUniforms()
@@ -312,6 +361,8 @@ internal class CreatorEffectGraphV25 private constructor(
         }
 
         companion object {
+            private const val FACE_TRACK_REFRESH_MS = 700L
+
             private const val VERTEX_SHADER = """
                 attribute vec4 aFramePosition;
                 varying vec2 vTexCoord;
@@ -345,6 +396,13 @@ internal class CreatorEffectGraphV25 private constructor(
                 uniform float uSmear;
                 uniform float uEdgeGlow;
                 uniform float uElectric;
+                uniform float uFireEyes;
+                uniform float uBodyElectric;
+                uniform float uBodyAura;
+                uniform float uHasFace;
+                uniform vec4 uLeftEyeRect;
+                uniform vec4 uRightEyeRect;
+                uniform vec4 uBodyRect;
                 uniform float uTime;
                 uniform float uSeed;
                 varying vec2 vTexCoord;
@@ -366,6 +424,46 @@ internal class CreatorEffectGraphV25 private constructor(
 
                 vec3 sampleCreator(vec2 uv) {
                     return texture2D(uTexSampler, clamp(uv, 0.001, 0.999)).rgb;
+                }
+
+                float ellipseMask(vec2 p, vec4 rect, float inner, float outer) {
+                    vec2 halfSize = max((rect.zw - rect.xy) * 0.5, vec2(0.0005));
+                    vec2 center = (rect.xy + rect.zw) * 0.5;
+                    vec2 q = (p - center) / halfSize;
+                    float d = dot(q, q);
+                    return 1.0 - smoothstep(inner, outer, d);
+                }
+
+                vec4 resolvedBodyRect() {
+                    return uHasFace > 0.5 ? uBodyRect : vec4(0.22, 0.22, 0.78, 0.98);
+                }
+
+                vec4 resolvedLeftEyeRect() {
+                    return uHasFace > 0.5 ? uLeftEyeRect : vec4(0.36, 0.32, 0.47, 0.43);
+                }
+
+                vec4 resolvedRightEyeRect() {
+                    return uHasFace > 0.5 ? uRightEyeRect : vec4(0.53, 0.32, 0.64, 0.43);
+                }
+
+                float bodyMaskAt(vec2 topLeftUv) {
+                    vec4 rect = resolvedBodyRect();
+                    return ellipseMask(topLeftUv, rect, 0.72, 1.08);
+                }
+
+                float eyeFireMask(vec2 p, vec4 rect, float phase) {
+                    vec2 size = max(rect.zw - rect.xy, vec2(0.003));
+                    vec2 center = (rect.xy + rect.zw) * 0.5;
+                    vec2 q = (p - center) / size;
+                    float core = exp(-dot(q * vec2(2.6, 3.4), q * vec2(2.6, 3.4)) * 2.4);
+                    float up = (center.y - p.y) / max(size.y, 0.004);
+                    float sway = sin(up * 8.0 + uTime * 8.5 + phase) * 0.16
+                        + sin(up * 17.0 - uTime * 11.0 + phase * 1.7) * 0.06;
+                    float taper = max(0.08, 0.42 - up * 0.10);
+                    float plume = exp(-abs(q.x - sway) / taper)
+                        * smoothstep(-0.10, 0.12, up)
+                        * (1.0 - smoothstep(0.25, 3.20, up));
+                    return clamp(core + plume * 0.92, 0.0, 1.0);
                 }
 
                 float electricBand(vec2 uv, float phase) {
@@ -458,14 +556,26 @@ internal class CreatorEffectGraphV25 private constructor(
 
                     if (uClone > 0.001) {
                         float cloneStrength = clamp(uClone, 0.0, 1.5);
-                        float spread = 0.055 + 0.065 * min(cloneStrength, 1.0);
-                        float breathe = 0.012 * sin(uTime * 1.7);
-                        vec2 leftOffset = vec2(spread + breathe, 0.010 * sin(uTime * 1.2));
-                        vec2 rightOffset = vec2(-spread - breathe, -0.010 * sin(uTime * 1.2));
-                        vec3 leftClone = sampleCreator(uv + leftOffset);
-                        vec3 rightClone = sampleCreator(uv + rightOffset);
-                        vec3 cloneMix = (center.rgb + leftClone + rightClone) / 3.0;
-                        rgb = mix(rgb, cloneMix, clamp(cloneStrength * 0.66, 0.0, 0.84));
+                        float spread = mix(0.105, 0.175, min(cloneStrength, 1.0));
+                        float breathe = 0.010 * sin(uTime * 1.7);
+                        vec2 leftUv = clamp(uv + vec2(spread + breathe, 0.006 * sin(uTime * 1.2)), 0.001, 0.999);
+                        vec2 rightUv = clamp(uv - vec2(spread + breathe, 0.006 * sin(uTime * 1.2)), 0.001, 0.999);
+                        vec3 leftClone = sampleCreator(leftUv);
+                        vec3 rightClone = sampleCreator(rightUv);
+
+                        vec2 outputP = vec2(uv.x, 1.0 - uv.y);
+                        vec2 leftSourceP = vec2(leftUv.x, 1.0 - leftUv.y);
+                        vec2 rightSourceP = vec2(rightUv.x, 1.0 - rightUv.y);
+                        float originalBody = bodyMaskAt(outputP);
+                        float leftBody = bodyMaskAt(leftSourceP);
+                        float rightBody = bodyMaskAt(rightSourceP);
+
+                        // Opaque subject-only clone compositing. Keeping the original subject on top
+                        // prevents the washed-out three-exposure look that the old frame averaging caused.
+                        float alpha = clamp(0.82 + cloneStrength * 0.12, 0.0, 0.98);
+                        float keepCenterClear = 1.0 - originalBody * 0.88;
+                        rgb = mix(rgb, leftClone, leftBody * keepCenterClear * alpha);
+                        rgb = mix(rgb, rightClone, rightBody * keepCenterClear * alpha);
                     }
 
                     if (uSmear > 0.001) {
@@ -525,6 +635,56 @@ internal class CreatorEffectGraphV25 private constructor(
                         );
                         rgb += electricColor * bolt * electricStrength * 0.52;
                         rgb += vec3(1.0) * smoothstep(0.60, 1.15, bolt) * electricStrength * 0.18;
+                    }
+
+                    vec2 topLeftP = vec2(vTexCoord.x, 1.0 - vTexCoord.y);
+
+                    if (uFireEyes > 0.001) {
+                        float fireStrength = clamp(uFireEyes, 0.0, 1.5);
+                        float leftFire = eyeFireMask(topLeftP, resolvedLeftEyeRect(), 0.7);
+                        float rightFire = eyeFireMask(topLeftP, resolvedRightEyeRect(), 2.3);
+                        float fire = clamp(leftFire + rightFire, 0.0, 1.0);
+                        float hot = smoothstep(0.42, 0.92, fire);
+                        vec3 flameColor = mix(vec3(1.00, 0.10, 0.01), vec3(1.00, 0.90, 0.16), hot);
+                        rgb = mix(rgb, max(rgb, flameColor * (0.78 + 0.42 * hot)),
+                            clamp(fire * fireStrength * 0.96, 0.0, 0.98));
+                        rgb += flameColor * fire * fireStrength * 0.28;
+                    }
+
+                    if (uBodyElectric > 0.001) {
+                        float strength = clamp(uBodyElectric, 0.0, 1.5);
+                        vec4 rect = resolvedBodyRect();
+                        vec2 bodySize = max(rect.zw - rect.xy, vec2(0.005));
+                        vec2 local = (topLeftP - rect.xy) / bodySize;
+                        float body = bodyMaskAt(topLeftP);
+                        float movingY = fract(local.y + uTime * 0.42);
+                        vec2 electricUv = vec2(local.x, movingY);
+                        float boltA = electricBand(electricUv, 0.4);
+                        float boltB = electricBand(vec2(1.0 - electricUv.x, electricUv.y), 2.1) * 0.76;
+                        float boltC = electricBand(vec2(electricUv.x, fract(electricUv.y + 0.34)), 4.4) * 0.55;
+                        float bolt = clamp((boltA + boltB + boltC) * body, 0.0, 1.35);
+                        vec3 currentColor = mix(
+                            vec3(0.12, 0.70, 1.00),
+                            vec3(0.66, 0.22, 1.00),
+                            sin(uTime * 3.1 + local.y * 7.0) * 0.5 + 0.5
+                        );
+                        rgb += currentColor * bolt * strength * 0.58;
+                        rgb += vec3(1.0) * smoothstep(0.68, 1.08, bolt) * strength * 0.26;
+                    }
+
+                    if (uBodyAura > 0.001) {
+                        float auraStrength = clamp(uBodyAura, 0.0, 1.5);
+                        vec4 rect = resolvedBodyRect();
+                        float outer = ellipseMask(topLeftP, rect, 0.92, 1.34);
+                        float inner = ellipseMask(topLeftP, rect, 0.52, 0.88);
+                        float rim = clamp(outer - inner, 0.0, 1.0);
+                        float pulse = 0.78 + 0.22 * sin(uTime * 5.0);
+                        vec3 auraColor = mix(
+                            vec3(0.06, 0.82, 1.00),
+                            vec3(0.74, 0.18, 1.00),
+                            sin(uTime * 1.7 + topLeftP.y * 5.0) * 0.5 + 0.5
+                        );
+                        rgb += auraColor * rim * auraStrength * pulse * 0.54;
                     }
 
                     float grain = (hash21(vTexCoord * vec2(1920.0, 1080.0)) - 0.5) * 2.0;
