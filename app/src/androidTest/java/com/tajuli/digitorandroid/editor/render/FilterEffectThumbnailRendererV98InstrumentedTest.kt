@@ -71,7 +71,7 @@ class FilterEffectThumbnailRendererV98InstrumentedTest {
         FilterEffectThumbnailRendererV98.clearMemoryCacheForTest()
         FilterEffectThumbnailRendererV98.resetStatsForTest()
 
-        listOf("Cross Shift", "X Clone", "Electric Current").forEach { name ->
+        listOf("Cross Shift", "X Clone", "Electric Current", "Fire Eyes", "Current Passing").forEach { name ->
             val output = FilterEffectThumbnailRendererV98.renderEffect(context, name)
             assertEquals(320, output.width)
             assertEquals(180, output.height)
