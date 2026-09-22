@@ -31,16 +31,20 @@ data class CreatorEffectVectorV25(
     val smear: Float = 0f,
     val edgeGlow: Float = 0f,
     val electric: Float = 0f,
+    val fireEyes: Float = 0f,
+    val bodyElectric: Float = 0f,
+    val bodyAura: Float = 0f,
 ) {
     val isIdentity: Boolean
         get() = blur == 0f && sharpen == 0f && glow == 0f && grain == 0f && vignette == 0f &&
             rgbSplit == 0f && scanlines == 0f && pixelate == 0f && wave == 0f && lens == 0f &&
             zoomBlur == 0f && ghost == 0f && flicker == 0f && warm == 0f && denoise == 0f &&
-            crossShift == 0f && clone == 0f && smear == 0f && edgeGlow == 0f && electric == 0f
+            crossShift == 0f && clone == 0f && smear == 0f && edgeGlow == 0f && electric == 0f &&
+            fireEyes == 0f && bodyElectric == 0f && bodyAura == 0f
 }
 
 object CreatorEffectCatalogV25 {
-    val categories: List<String> = listOf("Trending", "Basic", "Glitch", "Retro", "Lens", "Motion", "Clone", "Glow")
+    val categories: List<String> = listOf("Trending", "Basic", "Glitch", "Retro", "Lens", "Motion", "Body", "Clone", "Glow")
 
     val presets: List<CreatorEffectPresetV25> = listOf(
         // Trending — original Digitor GPU effects inspired by short-form editor effect families.
@@ -112,6 +116,14 @@ object CreatorEffectCatalogV25 {
         p("Spin Blur", "Motion", zoomBlur = .70f, wave = .36f),
         p("Flash", "Motion", glow = .82f, flicker = .82f),
 
+        // Body / face-tracked. The renderer starts with a center fallback and refines to ML face
+        // geometry in the background so eyes/body-localized overlays stay attached to the subject.
+        p("Fire Eyes", "Body", fireEyes = 1.00f),
+        p("Flame Eyes", "Body", fireEyes = .86f, glow = .22f, flicker = .10f),
+        p("Current Passing", "Body", bodyElectric = 1.00f),
+        p("Electric Body", "Body", bodyElectric = .78f, bodyAura = .82f),
+        p("Neon Body", "Body", bodyAura = 1.00f, bodyElectric = .24f),
+
         // Clone
         p("X Clone", "Clone", clone = 1.00f, crossShift = .62f),
         p("Clone Jutsu", "Clone", clone = 1.20f, ghost = .28f, wave = .12f),
@@ -160,6 +172,9 @@ fun resolveCreatorEffectsV25(effects: List<NodeEffect>): CreatorEffectVectorV25 
             smear = (out.smear + v.smear * a).coerceIn(0f, 1.5f),
             edgeGlow = (out.edgeGlow + v.edgeGlow * a).coerceIn(0f, 1.5f),
             electric = (out.electric + v.electric * a).coerceIn(0f, 1.5f),
+            fireEyes = (out.fireEyes + v.fireEyes * a).coerceIn(0f, 1.5f),
+            bodyElectric = (out.bodyElectric + v.bodyElectric * a).coerceIn(0f, 1.5f),
+            bodyAura = (out.bodyAura + v.bodyAura * a).coerceIn(0f, 1.5f),
         )
     }
     return out
@@ -189,6 +204,9 @@ private fun p(
     smear: Float = 0f,
     edgeGlow: Float = 0f,
     electric: Float = 0f,
+    fireEyes: Float = 0f,
+    bodyElectric: Float = 0f,
+    bodyAura: Float = 0f,
 ): CreatorEffectPresetV25 = CreatorEffectPresetV25(
     name = name,
     category = category,
@@ -213,5 +231,8 @@ private fun p(
         smear = smear,
         edgeGlow = edgeGlow,
         electric = electric,
+        fireEyes = fireEyes,
+        bodyElectric = bodyElectric,
+        bodyAura = bodyAura,
     ),
 )
