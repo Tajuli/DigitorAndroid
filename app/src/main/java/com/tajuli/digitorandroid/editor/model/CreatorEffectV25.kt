@@ -26,17 +26,31 @@ data class CreatorEffectVectorV25(
     val flicker: Float = 0f,
     val warm: Float = 0f,
     val denoise: Float = 0f,
+    val crossShift: Float = 0f,
+    val clone: Float = 0f,
+    val smear: Float = 0f,
+    val edgeGlow: Float = 0f,
+    val electric: Float = 0f,
 ) {
     val isIdentity: Boolean
         get() = blur == 0f && sharpen == 0f && glow == 0f && grain == 0f && vignette == 0f &&
             rgbSplit == 0f && scanlines == 0f && pixelate == 0f && wave == 0f && lens == 0f &&
-            zoomBlur == 0f && ghost == 0f && flicker == 0f && warm == 0f && denoise == 0f
+            zoomBlur == 0f && ghost == 0f && flicker == 0f && warm == 0f && denoise == 0f &&
+            crossShift == 0f && clone == 0f && smear == 0f && edgeGlow == 0f && electric == 0f
 }
 
 object CreatorEffectCatalogV25 {
-    val categories: List<String> = listOf("Basic", "Glitch", "Retro", "Lens", "Motion")
+    val categories: List<String> = listOf("Trending", "Basic", "Glitch", "Retro", "Lens", "Motion", "Clone", "Glow")
 
     val presets: List<CreatorEffectPresetV25> = listOf(
+        // Trending — original Digitor GPU effects inspired by short-form editor effect families.
+        p("Cross Shift", "Trending", crossShift = 1.00f, rgbSplit = .24f),
+        p("Luminous Smear", "Trending", smear = 1.00f, glow = .54f),
+        p("Electric Current", "Trending", electric = 1.00f, edgeGlow = .62f, glow = .24f),
+        p("Neon Outline", "Trending", edgeGlow = 1.00f, glow = .24f),
+        p("Prism Trail", "Trending", smear = .56f, rgbSplit = .62f, ghost = .34f),
+        p("Echo Clone", "Trending", clone = .68f, ghost = .42f, rgbSplit = .16f),
+
         // Basic
         p("Blur", "Basic", blur = 1.00f),
         p("Sharpen", "Basic", sharpen = 1.00f),
@@ -97,6 +111,20 @@ object CreatorEffectCatalogV25 {
         p("Pulse Zoom", "Motion", zoomBlur = .62f, flicker = .24f),
         p("Spin Blur", "Motion", zoomBlur = .70f, wave = .36f),
         p("Flash", "Motion", glow = .82f, flicker = .82f),
+
+        // Clone
+        p("X Clone", "Clone", clone = 1.00f, crossShift = .62f),
+        p("Clone Jutsu", "Clone", clone = 1.20f, ghost = .28f, wave = .12f),
+        p("Triple Clone", "Clone", clone = .82f),
+        p("Mirror Echo", "Clone", clone = .66f, ghost = .38f, lens = -.12f),
+        p("Shadow Copies", "Clone", clone = .74f, smear = .34f, vignette = .16f),
+
+        // Glow
+        p("Electric Aura", "Glow", electric = .56f, edgeGlow = .82f, glow = .42f),
+        p("Luminous Trails", "Glow", smear = .82f, edgeGlow = .30f, ghost = .44f),
+        p("Plasma Edge", "Glow", edgeGlow = 1.00f, electric = .40f, rgbSplit = .14f),
+        p("Flash Outline", "Glow", edgeGlow = .76f, flicker = .36f, glow = .46f),
+        p("Neon Pulse", "Glow", edgeGlow = .70f, glow = .56f, flicker = .24f, electric = .22f),
     )
 
     private val byName = presets.associateBy { it.name.lowercase() }
@@ -127,6 +155,11 @@ fun resolveCreatorEffectsV25(effects: List<NodeEffect>): CreatorEffectVectorV25 
             flicker = (out.flicker + v.flicker * a).coerceIn(0f, 1.5f),
             warm = (out.warm + v.warm * a).coerceIn(-1f, 1.5f),
             denoise = (out.denoise + v.denoise * a).coerceIn(0f, 1.5f),
+            crossShift = (out.crossShift + v.crossShift * a).coerceIn(0f, 1.5f),
+            clone = (out.clone + v.clone * a).coerceIn(0f, 1.5f),
+            smear = (out.smear + v.smear * a).coerceIn(0f, 1.5f),
+            edgeGlow = (out.edgeGlow + v.edgeGlow * a).coerceIn(0f, 1.5f),
+            electric = (out.electric + v.electric * a).coerceIn(0f, 1.5f),
         )
     }
     return out
@@ -151,6 +184,11 @@ private fun p(
     flicker: Float = 0f,
     warm: Float = 0f,
     denoise: Float = 0f,
+    crossShift: Float = 0f,
+    clone: Float = 0f,
+    smear: Float = 0f,
+    edgeGlow: Float = 0f,
+    electric: Float = 0f,
 ): CreatorEffectPresetV25 = CreatorEffectPresetV25(
     name = name,
     category = category,
@@ -170,5 +208,10 @@ private fun p(
         flicker = flicker,
         warm = warm,
         denoise = denoise,
+        crossShift = crossShift,
+        clone = clone,
+        smear = smear,
+        edgeGlow = edgeGlow,
+        electric = electric,
     ),
 )
