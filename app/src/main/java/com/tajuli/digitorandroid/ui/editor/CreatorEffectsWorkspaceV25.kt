@@ -28,21 +28,28 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
+import com.tajuli.digitorandroid.editor.model.CreatorEffectPresetV25
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
+import com.tajuli.digitorandroid.editor.processing.BeautyFaceAnalyzerV28
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val Fx25Panel = Color(0xFF0B0B0F)
 private val Fx25Raised = Color(0xFF17171C)
@@ -67,6 +74,8 @@ fun CreatorEffectsWorkspace(
         return
     }
 
+    val context = LocalContext.current.applicationContext
+    val scope = rememberCoroutineScope()
     val timelineSelection by EffectTimelineSelectionBusV26.selection.collectAsState()
     val selectedEffectId = timelineSelection
         ?.takeIf { it.clipId == clip.id && it.nodeId == node.id }
@@ -81,6 +90,40 @@ fun CreatorEffectsWorkspace(
         TimelineTextSelectionBusV10.clear()
         VisualOverlaySelectionBusV19.clear()
         EffectTimelineSelectionBusV26.select(clip.id, node.id, effectId)
+    }
+
+    fun refineTrackedSubjectInBackground(preset: CreatorEffectPresetV25) {
+        val v = preset.vector
+        val needsTracking = v.clone > .001f || v.fireEyes > .001f ||
+            v.bodyElectric > .001f || v.bodyAura > .001f
+        if (!needsTracking) return
+
+        vm.setEditorStatusV19(preset.name + " active · refining face/body tracking…")
+        scope.launch {
+            val analysisClip = vm.state.value.project.clip(clip.id) ?: clip
+            val track = runCatching {
+                withContext(Dispatchers.Default) {
+                    BeautyFaceAnalyzerV28(context).analyzeAndStore(
+                        analysisClip,
+                        requireHairMask = false,
+                        requireSkinMask = false,
+                    )
+                }
+            }.getOrElse { error ->
+                vm.setEditorStatusV19(
+                    preset.name + " active · center fallback in use: " +
+                        (error.message ?: "tracking unavailable"),
+                )
+                return@launch
+            }
+            vm.setEditorStatusV19(
+                if (track.samples.any { it.geometry != null }) {
+                    preset.name + " ready · subject tracking refined"
+                } else {
+                    preset.name + " active · no clear face found; center fallback remains active"
+                },
+            )
+        }
     }
 
     Column(modifier.background(Fx25Panel)) {
@@ -149,6 +192,7 @@ fun CreatorEffectsWorkspace(
                                 )
                             } else {
                                 vm.addEffectToSelectedNode(preset.name)
+                                refineTrackedSubjectInBackground(preset)
                                 val updatedNode = vm.state.value.project.clip(clip.id)
                                     ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
                                 updatedNode?.effects?.lastOrNull { it.name == preset.name }?.let { selectEffect(it.id) }
