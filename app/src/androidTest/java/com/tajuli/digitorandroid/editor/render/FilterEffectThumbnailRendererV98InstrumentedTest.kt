@@ -66,6 +66,21 @@ class FilterEffectThumbnailRendererV98InstrumentedTest {
     }
 
     @Test
+    fun representativeTrendingCloneAndGlowEffects_renderThroughProductionShader() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        FilterEffectThumbnailRendererV98.clearMemoryCacheForTest()
+        FilterEffectThumbnailRendererV98.resetStatsForTest()
+
+        listOf("Cross Shift", "X Clone", "Electric Current").forEach { name ->
+            val output = FilterEffectThumbnailRendererV98.renderEffect(context, name)
+            assertEquals(320, output.width)
+            assertEquals(180, output.height)
+        }
+
+        assertEquals(0, FilterEffectThumbnailRendererV98.fallbackCountForTest())
+    }
+
+    @Test
     fun unknownEffect_fallsBackWithoutCrashing() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         FilterEffectThumbnailRendererV98.clearMemoryCacheForTest()
