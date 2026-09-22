@@ -20,6 +20,8 @@ data class CutoutAnalysisRuntimeStateV66(
     val phase: CutoutAnalysisPhaseV66 = CutoutAnalysisPhaseV66.IDLE,
     val clipId: String? = null,
     val savedFrames: Int = 0,
+    /** Planned matte frames for user-facing progress. Zero means the decoder could not estimate it. */
+    val expectedFrames: Int = 0,
     val resumed: Boolean = false,
     val detail: String? = null,
 ) {
@@ -64,6 +66,16 @@ object CutoutAnalysisRuntimeV66 {
             if (current.phase == CutoutAnalysisPhaseV66.IDLE) return
             if (savedFrames <= current.savedFrames) return
             _state.value = current.copy(savedFrames = savedFrames)
+        }
+    }
+
+    fun updateExpectedFrames(expectedFrames: Int) {
+        synchronized(lock) {
+            val current = _state.value
+            if (current.phase == CutoutAnalysisPhaseV66.IDLE) return
+            val normalized = expectedFrames.coerceAtLeast(current.savedFrames).coerceAtLeast(1)
+            if (normalized == current.expectedFrames) return
+            _state.value = current.copy(expectedFrames = normalized)
         }
     }
 
@@ -167,6 +179,7 @@ object CutoutAnalysisRuntimeV66 {
         _state.value = current.copy(
             phase = CutoutAnalysisPhaseV66.COMPLETED,
             savedFrames = savedFrames.coerceAtLeast(0),
+            expectedFrames = savedFrames.coerceAtLeast(0),
             detail = "Matte analysis complete",
         )
     }

@@ -67,7 +67,7 @@ fun EditorViewModel.setSelectedCutoutV43(
 }
 
 fun EditorViewModel.enablePersonCutoutV43(settings: ClipCutoutV43) {
-    val person = settings.copy(mode = CutoutModeV43.PERSON).normalized()
+    val person = settings.copy(mode = CutoutModeV43.PERSON, portraitLensBlurV99 = false).normalized()
     val label = person.analysisQualityV47.uiLabelV47()
     setSelectedCutoutV43(
         person,

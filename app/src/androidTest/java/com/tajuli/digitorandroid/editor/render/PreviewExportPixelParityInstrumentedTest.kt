@@ -37,6 +37,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -203,6 +204,76 @@ class PreviewExportPixelParityInstrumentedTest {
         assertArrayEquals(previewPixels, exportPixels)
     }
 
+    @Test
+    fun portraitLensBlur_livePreviewMatchesExportAndMissingMatteIsIdentity() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val width = 128
+        val height = 128
+        val uri = "content://synthetic/lens-${System.nanoTime()}"
+        val timestampUs = 500_000L
+        val settings = com.tajuli.digitorandroid.editor.model.ClipCutoutV43(
+            mode = com.tajuli.digitorandroid.editor.model.CutoutModeV43.PERSON,
+            portraitLensBlurV99 = true,
+            lensBlurAmountV99 = 1f,
+            mattingSizeV69 = 256,
+        )
+        val clip = TimelineClip(id = "lens-parity", uri = uri, label = "Lens",
+            timelineStartUs = 0L, sourceOutUs = 1_000_000L, cutoutV43 = settings)
+        val track = TimelineTrack(id = "lens-track", name = "V1", kind = TrackKind.VIDEO, clips = listOf(clip))
+        val project = TimelineProject(width = width, height = height, tracks = listOf(track))
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val mask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        for (y in 0 until height) for (x in 0 until width) {
+            bitmap.setPixel(x, y, if (x < width / 2) Color.RED else if ((x + y) % 2 == 0) Color.WHITE else Color.BLACK)
+            mask.setPixel(x, y, if (x < width / 2) Color.WHITE else Color.BLACK)
+        }
+        val maskFile = com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43.save(context, uri, timestampUs, mask)
+        mask.recycle()
+        val format = Format.Builder().setWidth(width).setHeight(height).setColorInfo(
+            ColorInfo.Builder().setColorSpace(C.COLOR_SPACE_BT709).setColorRange(C.COLOR_RANGE_FULL)
+                .setColorTransfer(C.COLOR_TRANSFER_SRGB).build(),
+        ).build()
+        fun render(testClip: TimelineClip, preview: Boolean): ByteArray {
+            val testTrack = track.copy(clips = listOf(testClip))
+            val testProject = project.copy(tracks = listOf(testTrack))
+            PreviewProjectRegistry.update(testProject)
+            return renderOneFrame(context, testProject, listOf(testTrack), listOf(testClip), format,
+                listOf(timestampUs), listOf(0L), listOf(if (preview) SharedVideoPipeline.compositedPreviewEffectsFor(testClip)
+                else SharedVideoPipeline.compositedExportEffectsFor(testClip)), preview, bitmap,
+                // The real live chain includes resident beauty/creator shaders as well as lens
+                // blur. SwiftShader compiles these on first frame; retain all pixel assertions
+                // but allow a bounded cold-start budget instead of the minimal static chain's 10s.
+                outputTimeoutSeconds = 60L)
+        }
+        try {
+            val preview = render(clip, true)
+            val export = render(clip, false)
+            // Preview and export traverse slightly different Media3 color-conversion paths on
+            // the emulator. Allow a single 8-bit code value of rounding drift while still
+            // requiring every pixel/channel to match visually; subject identity below remains exact.
+            assertEquals("Portrait preview/export byte count mismatch", export.size, preview.size)
+            for (i in export.indices) {
+                val expected = export[i].toInt() and 0xff
+                val actual = preview[i].toInt() and 0xff
+                org.junit.Assert.assertTrue(
+                    "Portrait live preview/export mismatch at byte $i: expected=$expected actual=$actual",
+                    kotlin.math.abs(expected - actual) <= 1,
+                )
+            }
+            val identity = render(clip.copy(cutoutV43 = null), false)
+            for (y in 4 until height - 4) for (x in 4 until width / 2 - 2) for (c in 0..3) {
+                val index = (y * width + x) * 4 + c
+                org.junit.Assert.assertEquals("Subject details changed", identity[index], export[index])
+            }
+            assertTrue("Background must visibly change", !export.contentEquals(identity))
+            assertArrayEquals(identity, render(clip.copy(cutoutV43 = settings.copy(lensBlurAmountV99 = 0f)), false))
+            assertArrayEquals(identity, render(clip.copy(uri = uri + "-missing"), false))
+        } finally {
+            maskFile.delete()
+            bitmap.recycle()
+        }
+    }
+
     private fun renderOneFrame(
         context: android.content.Context,
         project: TimelineProject,
@@ -214,6 +285,7 @@ class PreviewExportPixelParityInstrumentedTest {
         effects: List<List<androidx.media3.common.Effect>>,
         livePreview: Boolean,
         bitmap: Bitmap,
+        outputTimeoutSeconds: Long = 10L,
     ): ByteArray {
         require(tracks.size == clips.size)
         require(tracks.size == inputTimestampsUs.size)
@@ -311,7 +383,7 @@ class PreviewExportPixelParityInstrumentedTest {
             // waiting indefinitely for a later timestamp.
             tracks.indices.forEach { index -> graph.signalEndOfInput(index) }
 
-            assertTrue("Timed out waiting for graph output", outputLatch.await(10, TimeUnit.SECONDS))
+            assertTrue("Timed out waiting for graph output", outputLatch.await(outputTimeoutSeconds, TimeUnit.SECONDS))
             throwIfGraphFailed(error.get())
             assertTrue("Timed out waiting for RGBA output", imageLatch.await(10, TimeUnit.SECONDS))
             throwIfGraphFailed(error.get())

@@ -20,6 +20,7 @@ bool IsSupportedModelSize(int size) {
 
 std::once_flag gGpuInitOnce;
 int gGpuInitResult = -1;
+std::mutex gEngineLifecycleMutex;
 
 bool EnsureVulkanRuntime() {
     std::call_once(gGpuInitOnce, []() {
@@ -64,11 +65,19 @@ struct Engine {
     double lastInferenceMs = -1.0;
 
     ~Engine() {
+        // Release Net-owned Vulkan pipelines/weights before returning its allocators to ncnn's
+        // device pool. Reclaiming the allocators first can leave the Net destructor touching
+        // already-recycled Vulkan state during a cancel -> settings change -> analyze restart.
+        net.clear();
         if (vkdev != nullptr) {
             if (blobAllocator != nullptr) vkdev->reclaim_blob_allocator(blobAllocator);
             if (workspaceAllocator != nullptr) vkdev->reclaim_blob_allocator(workspaceAllocator);
             if (stagingAllocator != nullptr) vkdev->reclaim_staging_allocator(stagingAllocator);
         }
+        blobAllocator = nullptr;
+        workspaceAllocator = nullptr;
+        stagingAllocator = nullptr;
+        vkdev = nullptr;
     }
 };
 
@@ -215,6 +224,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_createEngin
         jint threads,
         jint requestedModelSize) {
     const int modelSize = static_cast<int>(requestedModelSize);
+    std::lock_guard<std::mutex> lifecycleGuard(gEngineLifecycleMutex);
     if (!IsSupportedModelSize(modelSize)) {
         ThrowJava(env, "java/lang/IllegalArgumentException", "PP-MattingV2 model size must be 256, 320, 384 or 512");
         return 0;
@@ -361,5 +371,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_gpuName(
 extern "C" JNIEXPORT void JNICALL
 Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanNativeV52_destroy(
         JNIEnv*, jobject, jlong handle) {
-    if (handle != 0) delete reinterpret_cast<Engine*>(handle);
+    if (handle == 0) return;
+    std::lock_guard<std::mutex> lifecycleGuard(gEngineLifecycleMutex);
+    delete reinterpret_cast<Engine*>(handle);
 }

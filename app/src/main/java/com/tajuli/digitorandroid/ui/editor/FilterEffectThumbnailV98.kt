@@ -44,6 +44,18 @@ internal fun EffectThumbnailV98(
 }
 
 @Composable
+internal fun PortraitLensBlurThumbnailV101(
+    modifier: Modifier = Modifier,
+) {
+    ThumbnailV98(
+        cacheKey = "portrait-lens-blur",
+        modifier = modifier,
+    ) { context ->
+        FilterEffectThumbnailRendererV98.renderPortraitLensBlur(context)
+    }
+}
+
+@Composable
 internal fun IdentityThumbnailV98(
     modifier: Modifier = Modifier,
 ) {

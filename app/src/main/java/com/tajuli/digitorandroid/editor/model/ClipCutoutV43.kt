@@ -57,6 +57,9 @@ data class ClipCutoutV43(
     val mattingSizeV69: Int = 320,
     /** V71: Chroma stays visually inactive until a preview color sample has actually been accepted. */
     val chromaKeyColorPickedV71: Boolean = false,
+    /** PERSON output retains the scene and defocuses only the background. Legacy default is off. */
+    val portraitLensBlurV99: Boolean = false,
+    val lensBlurAmountV99: Float = .55f,
 ) {
     fun normalized(): ClipCutoutV43 {
         val legacyPersonDefaults = personThreshold == .42f && personFeather == .12f
@@ -92,6 +95,7 @@ data class ClipCutoutV43(
 
         return copy(
             mattingSizeV69 = normalizedPpMattingSizeV69(mattingSizeV69),
+            lensBlurAmountV99 = if (lensBlurAmountV99.isFinite()) lensBlurAmountV99.coerceIn(0f, 1f) else .55f,
             personThreshold = tunedThreshold.coerceIn(.05f, .95f),
             personFeather = tunedFeather.coerceIn(.005f, .45f),
             keyRed = keyRed.coerceIn(0f, 1f),

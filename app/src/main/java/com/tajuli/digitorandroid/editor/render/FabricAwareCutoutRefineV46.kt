@@ -87,6 +87,7 @@ internal class FabricAwareCutoutRefineV46 private constructor(
                     "uTexelSize",
                     floatArrayOf(1f / inputWidth.toFloat(), 1f / inputHeight.toFloat()),
                 )
+                program.setFloatUniform("uBypass", if (settings.mode != CutoutModeV43.PERSON || settings.portraitLensBlurV99) 1f else 0f)
                 program.setFloatUniform("uDehalo", settings.dehaloV44)
                 program.setFloatUniform("uEdgeClean", settings.edgeCleanV44)
                 program.bindAttributesAndUniforms()
@@ -123,6 +124,7 @@ internal class FabricAwareCutoutRefineV46 private constructor(
                 precision highp float;
                 uniform sampler2D uTexSampler;
                 uniform vec2 uTexelSize;
+                uniform float uBypass;
                 uniform float uDehalo;
                 uniform float uEdgeClean;
                 varying vec2 vTexCoord;
@@ -200,6 +202,7 @@ internal class FabricAwareCutoutRefineV46 private constructor(
 
                 void main() {
                     vec4 center = texture2D(uTexSampler, vTexCoord);
+                    if (uBypass > 0.5) { gl_FragColor = center; return; }
                     float alpha = center.a;
                     if (alpha <= 0.002 || alpha >= 0.998) {
                         gl_FragColor = center;
