@@ -78,14 +78,21 @@ internal class CreatorEffectGraphV25 private constructor(
     ) {
         private val appContext = context.applicationContext
         private val plan = SpatialNodeGraphPlan.compile(clip.nodeGraph)
+        private val supportsTrackedFx = clip.nodeGraph.nodes.any { node ->
+            node.kind == NodeKind.SERIAL || node.kind == NodeKind.PARALLEL
+        } && clip.nodeGraph.nodes.any { node ->
+            vectorRequiresTrackedFx(resolveCreatorEffectsV25(node.visibleEffects()))
+        }
         private val nodeProgram: GlProgram
+        private val trackedNodeProgram: GlProgram?
         private val mixProgram: GlProgram
         private val copyProgram: GlProgram
         private var inputWidth = 1
         private var inputHeight = 1
         private var scratchTextures = IntArray(0)
         private var scratchFbos = IntArray(0)
-        private var faceTrack: BeautyFaceTrackV28? = BeautyFaceTrackStoreV28.load(appContext, clip)
+        private var faceTrack: BeautyFaceTrackV28? =
+            if (supportsTrackedFx) BeautyFaceTrackStoreV28.load(appContext, clip) else null
         private var lastFaceTrackRefreshMs = 0L
         private var personMaskTextureA = 0
         private var personMaskTextureB = 0
@@ -94,11 +101,16 @@ internal class CreatorEffectGraphV25 private constructor(
 
         init {
             try {
-                nodeProgram = newProgram(NODE_FRAGMENT_SHADER)
+                nodeProgram = newProgram(
+                    NODE_FRAGMENT_SHADER.replace("#define DIGITOR_TRACKED_FX 1", "#define DIGITOR_TRACKED_FX 0"),
+                )
+                trackedNodeProgram = if (supportsTrackedFx) newProgram(NODE_FRAGMENT_SHADER) else null
                 mixProgram = newProgram(MIX_FRAGMENT_SHADER)
                 copyProgram = newProgram(COPY_FRAGMENT_SHADER)
-                personMaskTextureA = createMaskTexture()
-                personMaskTextureB = createMaskTexture()
+                if (supportsTrackedFx) {
+                    personMaskTextureA = createMaskTexture()
+                    personMaskTextureB = createMaskTexture()
+                }
             } catch (error: GlUtil.GlException) {
                 throw VideoFrameProcessingException(error)
             }
@@ -134,10 +146,23 @@ internal class CreatorEffectGraphV25 private constructor(
                 val media3OutputFbo = outputFboHolder[0]
                 val currentClip = if (preview) PreviewProjectRegistry.clip(clip.id) ?: clip else clip
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
-                val faceGeometry = refreshFaceTrack(currentClip)?.geometryAt(sourceUs)
-                val personBracket = personBracket(currentClip, sourceUs)
-                val hasPersonMaskA = bindPersonMask(personMaskTextureA, personBracket.a?.file?.absolutePath, true)
-                val hasPersonMaskB = bindPersonMask(personMaskTextureB, personBracket.b?.file?.absolutePath, false)
+                val currentRequiresTrackedFx = currentClip.nodeGraph.nodes.any { node ->
+                    vectorRequiresTrackedFx(resolveCreatorEffectsV25(node.visibleEffects()))
+                }
+                val faceGeometry = if (currentRequiresTrackedFx) {
+                    refreshFaceTrack(currentClip)?.geometryAt(sourceUs)
+                } else {
+                    null
+                }
+                val personBracket = if (currentRequiresTrackedFx && supportsTrackedFx) {
+                    personBracket(currentClip, sourceUs)
+                } else {
+                    PersonMaskBracket.empty()
+                }
+                val hasPersonMaskA = currentRequiresTrackedFx && supportsTrackedFx &&
+                    bindPersonMask(personMaskTextureA, personBracket.a?.file?.absolutePath, true)
+                val hasPersonMaskB = currentRequiresTrackedFx && supportsTrackedFx &&
+                    bindPersonMask(personMaskTextureB, personBracket.b?.file?.absolutePath, false)
                 val slotTextures = IntArray(plan.operations.size) { inputTexId }
                 var scratchCursor = 0
 
