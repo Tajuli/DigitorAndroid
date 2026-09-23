@@ -84,7 +84,7 @@ internal class CreatorEffectGraphV25 private constructor(
             vectorRequiresTrackedFx(resolveCreatorEffectsV25(node.visibleEffects()))
         }
         private val nodeProgram: GlProgram
-        private val trackedNodeProgram: GlProgram?
+        private var trackedNodeProgram: GlProgram?
         private val mixProgram: GlProgram
         private val copyProgram: GlProgram
         private var inputWidth = 1
@@ -209,15 +209,26 @@ internal class CreatorEffectGraphV25 private constructor(
                             if (vector.isIdentity) {
                                 slotTextures[operation.slot] = input
                             } else {
+                                val tracked = vectorRequiresTrackedFx(vector)
+                                val renderProgram = if (tracked) {
+                                    trackedNodeProgram ?: newProgram(NODE_FRAGMENT_SHADER).also {
+                                        trackedNodeProgram = it
+                                        if (personMaskTextureA == 0) personMaskTextureA = createMaskTexture()
+                                        if (personMaskTextureB == 0) personMaskTextureB = createMaskTexture()
+                                    }
+                                } else {
+                                    nodeProgram
+                                }
                                 val (texture, fbo) = nextScratch()
                                 focus(fbo)
                                 renderNode(
-                                    nodeProgram,
+                                    renderProgram,
                                     input,
                                     vector,
                                     evaluated.id,
                                     sourceUs,
                                     faceGeometry,
+                                    tracked,
                                     hasPersonMaskA,
                                     hasPersonMaskB,
                                     personBracket.mix,
@@ -415,14 +426,17 @@ internal class CreatorEffectGraphV25 private constructor(
             nodeId: String,
             sourceUs: Long,
             geometry: BeautyFaceGeometryV28?,
+            tracked: Boolean,
             hasPersonMaskA: Boolean,
             hasPersonMaskB: Boolean,
             personTemporalMix: Float,
         ) {
             program.use()
             program.setSamplerTexIdUniform("uTexSampler", inputTexture, 0)
-            program.setSamplerTexIdUniform("uPersonMaskA", personMaskTextureA, 1)
-            program.setSamplerTexIdUniform("uPersonMaskB", personMaskTextureB, 2)
+            if (tracked) {
+                program.setSamplerTexIdUniform("uPersonMaskA", personMaskTextureA, 1)
+                program.setSamplerTexIdUniform("uPersonMaskB", personMaskTextureB, 2)
+            }
             program.setFloatsUniform(
                 "uTexelSize",
                 floatArrayOf(1f / inputWidth.toFloat(), 1f / inputHeight.toFloat()),
@@ -443,24 +457,26 @@ internal class CreatorEffectGraphV25 private constructor(
             program.setFloatUniform("uWarm", v.warm)
             program.setFloatUniform("uDenoise", v.denoise)
             program.setFloatUniform("uCrossShift", v.crossShift)
-            program.setFloatUniform("uClone", v.clone)
             program.setFloatUniform("uSmear", v.smear)
             program.setFloatUniform("uEdgeGlow", v.edgeGlow)
             program.setFloatUniform("uElectric", v.electric)
-            program.setFloatUniform("uFireEyes", v.fireEyes)
-            program.setFloatUniform("uBodyElectric", v.bodyElectric)
-            program.setFloatUniform("uBodyAura", v.bodyAura)
-            program.setFloatUniform("uElectricEyes", v.electricEyes)
-            program.setFloatUniform("uLaserEyes", v.laserEyes)
-            program.setFloatUniform("uStroke", v.stroke)
-            program.setFloatUniform("uBodyFire", v.bodyFire)
-            program.setFloatUniform("uHasFace", if (geometry == null) 0f else 1f)
-            program.setFloatUniform("uHasPersonMaskA", if (hasPersonMaskA) 1f else 0f)
-            program.setFloatUniform("uHasPersonMaskB", if (hasPersonMaskB) 1f else 0f)
-            program.setFloatUniform("uPersonTemporalMix", personTemporalMix)
-            setRect(program, "uLeftEyeRect", geometry?.leftEye)
-            setRect(program, "uRightEyeRect", geometry?.rightEye)
-            setRect(program, "uBodyRect", bodyRect(geometry))
+            if (tracked) {
+                program.setFloatUniform("uClone", v.clone)
+                program.setFloatUniform("uFireEyes", v.fireEyes)
+                program.setFloatUniform("uBodyElectric", v.bodyElectric)
+                program.setFloatUniform("uBodyAura", v.bodyAura)
+                program.setFloatUniform("uElectricEyes", v.electricEyes)
+                program.setFloatUniform("uLaserEyes", v.laserEyes)
+                program.setFloatUniform("uStroke", v.stroke)
+                program.setFloatUniform("uBodyFire", v.bodyFire)
+                program.setFloatUniform("uHasFace", if (geometry == null) 0f else 1f)
+                program.setFloatUniform("uHasPersonMaskA", if (hasPersonMaskA) 1f else 0f)
+                program.setFloatUniform("uHasPersonMaskB", if (hasPersonMaskB) 1f else 0f)
+                program.setFloatUniform("uPersonTemporalMix", personTemporalMix)
+                setRect(program, "uLeftEyeRect", geometry?.leftEye)
+                setRect(program, "uRightEyeRect", geometry?.rightEye)
+                setRect(program, "uBodyRect", bodyRect(geometry))
+            }
             program.setFloatUniform("uTime", (sourceUs % 10_000_000L).toFloat() / 1_000_000f)
             program.setFloatUniform("uSeed", ((nodeId.hashCode() ushr 1) % 10_000).toFloat() / 10_000f)
             program.bindAttributesAndUniforms()
@@ -515,6 +531,8 @@ internal class CreatorEffectGraphV25 private constructor(
                 personMaskTextureA = 0
                 personMaskTextureB = 0
                 nodeProgram.delete()
+                trackedNodeProgram?.takeIf { it !== nodeProgram }?.delete()
+                trackedNodeProgram = null
                 mixProgram.delete()
                 copyProgram.delete()
             } catch (error: GlUtil.GlException) {
