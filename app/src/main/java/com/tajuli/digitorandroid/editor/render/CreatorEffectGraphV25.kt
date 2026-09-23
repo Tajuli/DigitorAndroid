@@ -898,6 +898,7 @@ internal class CreatorEffectGraphV25 private constructor(
                     }
 
                     #if DIGITOR_TRACKED_FX
+                    #if DIGITOR_CLONE
                     if (uClone > 0.001) {
                         float cloneStrength = clamp(uClone, 0.0, 1.5);
                         float spread = mix(0.105, 0.175, min(cloneStrength, 1.0));
@@ -929,7 +930,7 @@ internal class CreatorEffectGraphV25 private constructor(
                             rgb = mix(rgb, sampleCreator(farRightUv), farRightBody * keepCenterClear * farAlpha);
                         }
                     }
-
+                    #endif
                     #endif
 
                     if (uSmear > 0.001) {
@@ -994,6 +995,7 @@ internal class CreatorEffectGraphV25 private constructor(
                     #if DIGITOR_TRACKED_FX
                     vec2 topLeftP = vec2(vTexCoord.x, 1.0 - vTexCoord.y);
 
+                    #if DIGITOR_FIRE_EYES
                     if (uFireEyes > 0.001) {
                         float fireStrength = clamp(uFireEyes, 0.0, 1.5);
                         float leftFire = eyeFireMask(topLeftP, resolvedLeftEyeRect(), 0.7);
@@ -1005,7 +1007,9 @@ internal class CreatorEffectGraphV25 private constructor(
                             clamp(fire * fireStrength * 0.96, 0.0, 0.98));
                         rgb += flameColor * fire * fireStrength * 0.28;
                     }
+                    #endif
 
+                    #if DIGITOR_ELECTRIC_EYES
                     if (uElectricEyes > 0.001) {
                         float strength = clamp(uElectricEyes, 0.0, 1.5);
                         vec4 le = resolvedLeftEyeRect();
@@ -1032,7 +1036,9 @@ internal class CreatorEffectGraphV25 private constructor(
                         rgb = mix(rgb, max(rgb, electricEyeColor * 1.08), energy * 0.92);
                         rgb += vec3(1.0) * smoothstep(0.68, 1.0, energy) * 0.28;
                     }
+                    #endif
 
+                    #if DIGITOR_LASER_EYES
                     if (uLaserEyes > 0.001) {
                         float strength = clamp(uLaserEyes, 0.0, 1.5);
                         vec4 le = resolvedLeftEyeRect();
@@ -1053,7 +1059,9 @@ internal class CreatorEffectGraphV25 private constructor(
                         rgb = mix(rgb, max(rgb, laserColor * 1.18), clamp(beam * strength * 0.88, 0.0, 0.96));
                         rgb += vec3(1.0) * beamCore * strength * 0.58;
                     }
+                    #endif
 
+                    #if DIGITOR_BODY_ELECTRIC
                     if (uBodyElectric > 0.001) {
                         float strength = clamp(uBodyElectric, 0.0, 1.5);
                         vec4 rect = resolvedBodyRect();
@@ -1074,7 +1082,9 @@ internal class CreatorEffectGraphV25 private constructor(
                         rgb += currentColor * bolt * strength * 0.58;
                         rgb += vec3(1.0) * smoothstep(0.68, 1.08, bolt) * strength * 0.26;
                     }
+                    #endif
 
+                    #if DIGITOR_STROKE
                     if (uStroke > 0.001) {
                         float strokeStrength = clamp(uStroke, 0.0, 1.5);
                         float narrow = subjectStroke(vTexCoord, 1.8);
@@ -1088,7 +1098,9 @@ internal class CreatorEffectGraphV25 private constructor(
                         rgb += strokeColor * (narrow * 0.92 + wide * 0.24) * strokeStrength * pulse;
                         rgb += vec3(1.0) * narrow * strokeStrength * 0.18;
                     }
+                    #endif
 
+                    #if DIGITOR_BODY_FIRE
                     if (uBodyFire > 0.001) {
                         float fireStrength = clamp(uBodyFire, 0.0, 1.5);
                         float subject = subjectMaskAt(vTexCoord);
@@ -1117,7 +1129,9 @@ internal class CreatorEffectGraphV25 private constructor(
                             clamp(flames * fireStrength * 0.86, 0.0, 0.96));
                         rgb += flameColor * flames * fireStrength * 0.24;
                     }
+                    #endif
 
+                    #if DIGITOR_BODY_AURA
                     if (uBodyAura > 0.001) {
                         float auraStrength = clamp(uBodyAura, 0.0, 1.5);
                         float subject = subjectMaskAt(vTexCoord);
@@ -1133,6 +1147,7 @@ internal class CreatorEffectGraphV25 private constructor(
                         rgb += auraColor * (rim * 0.86 + nearGlow * 0.55 + farGlow * 0.24)
                             * auraStrength * pulse;
                     }
+                    #endif
                     #endif
 
                     float grain = (hash21(vTexCoord * vec2(1920.0, 1080.0)) - 0.5) * 2.0;
