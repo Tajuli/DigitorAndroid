@@ -129,7 +129,7 @@ object CreatorEffectCatalogV25 {
         p("Electric Body", "Body", bodyElectric = .78f, bodyAura = .82f),
         p("Neon Body", "Body", bodyAura = 1.00f, bodyElectric = .24f),
         p("Electric Eyes", "Body", electricEyes = 1.00f, glow = .12f),
-        p("Lightning Eyes", "Body", electricEyes = .86f, electric = .28f, glow = .16f),
+        p("Lightning Eyes", "Body", electricEyes = 1.16f, glow = .16f),
         p("Laser Eyes 2", "Body", laserEyes = 1.00f, glow = .18f),
         p("Electric Shock", "Body", bodyElectric = .96f, stroke = .42f, flicker = .14f),
         p("Electro Border", "Body", stroke = 1.00f, bodyElectric = .26f),
