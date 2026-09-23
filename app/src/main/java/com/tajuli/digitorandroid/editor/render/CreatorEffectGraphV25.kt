@@ -561,10 +561,53 @@ internal class CreatorEffectGraphV25 private constructor(
         companion object {
             private const val FACE_TRACK_REFRESH_MS = 700L
 
+            private const val FX_CLONE = 1
+            private const val FX_FIRE_EYES = 1 shl 1
+            private const val FX_BODY_ELECTRIC = 1 shl 2
+            private const val FX_BODY_AURA = 1 shl 3
+            private const val FX_ELECTRIC_EYES = 1 shl 4
+            private const val FX_LASER_EYES = 1 shl 5
+            private const val FX_STROKE = 1 shl 6
+            private const val FX_BODY_FIRE = 1 shl 7
+            private const val PERSON_MASK_FEATURES =
+                FX_CLONE or FX_BODY_ELECTRIC or FX_BODY_AURA or FX_STROKE or FX_BODY_FIRE
+            private const val EYE_FEATURES = FX_FIRE_EYES or FX_ELECTRIC_EYES or FX_LASER_EYES
+
+            private fun trackedFeatureMask(v: CreatorEffectVectorV25): Int {
+                var mask = 0
+                if (v.clone > .001f) mask = mask or FX_CLONE
+                if (v.fireEyes > .001f) mask = mask or FX_FIRE_EYES
+                if (v.bodyElectric > .001f) mask = mask or FX_BODY_ELECTRIC
+                if (v.bodyAura > .001f) mask = mask or FX_BODY_AURA
+                if (v.electricEyes > .001f) mask = mask or FX_ELECTRIC_EYES
+                if (v.laserEyes > .001f) mask = mask or FX_LASER_EYES
+                if (v.stroke > .001f) mask = mask or FX_STROKE
+                if (v.bodyFire > .001f) mask = mask or FX_BODY_FIRE
+                return mask
+            }
+
             private fun vectorRequiresTrackedFx(v: CreatorEffectVectorV25): Boolean =
-                v.clone > .001f || v.fireEyes > .001f || v.bodyElectric > .001f ||
-                    v.bodyAura > .001f || v.electricEyes > .001f || v.laserEyes > .001f ||
-                    v.stroke > .001f || v.bodyFire > .001f
+                trackedFeatureMask(v) != 0
+
+            private fun vectorNeedsPersonMask(v: CreatorEffectVectorV25): Boolean =
+                trackedFeatureMask(v) and PERSON_MASK_FEATURES != 0
+
+            private fun trackedShaderFor(mask: Int): String {
+                fun enabled(bit: Int): String = if (mask and bit != 0) "1" else "0"
+                return NODE_FRAGMENT_SHADER
+                    .replace("#define DIGITOR_PERSON_MASK 1", "#define DIGITOR_PERSON_MASK " +
+                        if (mask and PERSON_MASK_FEATURES != 0) "1" else "0")
+                    .replace("#define DIGITOR_EYES 1", "#define DIGITOR_EYES " +
+                        if (mask and EYE_FEATURES != 0) "1" else "0")
+                    .replace("#define DIGITOR_CLONE 1", "#define DIGITOR_CLONE " + enabled(FX_CLONE))
+                    .replace("#define DIGITOR_FIRE_EYES 1", "#define DIGITOR_FIRE_EYES " + enabled(FX_FIRE_EYES))
+                    .replace("#define DIGITOR_BODY_ELECTRIC 1", "#define DIGITOR_BODY_ELECTRIC " + enabled(FX_BODY_ELECTRIC))
+                    .replace("#define DIGITOR_BODY_AURA 1", "#define DIGITOR_BODY_AURA " + enabled(FX_BODY_AURA))
+                    .replace("#define DIGITOR_ELECTRIC_EYES 1", "#define DIGITOR_ELECTRIC_EYES " + enabled(FX_ELECTRIC_EYES))
+                    .replace("#define DIGITOR_LASER_EYES 1", "#define DIGITOR_LASER_EYES " + enabled(FX_LASER_EYES))
+                    .replace("#define DIGITOR_STROKE 1", "#define DIGITOR_STROKE " + enabled(FX_STROKE))
+                    .replace("#define DIGITOR_BODY_FIRE 1", "#define DIGITOR_BODY_FIRE " + enabled(FX_BODY_FIRE))
+            }
 
             private const val VERTEX_SHADER = """
                 attribute vec4 aFramePosition;
@@ -577,6 +620,16 @@ internal class CreatorEffectGraphV25 private constructor(
 
             private const val NODE_FRAGMENT_SHADER = """
                 #define DIGITOR_TRACKED_FX 1
+                #define DIGITOR_PERSON_MASK 1
+                #define DIGITOR_EYES 1
+                #define DIGITOR_CLONE 1
+                #define DIGITOR_FIRE_EYES 1
+                #define DIGITOR_BODY_ELECTRIC 1
+                #define DIGITOR_BODY_AURA 1
+                #define DIGITOR_ELECTRIC_EYES 1
+                #define DIGITOR_LASER_EYES 1
+                #define DIGITOR_STROKE 1
+                #define DIGITOR_BODY_FIRE 1
                 precision highp float;
                 uniform sampler2D uTexSampler;
                 #if DIGITOR_TRACKED_FX
