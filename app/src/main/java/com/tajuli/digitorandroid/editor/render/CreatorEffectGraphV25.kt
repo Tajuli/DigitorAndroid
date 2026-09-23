@@ -665,6 +665,31 @@ internal class CreatorEffectGraphV25 private constructor(
                     return clamp(core + plume * 0.92, 0.0, 1.0);
                 }
 
+                float segmentDistance(vec2 p, vec2 a, vec2 b) {
+                    vec2 pa = p - a;
+                    vec2 ba = b - a;
+                    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.00001), 0.0, 1.0);
+                    return length(pa - ba * h);
+                }
+
+                float lineGlow(vec2 p, vec2 a, vec2 b, float width) {
+                    float d = segmentDistance(p, a, b);
+                    float core = 1.0 - smoothstep(width * 0.18, width * 0.44, d);
+                    float glow = 1.0 - smoothstep(width * 0.40, width * 2.25, d);
+                    return clamp(core + glow * 0.58, 0.0, 1.0);
+                }
+
+                float jaggedEyeBolt(vec2 p, vec2 origin, vec2 target, float phase) {
+                    vec2 d = target - origin;
+                    vec2 n = normalize(vec2(-d.y, d.x) + vec2(0.0001));
+                    vec2 p1 = origin + d * 0.32 + n * (0.018 * sin(uTime * 15.0 + phase));
+                    vec2 p2 = origin + d * 0.64 + n * (0.025 * sin(uTime * 21.0 + phase * 1.7));
+                    float a = lineGlow(p, origin, p1, 0.010);
+                    float b = lineGlow(p, p1, p2, 0.009);
+                    float c = lineGlow(p, p2, target, 0.008);
+                    return max(a, max(b, c));
+                }
+
                 float electricBand(vec2 uv, float phase) {
                     float path = 0.50
                         + 0.18 * sin(uv.x * 19.0 + uTime * 4.3 + phase)
@@ -847,6 +872,54 @@ internal class CreatorEffectGraphV25 private constructor(
                         rgb += flameColor * fire * fireStrength * 0.28;
                     }
 
+                    if (uElectricEyes > 0.001) {
+                        float strength = clamp(uElectricEyes, 0.0, 1.5);
+                        vec4 le = resolvedLeftEyeRect();
+                        vec4 re = resolvedRightEyeRect();
+                        vec2 lc = (le.xy + le.zw) * 0.5;
+                        vec2 rc = (re.xy + re.zw) * 0.5;
+                        vec2 lt = lc + vec2(-0.30, -0.12);
+                        vec2 rt = rc + vec2( 0.30, -0.12);
+                        float bolt = max(
+                            jaggedEyeBolt(topLeftP, lc, lt, 0.8),
+                            jaggedEyeBolt(topLeftP, rc, rt, 2.7)
+                        );
+                        float eyeCore = max(
+                            ellipseMask(topLeftP, le, 0.18, 0.90),
+                            ellipseMask(topLeftP, re, 0.18, 0.90)
+                        );
+                        float pulse = 0.82 + 0.18 * sin(uTime * 19.0);
+                        vec3 electricEyeColor = mix(
+                            vec3(0.18, 0.72, 1.00),
+                            vec3(0.78, 0.26, 1.00),
+                            sin(uTime * 2.6) * 0.5 + 0.5
+                        );
+                        float energy = clamp(max(bolt, eyeCore) * strength * pulse, 0.0, 1.0);
+                        rgb = mix(rgb, max(rgb, electricEyeColor * 1.08), energy * 0.92);
+                        rgb += vec3(1.0) * smoothstep(0.68, 1.0, energy) * 0.28;
+                    }
+
+                    if (uLaserEyes > 0.001) {
+                        float strength = clamp(uLaserEyes, 0.0, 1.5);
+                        vec4 le = resolvedLeftEyeRect();
+                        vec4 re = resolvedRightEyeRect();
+                        vec2 lc = (le.xy + le.zw) * 0.5;
+                        vec2 rc = (re.xy + re.zw) * 0.5;
+                        vec2 lt = vec2(0.02, max(0.03, lc.y - 0.22));
+                        vec2 rt = vec2(0.98, max(0.03, rc.y - 0.22));
+                        float beam = max(
+                            lineGlow(topLeftP, lc, lt, 0.012),
+                            lineGlow(topLeftP, rc, rt, 0.012)
+                        );
+                        float beamCore = max(
+                            1.0 - smoothstep(0.0018, 0.0048, segmentDistance(topLeftP, lc, lt)),
+                            1.0 - smoothstep(0.0018, 0.0048, segmentDistance(topLeftP, rc, rt))
+                        );
+                        vec3 laserColor = vec3(0.20, 0.64, 1.00);
+                        rgb = mix(rgb, max(rgb, laserColor * 1.18), clamp(beam * strength * 0.88, 0.0, 0.96));
+                        rgb += vec3(1.0) * beamCore * strength * 0.58;
+                    }
+
                     if (uBodyElectric > 0.001) {
                         float strength = clamp(uBodyElectric, 0.0, 1.5);
                         vec4 rect = resolvedBodyRect();
@@ -866,6 +939,49 @@ internal class CreatorEffectGraphV25 private constructor(
                         );
                         rgb += currentColor * bolt * strength * 0.58;
                         rgb += vec3(1.0) * smoothstep(0.68, 1.08, bolt) * strength * 0.26;
+                    }
+
+                    if (uStroke > 0.001) {
+                        float strokeStrength = clamp(uStroke, 0.0, 1.5);
+                        float narrow = subjectStroke(vTexCoord, 1.8);
+                        float wide = subjectStroke(vTexCoord, 5.5);
+                        float pulse = 0.84 + 0.16 * sin(uTime * 6.2);
+                        vec3 strokeColor = mix(
+                            vec3(0.04, 0.82, 1.00),
+                            vec3(0.82, 0.18, 1.00),
+                            sin(uTime * 2.0 + topLeftP.y * 4.0) * 0.5 + 0.5
+                        );
+                        rgb += strokeColor * (narrow * 0.92 + wide * 0.24) * strokeStrength * pulse;
+                        rgb += vec3(1.0) * narrow * strokeStrength * 0.18;
+                    }
+
+                    if (uBodyFire > 0.001) {
+                        float fireStrength = clamp(uBodyFire, 0.0, 1.5);
+                        float subject = subjectMaskAt(vTexCoord);
+                        float edge = subjectStroke(vTexCoord, 2.6);
+                        float riseNear = max(
+                            subjectMaskAt(vTexCoord - vec2(0.0, uTexelSize.y * 6.0)) - subject,
+                            0.0
+                        );
+                        float riseFar = max(
+                            subjectMaskAt(vTexCoord - vec2(0.0, uTexelSize.y * 13.0)) - subject,
+                            0.0
+                        );
+                        float turbulence = 0.58
+                            + 0.26 * sin(vTexCoord.x * 83.0 + uTime * 11.0)
+                            + 0.16 * sin(vTexCoord.x * 157.0 - uTime * 17.0);
+                        float flames = clamp(
+                            edge * 0.74 + riseNear * 0.78 * turbulence + riseFar * 0.46 * turbulence,
+                            0.0,
+                            1.0
+                        );
+                        float core = smoothstep(0.52, 0.94, flames);
+                        vec3 flameOuter = vec3(1.00, 0.12, 0.01);
+                        vec3 flameInner = vec3(1.00, 0.88, 0.12);
+                        vec3 flameColor = mix(flameOuter, flameInner, core);
+                        rgb = mix(rgb, max(rgb, flameColor * (0.92 + core * 0.32)),
+                            clamp(flames * fireStrength * 0.86, 0.0, 0.96));
+                        rgb += flameColor * flames * fireStrength * 0.24;
                     }
 
                     if (uBodyAura > 0.001) {
