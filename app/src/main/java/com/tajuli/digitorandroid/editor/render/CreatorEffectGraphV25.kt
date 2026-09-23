@@ -562,16 +562,15 @@ internal class CreatorEffectGraphV25 private constructor(
             private const val FACE_TRACK_REFRESH_MS = 700L
 
             private const val FX_CLONE = 1
-            private const val FX_FIRE_EYES = 1 shl 1
-            private const val FX_BODY_ELECTRIC = 1 shl 2
-            private const val FX_BODY_AURA = 1 shl 3
-            private const val FX_ELECTRIC_EYES = 1 shl 4
-            private const val FX_LASER_EYES = 1 shl 5
-            private const val FX_STROKE = 1 shl 6
-            private const val FX_BODY_FIRE = 1 shl 7
-            private const val PERSON_MASK_FEATURES =
-                FX_CLONE or FX_BODY_ELECTRIC or FX_BODY_AURA or FX_STROKE or FX_BODY_FIRE
-            private const val EYE_FEATURES = FX_FIRE_EYES or FX_ELECTRIC_EYES or FX_LASER_EYES
+            private const val FX_FIRE_EYES = 2
+            private const val FX_BODY_ELECTRIC = 4
+            private const val FX_BODY_AURA = 8
+            private const val FX_ELECTRIC_EYES = 16
+            private const val FX_LASER_EYES = 32
+            private const val FX_STROKE = 64
+            private const val FX_BODY_FIRE = 128
+            private const val PERSON_MASK_FEATURES = 205
+            private const val EYE_FEATURES = 50
 
             private fun trackedFeatureMask(v: CreatorEffectVectorV25): Int {
                 var mask = 0
