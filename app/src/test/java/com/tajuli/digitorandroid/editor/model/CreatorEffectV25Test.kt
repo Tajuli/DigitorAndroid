@@ -7,10 +7,10 @@ import org.junit.Test
 
 class CreatorEffectV25Test {
     @Test
-    fun catalogHasSeventyTwoUniqueCreatorEffects() {
+    fun catalogHasSeventyNineUniqueCreatorEffects() {
         val presets = CreatorEffectCatalogV25.presets
-        assertEquals(72, presets.size)
-        assertEquals(72, presets.map { it.name.lowercase() }.toSet().size)
+        assertEquals(79, presets.size)
+        assertEquals(79, presets.map { it.name.lowercase() }.toSet().size)
         assertEquals(
             listOf("Trending", "Basic", "Glitch", "Retro", "Lens", "Motion", "Body", "Clone", "Glow"),
             CreatorEffectCatalogV25.categories,
@@ -20,7 +20,7 @@ class CreatorEffectV25Test {
         listOf("Glitch", "Retro", "Lens", "Motion").forEach { category ->
             assertEquals(10, CreatorEffectCatalogV25.inCategory(category).size)
         }
-        assertEquals(5, CreatorEffectCatalogV25.inCategory("Body").size)
+        assertEquals(12, CreatorEffectCatalogV25.inCategory("Body").size)
         assertEquals(5, CreatorEffectCatalogV25.inCategory("Clone").size)
         assertEquals(5, CreatorEffectCatalogV25.inCategory("Glow").size)
     }
@@ -61,6 +61,10 @@ class CreatorEffectV25Test {
         val fireEyes = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Fire Eyes", amount = 1f)))
         val current = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Current Passing", amount = 1f)))
         val aura = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Neon Body", amount = 1f)))
+        val electricEyes = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Electric Eyes", amount = 1f)))
+        val laserEyes = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Laser Eyes 2", amount = 1f)))
+        val stroke = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Stroke", amount = 1f)))
+        val hellfire = resolveCreatorEffectsV25(listOf(NodeEffect(name = "Hellfire", amount = 1f)))
 
         assertTrue(crossFull.crossShift > crossHalf.crossShift && crossHalf.crossShift > 0f)
         assertTrue(clone.clone > 0f)
@@ -70,6 +74,10 @@ class CreatorEffectV25Test {
         assertTrue(fireEyes.fireEyes > 0f)
         assertTrue(current.bodyElectric > 0f)
         assertTrue(aura.bodyAura > 0f)
+        assertTrue(electricEyes.electricEyes > 0f)
+        assertTrue(laserEyes.laserEyes > 0f)
+        assertTrue(stroke.stroke > 0f)
+        assertTrue(hellfire.bodyFire > 0f)
         assertFalse(crossFull.isIdentity)
         assertFalse(clone.isIdentity)
         assertFalse(smear.isIdentity)
@@ -77,6 +85,10 @@ class CreatorEffectV25Test {
         assertFalse(fireEyes.isIdentity)
         assertFalse(current.isIdentity)
         assertFalse(aura.isIdentity)
+        assertFalse(electricEyes.isIdentity)
+        assertFalse(laserEyes.isIdentity)
+        assertFalse(stroke.isIdentity)
+        assertFalse(hellfire.isIdentity)
     }
 
     @Test
