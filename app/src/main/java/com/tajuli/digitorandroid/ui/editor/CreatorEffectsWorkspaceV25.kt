@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
 import com.tajuli.digitorandroid.editor.model.CreatorEffectPresetV25
+import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -47,6 +48,8 @@ import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceAnalyzerV28
+import com.tajuli.digitorandroid.editor.processing.GpuPersonCutoutAnalyzerV47
+import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -94,33 +97,73 @@ fun CreatorEffectsWorkspace(
 
     fun refineTrackedSubjectInBackground(preset: CreatorEffectPresetV25) {
         val v = preset.vector
-        val needsTracking = v.clone > .001f || v.fireEyes > .001f ||
-            v.bodyElectric > .001f || v.bodyAura > .001f
-        if (!needsTracking) return
+        val needsFaceTracking = v.clone > .001f || v.fireEyes > .001f ||
+            v.electricEyes > .001f || v.laserEyes > .001f ||
+            v.bodyElectric > .001f || v.bodyAura > .001f ||
+            v.stroke > .001f || v.bodyFire > .001f
+        val needsPersonMatte = v.clone > .001f || v.bodyElectric > .001f ||
+            v.bodyAura > .001f || v.stroke > .001f || v.bodyFire > .001f
+        if (!needsFaceTracking && !needsPersonMatte) return
 
-        vm.setEditorStatusV19(preset.name + " active · refining face/body tracking…")
+        vm.setEditorStatusV19(preset.name + " active · analyzing subject for clean body tracking…")
         scope.launch {
             val analysisClip = vm.state.value.project.clip(clip.id) ?: clip
-            val track = runCatching {
-                withContext(Dispatchers.Default) {
-                    BeautyFaceAnalyzerV28(context).analyzeAndStore(
-                        analysisClip,
-                        requireHairMask = false,
-                        requireSkinMask = false,
-                    )
-                }
-            }.getOrElse { error ->
-                vm.setEditorStatusV19(
-                    preset.name + " active · center fallback in use: " +
-                        (error.message ?: "tracking unavailable"),
-                )
-                return@launch
+
+            val faceTrack = if (needsFaceTracking) {
+                runCatching {
+                    withContext(Dispatchers.Default) {
+                        BeautyFaceAnalyzerV28(context).analyzeAndStore(
+                            analysisClip,
+                            requireHairMask = false,
+                            requireSkinMask = false,
+                        )
+                    }
+                }.getOrNull()
+            } else {
+                null
             }
-            vm.setEditorStatusV19(
-                if (track.samples.any { it.geometry != null }) {
-                    preset.name + " ready · subject tracking refined"
+
+            var matteReady = !needsPersonMatte
+            var matteError: Throwable? = null
+            if (needsPersonMatte) {
+                val bodyTrackingClip = analysisClip.copy(
+                    cutoutV43 = analysisClip.resolvedCutoutV43().copy(
+                        mode = CutoutModeV43.PERSON,
+                        analysisQualityV47 = CutoutAnalysisQualityV47.MEDIUM,
+                        mattingSizeV69 = 384,
+                        portraitLensBlurV99 = false,
+                    ),
+                )
+                if (hasPersonCutoutCoverageV43(context, bodyTrackingClip)) {
+                    matteReady = true
                 } else {
-                    preset.name + " active · no clear face found; center fallback remains active"
+                    runCatching {
+                        withContext(Dispatchers.Default) {
+                            GpuPersonCutoutAnalyzerV47(context).analyzeAndStore(
+                                bodyTrackingClip,
+                                prioritySourceUs = animationSourceTimeUs ?: bodyTrackingClip.sourceInUs,
+                            )
+                        }
+                    }.onSuccess {
+                        matteReady = true
+                    }.onFailure { error ->
+                        matteError = error
+                    }
+                }
+            }
+
+            val faceReady = !needsFaceTracking || faceTrack?.samples?.any { it.geometry != null } == true
+            vm.setEditorStatusV19(
+                when {
+                    faceReady && matteReady ->
+                        preset.name + " ready · tracked eyes/body + PP-MattingV2 silhouette"
+                    faceReady ->
+                        preset.name + " active · face tracking ready; silhouette fallback: " +
+                            (matteError?.message ?: "matting unavailable")
+                    matteReady ->
+                        preset.name + " active · silhouette ready; face fallback in use"
+                    else ->
+                        preset.name + " active · center fallback in use"
                 },
             )
         }
