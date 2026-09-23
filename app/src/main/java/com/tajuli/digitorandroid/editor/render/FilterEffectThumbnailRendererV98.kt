@@ -301,11 +301,11 @@ internal object FilterEffectThumbnailRendererV98 {
             }
             graph.signalEndOfInput(0)
 
-            check(outputLatch.await(10, TimeUnit.SECONDS)) {
+            check(outputLatch.await(15, TimeUnit.SECONDS)) {
                 "Timed out waiting for thumbnail graph output"
             }
             error.get()?.let { throw it }
-            check(imageLatch.await(10, TimeUnit.SECONDS)) {
+            check(imageLatch.await(15, TimeUnit.SECONDS)) {
                 "Timed out waiting for thumbnail RGBA frame"
             }
             error.get()?.let { throw it }
