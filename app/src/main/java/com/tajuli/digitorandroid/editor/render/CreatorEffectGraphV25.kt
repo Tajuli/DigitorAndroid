@@ -632,8 +632,10 @@ internal class CreatorEffectGraphV25 private constructor(
                 precision highp float;
                 uniform sampler2D uTexSampler;
                 #if DIGITOR_TRACKED_FX
+                #if DIGITOR_PERSON_MASK
                 uniform sampler2D uPersonMaskA;
                 uniform sampler2D uPersonMaskB;
+                #endif
                 #endif
                 uniform vec2 uTexelSize;
                 uniform float uBlur;
@@ -665,12 +667,16 @@ internal class CreatorEffectGraphV25 private constructor(
                 uniform float uStroke;
                 uniform float uBodyFire;
                 uniform float uHasFace;
+                #if DIGITOR_PERSON_MASK
                 uniform float uHasPersonMaskA;
                 uniform float uHasPersonMaskB;
                 uniform float uPersonTemporalMix;
+                uniform vec4 uBodyRect;
+                #endif
+                #if DIGITOR_EYES
                 uniform vec4 uLeftEyeRect;
                 uniform vec4 uRightEyeRect;
-                uniform vec4 uBodyRect;
+                #endif
                 #endif
                 uniform float uTime;
                 uniform float uSeed;
@@ -704,16 +710,9 @@ internal class CreatorEffectGraphV25 private constructor(
                     return 1.0 - smoothstep(inner, outer, d);
                 }
 
+                #if DIGITOR_PERSON_MASK
                 vec4 resolvedBodyRect() {
                     return uHasFace > 0.5 ? uBodyRect : vec4(0.22, 0.22, 0.78, 0.98);
-                }
-
-                vec4 resolvedLeftEyeRect() {
-                    return uHasFace > 0.5 ? uLeftEyeRect : vec4(0.36, 0.32, 0.47, 0.43);
-                }
-
-                vec4 resolvedRightEyeRect() {
-                    return uHasFace > 0.5 ? uRightEyeRect : vec4(0.53, 0.32, 0.64, 0.43);
                 }
 
                 float fallbackBodyMask(vec2 videoUv) {
@@ -765,6 +764,16 @@ internal class CreatorEffectGraphV25 private constructor(
                 float subjectStroke(vec2 uv, float pixels) {
                     return clamp(subjectDilate(uv, pixels) - subjectErode(uv, pixels * 0.62), 0.0, 1.0);
                 }
+                #endif
+
+                #if DIGITOR_EYES
+                vec4 resolvedLeftEyeRect() {
+                    return uHasFace > 0.5 ? uLeftEyeRect : vec4(0.36, 0.32, 0.47, 0.43);
+                }
+
+                vec4 resolvedRightEyeRect() {
+                    return uHasFace > 0.5 ? uRightEyeRect : vec4(0.53, 0.32, 0.64, 0.43);
+                }
 
                 float eyeFireMask(vec2 p, vec4 rect, float phase) {
                     vec2 size = max(rect.zw - rect.xy, vec2(0.003));
@@ -805,6 +814,7 @@ internal class CreatorEffectGraphV25 private constructor(
                     float c = lineGlow(p, p2, target, 0.008);
                     return max(a, max(b, c));
                 }
+                #endif
 
                 #endif
 
