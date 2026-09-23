@@ -84,6 +84,7 @@ fun CreatorEffectsWorkspace(
         ?.takeIf { it.clipId == clip.id && it.nodeId == node.id }
         ?.effectId
     var category by remember { mutableStateOf("Trending") }
+    var analyzingPresetName by remember { mutableStateOf<String?>(null) }
     val categoryPresets = remember(category) { CreatorEffectCatalogV25.inCategory(category) }
     val nodeEffects = node.visibleEffects()
     val selectedEffect = nodeEffects.firstOrNull { it.id == selectedEffectId }
@@ -95,77 +96,100 @@ fun CreatorEffectsWorkspace(
         EffectTimelineSelectionBusV26.select(clip.id, node.id, effectId)
     }
 
-    fun refineTrackedSubjectInBackground(preset: CreatorEffectPresetV25) {
+    fun addAndSelectPreset(preset: CreatorEffectPresetV25) {
+        vm.addEffectToSelectedNode(preset.name)
+        val updatedNode = vm.state.value.project.clip(clip.id)
+            ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
+        updatedNode?.effects?.lastOrNull { it.name == preset.name }?.let { selectEffect(it.id) }
+    }
+
+    fun applyPresetAccuracyFirst(preset: CreatorEffectPresetV25) {
         val v = preset.vector
-        val needsFaceTracking = v.clone > .001f || v.fireEyes > .001f ||
-            v.electricEyes > .001f || v.laserEyes > .001f ||
-            v.bodyElectric > .001f || v.bodyAura > .001f ||
-            v.stroke > .001f || v.bodyFire > .001f
+        val needsFaceTracking = v.fireEyes > .001f ||
+            v.electricEyes > .001f || v.laserEyes > .001f
         val needsPersonMatte = v.clone > .001f || v.bodyElectric > .001f ||
             v.bodyAura > .001f || v.stroke > .001f || v.bodyFire > .001f
-        if (!needsFaceTracking && !needsPersonMatte) return
 
-        vm.setEditorStatusV19(preset.name + " active · analyzing subject for clean body tracking…")
+        if (!needsFaceTracking && !needsPersonMatte) {
+            addAndSelectPreset(preset)
+            return
+        }
+        if (analyzingPresetName != null) return
+
+        analyzingPresetName = preset.name
+        vm.setEditorStatusV19(preset.name + " · analyzing subject before apply…")
         scope.launch {
-            val analysisClip = vm.state.value.project.clip(clip.id) ?: clip
+            try {
+                val analysisClip = vm.state.value.project.clip(clip.id) ?: clip
 
-            val faceTrack = if (needsFaceTracking) {
-                runCatching {
-                    withContext(Dispatchers.Default) {
-                        BeautyFaceAnalyzerV28(context).analyzeAndStore(
-                            analysisClip,
-                            requireHairMask = false,
-                            requireSkinMask = false,
-                        )
-                    }
-                }.getOrNull()
-            } else {
-                null
-            }
-
-            var matteReady = !needsPersonMatte
-            var matteError: Throwable? = null
-            if (needsPersonMatte) {
-                val bodyTrackingClip = analysisClip.copy(
-                    cutoutV43 = analysisClip.resolvedCutoutV43().copy(
-                        mode = CutoutModeV43.PERSON,
-                        analysisQualityV47 = CutoutAnalysisQualityV47.MEDIUM,
-                        mattingSizeV69 = 384,
-                        portraitLensBlurV99 = false,
-                    ),
-                )
-                if (hasPersonCutoutCoverageV43(context, bodyTrackingClip)) {
-                    matteReady = true
-                } else {
+                val faceTrack = if (needsFaceTracking) {
                     runCatching {
                         withContext(Dispatchers.Default) {
-                            GpuPersonCutoutAnalyzerV47(context).analyzeAndStore(
-                                bodyTrackingClip,
-                                prioritySourceUs = animationSourceTimeUs ?: bodyTrackingClip.sourceInUs,
-                            )
+                            BeautyFaceAnalyzerV28(context).refineBodyFxAndStore(analysisClip)
                         }
-                    }.onSuccess {
+                    }.getOrNull()
+                } else {
+                    null
+                }
+
+                val faceReady = if (!needsFaceTracking) {
+                    true
+                } else {
+                    val relevant = faceTrack?.samples.orEmpty().filter {
+                        it.sourceTimeUs >= analysisClip.sourceInUs &&
+                            it.sourceTimeUs <= analysisClip.sourceOutUs
+                    }
+                    val detected = relevant.count { it.geometry != null }
+                    relevant.isNotEmpty() && detected * 100 >= relevant.size * 60
+                }
+
+                var matteReady = !needsPersonMatte
+                var matteError: Throwable? = null
+                if (needsPersonMatte) {
+                    val bodyTrackingClip = analysisClip.copy(
+                        cutoutV43 = analysisClip.resolvedCutoutV43().copy(
+                            mode = CutoutModeV43.PERSON,
+                            analysisQualityV47 = CutoutAnalysisQualityV47.MEDIUM,
+                            mattingSizeV69 = 384,
+                            portraitLensBlurV99 = false,
+                        ),
+                    )
+                    if (hasPersonCutoutCoverageV43(context, bodyTrackingClip)) {
                         matteReady = true
-                    }.onFailure { error ->
-                        matteError = error
+                    } else {
+                        runCatching {
+                            withContext(Dispatchers.Default) {
+                                GpuPersonCutoutAnalyzerV47(context).analyzeAndStore(
+                                    bodyTrackingClip,
+                                    prioritySourceUs = animationSourceTimeUs ?: bodyTrackingClip.sourceInUs,
+                                )
+                            }
+                        }.onSuccess {
+                            matteReady = hasPersonCutoutCoverageV43(context, bodyTrackingClip)
+                        }.onFailure { error ->
+                            matteError = error
+                        }
                     }
                 }
-            }
 
-            val faceReady = !needsFaceTracking || faceTrack?.samples?.any { it.geometry != null } == true
-            vm.setEditorStatusV19(
-                when {
-                    faceReady && matteReady ->
-                        preset.name + " ready · tracked eyes/body + PP-MattingV2 silhouette"
-                    faceReady ->
-                        preset.name + " active · face tracking ready; silhouette fallback: " +
-                            (matteError?.message ?: "matting unavailable")
-                    matteReady ->
-                        preset.name + " active · silhouette ready; face fallback in use"
-                    else ->
-                        preset.name + " active · center fallback in use"
-                },
-            )
+                if (faceReady && matteReady) {
+                    addAndSelectPreset(preset)
+                    vm.setEditorStatusV19(
+                        preset.name + " ready · dense tracking locked before apply",
+                    )
+                } else {
+                    val reason = when {
+                        !faceReady && !matteReady -> "face + person tracking incomplete"
+                        !faceReady -> "face/eye tracking incomplete"
+                        else -> matteError?.message ?: "person matte incomplete"
+                    }
+                    vm.setEditorStatusV19(
+                        preset.name + " not applied · " + reason,
+                    )
+                }
+            } finally {
+                analyzingPresetName = null
+            }
         }
     }
 
@@ -234,11 +258,7 @@ fun CreatorEffectsWorkspace(
                                     EffectTimelineSelectionV26(clip.id, node.id, liveEffect.id),
                                 )
                             } else {
-                                vm.addEffectToSelectedNode(preset.name)
-                                refineTrackedSubjectInBackground(preset)
-                                val updatedNode = vm.state.value.project.clip(clip.id)
-                                    ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
-                                updatedNode?.effects?.lastOrNull { it.name == preset.name }?.let { selectEffect(it.id) }
+                                applyPresetAccuracyFirst(preset)
                             }
                         }
                         .padding(5.dp),
@@ -263,7 +283,7 @@ fun CreatorEffectsWorkspace(
                     }
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        preset.name,
+                        if (analyzingPresetName == preset.name) "Analyzing…" else preset.name,
                         fontSize = 8.sp,
                         fontWeight = FontWeight.Medium,
                         color = Color.White.copy(alpha = .90f),
