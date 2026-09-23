@@ -132,6 +132,43 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         return merged
     }
 
+    /**
+     * Accuracy-first tracking for creator body/eye effects.
+     *
+     * Unlike [analyzeAndStore], this call does not return after the sparse five-frame seed.
+     * It waits for dense exact-frame anchors so an effect cannot be applied/exported while it is
+     * still using a screen-space fallback. Eight anchors/second is dense enough for eye-attached
+     * effects while staying practical on mobile.
+     */
+    suspend fun refineBodyFxAndStore(clip: TimelineClip): BeautyFaceTrackV28 {
+        val existing = BeautyFaceTrackStoreV28.load(context, clip)
+        val targetFaceAnchors = bodyFxFaceAnchorCount(clip)
+        val existingDetected = existing?.samples?.count { it.geometry != null } ?: 0
+        val readyThreshold = minOf(targetFaceAnchors, BODY_FX_MIN_READY_ANCHORS)
+        if (
+            existing?.covers(clip.sourceInUs, clip.sourceOutUs) == true &&
+            existingDetected >= readyThreshold
+        ) {
+            return existing
+        }
+
+        val fresh = if (clip.isImageV21) {
+            analyzeImage(clip, requireHairMask = false, requireSkinMask = false)
+        } else {
+            analyzeVideoAnchors(
+                clip = clip,
+                faceAnchorCount = targetFaceAnchors,
+                requireHairMask = false,
+                requireSkinMask = false,
+                semanticAnchorLimit = 0,
+                frameOption = MediaMetadataRetriever.OPTION_CLOSEST,
+            )
+        }
+        val merged = existing?.mergedWith(fresh) ?: fresh
+        BeautyFaceTrackStoreV28.save(context, merged)
+        return merged
+    }
+
     suspend fun analyzeAndStore(
         clip: TimelineClip,
         requireHairMask: Boolean = true,
@@ -252,6 +289,12 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         val durationUs = (clip.sourceOutUs - clip.sourceInUs).coerceAtLeast(1L)
         val roughlyThreePerSecond = ((durationUs * 3L) / 1_000_000L).toInt() + 2
         return roughlyThreePerSecond.coerceIn(MIN_FAST_FACE_ANCHORS, MAX_FAST_FACE_ANCHORS)
+    }
+
+    private fun bodyFxFaceAnchorCount(clip: TimelineClip): Int {
+        val durationUs = (clip.sourceOutUs - clip.sourceInUs).coerceAtLeast(1L)
+        val dense = ((durationUs * BODY_FX_FACE_FPS) / 1_000_000L).toInt() + 2
+        return dense.coerceIn(BODY_FX_MIN_ANCHORS, BODY_FX_MAX_ANCHORS)
     }
 
     private fun evenlySpacedTimes(start: Long, end: Long, count: Int): List<Long> {
@@ -441,6 +484,10 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         private const val MIN_FAST_FACE_ANCHORS = 18
         private const val MAX_FAST_FACE_ANCHORS = 210
         private const val SEMANTIC_ANCHOR_LIMIT = 30
+        private const val BODY_FX_FACE_FPS = 8L
+        private const val BODY_FX_MIN_ANCHORS = 24
+        private const val BODY_FX_MIN_READY_ANCHORS = 24
+        private const val BODY_FX_MAX_ANCHORS = 480
         private const val ANALYSIS_LONG_EDGE = 480
 
         private val refinementScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
