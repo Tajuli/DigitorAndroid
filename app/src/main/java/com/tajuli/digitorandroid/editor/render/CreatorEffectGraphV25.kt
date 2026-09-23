@@ -815,7 +815,9 @@ internal class CreatorEffectGraphV25 private constructor(
                         + 0.065 * sin(uv.x * 53.0 - uTime * 7.1 + phase * 1.7)
                         + 0.025 * sin(uv.x * 113.0 + uTime * 11.0 + phase * 0.7);
                     float d = abs(uv.y - path);
-                    return exp(-d * 180.0) + 0.32 * exp(-d * 38.0);
+                    float core = 1.0 - smoothstep(0.0025, 0.0105, d);
+                    float glow = 1.0 - smoothstep(0.0105, 0.0520, d);
+                    return core + glow * 0.34;
                 }
 
                 vec2 creatorUv(vec2 uv) {
