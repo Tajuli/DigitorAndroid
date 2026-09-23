@@ -797,6 +797,17 @@ internal class CreatorEffectGraphV25 private constructor(
                         float keepCenterClear = 1.0 - originalBody * 0.94;
                         rgb = mix(rgb, leftClone, leftBody * keepCenterClear * alpha);
                         rgb = mix(rgb, rightClone, rightBody * keepCenterClear * alpha);
+
+                        if (cloneStrength > 1.05) {
+                            float farSpread = spread * 1.72;
+                            vec2 farLeftUv = clamp(uv + vec2(farSpread, -0.010), 0.001, 0.999);
+                            vec2 farRightUv = clamp(uv - vec2(farSpread, -0.010), 0.001, 0.999);
+                            float farLeftBody = subjectMaskAt(farLeftUv);
+                            float farRightBody = subjectMaskAt(farRightUv);
+                            float farAlpha = alpha * 0.90;
+                            rgb = mix(rgb, sampleCreator(farLeftUv), farLeftBody * keepCenterClear * farAlpha);
+                            rgb = mix(rgb, sampleCreator(farRightUv), farRightBody * keepCenterClear * farAlpha);
+                        }
                     }
 
                     if (uSmear > 0.001) {
