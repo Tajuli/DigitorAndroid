@@ -34,13 +34,18 @@ data class CreatorEffectVectorV25(
     val fireEyes: Float = 0f,
     val bodyElectric: Float = 0f,
     val bodyAura: Float = 0f,
+    val electricEyes: Float = 0f,
+    val laserEyes: Float = 0f,
+    val stroke: Float = 0f,
+    val bodyFire: Float = 0f,
 ) {
     val isIdentity: Boolean
         get() = blur == 0f && sharpen == 0f && glow == 0f && grain == 0f && vignette == 0f &&
             rgbSplit == 0f && scanlines == 0f && pixelate == 0f && wave == 0f && lens == 0f &&
             zoomBlur == 0f && ghost == 0f && flicker == 0f && warm == 0f && denoise == 0f &&
             crossShift == 0f && clone == 0f && smear == 0f && edgeGlow == 0f && electric == 0f &&
-            fireEyes == 0f && bodyElectric == 0f && bodyAura == 0f
+            fireEyes == 0f && bodyElectric == 0f && bodyAura == 0f &&
+            electricEyes == 0f && laserEyes == 0f && stroke == 0f && bodyFire == 0f
 }
 
 object CreatorEffectCatalogV25 {
@@ -123,6 +128,13 @@ object CreatorEffectCatalogV25 {
         p("Current Passing", "Body", bodyElectric = 1.00f),
         p("Electric Body", "Body", bodyElectric = .78f, bodyAura = .82f),
         p("Neon Body", "Body", bodyAura = 1.00f, bodyElectric = .24f),
+        p("Electric Eyes", "Body", electricEyes = 1.00f, glow = .12f),
+        p("Lightning Eyes", "Body", electricEyes = .86f, electric = .28f, glow = .16f),
+        p("Laser Eyes 2", "Body", laserEyes = 1.00f, glow = .18f),
+        p("Electric Shock", "Body", bodyElectric = .96f, stroke = .42f, flicker = .14f),
+        p("Electro Border", "Body", stroke = 1.00f, bodyElectric = .26f),
+        p("Stroke", "Body", stroke = .82f),
+        p("Hellfire", "Body", bodyFire = 1.00f, bodyAura = .44f, glow = .22f),
 
         // Clone
         p("X Clone", "Clone", clone = 1.00f, crossShift = .62f),
@@ -175,6 +187,10 @@ fun resolveCreatorEffectsV25(effects: List<NodeEffect>): CreatorEffectVectorV25 
             fireEyes = (out.fireEyes + v.fireEyes * a).coerceIn(0f, 1.5f),
             bodyElectric = (out.bodyElectric + v.bodyElectric * a).coerceIn(0f, 1.5f),
             bodyAura = (out.bodyAura + v.bodyAura * a).coerceIn(0f, 1.5f),
+            electricEyes = (out.electricEyes + v.electricEyes * a).coerceIn(0f, 1.5f),
+            laserEyes = (out.laserEyes + v.laserEyes * a).coerceIn(0f, 1.5f),
+            stroke = (out.stroke + v.stroke * a).coerceIn(0f, 1.5f),
+            bodyFire = (out.bodyFire + v.bodyFire * a).coerceIn(0f, 1.5f),
         )
     }
     return out
@@ -207,6 +223,10 @@ private fun p(
     fireEyes: Float = 0f,
     bodyElectric: Float = 0f,
     bodyAura: Float = 0f,
+    electricEyes: Float = 0f,
+    laserEyes: Float = 0f,
+    stroke: Float = 0f,
+    bodyFire: Float = 0f,
 ): CreatorEffectPresetV25 = CreatorEffectPresetV25(
     name = name,
     category = category,
@@ -234,5 +254,9 @@ private fun p(
         fireEyes = fireEyes,
         bodyElectric = bodyElectric,
         bodyAura = bodyAura,
+        electricEyes = electricEyes,
+        laserEyes = laserEyes,
+        stroke = stroke,
+        bodyFire = bodyFire,
     ),
 )
