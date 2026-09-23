@@ -137,7 +137,7 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
      *
      * Unlike [analyzeAndStore], this call does not return after the sparse five-frame seed.
      * It waits for dense exact-frame anchors so an effect cannot be applied/exported while it is
-     * still using a screen-space fallback. Eight anchors/second is dense enough for eye-attached
+     * still using a screen-space fallback. Twelve anchors/second matches the person-matte cadence for eye-attached
      * effects while staying practical on mobile.
      */
     suspend fun refineBodyFxAndStore(clip: TimelineClip): BeautyFaceTrackV28 {
@@ -484,10 +484,10 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         private const val MIN_FAST_FACE_ANCHORS = 18
         private const val MAX_FAST_FACE_ANCHORS = 210
         private const val SEMANTIC_ANCHOR_LIMIT = 30
-        private const val BODY_FX_FACE_FPS = 8L
+        private const val BODY_FX_FACE_FPS = 12L
         private const val BODY_FX_MIN_ANCHORS = 24
-        private const val BODY_FX_MIN_READY_ANCHORS = 24
-        private const val BODY_FX_MAX_ANCHORS = 480
+        private const val BODY_FX_MIN_READY_ANCHORS = 36
+        private const val BODY_FX_MAX_ANCHORS = 720
         private const val ANALYSIS_LONG_EDGE = 480
 
         private val refinementScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
