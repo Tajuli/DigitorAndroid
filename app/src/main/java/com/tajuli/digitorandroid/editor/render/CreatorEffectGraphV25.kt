@@ -1,7 +1,10 @@
 package com.tajuli.digitorandroid.editor.render
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.opengl.GLES20
+import android.opengl.GLUtils
 import android.os.SystemClock
 import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.util.GlProgram
@@ -21,9 +24,14 @@ import com.tajuli.digitorandroid.editor.model.SpatialNodeGraphPlan
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolveCreatorEffectsV25
 import com.tajuli.digitorandroid.editor.model.resolveTimedCreatorEffectsV26
+import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceTrackStoreV28
+import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskFrameV43
+import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
+import com.tajuli.digitorandroid.editor.processing.personCutoutMaxGapUsV47
+import kotlin.math.abs
 
 /**
  * V25 creator-effects renderer with V26 timed effect spans.
@@ -79,12 +87,18 @@ internal class CreatorEffectGraphV25 private constructor(
         private var scratchFbos = IntArray(0)
         private var faceTrack: BeautyFaceTrackV28? = BeautyFaceTrackStoreV28.load(appContext, clip)
         private var lastFaceTrackRefreshMs = 0L
+        private var personMaskTextureA = 0
+        private var personMaskTextureB = 0
+        private var loadedPersonMaskPathA: String? = null
+        private var loadedPersonMaskPathB: String? = null
 
         init {
             try {
                 nodeProgram = newProgram(NODE_FRAGMENT_SHADER)
                 mixProgram = newProgram(MIX_FRAGMENT_SHADER)
                 copyProgram = newProgram(COPY_FRAGMENT_SHADER)
+                personMaskTextureA = createMaskTexture()
+                personMaskTextureB = createMaskTexture()
             } catch (error: GlUtil.GlException) {
                 throw VideoFrameProcessingException(error)
             }
@@ -121,6 +135,9 @@ internal class CreatorEffectGraphV25 private constructor(
                 val currentClip = if (preview) PreviewProjectRegistry.clip(clip.id) ?: clip else clip
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
                 val faceGeometry = refreshFaceTrack(currentClip)?.geometryAt(sourceUs)
+                val personBracket = personBracket(currentClip, sourceUs)
+                val hasPersonMaskA = bindPersonMask(personMaskTextureA, personBracket.a?.file?.absolutePath, true)
+                val hasPersonMaskB = bindPersonMask(personMaskTextureB, personBracket.b?.file?.absolutePath, false)
                 val slotTextures = IntArray(plan.operations.size) { inputTexId }
                 var scratchCursor = 0
 
@@ -169,7 +186,17 @@ internal class CreatorEffectGraphV25 private constructor(
                             } else {
                                 val (texture, fbo) = nextScratch()
                                 focus(fbo)
-                                renderNode(nodeProgram, input, vector, evaluated.id, sourceUs, faceGeometry)
+                                renderNode(
+                                    nodeProgram,
+                                    input,
+                                    vector,
+                                    evaluated.id,
+                                    sourceUs,
+                                    faceGeometry,
+                                    hasPersonMaskA,
+                                    hasPersonMaskB,
+                                    personBracket.mix,
+                                )
                                 slotTextures[operation.slot] = texture
                             }
                         }
