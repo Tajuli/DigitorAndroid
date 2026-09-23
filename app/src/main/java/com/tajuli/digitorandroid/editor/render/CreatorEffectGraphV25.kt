@@ -256,6 +256,99 @@ internal class CreatorEffectGraphV25 private constructor(
             return faceTrack
         }
 
+        private fun personBracket(currentClip: TimelineClip, sourceUs: Long): PersonMaskBracket {
+            val frames = PersonCutoutMaskStoreV43.index(appContext, currentClip).frames
+                .filter { it.file.isFile }
+            if (frames.isEmpty()) return PersonMaskBracket.empty()
+
+            val maxGapUs = personCutoutMaxGapUsV47(currentClip.resolvedCutoutV43().analysisQualityV47)
+            if (frames.size == 1) {
+                val frame = frames[0]
+                return if (abs(sourceUs - frame.sourceTimeUs) <= maxGapUs) {
+                    PersonMaskBracket(frame, frame, 0f)
+                } else {
+                    PersonMaskBracket.empty()
+                }
+            }
+
+            var rightIndex = frames.binarySearchBy(sourceUs) { it.sourceTimeUs }
+            if (rightIndex >= 0) return PersonMaskBracket(frames[rightIndex], frames[rightIndex], 0f)
+            rightIndex = -rightIndex - 1
+            val right = frames.getOrNull(rightIndex)
+            val left = frames.getOrNull(rightIndex - 1)
+
+            if (left == null) {
+                return right?.takeIf { abs(it.sourceTimeUs - sourceUs) <= maxGapUs }
+                    ?.let { PersonMaskBracket(it, it, 0f) } ?: PersonMaskBracket.empty()
+            }
+            if (right == null) {
+                return left.takeIf { abs(sourceUs - it.sourceTimeUs) <= maxGapUs }
+                    ?.let { PersonMaskBracket(it, it, 0f) } ?: PersonMaskBracket.empty()
+            }
+
+            val leftDistance = abs(sourceUs - left.sourceTimeUs)
+            val rightDistance = abs(right.sourceTimeUs - sourceUs)
+            val span = (right.sourceTimeUs - left.sourceTimeUs).coerceAtLeast(1L)
+            if (span > maxGapUs) {
+                return when {
+                    leftDistance <= rightDistance && leftDistance <= maxGapUs -> PersonMaskBracket(left, left, 0f)
+                    rightDistance <= maxGapUs -> PersonMaskBracket(right, right, 0f)
+                    else -> PersonMaskBracket.empty()
+                }
+            }
+            if (leftDistance > maxGapUs && rightDistance > maxGapUs) return PersonMaskBracket.empty()
+            val mix = ((sourceUs - left.sourceTimeUs).toDouble() / span.toDouble()).toFloat().coerceIn(0f, 1f)
+            return PersonMaskBracket(left, right, mix)
+        }
+
+        private fun createMaskTexture(): Int {
+            val ids = IntArray(1)
+            GLES20.glGenTextures(1, ids, 0)
+            val texture = ids[0]
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            uploadMaskBitmap(texture, null)
+            return texture
+        }
+
+        private fun bindPersonMask(texture: Int, path: String?, slotA: Boolean): Boolean {
+            val loaded = if (slotA) loadedPersonMaskPathA else loadedPersonMaskPathB
+            if (path == null) {
+                if (loaded != null) {
+                    uploadMaskBitmap(texture, null)
+                    if (slotA) loadedPersonMaskPathA = null else loadedPersonMaskPathB = null
+                }
+                return false
+            }
+            if (loaded == path) return true
+            val bitmap = BitmapFactory.decodeFile(path) ?: return false
+            try {
+                uploadMaskBitmap(texture, bitmap)
+                if (slotA) loadedPersonMaskPathA = path else loadedPersonMaskPathB = path
+            } finally {
+                bitmap.recycle()
+            }
+            return true
+        }
+
+        private fun uploadMaskBitmap(texture: Int, bitmap: Bitmap?) {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
+            if (bitmap != null) {
+                GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+            } else {
+                val black = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+                try {
+                    black.eraseColor(android.graphics.Color.BLACK)
+                    GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, black, 0)
+                } finally {
+                    black.recycle()
+                }
+            }
+        }
+
         private fun bodyRect(geometry: BeautyFaceGeometryV28?): BeautyRectV28? {
             val face = geometry?.face?.normalized() ?: return null
             val faceWidth = (face.right - face.left).coerceAtLeast(.01f)
@@ -297,9 +390,14 @@ internal class CreatorEffectGraphV25 private constructor(
             nodeId: String,
             sourceUs: Long,
             geometry: BeautyFaceGeometryV28?,
+            hasPersonMaskA: Boolean,
+            hasPersonMaskB: Boolean,
+            personTemporalMix: Float,
         ) {
             program.use()
             program.setSamplerTexIdUniform("uTexSampler", inputTexture, 0)
+            program.setSamplerTexIdUniform("uPersonMaskA", personMaskTextureA, 1)
+            program.setSamplerTexIdUniform("uPersonMaskB", personMaskTextureB, 2)
             program.setFloatsUniform(
                 "uTexelSize",
                 floatArrayOf(1f / inputWidth.toFloat(), 1f / inputHeight.toFloat()),
@@ -327,7 +425,14 @@ internal class CreatorEffectGraphV25 private constructor(
             program.setFloatUniform("uFireEyes", v.fireEyes)
             program.setFloatUniform("uBodyElectric", v.bodyElectric)
             program.setFloatUniform("uBodyAura", v.bodyAura)
+            program.setFloatUniform("uElectricEyes", v.electricEyes)
+            program.setFloatUniform("uLaserEyes", v.laserEyes)
+            program.setFloatUniform("uStroke", v.stroke)
+            program.setFloatUniform("uBodyFire", v.bodyFire)
             program.setFloatUniform("uHasFace", if (geometry == null) 0f else 1f)
+            program.setFloatUniform("uHasPersonMaskA", if (hasPersonMaskA) 1f else 0f)
+            program.setFloatUniform("uHasPersonMaskB", if (hasPersonMaskB) 1f else 0f)
+            program.setFloatUniform("uPersonTemporalMix", personTemporalMix)
             setRect(program, "uLeftEyeRect", geometry?.leftEye)
             setRect(program, "uRightEyeRect", geometry?.rightEye)
             setRect(program, "uBodyRect", bodyRect(geometry))
@@ -379,12 +484,25 @@ internal class CreatorEffectGraphV25 private constructor(
             super.release()
             try {
                 releaseScratch()
+                listOf(personMaskTextureA, personMaskTextureB).filter { it != 0 }.forEach { texture ->
+                    GLES20.glDeleteTextures(1, intArrayOf(texture), 0)
+                }
+                personMaskTextureA = 0
+                personMaskTextureB = 0
                 nodeProgram.delete()
                 mixProgram.delete()
                 copyProgram.delete()
             } catch (error: GlUtil.GlException) {
                 throw VideoFrameProcessingException(error)
             }
+        }
+
+        private data class PersonMaskBracket(
+            val a: PersonCutoutMaskFrameV43?,
+            val b: PersonCutoutMaskFrameV43?,
+            val mix: Float,
+        ) {
+            companion object { fun empty() = PersonMaskBracket(null, null, 0f) }
         }
 
         companion object {
@@ -402,6 +520,8 @@ internal class CreatorEffectGraphV25 private constructor(
             private const val NODE_FRAGMENT_SHADER = """
                 precision highp float;
                 uniform sampler2D uTexSampler;
+                uniform sampler2D uPersonMaskA;
+                uniform sampler2D uPersonMaskB;
                 uniform vec2 uTexelSize;
                 uniform float uBlur;
                 uniform float uSharpen;
@@ -426,7 +546,14 @@ internal class CreatorEffectGraphV25 private constructor(
                 uniform float uFireEyes;
                 uniform float uBodyElectric;
                 uniform float uBodyAura;
+                uniform float uElectricEyes;
+                uniform float uLaserEyes;
+                uniform float uStroke;
+                uniform float uBodyFire;
                 uniform float uHasFace;
+                uniform float uHasPersonMaskA;
+                uniform float uHasPersonMaskB;
+                uniform float uPersonTemporalMix;
                 uniform vec4 uLeftEyeRect;
                 uniform vec4 uRightEyeRect;
                 uniform vec4 uBodyRect;
