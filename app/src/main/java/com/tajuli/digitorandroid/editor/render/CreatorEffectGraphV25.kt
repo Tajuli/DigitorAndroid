@@ -600,9 +600,54 @@ internal class CreatorEffectGraphV25 private constructor(
                     return uHasFace > 0.5 ? uRightEyeRect : vec4(0.53, 0.32, 0.64, 0.43);
                 }
 
-                float bodyMaskAt(vec2 topLeftUv) {
+                float fallbackBodyMask(vec2 videoUv) {
+                    vec2 topLeftUv = vec2(videoUv.x, 1.0 - videoUv.y);
                     vec4 rect = resolvedBodyRect();
                     return ellipseMask(topLeftUv, rect, 0.72, 1.08);
+                }
+
+                float rawPersonAt(vec2 videoUv) {
+                    if (uHasPersonMaskA < 0.5 && uHasPersonMaskB < 0.5) return -1.0;
+                    vec2 clamped = clamp(videoUv, vec2(0.0), vec2(1.0));
+                    vec2 maskUv = vec2(clamped.x, 1.0 - clamped.y);
+                    float a = uHasPersonMaskA > 0.5 ? texture2D(uPersonMaskA, maskUv).r : 0.0;
+                    float b = uHasPersonMaskB > 0.5 ? texture2D(uPersonMaskB, maskUv).r : a;
+                    if (uHasPersonMaskA < 0.5) a = b;
+                    return mix(a, b, clamp(uPersonTemporalMix, 0.0, 1.0));
+                }
+
+                float subjectMaskAt(vec2 videoUv) {
+                    float raw = rawPersonAt(videoUv);
+                    if (raw < 0.0) return fallbackBodyMask(videoUv);
+                    return smoothstep(0.035, 0.72, raw);
+                }
+
+                float subjectDilate(vec2 uv, float pixels) {
+                    vec2 o = uTexelSize * pixels;
+                    float m = subjectMaskAt(uv);
+                    m = max(m, subjectMaskAt(uv + vec2( o.x, 0.0)));
+                    m = max(m, subjectMaskAt(uv + vec2(-o.x, 0.0)));
+                    m = max(m, subjectMaskAt(uv + vec2(0.0,  o.y)));
+                    m = max(m, subjectMaskAt(uv + vec2(0.0, -o.y)));
+                    m = max(m, subjectMaskAt(uv + vec2( o.x,  o.y)));
+                    m = max(m, subjectMaskAt(uv + vec2(-o.x,  o.y)));
+                    m = max(m, subjectMaskAt(uv + vec2( o.x, -o.y)));
+                    m = max(m, subjectMaskAt(uv + vec2(-o.x, -o.y)));
+                    return m;
+                }
+
+                float subjectErode(vec2 uv, float pixels) {
+                    vec2 o = uTexelSize * pixels;
+                    float m = subjectMaskAt(uv);
+                    m = min(m, subjectMaskAt(uv + vec2( o.x, 0.0)));
+                    m = min(m, subjectMaskAt(uv + vec2(-o.x, 0.0)));
+                    m = min(m, subjectMaskAt(uv + vec2(0.0,  o.y)));
+                    m = min(m, subjectMaskAt(uv + vec2(0.0, -o.y)));
+                    return m;
+                }
+
+                float subjectStroke(vec2 uv, float pixels) {
+                    return clamp(subjectDilate(uv, pixels) - subjectErode(uv, pixels * 0.62), 0.0, 1.0);
                 }
 
                 float eyeFireMask(vec2 p, vec4 rect, float phase) {
@@ -717,17 +762,14 @@ internal class CreatorEffectGraphV25 private constructor(
                         vec3 leftClone = sampleCreator(leftUv);
                         vec3 rightClone = sampleCreator(rightUv);
 
-                        vec2 outputP = vec2(uv.x, 1.0 - uv.y);
-                        vec2 leftSourceP = vec2(leftUv.x, 1.0 - leftUv.y);
-                        vec2 rightSourceP = vec2(rightUv.x, 1.0 - rightUv.y);
-                        float originalBody = bodyMaskAt(outputP);
-                        float leftBody = bodyMaskAt(leftSourceP);
-                        float rightBody = bodyMaskAt(rightSourceP);
+                        float originalBody = subjectMaskAt(uv);
+                        float leftBody = subjectMaskAt(leftUv);
+                        float rightBody = subjectMaskAt(rightUv);
 
                         // Opaque subject-only clone compositing. Keeping the original subject on top
                         // prevents the washed-out three-exposure look that the old frame averaging caused.
-                        float alpha = clamp(0.82 + cloneStrength * 0.12, 0.0, 0.98);
-                        float keepCenterClear = 1.0 - originalBody * 0.88;
+                        float alpha = clamp(0.94 + cloneStrength * 0.035, 0.0, 0.995);
+                        float keepCenterClear = 1.0 - originalBody * 0.94;
                         rgb = mix(rgb, leftClone, leftBody * keepCenterClear * alpha);
                         rgb = mix(rgb, rightClone, rightBody * keepCenterClear * alpha);
                     }
@@ -810,7 +852,7 @@ internal class CreatorEffectGraphV25 private constructor(
                         vec4 rect = resolvedBodyRect();
                         vec2 bodySize = max(rect.zw - rect.xy, vec2(0.005));
                         vec2 local = (topLeftP - rect.xy) / bodySize;
-                        float body = bodyMaskAt(topLeftP);
+                        float body = subjectMaskAt(vTexCoord);
                         float movingY = fract(local.y + uTime * 0.42);
                         vec2 electricUv = vec2(local.x, movingY);
                         float boltA = electricBand(electricUv, 0.4);
@@ -828,17 +870,18 @@ internal class CreatorEffectGraphV25 private constructor(
 
                     if (uBodyAura > 0.001) {
                         float auraStrength = clamp(uBodyAura, 0.0, 1.5);
-                        vec4 rect = resolvedBodyRect();
-                        float outer = ellipseMask(topLeftP, rect, 0.92, 1.34);
-                        float inner = ellipseMask(topLeftP, rect, 0.52, 0.88);
-                        float rim = clamp(outer - inner, 0.0, 1.0);
-                        float pulse = 0.78 + 0.22 * sin(uTime * 5.0);
+                        float subject = subjectMaskAt(vTexCoord);
+                        float nearGlow = max(subjectDilate(vTexCoord, 4.0) - subject, 0.0);
+                        float farGlow = max(subjectDilate(vTexCoord, 10.0) - subjectDilate(vTexCoord, 3.0), 0.0);
+                        float rim = subjectStroke(vTexCoord, 2.4);
+                        float pulse = 0.80 + 0.20 * sin(uTime * 5.0);
                         vec3 auraColor = mix(
-                            vec3(0.06, 0.82, 1.00),
-                            vec3(0.74, 0.18, 1.00),
+                            vec3(0.04, 0.80, 1.00),
+                            vec3(0.72, 0.16, 1.00),
                             sin(uTime * 1.7 + topLeftP.y * 5.0) * 0.5 + 0.5
                         );
-                        rgb += auraColor * rim * auraStrength * pulse * 0.54;
+                        rgb += auraColor * (rim * 0.86 + nearGlow * 0.55 + farGlow * 0.24)
+                            * auraStrength * pulse;
                     }
 
                     float grain = (hash21(vTexCoord * vec2(1920.0, 1080.0)) - 0.5) * 2.0;
