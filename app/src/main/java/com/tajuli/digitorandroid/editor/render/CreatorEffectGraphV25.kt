@@ -84,7 +84,7 @@ internal class CreatorEffectGraphV25 private constructor(
             vectorRequiresTrackedFx(resolveCreatorEffectsV25(node.visibleEffects()))
         }
         private val nodeProgram: GlProgram
-        private var trackedNodeProgram: GlProgram?
+        private val trackedNodePrograms = linkedMapOf<Int, GlProgram>()
         private val mixProgram: GlProgram
         private val copyProgram: GlProgram
         private var inputWidth = 1
@@ -104,13 +104,8 @@ internal class CreatorEffectGraphV25 private constructor(
                 nodeProgram = newProgram(
                     NODE_FRAGMENT_SHADER.replace("#define DIGITOR_TRACKED_FX 1", "#define DIGITOR_TRACKED_FX 0"),
                 )
-                trackedNodeProgram = if (supportsTrackedFx) newProgram(NODE_FRAGMENT_SHADER) else null
                 mixProgram = newProgram(MIX_FRAGMENT_SHADER)
                 copyProgram = newProgram(COPY_FRAGMENT_SHADER)
-                if (supportsTrackedFx) {
-                    personMaskTextureA = createMaskTexture()
-                    personMaskTextureB = createMaskTexture()
-                }
             } catch (error: GlUtil.GlException) {
                 throw VideoFrameProcessingException(error)
             }
@@ -146,22 +141,30 @@ internal class CreatorEffectGraphV25 private constructor(
                 val media3OutputFbo = outputFboHolder[0]
                 val currentClip = if (preview) PreviewProjectRegistry.clip(clip.id) ?: clip else clip
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
-                val currentRequiresTrackedFx = currentClip.nodeGraph.nodes.any { node ->
-                    vectorRequiresTrackedFx(resolveCreatorEffectsV25(node.visibleEffects()))
-                }
+                val currentVectors = currentClip.nodeGraph.nodes
+                    .asSequence()
+                    .filter { it.kind == NodeKind.SERIAL || it.kind == NodeKind.PARALLEL }
+                    .map { resolveCreatorEffectsV25(it.visibleEffects()) }
+                    .toList()
+                val currentRequiresTrackedFx = currentVectors.any(::vectorRequiresTrackedFx)
+                val currentRequiresPersonMask = currentVectors.any(::vectorNeedsPersonMask)
                 val faceGeometry = if (currentRequiresTrackedFx) {
                     refreshFaceTrack(currentClip)?.geometryAt(sourceUs)
                 } else {
                     null
                 }
-                val personBracket = if (currentRequiresTrackedFx && supportsTrackedFx) {
+                if (currentRequiresPersonMask) {
+                    if (personMaskTextureA == 0) personMaskTextureA = createMaskTexture()
+                    if (personMaskTextureB == 0) personMaskTextureB = createMaskTexture()
+                }
+                val personBracket = if (currentRequiresPersonMask) {
                     personBracket(currentClip, sourceUs)
                 } else {
                     PersonMaskBracket.empty()
                 }
-                val hasPersonMaskA = currentRequiresTrackedFx && supportsTrackedFx &&
+                val hasPersonMaskA = currentRequiresPersonMask &&
                     bindPersonMask(personMaskTextureA, personBracket.a?.file?.absolutePath, true)
-                val hasPersonMaskB = currentRequiresTrackedFx && supportsTrackedFx &&
+                val hasPersonMaskB = currentRequiresPersonMask &&
                     bindPersonMask(personMaskTextureB, personBracket.b?.file?.absolutePath, false)
                 val slotTextures = IntArray(plan.operations.size) { inputTexId }
                 var scratchCursor = 0
