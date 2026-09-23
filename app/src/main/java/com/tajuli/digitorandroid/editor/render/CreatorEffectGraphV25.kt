@@ -551,6 +551,11 @@ internal class CreatorEffectGraphV25 private constructor(
         companion object {
             private const val FACE_TRACK_REFRESH_MS = 700L
 
+            private fun vectorRequiresTrackedFx(v: CreatorEffectVectorV25): Boolean =
+                v.clone > .001f || v.fireEyes > .001f || v.bodyElectric > .001f ||
+                    v.bodyAura > .001f || v.electricEyes > .001f || v.laserEyes > .001f ||
+                    v.stroke > .001f || v.bodyFire > .001f
+
             private const val VERTEX_SHADER = """
                 attribute vec4 aFramePosition;
                 varying vec2 vTexCoord;
@@ -561,10 +566,13 @@ internal class CreatorEffectGraphV25 private constructor(
             """
 
             private const val NODE_FRAGMENT_SHADER = """
+                #define DIGITOR_TRACKED_FX 1
                 precision highp float;
                 uniform sampler2D uTexSampler;
+                #if DIGITOR_TRACKED_FX
                 uniform sampler2D uPersonMaskA;
                 uniform sampler2D uPersonMaskB;
+                #endif
                 uniform vec2 uTexelSize;
                 uniform float uBlur;
                 uniform float uSharpen;
@@ -582,10 +590,11 @@ internal class CreatorEffectGraphV25 private constructor(
                 uniform float uWarm;
                 uniform float uDenoise;
                 uniform float uCrossShift;
-                uniform float uClone;
                 uniform float uSmear;
                 uniform float uEdgeGlow;
                 uniform float uElectric;
+                #if DIGITOR_TRACKED_FX
+                uniform float uClone;
                 uniform float uFireEyes;
                 uniform float uBodyElectric;
                 uniform float uBodyAura;
@@ -600,6 +609,7 @@ internal class CreatorEffectGraphV25 private constructor(
                 uniform vec4 uLeftEyeRect;
                 uniform vec4 uRightEyeRect;
                 uniform vec4 uBodyRect;
+                #endif
                 uniform float uTime;
                 uniform float uSeed;
                 varying vec2 vTexCoord;
@@ -623,6 +633,7 @@ internal class CreatorEffectGraphV25 private constructor(
                     return texture2D(uTexSampler, clamp(uv, 0.001, 0.999)).rgb;
                 }
 
+                #if DIGITOR_TRACKED_FX
                 float ellipseMask(vec2 p, vec4 rect, float inner, float outer) {
                     vec2 halfSize = max((rect.zw - rect.xy) * 0.5, vec2(0.0005));
                     vec2 center = (rect.xy + rect.zw) * 0.5;
@@ -733,6 +744,8 @@ internal class CreatorEffectGraphV25 private constructor(
                     return max(a, max(b, c));
                 }
 
+                #endif
+
                 float electricBand(vec2 uv, float phase) {
                     float path = 0.50
                         + 0.18 * sin(uv.x * 19.0 + uTime * 4.3 + phase)
@@ -821,6 +834,7 @@ internal class CreatorEffectGraphV25 private constructor(
                         rgb = mix(rgb, max(rgb, ghost), clamp(uGhost * 0.46, 0.0, 0.72));
                     }
 
+                    #if DIGITOR_TRACKED_FX
                     if (uClone > 0.001) {
                         float cloneStrength = clamp(uClone, 0.0, 1.5);
                         float spread = mix(0.105, 0.175, min(cloneStrength, 1.0));
@@ -852,6 +866,8 @@ internal class CreatorEffectGraphV25 private constructor(
                             rgb = mix(rgb, sampleCreator(farRightUv), farRightBody * keepCenterClear * farAlpha);
                         }
                     }
+
+                    #endif
 
                     if (uSmear > 0.001) {
                         float smearStrength = clamp(uSmear, 0.0, 1.5);
@@ -912,6 +928,7 @@ internal class CreatorEffectGraphV25 private constructor(
                         rgb += vec3(1.0) * smoothstep(0.60, 1.15, bolt) * electricStrength * 0.18;
                     }
 
+                    #if DIGITOR_TRACKED_FX
                     vec2 topLeftP = vec2(vTexCoord.x, 1.0 - vTexCoord.y);
 
                     if (uFireEyes > 0.001) {
@@ -1053,6 +1070,7 @@ internal class CreatorEffectGraphV25 private constructor(
                         rgb += auraColor * (rim * 0.86 + nearGlow * 0.55 + farGlow * 0.24)
                             * auraStrength * pulse;
                     }
+                    #endif
 
                     float grain = (hash21(vTexCoord * vec2(1920.0, 1080.0)) - 0.5) * 2.0;
                     float luma = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
