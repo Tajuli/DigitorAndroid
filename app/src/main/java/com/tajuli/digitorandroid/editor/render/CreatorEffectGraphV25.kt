@@ -98,6 +98,8 @@ internal class CreatorEffectGraphV25 private constructor(
         private var personMaskTextureB = 0
         private var loadedPersonMaskPathA: String? = null
         private var loadedPersonMaskPathB: String? = null
+        private val allowTrackingFallback =
+            clip.uri.startsWith("content://digitor/filter-effect-thumbnail")
 
         init {
             try {
@@ -476,6 +478,7 @@ internal class CreatorEffectGraphV25 private constructor(
                 if (trackedMask and FX_STROKE != 0) program.setFloatUniform("uStroke", v.stroke)
                 if (trackedMask and FX_BODY_FIRE != 0) program.setFloatUniform("uBodyFire", v.bodyFire)
                 program.setFloatUniform("uHasFace", if (geometry == null) 0f else 1f)
+                program.setFloatUniform("uAllowTrackingFallback", if (allowTrackingFallback) 1f else 0f)
                 if (needsPersonMask) {
                     program.setFloatUniform("uHasPersonMaskA", if (hasPersonMaskA) 1f else 0f)
                     program.setFloatUniform("uHasPersonMaskB", if (hasPersonMaskB) 1f else 0f)
@@ -667,6 +670,7 @@ internal class CreatorEffectGraphV25 private constructor(
                 uniform float uStroke;
                 uniform float uBodyFire;
                 uniform float uHasFace;
+                uniform float uAllowTrackingFallback;
                 #if DIGITOR_PERSON_MASK
                 uniform float uHasPersonMaskA;
                 uniform float uHasPersonMaskB;
@@ -733,7 +737,9 @@ internal class CreatorEffectGraphV25 private constructor(
 
                 float subjectMaskAt(vec2 videoUv) {
                     float raw = rawPersonAt(videoUv);
-                    if (raw < 0.0) return fallbackBodyMask(videoUv);
+                    if (raw < 0.0) {
+                        return uAllowTrackingFallback > 0.5 ? fallbackBodyMask(videoUv) : 0.0;
+                    }
                     return smoothstep(0.035, 0.72, raw);
                 }
 
@@ -1007,7 +1013,7 @@ internal class CreatorEffectGraphV25 private constructor(
                     vec2 topLeftP = vec2(vTexCoord.x, 1.0 - vTexCoord.y);
 
                     #if DIGITOR_FIRE_EYES
-                    if (uFireEyes > 0.001) {
+                    if (uFireEyes > 0.001 && (uHasFace > 0.5 || uAllowTrackingFallback > 0.5)) {
                         float fireStrength = clamp(uFireEyes, 0.0, 1.5);
                         float leftFire = eyeFireMask(topLeftP, resolvedLeftEyeRect(), 0.7);
                         float rightFire = eyeFireMask(topLeftP, resolvedRightEyeRect(), 2.3);
@@ -1021,7 +1027,7 @@ internal class CreatorEffectGraphV25 private constructor(
                     #endif
 
                     #if DIGITOR_ELECTRIC_EYES
-                    if (uElectricEyes > 0.001) {
+                    if (uElectricEyes > 0.001 && (uHasFace > 0.5 || uAllowTrackingFallback > 0.5)) {
                         float strength = clamp(uElectricEyes, 0.0, 1.5);
                         vec4 le = resolvedLeftEyeRect();
                         vec4 re = resolvedRightEyeRect();
@@ -1050,7 +1056,7 @@ internal class CreatorEffectGraphV25 private constructor(
                     #endif
 
                     #if DIGITOR_LASER_EYES
-                    if (uLaserEyes > 0.001) {
+                    if (uLaserEyes > 0.001 && (uHasFace > 0.5 || uAllowTrackingFallback > 0.5)) {
                         float strength = clamp(uLaserEyes, 0.0, 1.5);
                         vec4 le = resolvedLeftEyeRect();
                         vec4 re = resolvedRightEyeRect();
@@ -1075,9 +1081,10 @@ internal class CreatorEffectGraphV25 private constructor(
                     #if DIGITOR_BODY_ELECTRIC
                     if (uBodyElectric > 0.001) {
                         float strength = clamp(uBodyElectric, 0.0, 1.5);
-                        vec4 rect = resolvedBodyRect();
-                        vec2 bodySize = max(rect.zw - rect.xy, vec2(0.005));
-                        vec2 local = (topLeftP - rect.xy) / bodySize;
+                        // Drive the electric field in frame space and clip it with the actual
+                        // PP-MattingV2 silhouette. This removes the old face-derived body rectangle,
+                        // which caused the current to slide when the head moved.
+                        vec2 local = topLeftP;
                         float body = subjectMaskAt(vTexCoord);
                         float movingY = fract(local.y + uTime * 0.42);
                         vec2 electricUv = vec2(local.x, movingY);
