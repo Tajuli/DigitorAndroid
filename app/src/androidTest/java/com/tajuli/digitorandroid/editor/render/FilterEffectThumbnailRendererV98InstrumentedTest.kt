@@ -80,6 +80,19 @@ class FilterEffectThumbnailRendererV98InstrumentedTest {
     }
 
     @Test
+    fun cloneEffectThumbnail_runsSemanticProductionGraph() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        FilterEffectThumbnailRendererV98.clearMemoryCacheForTest()
+        FilterEffectThumbnailRendererV98.resetStatsForTest()
+
+        val base = FilterEffectThumbnailRendererV98.baseThumbnailForTest(context)
+        val clone = FilterEffectThumbnailRendererV98.renderEffect(context, "Triple Clone")
+
+        assertEquals(0, FilterEffectThumbnailRendererV98.fallbackCountForTest())
+        assertFalse(pixels(base).contentEquals(pixels(clone)))
+    }
+
+    @Test
     fun unknownEffect_fallsBackWithoutCrashing() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         FilterEffectThumbnailRendererV98.clearMemoryCacheForTest()
