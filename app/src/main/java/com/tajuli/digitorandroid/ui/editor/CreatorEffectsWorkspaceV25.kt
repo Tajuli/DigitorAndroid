@@ -121,6 +121,50 @@ fun CreatorEffectsWorkspace(
             return@Column
         }
 
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(rememberScrollState()),
+        ) {
+        if (category == "Body") {
+            val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
+            val matteReady = hasPersonCutoutCoverageV43(appContext, clip)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Fx25Raised)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (matteReady) "Body matte · Ready" else "Body matte · Analyze required",
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (matteReady) Fx25Accent else Color.White,
+                    )
+                    Text(
+                        "PP-MattingV2 + hair detail + temporal flow. Shared with Pro Cutout; the background stays visible.",
+                        fontSize = 7.sp,
+                        color = Fx25Muted,
+                    )
+                }
+                if (!matteReady) {
+                    TextButton(
+                        enabled = !analysisRuntime.busy,
+                        onClick = { vm.analyzeSelectedPersonCutoutV43() },
+                    ) {
+                        Text(
+                            if (analysisRuntime.busy && analysisRuntime.clipId == clip.id) "Analyzing…" else "Analyze body",
+                            fontSize = 8.sp,
+                            color = if (analysisRuntime.busy) Fx25Muted else Fx25Accent,
+                        )
+                    }
+                }
+            }
+        }
+
         LazyRow(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -208,43 +252,7 @@ fun CreatorEffectsWorkspace(
             }
         }
 
-        if (category == "Body") {
-            val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
-            val matteReady = hasPersonCutoutCoverageV43(appContext, clip)
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .background(Fx25Raised)
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        if (matteReady) "Body matte · Ready" else "Body matte · Analyze required",
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (matteReady) Fx25Accent else Color.White,
-                    )
-                    Text(
-                        "PP-MattingV2 + hair detail + temporal flow. Shared with Pro Cutout; the background stays visible.",
-                        fontSize = 7.sp,
-                        color = Fx25Muted,
-                    )
-                }
-                if (!matteReady) {
-                    TextButton(
-                        enabled = !analysisRuntime.busy,
-                        onClick = { vm.analyzeSelectedPersonCutoutV43() },
-                    ) {
-                        Text(
-                            if (analysisRuntime.busy && analysisRuntime.clipId == clip.id) "Analyzing…" else "Analyze body",
-                            fontSize = 8.sp,
-                            color = if (analysisRuntime.busy) Fx25Muted else Fx25Accent,
-                        )
-                    }
-                }
-            }
-        }
+
 
         HorizontalDivider(color = Fx25Divider)
 
@@ -306,7 +314,7 @@ fun CreatorEffectsWorkspace(
         HorizontalDivider(color = Fx25Divider)
 
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 6.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             val effects = nodeEffects
@@ -382,7 +390,8 @@ fun CreatorEffectsWorkspace(
                 }
             }
         }
-    }
+    }    }
+
 }
 
 @Composable
