@@ -47,6 +47,36 @@ class BodyEffectV102Test {
     }
 
     @Test
+    fun clipDetectsEnabledBodyEffectsForExportReadiness() {
+        val selected = clip.nodeGraph.selectedNodeId
+        val bodyClip = clip.copy(
+            nodeGraph = clip.nodeGraph.copy(
+                nodes = clip.nodeGraph.nodes.map { node ->
+                    if (node.id == selected) {
+                        node.copy(effects = listOf(NodeEffect(name = "Body Clone", amount = 1f)))
+                    } else {
+                        node
+                    }
+                },
+            ),
+        )
+        assertTrue(bodyClip.hasBodyEffectsV102())
+
+        val disabled = bodyClip.copy(
+            nodeGraph = bodyClip.nodeGraph.copy(
+                nodes = bodyClip.nodeGraph.nodes.map { node ->
+                    if (node.id == selected) {
+                        node.copy(effects = listOf(NodeEffect(name = "Body Clone", amount = 0f)))
+                    } else {
+                        node
+                    }
+                },
+            ),
+        )
+        assertFalse(disabled.hasBodyEffectsV102())
+    }
+
+    @Test
     fun clonePresetsResolveOnlyIntoSemanticBodyVector() {
         val half = resolveBodyEffectsV102(listOf(NodeEffect(name = "Triple Clone", amount = .5f)))
         val full = resolveBodyEffectsV102(listOf(NodeEffect(name = "Triple Clone", amount = 1f)))
