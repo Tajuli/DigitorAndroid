@@ -51,6 +51,19 @@ fun CreatorEffectVectorV25.bodyValuesV100(): BodyEffectValuesV100 =
         bodyFire = bodyFire,
     )
 
+/** Strip subject-aware fields before the generic CreatorEffectGraph pass. */
+fun CreatorEffectVectorV25.withoutBodyEffectsV100(): CreatorEffectVectorV25 =
+    copy(
+        clone = 0f,
+        fireEyes = 0f,
+        bodyElectric = 0f,
+        bodyAura = 0f,
+        electricEyes = 0f,
+        laserEyes = 0f,
+        stroke = 0f,
+        bodyFire = 0f,
+    )
+
 fun resolveBodyEffectsV100(effects: List<NodeEffect>): BodyEffectValuesV100 =
     resolveCreatorEffectsV25(effects).bodyValuesV100()
 
