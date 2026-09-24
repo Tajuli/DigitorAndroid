@@ -15,6 +15,7 @@ import androidx.media3.effect.BaseGlShaderProgram
 import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
 import com.tajuli.digitorandroid.editor.model.BodyEffectValuesV100
+import com.tajuli.digitorandroid.editor.model.BodyFaceTrackV100
 import com.tajuli.digitorandroid.editor.model.BodyLandmarkV100
 import com.tajuli.digitorandroid.editor.model.BodyPoseLandmarkIndexV100
 import com.tajuli.digitorandroid.editor.model.BodyPoseTrackV100
@@ -29,7 +30,7 @@ import com.tajuli.digitorandroid.editor.model.resolveBodyEffectsV100
 import com.tajuli.digitorandroid.editor.model.resolveTimedBodyEffectsV100
 import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
-import com.tajuli.digitorandroid.editor.processing.BeautyFaceTrackStoreV28
+import com.tajuli.digitorandroid.editor.processing.BodyFaceTrackStoreV100
 import com.tajuli.digitorandroid.editor.processing.BodyPoseTrackStoreV100
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskFrameV43
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
@@ -100,7 +101,7 @@ internal class BodyEffectGraphV100 private constructor(
         private var scratchTextures = IntArray(0)
         private var scratchFbos = IntArray(0)
 
-        private var faceTrack = BeautyFaceTrackStoreV28.load(appContext, clip)
+        private var faceTrack: BodyFaceTrackV100? = BodyFaceTrackStoreV100.load(appContext, clip)
         private var poseTrack: BodyPoseTrackV100? = BodyPoseTrackStoreV100.load(appContext, clip)
         private var lastTrackRefreshMs = 0L
 
@@ -152,7 +153,7 @@ internal class BodyEffectGraphV100 private constructor(
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
                 refreshTracks(currentClip)
 
-                val liveFace = faceTrack?.geometryAt(sourceUs)
+                val liveEyes = faceTrack?.eyesAt(sourceUs)
                 val livePose = poseTrack?.landmarksAt(sourceUs)
                 val needsAnyMatte = currentClip.nodeGraph.nodes
                     .asSequence()
@@ -228,7 +229,7 @@ internal class BodyEffectGraphV100 private constructor(
                                     values = values,
                                     sourceUs = sourceUs,
                                     nodeId = evaluated.id,
-                                    face = liveFace,
+                                    eyes = liveEyes,
                                     pose = livePose,
                                     hasMaskA = hasMaskA,
                                     hasMaskB = hasMaskB,
@@ -292,7 +293,7 @@ internal class BodyEffectGraphV100 private constructor(
             val now = SystemClock.elapsedRealtime()
             if (now - lastTrackRefreshMs < TRACK_REFRESH_MS) return
             lastTrackRefreshMs = now
-            BeautyFaceTrackStoreV28.load(appContext, currentClip)?.let { faceTrack = it }
+            BodyFaceTrackStoreV100.load(appContext, currentClip)?.let { faceTrack = it }
             BodyPoseTrackStoreV100.load(appContext, currentClip)?.let { poseTrack = it }
         }
 
@@ -306,7 +307,10 @@ internal class BodyEffectGraphV100 private constructor(
             values: BodyEffectValuesV100,
             sourceUs: Long,
             nodeId: String,
-            face: com.tajuli.digitorandroid.editor.model.BeautyFaceGeometryV28?,
+            eyes: Pair<
+                com.tajuli.digitorandroid.editor.model.BeautyRectV28,
+                com.tajuli.digitorandroid.editor.model.BeautyRectV28
+            >?,
             pose: List<BodyLandmarkV100>?,
             hasMaskA: Boolean,
             hasMaskB: Boolean,
@@ -330,7 +334,7 @@ internal class BodyEffectGraphV100 private constructor(
             bodyProgram.setFloatUniform("uLaserEyes", values.laserEyes)
             bodyProgram.setFloatUniform("uStroke", values.stroke)
             bodyProgram.setFloatUniform("uBodyFire", values.bodyFire)
-            bodyProgram.setFloatUniform("uHasFace", if (face == null) 0f else 1f)
+            bodyProgram.setFloatUniform("uHasFace", if (eyes == null) 0f else 1f)
             bodyProgram.setFloatUniform("uHasPose", if ((pose?.size ?: 0) >= 29) 1f else 0f)
             bodyProgram.setFloatUniform("uAllowFallback", if (allowSyntheticFallback) 1f else 0f)
             bodyProgram.setFloatUniform("uHasPersonMaskA", if (hasMaskA) 1f else 0f)
@@ -339,8 +343,8 @@ internal class BodyEffectGraphV100 private constructor(
             bodyProgram.setFloatUniform("uTime", (sourceUs % 10_000_000L).toFloat() / 1_000_000f)
             bodyProgram.setFloatUniform("uSeed", ((nodeId.hashCode() ushr 1) % 10_000).toFloat() / 10_000f)
 
-            setRect("uLeftEyeRect", face?.leftEye)
-            setRect("uRightEyeRect", face?.rightEye)
+            setRect("uLeftEyeRect", eyes?.first)
+            setRect("uRightEyeRect", eyes?.second)
             setPoseUniforms(pose)
 
             bodyProgram.bindAttributesAndUniforms()
