@@ -140,6 +140,26 @@ val downloadPersonDetectorModel by tasks.registering {
     }
 }
 
+// V100 tracked body effects use the official MediaPipe full pose model for stable shoulders,
+// elbows, wrists, hips, knees and ankles. The full model is intentionally chosen over Lite because
+// effect anchoring quality matters more than one-time offline analysis latency.
+val generatedPoseLandmarkerAssets = layout.buildDirectory.dir("generated/poseLandmarkerAssets")
+val poseLandmarkerModelFile = generatedPoseLandmarkerAssets.map { it.file("pose_landmarker_full.task") }
+val downloadPoseLandmarkerModel by tasks.registering {
+    outputs.file(poseLandmarkerModelFile)
+    doLast {
+        val output = poseLandmarkerModelFile.get().asFile
+        downloadGeneratedAssetWithRetry(
+            urls = listOf(
+                "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+            ),
+            output = output,
+            minimumBytes = 5_000_000L,
+            label = "MediaPipe PoseLandmarker Full",
+        )
+    }
+}
+
 // V50 Pro Cutout uses PP-MattingV2/STDC1 512. The pinned ONNX model is the conversion source for
 // the ncnn Vulkan GPU artifact and remains the lazy ONNX Runtime CPU reliability fallback.
 val generatedPpMattingV2Assets = layout.buildDirectory.dir("generated/ppMattingV2Assets")
@@ -228,6 +248,7 @@ android {
     sourceSets["main"].assets.srcDir(generatedHairModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedFaceSkinModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedPersonDetectorAssets.get().asFile)
+    sourceSets["main"].assets.srcDir(generatedPoseLandmarkerAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedPpMattingV2Assets.get().asFile)
 }
 
@@ -235,6 +256,7 @@ tasks.named("preBuild").configure {
     dependsOn(downloadHairSegmenterModel)
     dependsOn(downloadFaceSkinSegmenterModel)
     dependsOn(downloadPersonDetectorModel)
+    dependsOn(downloadPoseLandmarkerModel)
     dependsOn(downloadPpMattingV2Model)
 }
 
