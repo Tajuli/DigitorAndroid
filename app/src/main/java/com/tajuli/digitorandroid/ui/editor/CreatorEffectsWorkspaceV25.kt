@@ -20,6 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -128,42 +129,88 @@ fun CreatorEffectsWorkspace(
                 .verticalScroll(rememberScrollState()),
         ) {
             if (category == "Body") {
-            val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
-            val matteReady = hasPersonCutoutCoverageV43(appContext, clip)
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .background(Fx25Raised)
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        if (matteReady) "Body matte · Ready" else "Body matte · Analyze required",
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (matteReady) Fx25Accent else Color.White,
-                    )
-                    Text(
-                        "PP-MattingV2 + hair detail + temporal flow. Shared with Pro Cutout; the background stays visible.",
-                        fontSize = 7.sp,
-                        color = Fx25Muted,
-                    )
+                val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
+                val matteReady = hasPersonCutoutCoverageV43(appContext, clip)
+                val analyzingThisClip = analysisRuntime.busy && analysisRuntime.clipId == clip.id
+                val expectedFrames = analysisRuntime.expectedFrames.coerceAtLeast(0)
+                val processedFrames = analysisRuntime.savedFrames.coerceAtLeast(0)
+                val progress = if (expectedFrames > 0) {
+                    (processedFrames.toFloat() / expectedFrames.toFloat()).coerceIn(0f, 1f)
+                } else {
+                    0f
                 }
-                if (!matteReady) {
-                    TextButton(
-                        enabled = !analysisRuntime.busy,
-                        onClick = { vm.analyzeSelectedPersonCutoutV43() },
+                val progressPercent = if (matteReady) 100 else (progress * 100f).toInt().coerceIn(0, 100)
+
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(Fx25Raised)
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            if (analysisRuntime.busy && analysisRuntime.clipId == clip.id) "Analyzing…" else "Analyze body",
-                            fontSize = 8.sp,
-                            color = if (analysisRuntime.busy) Fx25Muted else Fx25Accent,
-                        )
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                when {
+                                    matteReady -> "Body matte · Ready · 100%"
+                                    analyzingThisClip && expectedFrames > 0 -> "Body matte · Analyzing · $progressPercent%"
+                                    analyzingThisClip -> "Body matte · Preparing analysis…"
+                                    else -> "Body matte · Analyze required"
+                                },
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (matteReady) Fx25Accent else Color.White,
+                            )
+                            Text(
+                                when {
+                                    matteReady && expectedFrames > 0 ->
+                                        "$expectedFrames / $expectedFrames matte frames complete"
+                                    analyzingThisClip && expectedFrames > 0 ->
+                                        "$processedFrames / $expectedFrames matte frames processed"
+                                    else ->
+                                        "PP-MattingV2 + hair detail + temporal flow. Shared with Pro Cutout; the background stays visible."
+                                },
+                                fontSize = 7.sp,
+                                color = Fx25Muted,
+                            )
+                        }
+                        if (!matteReady) {
+                            TextButton(
+                                enabled = !analysisRuntime.busy,
+                                onClick = { vm.analyzeSelectedPersonCutoutV43() },
+                            ) {
+                                Text(
+                                    if (analyzingThisClip && expectedFrames > 0) {
+                                        "$progressPercent%"
+                                    } else if (analyzingThisClip) {
+                                        "Analyzing…"
+                                    } else {
+                                        "Analyze body"
+                                    },
+                                    fontSize = 8.sp,
+                                    color = if (analysisRuntime.busy) Fx25Muted else Fx25Accent,
+                                )
+                            }
+                        }
+                    }
+
+                    if (analyzingThisClip) {
+                        Spacer(Modifier.height(4.dp))
+                        if (expectedFrames > 0) {
+                            LinearProgressIndicator(
+                                progress = { progress },
+                                modifier = Modifier.fillMaxWidth().height(3.dp),
+                            )
+                        } else {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth().height(3.dp),
+                            )
+                        }
                     }
                 }
             }
-        }
 
             LazyRow(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
