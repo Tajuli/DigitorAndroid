@@ -202,7 +202,7 @@ fun CreatorEffectsWorkspace(
             ) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        if (matteReady) "Body tracking · Ready" else "Body tracking · Analyze required",
+                        if (matteReady) "Body matte · Ready" else "Body matte · Analyze required",
                         fontSize = 8.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = if (matteReady) Fx25Accent else Color.White,
