@@ -67,7 +67,7 @@ internal object FilterEffectThumbnailRendererV98 {
     const val FULL_PREVIEW_AMOUNT = 1f
 
     private const val CLIP_DURATION_US = 1_000_000L
-    private const val CACHE_VERSION = "v2"
+    private const val CACHE_VERSION = "v3-body-v100"
     private const val TAG = "DigitorFxThumb"
     private const val CACHE_KB = 12 * 1024
 
