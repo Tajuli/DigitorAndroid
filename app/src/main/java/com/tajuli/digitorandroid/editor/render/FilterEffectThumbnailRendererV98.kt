@@ -35,6 +35,7 @@ import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.creatorFilterMarkerNameV36
 import com.tajuli.digitorandroid.editor.model.creatorFilterPresetV36
+import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
 import com.tajuli.digitorandroid.editor.processing.PortraitLensBlurV99
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -107,6 +108,9 @@ internal object FilterEffectThumbnailRendererV98 {
                 id = "thumb-effect-" + effectName.lowercase().replace(' ', '-'),
                 effect = NodeEffect(name = preset.name, amount = FULL_PREVIEW_AMOUNT),
             )
+            if (preset.category == "Body") {
+                installBodyThumbnailMatteV102(appContext, clip, base.width, base.height)
+            }
             renderProductionFrame(appContext, clip, base)
         }
 
@@ -136,6 +140,46 @@ internal object FilterEffectThumbnailRendererV98 {
             )
             Bitmap.createBitmap(blurred, width, height, Bitmap.Config.ARGB_8888)
         }
+
+    private fun installBodyThumbnailMatteV102(
+        context: Context,
+        clip: TimelineClip,
+        width: Int,
+        height: Int,
+    ) {
+        val mask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        try {
+            val canvas = Canvas(mask)
+            val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                style = Paint.Style.FILL
+            }
+            val limb = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+                strokeWidth = width * .075f
+            }
+            val cx = width * .50f
+            canvas.drawCircle(cx, height * .24f, height * .105f, fill)
+            canvas.drawRoundRect(
+                cx - width * .095f,
+                height * .34f,
+                cx + width * .095f,
+                height * .73f,
+                width * .055f,
+                width * .055f,
+                fill,
+            )
+            canvas.drawLine(cx - width * .075f, height * .42f, cx - width * .18f, height * .64f, limb)
+            canvas.drawLine(cx + width * .075f, height * .42f, cx + width * .18f, height * .64f, limb)
+            canvas.drawLine(cx - width * .048f, height * .68f, cx - width * .105f, height * .92f, limb)
+            canvas.drawLine(cx + width * .048f, height * .68f, cx + width * .105f, height * .92f, limb)
+            PersonCutoutMaskStoreV43.save(context, clip.uri, PREVIEW_TIME_US, mask)
+        } finally {
+            mask.recycle()
+        }
+    }
 
     /** Used by tests and by any future explicit "None" item. */
     suspend fun renderIdentity(context: Context): Bitmap =
