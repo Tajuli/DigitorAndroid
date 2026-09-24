@@ -37,6 +37,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tajuli.digitorandroid.editor.model.BodyEffectCatalogV102
 import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.NodeKind
@@ -79,6 +80,7 @@ fun CreatorEffectsWorkspace(
     val nodeEffects = node.visibleEffects()
     val selectedEffect = nodeEffects.firstOrNull { it.id == selectedEffectId }
     val selectedEffectName = selectedEffect?.name
+    val appContext = LocalContext.current.applicationContext
 
     fun selectEffect(effectId: String) {
         TimelineTextSelectionBusV10.clear()
@@ -152,9 +154,23 @@ fun CreatorEffectsWorkspace(
                                 )
                             } else {
                                 vm.addEffectToSelectedNode(preset.name)
-                                val updatedNode = vm.state.value.project.clip(clip.id)
+                                val updatedClip = vm.state.value.project.clip(clip.id)
+                                val updatedNode = updatedClip
                                     ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
                                 updatedNode?.effects?.lastOrNull { it.name == preset.name }?.let { selectEffect(it.id) }
+
+                                // Body/Clone effects must never look "applied" while silently doing
+                                // nothing. Kick off the shared PP-MattingV2 analysis automatically.
+                                // The analyzer prioritizes the current preview frame, so the resident
+                                // preview graph can start showing the effect as soon as its first
+                                // durable matte arrives.
+                                if (
+                                    updatedClip != null &&
+                                    BodyEffectCatalogV102.isBodyEffect(preset.name) &&
+                                    !hasPersonCutoutCoverageV43(appContext, updatedClip)
+                                ) {
+                                    vm.analyzeSelectedPersonCutoutV43()
+                                }
                             }
                         }
                         .padding(5.dp),
@@ -191,7 +207,6 @@ fun CreatorEffectsWorkspace(
 
         if (category == "Body") {
             val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
-            val appContext = LocalContext.current.applicationContext
             val matteReady = hasPersonCutoutCoverageV43(appContext, clip)
             Row(
                 Modifier
