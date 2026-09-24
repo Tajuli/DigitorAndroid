@@ -206,24 +206,19 @@ fun CreatorEffectsWorkspace(
                             modifier = Modifier.weight(1f),
                         ) {
                             Text(
-                                if (bodySettingsExpanded) "Hide Settings" else "Settings",
+                                "Settings",
                                 fontSize = 8.sp,
                             )
                         }
                         FilledTonalButton(
-                            onClick = { vm.analyzeSelectedPersonCutoutV43() },
+                            onClick = {
+                                bodySettingsExpanded = false
+                                vm.analyzeSelectedPersonCutoutV43()
+                            },
                             enabled = !analysisRuntime.busy,
                             modifier = Modifier.weight(1f),
                         ) {
-                            Text(
-                                when {
-                                    analyzingThisClip && expectedFrames > 0 -> progressPercent.toString() + "%"
-                                    analyzingThisClip -> "Analyzing…"
-                                    matteReady -> "Analyze Body"
-                                    else -> "Analyze Body"
-                                },
-                                fontSize = 8.sp,
-                            )
+                            Text("Analyze Body", fontSize = 8.sp)
                         }
                     }
                 }
