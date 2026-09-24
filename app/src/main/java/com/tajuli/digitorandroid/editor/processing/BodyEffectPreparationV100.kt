@@ -48,7 +48,7 @@ object BodyEffectPreparationV100 {
 
         val faceTask = if (requirements.face) {
             async(Dispatchers.Default) {
-                runCatching { BeautyFaceAnalyzerV28(context).refineBodyFxAndStore(clip) }
+                runCatching { BodyEffectFaceAnalyzerV100(context).analyzeAndStore(clip) }
             }
         } else null
 
@@ -87,12 +87,10 @@ object BodyEffectPreparationV100 {
         val faceReady = if (!requirements.face) {
             true
         } else {
-            val track = faceResult?.getOrNull()
-            val relevant = track?.samples.orEmpty().filter {
-                it.sourceTimeUs >= clip.sourceInUs && it.sourceTimeUs <= clip.sourceOutUs
-            }
-            relevant.isNotEmpty() &&
-                relevant.count { it.geometry != null } * 100 >= relevant.size * FACE_READY_PERCENT
+            faceResult?.getOrNull()?.let { track ->
+                track.covers(clip.sourceInUs, clip.sourceOutUs) &&
+                    track.detectedRatio() >= FACE_READY_RATIO
+            } == true
         }
 
         val poseResult = poseTask?.await()
@@ -131,6 +129,6 @@ object BodyEffectPreparationV100 {
         )
     }
 
-    private const val FACE_READY_PERCENT = 60
+    private const val FACE_READY_RATIO = .60f
     private const val POSE_READY_RATIO = .58f
 }
