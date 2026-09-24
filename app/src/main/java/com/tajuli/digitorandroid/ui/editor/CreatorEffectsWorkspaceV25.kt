@@ -169,14 +169,10 @@ fun CreatorEffectsWorkspace(
 
                     if (analyzingThisClip) {
                         Text(
-                            if (expectedFrames > 0) {
-                                "Analyzing body matte · " + progressPercent + "% · " +
-                                    processedFrames + " / " + expectedFrames + " frames"
-                            } else {
-                                "Preparing Body analysis…"
-                            },
-                            fontSize = 7.sp,
-                            color = Fx25Muted,
+                            if (expectedFrames > 0) progressPercent.toString() + "%" else "0%",
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Fx25Accent,
                         )
                         if (expectedFrames > 0) {
                             LinearProgressIndicator(
