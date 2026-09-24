@@ -134,6 +134,7 @@ internal class BodyEffectGraphV102 private constructor(
                     snapshotClip
                 }
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
+                val matteSettings = currentClip.resolvedCutoutV43()
                 val bracket = personBracket(currentClip, sourceUs)
                 val hasMaskA = bindMask(maskTextureA, bracket.a?.file?.absolutePath, true)
                 val hasMaskB = bindMask(maskTextureB, bracket.b?.file?.absolutePath, false)
@@ -194,6 +195,11 @@ internal class BodyEffectGraphV102 private constructor(
                                     hasMaskA = hasMaskA,
                                     hasMaskB = hasMaskB,
                                     temporalMix = bracket.mix,
+                                    alphaBias = matteSettings.personThreshold,
+                                    edgeSoftness = matteSettings.personFeather,
+                                    edgeShift = matteSettings.edgeShiftV44,
+                                    edgeClean = matteSettings.edgeCleanV44,
+                                    dehalo = matteSettings.dehaloV44,
                                 )
                                 slotTextures[operation.slot] = texture
                             }
@@ -252,6 +258,11 @@ internal class BodyEffectGraphV102 private constructor(
             hasMaskA: Boolean,
             hasMaskB: Boolean,
             temporalMix: Float,
+            alphaBias: Float,
+            edgeSoftness: Float,
+            edgeShift: Float,
+            edgeClean: Float,
+            dehalo: Float,
         ) {
             nodeProgram.use()
             nodeProgram.setSamplerTexIdUniform("uTexSampler", inputTexture, 0)
@@ -264,6 +275,11 @@ internal class BodyEffectGraphV102 private constructor(
             nodeProgram.setFloatUniform("uHasMaskA", if (hasMaskA) 1f else 0f)
             nodeProgram.setFloatUniform("uHasMaskB", if (hasMaskB) 1f else 0f)
             nodeProgram.setFloatUniform("uTemporalMix", temporalMix)
+            nodeProgram.setFloatUniform("uAlphaBias", alphaBias)
+            nodeProgram.setFloatUniform("uEdgeSoftness", edgeSoftness)
+            nodeProgram.setFloatUniform("uEdgeShift", edgeShift)
+            nodeProgram.setFloatUniform("uEdgeClean", edgeClean)
+            nodeProgram.setFloatUniform("uDehalo", dehalo)
             nodeProgram.setFloatUniform("uOutline", vector.outline)
             nodeProgram.setFloatUniform("uGlow", vector.glow)
             nodeProgram.setFloatUniform("uAura", vector.aura)
@@ -492,6 +508,11 @@ internal class BodyEffectGraphV102 private constructor(
                 uniform float uHasMaskA;
                 uniform float uHasMaskB;
                 uniform float uTemporalMix;
+                uniform float uAlphaBias;
+                uniform float uEdgeSoftness;
+                uniform float uEdgeShift;
+                uniform float uEdgeClean;
+                uniform float uDehalo;
                 uniform float uOutline;
                 uniform float uGlow;
                 uniform float uAura;
@@ -509,13 +530,48 @@ internal class BodyEffectGraphV102 private constructor(
                     return vec2(videoUv.x, 1.0 - videoUv.y);
                 }
 
-                float bodyAt(vec2 uv) {
+                float rawBodyAt(vec2 uv) {
                     if (uHasMaskA < 0.5 && uHasMaskB < 0.5) return 0.0;
                     vec2 m = maskUv(clamp(uv, vec2(0.0), vec2(1.0)));
                     float a = uHasMaskA > 0.5 ? texture2D(uMaskA, m).r : 0.0;
                     float b = uHasMaskB > 0.5 ? texture2D(uMaskB, m).r : a;
                     if (uHasMaskA < 0.5) a = b;
                     return clamp(mix(a, b, clamp(uTemporalMix, 0.0, 1.0)), 0.0, 1.0);
+                }
+
+                float shiftedRawBody(vec2 uv) {
+                    float amount = clamp(uEdgeShift, -0.18, 0.18);
+                    if (abs(amount) < 0.0005) return rawBodyAt(uv);
+                    float radius = 1.0 + abs(amount) * 38.0;
+                    vec2 d = uTexelSize * radius;
+                    float c = rawBodyAt(uv);
+                    float s1 = rawBodyAt(uv + vec2(d.x, 0.0));
+                    float s2 = rawBodyAt(uv - vec2(d.x, 0.0));
+                    float s3 = rawBodyAt(uv + vec2(0.0, d.y));
+                    float s4 = rawBodyAt(uv - vec2(0.0, d.y));
+                    float s5 = rawBodyAt(uv + d);
+                    float s6 = rawBodyAt(uv - d);
+                    float s7 = rawBodyAt(uv + vec2(d.x, -d.y));
+                    float s8 = rawBodyAt(uv + vec2(-d.x, d.y));
+                    if (amount > 0.0) {
+                        return max(c, max(max(max(s1, s2), max(s3, s4)), max(max(s5, s6), max(s7, s8))));
+                    }
+                    return min(c, min(min(min(s1, s2), min(s3, s4)), min(min(s5, s6), min(s7, s8))));
+                }
+
+                float bodyAt(vec2 uv) {
+                    float raw = shiftedRawBody(uv);
+                    float softness = clamp(uEdgeSoftness, 0.005, 0.45);
+                    float bias = clamp(uAlphaBias, 0.05, 0.95);
+                    float shaped = smoothstep(
+                        clamp(bias - softness, 0.0, 1.0),
+                        clamp(bias + softness, 0.0, 1.0),
+                        raw
+                    );
+                    float cleaned = smoothstep(0.12, 0.88, shaped);
+                    shaped = mix(shaped, cleaned, clamp(uEdgeClean, 0.0, 1.0) * 0.82);
+                    float haloTighten = mix(1.0, smoothstep(0.08, 0.72, shaped), clamp(uDehalo, 0.0, 1.0) * 0.55);
+                    return clamp(shaped * haloTighten, 0.0, 1.0);
                 }
 
                 float maxRing(vec2 uv, float radius) {
