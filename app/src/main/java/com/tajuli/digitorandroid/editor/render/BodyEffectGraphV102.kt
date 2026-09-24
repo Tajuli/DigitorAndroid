@@ -20,6 +20,7 @@ import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.SpatialNodeGraphPlan
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.resolveTimedBodyEffectsV102
+import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskFrameV43
@@ -67,9 +68,9 @@ internal class BodyEffectGraphV102 private constructor(
         private val appContext: Context,
         private val snapshotClip: TimelineClip,
         private val preview: Boolean,
-        useHdr: Boolean,
+        private val useHighPrecisionColorComponents: Boolean,
     ) : BaseGlShaderProgram(
-        /* useHighPrecisionColorComponents = */ useHdr,
+        /* useHighPrecisionColorComponents = */ useHighPrecisionColorComponents,
         /* texturePoolCapacity = */ 1,
     ) {
         private val plan = SpatialNodeGraphPlan.compile(snapshotClip.nodeGraph)
