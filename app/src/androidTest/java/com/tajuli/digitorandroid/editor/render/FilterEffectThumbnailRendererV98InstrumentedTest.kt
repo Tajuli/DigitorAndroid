@@ -7,6 +7,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -63,6 +64,19 @@ class FilterEffectThumbnailRendererV98InstrumentedTest {
         val pixelsB = pixels(b)
 
         assertArrayEquals(pixelsA, pixelsB)
+    }
+
+    @Test
+    fun bodyEffectThumbnail_runsSemanticProductionGraph() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        FilterEffectThumbnailRendererV98.clearMemoryCacheForTest()
+        FilterEffectThumbnailRendererV98.resetStatsForTest()
+
+        val base = FilterEffectThumbnailRendererV98.baseThumbnailForTest(context)
+        val body = FilterEffectThumbnailRendererV98.renderEffect(context, "Neon Outline")
+
+        assertEquals(0, FilterEffectThumbnailRendererV98.fallbackCountForTest())
+        assertFalse(pixels(base).contentEquals(pixels(body)))
     }
 
     @Test
