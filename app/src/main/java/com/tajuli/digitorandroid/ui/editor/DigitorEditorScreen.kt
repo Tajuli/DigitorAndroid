@@ -1,8 +1,6 @@
 package com.tajuli.digitorandroid.ui.editor
 
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
 import androidx.media3.common.util.UnstableApi
 
 /**
