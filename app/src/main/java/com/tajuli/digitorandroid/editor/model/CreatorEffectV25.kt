@@ -106,6 +106,10 @@ object CreatorEffectCatalogV25 {
         p("Body RGB Split", "Body"),
         p("Body Silhouette", "Body"),
         p("Body Pulse", "Body"),
+        p("Body Clone", "Body"),
+        p("Triple Clone", "Body"),
+        p("Clone Echo", "Body"),
+        p("Mirror Clone", "Body"),
     )
 
     private val byName = presets.associateBy { it.name.lowercase() }
