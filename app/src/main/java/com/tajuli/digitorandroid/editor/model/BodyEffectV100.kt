@@ -39,7 +39,7 @@ fun BodyEffectValuesV100.requirementsV100(): BodyEffectRequirementsV100 =
             stroke > .001f || bodyFire > .001f,
     )
 
-private fun CreatorEffectVectorV25.bodyValuesV100(): BodyEffectValuesV100 =
+fun CreatorEffectVectorV25.bodyValuesV100(): BodyEffectValuesV100 =
     BodyEffectValuesV100(
         clone = clone,
         fireEyes = fireEyes,
