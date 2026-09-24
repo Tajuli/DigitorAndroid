@@ -80,6 +80,16 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         .enableTracking()
         .build()
 
+    // Body/eye FX are analyzed offline before apply, so prefer precise contours over realtime speed.
+    // ML Kit notes that contour detection and tracking IDs should not be combined for this case.
+    private val bodyFxOptions = FaceDetectorOptions.Builder()
+        .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+        .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
+        .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+        .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
+        .setMinFaceSize(.08f)
+        .build()
+
     suspend fun primeAndStore(clip: TimelineClip): BeautyFaceTrackV28 {
         val existing = BeautyFaceTrackStoreV28.load(context, clip)
         if (existing != null && existing.samples.count { it.geometry != null } >= PRIME_FACE_ANCHORS) return existing
@@ -153,7 +163,12 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         }
 
         val fresh = if (clip.isImageV21) {
-            analyzeImage(clip, requireHairMask = false, requireSkinMask = false)
+            analyzeImage(
+                clip,
+                requireHairMask = false,
+                requireSkinMask = false,
+                faceOptions = bodyFxOptions,
+            )
         } else {
             analyzeVideoAnchors(
                 clip = clip,
@@ -162,6 +177,7 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
                 requireSkinMask = false,
                 semanticAnchorLimit = 0,
                 frameOption = MediaMetadataRetriever.OPTION_CLOSEST,
+                faceOptions = bodyFxOptions,
             )
         }
         val merged = existing?.mergedWith(fresh) ?: fresh
@@ -202,8 +218,9 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         clip: TimelineClip,
         requireHairMask: Boolean,
         requireSkinMask: Boolean,
+        faceOptions: FaceDetectorOptions = options,
     ): BeautyFaceTrackV28 {
-        val detector = FaceDetection.getClient(options)
+        val detector = FaceDetection.getClient(faceOptions)
         val hairSegmenter = if (requireHairMask) BeautyHairSegmenterV29(context) else null
         val skinSegmenter = if (requireSkinMask) BeautyFaceSkinSegmenterV31(context) else null
         val bitmap = decodeImage(Uri.parse(clip.uri))
@@ -238,8 +255,9 @@ class BeautyFaceAnalyzerV28(private val context: Context) {
         requireSkinMask: Boolean,
         semanticAnchorLimit: Int,
         frameOption: Int,
+        faceOptions: FaceDetectorOptions = options,
     ): BeautyFaceTrackV28 {
-        val detector = FaceDetection.getClient(options)
+        val detector = FaceDetection.getClient(faceOptions)
         val hairSegmenter = if (requireHairMask) BeautyHairSegmenterV29(context) else null
         val skinSegmenter = if (requireSkinMask) BeautyFaceSkinSegmenterV31(context) else null
         val retriever = MediaMetadataRetriever()
