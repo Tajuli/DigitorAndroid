@@ -169,7 +169,10 @@ fun CreatorEffectsWorkspace(
                                     BodyEffectCatalogV102.isBodyEffect(preset.name) &&
                                     !hasPersonCutoutCoverageV43(appContext, updatedClip)
                                 ) {
-                                    vm.analyzeSelectedPersonCutoutV43()
+                                    val runtime = CutoutAnalysisRuntimeV66.state.value
+                                    if (!runtime.busy) {
+                                        vm.analyzeSelectedPersonCutoutV43()
+                                    }
                                 }
                             }
                         }
