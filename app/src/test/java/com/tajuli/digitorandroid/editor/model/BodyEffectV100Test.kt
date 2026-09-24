@@ -69,6 +69,28 @@ class BodyEffectV100Test {
     }
 
     @Test
+    fun bodyFaceTrackInterpolatesEyeRectangles() {
+        val leftA = BeautyRectV28(.20f, .20f, .30f, .30f)
+        val rightA = BeautyRectV28(.40f, .20f, .50f, .30f)
+        val leftB = BeautyRectV28(.30f, .30f, .40f, .40f)
+        val rightB = BeautyRectV28(.50f, .30f, .60f, .40f)
+        val track = BodyFaceTrackV100(
+            sourceUri = "content://test",
+            analyzedStartUs = 0L,
+            analyzedEndUs = 1_000_000L,
+            samples = listOf(
+                BodyFaceSampleV100(0L, leftA, rightA),
+                BodyFaceSampleV100(1_000_000L, leftB, rightB),
+            ),
+        )
+
+        val eyes = track.eyesAt(500_000L)!!
+        assertEquals(.25f, eyes.first.left, .0001f)
+        assertEquals(.45f, eyes.second.left, .0001f)
+        assertEquals(1f, track.detectedRatio(), .0001f)
+    }
+
+    @Test
     fun poseTrackRespectsMissingDetectionSamples() {
         val landmarks = List(33) { BodyLandmarkV100(.5f, .5f) }
         val track = BodyPoseTrackV100(
