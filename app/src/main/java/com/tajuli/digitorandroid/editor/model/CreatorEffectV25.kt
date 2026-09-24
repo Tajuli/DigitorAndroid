@@ -34,7 +34,7 @@ data class CreatorEffectVectorV25(
 }
 
 object CreatorEffectCatalogV25 {
-    val categories: List<String> = listOf("Basic", "Glitch", "Retro", "Lens", "Motion")
+    val categories: List<String> = listOf("Basic", "Glitch", "Retro", "Lens", "Motion", "Body")
 
     val presets: List<CreatorEffectPresetV25> = listOf(
         // Basic
@@ -97,6 +97,15 @@ object CreatorEffectCatalogV25 {
         p("Pulse Zoom", "Motion", zoomBlur = .62f, flicker = .24f),
         p("Spin Blur", "Motion", zoomBlur = .70f, wave = .36f),
         p("Flash", "Motion", glow = .82f, flicker = .82f),
+
+        // Body — semantic PP-MattingV2 effects are rendered by BodyEffectGraphV102.
+        // Their V25 vector stays identity so full-frame creator processing never double-applies them.
+        p("Body Glow", "Body"),
+        p("Neon Outline", "Body"),
+        p("Body Aura", "Body"),
+        p("Body RGB Split", "Body"),
+        p("Body Silhouette", "Body"),
+        p("Body Pulse", "Body"),
     )
 
     private val byName = presets.associateBy { it.name.lowercase() }
