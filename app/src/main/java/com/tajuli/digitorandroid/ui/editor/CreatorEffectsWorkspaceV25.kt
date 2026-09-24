@@ -41,7 +41,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.tajuli.digitorandroid.editor.model.BodyEffectCatalogV102
 import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
@@ -52,6 +51,7 @@ import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisRuntimeV66
 import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
+import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
 
 private val Fx25Panel = Color(0xFF0B0B0F)
 private val Fx25Raised = Color(0xFF17171C)
@@ -81,11 +81,13 @@ fun CreatorEffectsWorkspace(
         ?.takeIf { it.clipId == clip.id && it.nodeId == node.id }
         ?.effectId
     var category by remember { mutableStateOf("Basic") }
+    var bodySettingsExpanded by remember(clip.id) { mutableStateOf(false) }
     val categoryPresets = remember(category) { CreatorEffectCatalogV25.inCategory(category) }
     val nodeEffects = node.visibleEffects()
     val selectedEffect = nodeEffects.firstOrNull { it.id == selectedEffectId }
     val selectedEffectName = selectedEffect?.name
     val appContext = LocalContext.current.applicationContext
+    val bodyMatteReady = category != "Body" || hasPersonCutoutCoverageV43(appContext, clip)
 
     fun selectEffect(effectId: String) {
         TimelineTextSelectionBusV10.clear()
@@ -134,7 +136,7 @@ fun CreatorEffectsWorkspace(
         ) {
             if (category == "Body") {
                 val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
-                val matteReady = hasPersonCutoutCoverageV43(appContext, clip)
+                val matteReady = bodyMatteReady
                 val analyzingThisClip = analysisRuntime.busy && analysisRuntime.clipId == clip.id
                 val expectedFrames = analysisRuntime.expectedFrames.coerceAtLeast(0)
                 val processedFrames = analysisRuntime.savedFrames.coerceAtLeast(0)
@@ -149,59 +151,33 @@ fun CreatorEffectsWorkspace(
                     Modifier
                         .fillMaxWidth()
                         .background(Fx25Raised)
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                when {
-                                    matteReady -> "Body matte · Ready · 100%"
-                                    analyzingThisClip && expectedFrames > 0 -> "Body matte · Analyzing · $progressPercent%"
-                                    analyzingThisClip -> "Body matte · Preparing analysis…"
-                                    else -> "Body matte · Analyze required"
-                                },
-                                fontSize = 8.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (matteReady) Fx25Accent else Color.White,
-                            )
-                            Text(
-                                when {
-                                    matteReady && expectedFrames > 0 ->
-                                        "$expectedFrames / $expectedFrames matte frames complete"
-                                    analyzingThisClip && expectedFrames > 0 ->
-                                        "$processedFrames / $expectedFrames matte frames processed"
-                                    else ->
-                                        "PP-MattingV2 + hair detail + temporal flow. Shared with Pro Cutout; the background stays visible."
-                                },
-                                fontSize = 7.sp,
-                                color = Fx25Muted,
-                            )
-                        }
-                        if (!matteReady) {
-                            TextButton(
-                                enabled = !analysisRuntime.busy,
-                                onClick = { vm.analyzeSelectedPersonCutoutV43() },
-                            ) {
-                                Text(
-                                    if (analyzingThisClip && expectedFrames > 0) {
-                                        "$progressPercent%"
-                                    } else if (analyzingThisClip) {
-                                        "Analyzing…"
-                                    } else {
-                                        "Analyze body"
-                                    },
-                                    fontSize = 8.sp,
-                                    color = if (analysisRuntime.busy) Fx25Muted else Fx25Accent,
-                                )
-                            }
-                        }
-                    }
+                    Text(
+                        when {
+                            matteReady ->
+                                "Body analysis is complete. Body effects are ready to apply."
+                            analyzingThisClip ->
+                                "Body analysis is in progress. Effects will become available when the analysis is complete."
+                            else ->
+                                "Body analysis must be completed before Body effects can be applied. Review the analysis settings if required, then select Analyze Body."
+                        },
+                        fontSize = 8.sp,
+                        color = if (matteReady) Fx25Accent else Color.White.copy(alpha = .88f),
+                    )
 
                     if (analyzingThisClip) {
-                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            if (expectedFrames > 0) {
+                                "Analyzing body matte · " + progressPercent + "% · " +
+                                    processedFrames + " / " + expectedFrames + " frames"
+                            } else {
+                                "Preparing Body analysis…"
+                            },
+                            fontSize = 7.sp,
+                            color = Fx25Muted,
+                        )
                         if (expectedFrames > 0) {
                             LinearProgressIndicator(
                                 progress = { progress },
@@ -212,11 +188,48 @@ fun CreatorEffectsWorkspace(
                                 modifier = Modifier.fillMaxWidth().height(3.dp),
                             )
                         }
+                    } else if (matteReady) {
+                        Text(
+                            "Body matte · Ready · 100%",
+                            fontSize = 7.sp,
+                            color = Fx25Muted,
+                        )
+                    }
+
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = { bodySettingsExpanded = !bodySettingsExpanded },
+                            enabled = !analysisRuntime.busy,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(
+                                if (bodySettingsExpanded) "Hide Settings" else "Settings",
+                                fontSize = 8.sp,
+                            )
+                        }
+                        FilledTonalButton(
+                            onClick = { vm.analyzeSelectedPersonCutoutV43() },
+                            enabled = !analysisRuntime.busy,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(
+                                when {
+                                    analyzingThisClip && expectedFrames > 0 -> progressPercent.toString() + "%"
+                                    analyzingThisClip -> "Analyzing…"
+                                    matteReady -> "Analyze Body"
+                                    else -> "Analyze Body"
+                                },
+                                fontSize = 8.sp,
+                            )
+                        }
                     }
                 }
             }
 
-            if (category == "Body") {
+            if (category == "Body" && bodySettingsExpanded) {
                 val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
                 val settings = clip.resolvedCutoutV43()
                 val analysisBusy = analysisRuntime.busy && analysisRuntime.clipId == clip.id
@@ -350,7 +363,8 @@ fun CreatorEffectsWorkspace(
                 HorizontalDivider(color = Fx25Divider)
             }
 
-            LazyRow(
+            if (bodyMatteReady) {
+                LazyRow(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -381,28 +395,14 @@ fun CreatorEffectsWorkspace(
                                 vm.deleteEffectTimelineV26(
                                     EffectTimelineSelectionV26(clip.id, node.id, liveEffect.id),
                                 )
+                                PreviewExportCoordinator.refreshActivePreviews(40L)
                             } else {
                                 vm.addEffectToSelectedNode(preset.name)
                                 val updatedClip = vm.state.value.project.clip(clip.id)
                                 val updatedNode = updatedClip
                                     ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
                                 updatedNode?.effects?.lastOrNull { it.name == preset.name }?.let { selectEffect(it.id) }
-
-                                // Body/Clone effects must never look "applied" while silently doing
-                                // nothing. Kick off the shared PP-MattingV2 analysis automatically.
-                                // The analyzer prioritizes the current preview frame, so the resident
-                                // preview graph can start showing the effect as soon as its first
-                                // durable matte arrives.
-                                if (
-                                    updatedClip != null &&
-                                    BodyEffectCatalogV102.isBodyEffect(preset.name) &&
-                                    !hasPersonCutoutCoverageV43(appContext, updatedClip)
-                                ) {
-                                    val runtime = CutoutAnalysisRuntimeV66.state.value
-                                    if (!runtime.busy) {
-                                        vm.analyzeSelectedPersonCutoutV43()
-                                    }
-                                }
+                                PreviewExportCoordinator.refreshActivePreviews(40L)
                             }
                         }
                         .padding(5.dp),
@@ -575,6 +575,7 @@ fun CreatorEffectsWorkspace(
                 }
             }
         }
+            }
     }
     }
 }
