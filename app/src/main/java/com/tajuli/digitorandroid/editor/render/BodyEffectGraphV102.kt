@@ -270,6 +270,10 @@ internal class BodyEffectGraphV102 private constructor(
             nodeProgram.setFloatUniform("uRgbSplit", vector.rgbSplit)
             nodeProgram.setFloatUniform("uSilhouette", vector.silhouette)
             nodeProgram.setFloatUniform("uPulse", vector.pulse)
+            nodeProgram.setFloatUniform("uClone", vector.clone)
+            nodeProgram.setFloatUniform("uCloneTriple", vector.cloneTriple)
+            nodeProgram.setFloatUniform("uCloneEcho", vector.cloneEcho)
+            nodeProgram.setFloatUniform("uCloneMirror", vector.cloneMirror)
             nodeProgram.setFloatUniform("uTime", (sourceUs % 10_000_000L).toFloat() / 1_000_000f)
             nodeProgram.bindAttributesAndUniforms()
             GLES20.glDisable(GLES20.GL_BLEND)
@@ -494,6 +498,10 @@ internal class BodyEffectGraphV102 private constructor(
                 uniform float uRgbSplit;
                 uniform float uSilhouette;
                 uniform float uPulse;
+                uniform float uClone;
+                uniform float uCloneTriple;
+                uniform float uCloneEcho;
+                uniform float uCloneMirror;
                 uniform float uTime;
                 varying vec2 vTexCoord;
 
@@ -538,6 +546,17 @@ internal class BodyEffectGraphV102 private constructor(
                     return m;
                 }
 
+                vec3 overlayBodyClone(vec3 base, vec2 sourceUv, float opacity) {
+                    if (sourceUv.x < 0.0 || sourceUv.x > 1.0 || sourceUv.y < 0.0 || sourceUv.y > 1.0) {
+                        return base;
+                    }
+                    float matte = smoothstep(0.035, 0.94, bodyAt(sourceUv));
+                    if (matte <= 0.001) return base;
+                    vec4 cloneSample = texture2D(uTexSampler, sourceUv);
+                    float alpha = clamp(matte * opacity * cloneSample.a, 0.0, 1.0);
+                    return mix(base, cloneSample.rgb, alpha);
+                }
+
                 void main() {
                     vec4 source = texture2D(uTexSampler, vTexCoord);
                     if (uHasMaskA < 0.5 && uHasMaskB < 0.5) {
@@ -562,6 +581,35 @@ internal class BodyEffectGraphV102 private constructor(
                     vec3 neon = mix(cyan, magenta, sweep);
 
                     vec3 rgb = source.rgb;
+
+                    // Clone effects copy only pixels supported by the semantic body matte. The scene
+                    // itself is never shifted/duplicated, so furniture/background details stay fixed.
+                    if (uClone > 0.001 && uCloneTriple < 0.001) {
+                        rgb = overlayBodyClone(
+                            rgb,
+                            vTexCoord - vec2(0.205, 0.0),
+                            clamp(uClone, 0.0, 1.0)
+                        );
+                    }
+                    if (uCloneTriple > 0.001) {
+                        float strength = clamp(uCloneTriple, 0.0, 1.0);
+                        rgb = overlayBodyClone(rgb, vTexCoord + vec2(0.185, 0.0), strength);
+                        rgb = overlayBodyClone(rgb, vTexCoord - vec2(0.185, 0.0), strength);
+                    }
+                    if (uCloneEcho > 0.001) {
+                        float strength = clamp(uCloneEcho, 0.0, 1.0);
+                        rgb = overlayBodyClone(rgb, vTexCoord + vec2(0.075, 0.0), strength * 0.58);
+                        rgb = overlayBodyClone(rgb, vTexCoord + vec2(0.145, 0.0), strength * 0.40);
+                        rgb = overlayBodyClone(rgb, vTexCoord + vec2(0.215, 0.0), strength * 0.26);
+                    }
+                    if (uCloneMirror > 0.001) {
+                        vec2 mirrorSource = vec2(1.0 - vTexCoord.x, vTexCoord.y);
+                        rgb = overlayBodyClone(
+                            rgb,
+                            mirrorSource,
+                            clamp(uCloneMirror, 0.0, 1.0) * 0.94
+                        );
+                    }
 
                     if (uRgbSplit > 0.001 && body > 0.001) {
                         float px = 1.5 + 6.0 * clamp(uRgbSplit, 0.0, 1.5);
