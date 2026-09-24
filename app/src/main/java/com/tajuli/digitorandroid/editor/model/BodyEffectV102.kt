@@ -76,3 +76,14 @@ fun resolveTimedBodyEffectsV102(
     sourceTimeUs: Long,
 ): BodyEffectVectorV102 =
     resolveBodyEffectsV102(effects.filter { it.activeAtSourceTimeV26(clip, sourceTimeUs) })
+
+
+/** True when this clip contains at least one enabled semantic Body/Clone effect. */
+fun TimelineClip.hasBodyEffectsV102(): Boolean =
+    nodeGraph.nodes
+        .asSequence()
+        .filter { it.kind == NodeKind.SERIAL || it.kind == NodeKind.PARALLEL }
+        .flatMap { it.visibleEffects().asSequence() }
+        .any { effect ->
+            effect.enabled && effect.amount > 0f && BodyEffectCatalogV102.isBodyEffect(effect.name)
+        }
