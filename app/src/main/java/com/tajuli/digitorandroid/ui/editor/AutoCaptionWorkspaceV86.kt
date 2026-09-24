@@ -126,7 +126,7 @@ fun AutoCaptionLauncher(
 }
 
 @Composable
-private fun AutoCaptionDialogV86(
+internal fun AutoCaptionDialogV86(
     vm: EditorViewModel,
     onDismiss: () -> Unit,
 ) {
