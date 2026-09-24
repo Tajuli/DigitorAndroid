@@ -331,7 +331,7 @@ internal class BodyEffectGraphV100 private constructor(
             bodyProgram.setFloatUniform("uStroke", values.stroke)
             bodyProgram.setFloatUniform("uBodyFire", values.bodyFire)
             bodyProgram.setFloatUniform("uHasFace", if (face == null) 0f else 1f)
-            bodyProgram.setFloatUniform("uHasPose", if (pose?.size ?: 0 >= 29) 1f else 0f)
+            bodyProgram.setFloatUniform("uHasPose", if ((pose?.size ?: 0) >= 29) 1f else 0f)
             bodyProgram.setFloatUniform("uAllowFallback", if (allowSyntheticFallback) 1f else 0f)
             bodyProgram.setFloatUniform("uHasPersonMaskA", if (hasMaskA) 1f else 0f)
             bodyProgram.setFloatUniform("uHasPersonMaskB", if (hasMaskB) 1f else 0f)
