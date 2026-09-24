@@ -33,6 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,6 +44,8 @@ import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
+import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisRuntimeV66
+import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 
 private val Fx25Panel = Color(0xFF0B0B0F)
 private val Fx25Raised = Color(0xFF17171C)
@@ -182,6 +185,45 @@ fun CreatorEffectsWorkspace(
                         color = Color.White.copy(alpha = .90f),
                         maxLines = 1,
                     )
+                }
+            }
+        }
+
+        if (category == "Body") {
+            val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
+            val appContext = LocalContext.current.applicationContext
+            val matteReady = hasPersonCutoutCoverageV43(appContext, clip)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Fx25Raised)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (matteReady) "Body tracking · Ready" else "Body tracking · Analyze required",
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (matteReady) Fx25Accent else Color.White,
+                    )
+                    Text(
+                        "PP-MattingV2 + hair detail + temporal flow. Shared with Pro Cutout; the background stays visible.",
+                        fontSize = 7.sp,
+                        color = Fx25Muted,
+                    )
+                }
+                if (!matteReady) {
+                    TextButton(
+                        enabled = !analysisRuntime.busy,
+                        onClick = { vm.analyzeSelectedPersonCutoutV43() },
+                    ) {
+                        Text(
+                            if (analysisRuntime.busy && analysisRuntime.clipId == clip.id) "Analyzing…" else "Analyze body",
+                            fontSize = 8.sp,
+                            color = if (analysisRuntime.busy) Fx25Muted else Fx25Accent,
+                        )
+                    }
                 }
             }
         }
