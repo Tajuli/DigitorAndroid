@@ -26,6 +26,7 @@ import com.tajuli.digitorandroid.editor.model.resolveCreatorEffectsV25
 import com.tajuli.digitorandroid.editor.model.resolveTimedCreatorEffectsV26
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.model.visibleEffects
+import com.tajuli.digitorandroid.editor.model.withoutBodyEffectsV100
 import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 import com.tajuli.digitorandroid.editor.processing.BeautyFaceTrackStoreV28
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskFrameV43
@@ -60,7 +61,7 @@ internal class CreatorEffectGraphV25 private constructor(
                 return if (editableNodes.isNotEmpty()) CreatorEffectGraphV25(clip, true) else null
             }
             val hasFx = editableNodes.any { node ->
-                !resolveCreatorEffectsV25(node.visibleEffects()).isIdentity ||
+                !resolveCreatorEffectsV25(node.visibleEffects()).withoutBodyEffectsV100().isIdentity ||
                     clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
             }
             return if (hasFx) CreatorEffectGraphV25(clip, false) else null
@@ -81,7 +82,7 @@ internal class CreatorEffectGraphV25 private constructor(
         private val supportsTrackedFx = clip.nodeGraph.nodes.any { node ->
             node.kind == NodeKind.SERIAL || node.kind == NodeKind.PARALLEL
         } && clip.nodeGraph.nodes.any { node ->
-            vectorRequiresTrackedFx(resolveCreatorEffectsV25(node.visibleEffects()))
+            vectorRequiresTrackedFx(resolveCreatorEffectsV25(node.visibleEffects()).withoutBodyEffectsV100())
         }
         private val nodeProgram: GlProgram
         private val trackedNodePrograms = linkedMapOf<Int, GlProgram>()
@@ -146,7 +147,7 @@ internal class CreatorEffectGraphV25 private constructor(
                 val currentVectors = currentClip.nodeGraph.nodes
                     .asSequence()
                     .filter { it.kind == NodeKind.SERIAL || it.kind == NodeKind.PARALLEL }
-                    .map { resolveCreatorEffectsV25(it.visibleEffects()) }
+                    .map { resolveCreatorEffectsV25(it.visibleEffects()).withoutBodyEffectsV100() }
                     .toList()
                 val currentRequiresTrackedFx = currentVectors.any(::vectorRequiresTrackedFx)
                 val currentRequiresPersonMask = currentVectors.any(::vectorNeedsPersonMask)
@@ -210,7 +211,11 @@ internal class CreatorEffectGraphV25 private constructor(
                                     sourceEndUsV26 = base.sourceEndUsV26,
                                 )
                             }
-                            val vector = resolveTimedCreatorEffectsV26(effectsWithTiming, currentClip, sourceUs)
+                            val vector = resolveTimedCreatorEffectsV26(
+                                effectsWithTiming,
+                                currentClip,
+                                sourceUs,
+                            ).withoutBodyEffectsV100()
                             if (vector.isIdentity) {
                                 slotTextures[operation.slot] = input
                             } else {
