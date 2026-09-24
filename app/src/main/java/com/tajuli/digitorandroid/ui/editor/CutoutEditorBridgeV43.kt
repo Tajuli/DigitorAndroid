@@ -210,6 +210,12 @@ fun EditorViewModel.analyzeSelectedPersonCutoutV43() {
                                 CutoutAnalysisRuntimeV66.updateSavedFrames(completed)
                                 if (completed == 1 || completed % progressStride == 0) {
                                     personCutoutAnalysisScopeV66.launch(Dispatchers.Main) {
+                                        if (completed == 1) {
+                                            // Body/Clone effects share this matte store. Refresh as
+                                            // soon as the priority preview-frame matte lands instead
+                                            // of making the user wait for full-clip analysis.
+                                            PreviewExportCoordinator.refreshActivePreviews(80L)
+                                        }
                                         setEditorStatusV19(
                                             "Pro Cutout · $label · $completed processed frame(s) · checkpointing",
                                         )
