@@ -14,10 +14,15 @@ data class BodyEffectVectorV102(
     val rgbSplit: Float = 0f,
     val silhouette: Float = 0f,
     val pulse: Float = 0f,
+    val clone: Float = 0f,
+    val cloneTriple: Float = 0f,
+    val cloneEcho: Float = 0f,
+    val cloneMirror: Float = 0f,
 ) {
     val isIdentity: Boolean
         get() = outline == 0f && glow == 0f && aura == 0f && rgbSplit == 0f &&
-            silhouette == 0f && pulse == 0f
+            silhouette == 0f && pulse == 0f && clone == 0f && cloneTriple == 0f &&
+            cloneEcho == 0f && cloneMirror == 0f
 }
 
 object BodyEffectCatalogV102 {
@@ -30,6 +35,10 @@ object BodyEffectCatalogV102 {
         "Body RGB Split" to BodyEffectVectorV102(outline = .16f, rgbSplit = 1f),
         "Body Silhouette" to BodyEffectVectorV102(outline = .32f, glow = .16f, silhouette = 1f),
         "Body Pulse" to BodyEffectVectorV102(outline = .72f, glow = .82f, aura = .36f, pulse = 1f),
+        "Body Clone" to BodyEffectVectorV102(clone = 1f),
+        "Triple Clone" to BodyEffectVectorV102(clone = 1f, cloneTriple = 1f),
+        "Clone Echo" to BodyEffectVectorV102(cloneEcho = 1f),
+        "Mirror Clone" to BodyEffectVectorV102(cloneMirror = 1f),
     )
 
     val names: List<String> get() = vectors.keys.toList()
@@ -52,6 +61,10 @@ fun resolveBodyEffectsV102(effects: List<NodeEffect>): BodyEffectVectorV102 {
             rgbSplit = (out.rgbSplit + preset.rgbSplit * amount).coerceIn(0f, 1.5f),
             silhouette = (out.silhouette + preset.silhouette * amount).coerceIn(0f, 1.5f),
             pulse = (out.pulse + preset.pulse * amount).coerceIn(0f, 1.5f),
+            clone = (out.clone + preset.clone * amount).coerceIn(0f, 1.5f),
+            cloneTriple = (out.cloneTriple + preset.cloneTriple * amount).coerceIn(0f, 1.5f),
+            cloneEcho = (out.cloneEcho + preset.cloneEcho * amount).coerceIn(0f, 1.5f),
+            cloneMirror = (out.cloneMirror + preset.cloneMirror * amount).coerceIn(0f, 1.5f),
         )
     }
     return out
