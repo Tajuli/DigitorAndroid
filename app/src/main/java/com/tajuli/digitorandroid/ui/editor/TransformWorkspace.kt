@@ -73,6 +73,7 @@ fun EditWorkspace(
     modifier: Modifier = Modifier,
 ) {
     var page by remember { mutableStateOf(EditPageV5.TIMELINE) }
+    var autoCcOpen by remember { mutableStateOf(false) }
     val canEditVideo = selectedClip != null && project.trackContaining(selectedClip.id)?.kind == TrackKind.VIDEO
 
     LaunchedEffect(canEditVideo) {
@@ -81,7 +82,12 @@ fun EditWorkspace(
 
     Column(modifier.background(X5Panel)) {
         Row(
-            Modifier.fillMaxWidth().height(34.dp).background(Color(0xFF101014)).padding(horizontal = 5.dp),
+            Modifier
+                .fillMaxWidth()
+                .height(34.dp)
+                .background(Color(0xFF101014))
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
@@ -100,12 +106,22 @@ fun EditWorkspace(
             TextButton(onClick = { page = EditPageV5.CUTOUT }, enabled = canEditVideo) {
                 Text("Cutout", fontSize = 8.sp, color = if (page == EditPageV5.CUTOUT) X5Accent else X5Muted)
             }
-            Spacer(Modifier.weight(1f))
+            TextButton(onClick = { autoCcOpen = true }) {
+                Text("Auto CC", fontSize = 8.sp, color = if (autoCcOpen) X5Accent else X5Muted)
+            }
             if (page == EditPageV5.TRANSFORM) {
+                Spacer(Modifier.width(4.dp))
                 Text("◆ keyframe at playhead", fontSize = 7.sp, color = X5Muted)
             }
         }
         HorizontalDivider(color = X5Divider)
+
+        if (autoCcOpen) {
+            AutoCaptionDialogV86(
+                vm = vm,
+                onDismiss = { autoCcOpen = false },
+            )
+        }
 
         when (page) {
             EditPageV5.TIMELINE -> TimelineEditor(
