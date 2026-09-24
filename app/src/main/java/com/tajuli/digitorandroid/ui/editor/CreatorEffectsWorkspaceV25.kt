@@ -40,19 +40,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
 import com.tajuli.digitorandroid.editor.model.CreatorEffectPresetV25
-import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
+import com.tajuli.digitorandroid.editor.model.bodyValuesV100
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
-import com.tajuli.digitorandroid.editor.processing.BeautyFaceAnalyzerV28
-import com.tajuli.digitorandroid.editor.processing.GpuPersonCutoutAnalyzerV47
-import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
-import kotlinx.coroutines.Dispatchers
+import com.tajuli.digitorandroid.editor.processing.BodyEffectPreparationV100
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 private val Fx25Panel = Color(0xFF0B0B0F)
 private val Fx25Raised = Color(0xFF17171C)
@@ -104,88 +100,39 @@ fun CreatorEffectsWorkspace(
     }
 
     fun applyPresetAccuracyFirst(preset: CreatorEffectPresetV25) {
-        val v = preset.vector
-        val needsFaceTracking = v.fireEyes > .001f ||
-            v.electricEyes > .001f || v.laserEyes > .001f
-        val needsPersonMatte = v.clone > .001f || v.bodyElectric > .001f ||
-            v.bodyAura > .001f || v.stroke > .001f || v.bodyFire > .001f
-
-        if (!needsFaceTracking && !needsPersonMatte) {
+        if (preset.vector.bodyValuesV100().isIdentity) {
             addAndSelectPreset(preset)
             return
         }
         if (analyzingPresetName != null) return
 
         analyzingPresetName = preset.name
-        vm.setEditorStatusV19(preset.name + " · analyzing subject before apply…")
+        vm.setEditorStatusV19(preset.name + " · preparing face + pose + matte tracking…")
         scope.launch {
             try {
                 val analysisClip = vm.state.value.project.clip(clip.id) ?: clip
-
-                val faceTrack = if (needsFaceTracking) {
-                    runCatching {
-                        withContext(Dispatchers.Default) {
-                            BeautyFaceAnalyzerV28(context).refineBodyFxAndStore(analysisClip)
-                        }
-                    }.getOrNull()
-                } else {
-                    null
-                }
-
-                val faceReady = if (!needsFaceTracking) {
-                    true
-                } else {
-                    val relevant = faceTrack?.samples.orEmpty().filter {
-                        it.sourceTimeUs >= analysisClip.sourceInUs &&
-                            it.sourceTimeUs <= analysisClip.sourceOutUs
-                    }
-                    val detected = relevant.count { it.geometry != null }
-                    relevant.isNotEmpty() && detected * 100 >= relevant.size * 60
-                }
-
-                var matteReady = !needsPersonMatte
-                var matteError: Throwable? = null
-                if (needsPersonMatte) {
-                    val bodyTrackingClip = analysisClip.copy(
-                        cutoutV43 = analysisClip.resolvedCutoutV43().copy(
-                            mode = CutoutModeV43.PERSON,
-                            analysisQualityV47 = CutoutAnalysisQualityV47.MEDIUM,
-                            mattingSizeV69 = 384,
-                            portraitLensBlurV99 = false,
-                        ),
+                val result = runCatching {
+                    BodyEffectPreparationV100.prepare(
+                        context = context,
+                        clip = analysisClip,
+                        preset = preset,
+                        prioritySourceUs = animationSourceTimeUs ?: analysisClip.sourceInUs,
                     )
-                    if (hasPersonCutoutCoverageV43(context, bodyTrackingClip)) {
-                        matteReady = true
-                    } else {
-                        runCatching {
-                            withContext(Dispatchers.Default) {
-                                GpuPersonCutoutAnalyzerV47(context).analyzeAndStore(
-                                    bodyTrackingClip,
-                                    prioritySourceUs = animationSourceTimeUs ?: bodyTrackingClip.sourceInUs,
-                                )
-                            }
-                        }.onSuccess {
-                            matteReady = hasPersonCutoutCoverageV43(context, bodyTrackingClip)
-                        }.onFailure { error ->
-                            matteError = error
-                        }
-                    }
+                }.getOrElse { error ->
+                    vm.setEditorStatusV19(
+                        preset.name + " not applied · " +
+                            (error.message ?: "subject analysis failed"),
+                    )
+                    return@launch
                 }
 
-                if (faceReady && matteReady) {
+                if (result.ready) {
                     addAndSelectPreset(preset)
                     vm.setEditorStatusV19(
-                        preset.name + " ready · dense tracking locked before apply",
+                        preset.name + " ready · face + pose + PP-MattingV2 locked",
                     )
                 } else {
-                    val reason = when {
-                        !faceReady && !matteReady -> "face + person tracking incomplete"
-                        !faceReady -> "face/eye tracking incomplete"
-                        else -> matteError?.message ?: "person matte incomplete"
-                    }
-                    vm.setEditorStatusV19(
-                        preset.name + " not applied · " + reason,
-                    )
+                    vm.setEditorStatusV19(preset.name + " not applied · " + result.message)
                 }
             } finally {
                 analyzingPresetName = null
