@@ -341,7 +341,6 @@ internal class BodyEffectGraphV100 private constructor(
             bodyProgram.setFloatUniform("uHasPersonMaskB", if (hasMaskB) 1f else 0f)
             bodyProgram.setFloatUniform("uPersonTemporalMix", maskMix)
             bodyProgram.setFloatUniform("uTime", (sourceUs % 10_000_000L).toFloat() / 1_000_000f)
-            bodyProgram.setFloatUniform("uSeed", ((nodeId.hashCode() ushr 1) % 10_000).toFloat() / 10_000f)
 
             setRect("uLeftEyeRect", eyes?.first)
             setRect("uRightEyeRect", eyes?.second)
@@ -577,7 +576,6 @@ internal class BodyEffectGraphV100 private constructor(
                 uniform float uHasPersonMaskB;
                 uniform float uPersonTemporalMix;
                 uniform float uTime;
-                uniform float uSeed;
                 uniform vec4 uLeftEyeRect;
                 uniform vec4 uRightEyeRect;
                 uniform vec4 uShoulders;
