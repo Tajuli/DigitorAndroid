@@ -127,7 +127,7 @@ fun CreatorEffectsWorkspace(
                 .weight(1f)
                 .verticalScroll(rememberScrollState()),
         ) {
-        if (category == "Body") {
+            if (category == "Body") {
             val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
             val matteReady = hasPersonCutoutCoverageV43(appContext, clip)
             Row(
@@ -165,7 +165,7 @@ fun CreatorEffectsWorkspace(
             }
         }
 
-        LazyRow(
+            LazyRow(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -390,8 +390,8 @@ fun CreatorEffectsWorkspace(
                 }
             }
         }
-    }    }
-
+    }
+    }
 }
 
 @Composable
