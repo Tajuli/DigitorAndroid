@@ -79,8 +79,9 @@ class BodyEffectPoseAnalyzerV100(private val context: Context) {
         }
 
         val fresh = if (clip.isImageV21) analyzeImage(clip) else analyzeVideo(clip)
-        BodyPoseTrackStoreV100.save(context, fresh)
-        return fresh
+        val stabilized = fresh.copy(samples = stabilize(fresh.samples))
+        BodyPoseTrackStoreV100.save(context, stabilized)
+        return stabilized
     }
 
     private fun analyzeImage(clip: TimelineClip): BodyPoseTrackV100 {
@@ -141,6 +142,54 @@ class BodyEffectPoseAnalyzerV100(private val context: Context) {
             analyzedEndUs = end,
             samples = samples,
         )
+    }
+
+    /**
+     * Bridge isolated one-frame misses and damp small landmark jitter without adding visible lag.
+     * Large motion receives a high blend alpha so arms/legs remain responsive.
+     */
+    private fun stabilize(samples: List<BodyPoseSampleV100>): List<BodyPoseSampleV100> {
+        if (samples.size < 2) return samples
+        val filled = samples.toMutableList()
+
+        for (i in 1 until filled.lastIndex) {
+            if (filled[i].landmarks != null) continue
+            val before = filled[i - 1]
+            val after = filled[i + 1]
+            val a = before.landmarks
+            val b = after.landmarks
+            if (a == null || b == null || a.size != b.size) continue
+            val span = (after.sourceTimeUs - before.sourceTimeUs).coerceAtLeast(1L)
+            if (span > SHORT_GAP_MAX_US) continue
+            val t = ((filled[i].sourceTimeUs - before.sourceTimeUs).toDouble() / span.toDouble())
+                .toFloat()
+                .coerceIn(0f, 1f)
+            filled[i] = filled[i].copy(
+                landmarks = a.indices.map { index -> a[index].lerp(b[index], t) },
+            )
+        }
+
+        var previous: List<BodyLandmarkV100>? = null
+        return filled.map { sample ->
+            val current = sample.landmarks
+            val prev = previous
+            if (current == null || prev == null || current.size != prev.size) {
+                previous = current
+                sample
+            } else {
+                val smoothed = current.indices.map { index ->
+                    val a = prev[index]
+                    val b = current[index]
+                    val dx = b.x - a.x
+                    val dy = b.y - a.y
+                    val motion = kotlin.math.sqrt(dx * dx + dy * dy)
+                    val alpha = (.34f + motion * 7.5f).coerceIn(.34f, .94f)
+                    a.lerp(b, alpha)
+                }
+                previous = smoothed
+                sample.copy(landmarks = smoothed)
+            }
+        }
     }
 
     private fun createLandmarker(mode: RunningMode): PoseLandmarker {
@@ -239,6 +288,7 @@ class BodyEffectPoseAnalyzerV100(private val context: Context) {
         private const val ANALYSIS_FPS = 12
         private const val ANALYSIS_LONG_EDGE = 720
         private const val EXPECTED_LANDMARKS = 33
+        private const val SHORT_GAP_MAX_US = 190_000L
 
         internal fun expectedSampleCount(clip: TimelineClip): Int {
             if (clip.isImageV21) return 2
