@@ -1,12 +1,8 @@
 package com.tajuli.digitorandroid.ui.editor
 
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.media3.common.util.UnstableApi
 
 /**
@@ -23,13 +19,5 @@ fun DigitorEditorScreen(
     onHome: () -> Unit = {},
 ) {
     AutoCaptionTrackIntegrity(vm)
-    Box(Modifier.fillMaxSize()) {
-        EditorWorkspaceScreen(vm = vm, onHome = onHome)
-        AutoCaptionLauncher(
-            vm = vm,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 8.dp, bottom = 72.dp),
-        )
-    }
+    EditorWorkspaceScreen(vm = vm, onHome = onHome)
 }
