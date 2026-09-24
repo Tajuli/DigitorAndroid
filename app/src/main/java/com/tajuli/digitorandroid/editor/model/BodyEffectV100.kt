@@ -88,6 +88,70 @@ data class BodyLandmarkV100(
         )
 }
 
+data class BodyFaceSampleV100(
+    val sourceTimeUs: Long,
+    val leftEye: BeautyRectV28?,
+    val rightEye: BeautyRectV28?,
+) {
+    val detected: Boolean
+        get() = leftEye != null && rightEye != null
+}
+
+data class BodyFaceTrackV100(
+    val sourceUri: String,
+    val analyzedStartUs: Long,
+    val analyzedEndUs: Long,
+    val samples: List<BodyFaceSampleV100>,
+    val version: Int = 1,
+) {
+    fun covers(startUs: Long, endUs: Long): Boolean =
+        sourceUri.isNotBlank() && analyzedStartUs <= startUs && analyzedEndUs >= endUs
+
+    fun eyesAt(sourceTimeUs: Long): Pair<BeautyRectV28, BeautyRectV28>? {
+        val ordered = samples.sortedBy { it.sourceTimeUs }
+        if (ordered.isEmpty()) return null
+
+        fun pair(sample: BodyFaceSampleV100): Pair<BeautyRectV28, BeautyRectV28>? {
+            val left = sample.leftEye ?: return null
+            val right = sample.rightEye ?: return null
+            return left to right
+        }
+
+        if (sourceTimeUs <= ordered.first().sourceTimeUs) return pair(ordered.first())
+        if (sourceTimeUs >= ordered.last().sourceTimeUs) return pair(ordered.last())
+
+        val rightIndex = ordered.indexOfFirst { it.sourceTimeUs >= sourceTimeUs }.coerceAtLeast(1)
+        val leftSample = ordered[rightIndex - 1]
+        val rightSample = ordered[rightIndex]
+        if (sourceTimeUs == rightSample.sourceTimeUs) return pair(rightSample)
+
+        val leftEyes = pair(leftSample)
+        val rightEyes = pair(rightSample)
+        if (leftEyes == null || rightEyes == null) {
+            return if (
+                abs(sourceTimeUs - leftSample.sourceTimeUs) <=
+                abs(rightSample.sourceTimeUs - sourceTimeUs)
+            ) {
+                leftEyes
+            } else {
+                rightEyes
+            }
+        }
+
+        val span = (rightSample.sourceTimeUs - leftSample.sourceTimeUs).coerceAtLeast(1L)
+        val t = ((sourceTimeUs - leftSample.sourceTimeUs).toDouble() / span.toDouble())
+            .toFloat()
+            .coerceIn(0f, 1f)
+        return leftEyes.first.lerp(rightEyes.first, t) to
+            leftEyes.second.lerp(rightEyes.second, t)
+    }
+
+    fun detectedRatio(): Float {
+        if (samples.isEmpty()) return 0f
+        return samples.count { it.detected }.toFloat() / samples.size.toFloat()
+    }
+}
+
 data class BodyPoseSampleV100(
     val sourceTimeUs: Long,
     val landmarks: List<BodyLandmarkV100>?,
