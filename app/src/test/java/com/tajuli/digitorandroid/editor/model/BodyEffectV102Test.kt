@@ -40,5 +40,19 @@ class BodyEffectV102Test {
         assertTrue(BodyEffectCatalogV102.names.contains("Body RGB Split"))
         assertTrue(BodyEffectCatalogV102.names.contains("Body Silhouette"))
         assertTrue(BodyEffectCatalogV102.names.contains("Body Pulse"))
+        assertTrue(BodyEffectCatalogV102.names.contains("Body Clone"))
+        assertTrue(BodyEffectCatalogV102.names.contains("Triple Clone"))
+        assertTrue(BodyEffectCatalogV102.names.contains("Clone Echo"))
+        assertTrue(BodyEffectCatalogV102.names.contains("Mirror Clone"))
+    }
+
+    @Test
+    fun clonePresetsResolveOnlyIntoSemanticBodyVector() {
+        val half = resolveBodyEffectsV102(listOf(NodeEffect(name = "Triple Clone", amount = .5f)))
+        val full = resolveBodyEffectsV102(listOf(NodeEffect(name = "Triple Clone", amount = 1f)))
+        assertTrue(half.clone > 0f)
+        assertTrue(half.cloneTriple > 0f)
+        assertTrue(half.cloneTriple < full.cloneTriple)
+        assertTrue(resolveCreatorEffectsV25(listOf(NodeEffect(name = "Triple Clone"))).isIdentity)
     }
 }
