@@ -361,7 +361,14 @@ internal object FilterEffectThumbnailRendererV98 {
                 VideoFrameProcessor.INPUT_TYPE_BITMAP,
                 inputFormat,
                 if (preview) {
-                    SharedVideoPipeline.compositedPreviewEffectsFor(clip)
+                    // Diagnostic path: exercise the exact resident V25 creator-effect shader in
+                    // preview mode, but do not force unrelated Surface/MediaCodec-only resident
+                    // preview stages through a BITMAP input graph.
+                    listOf(
+                        requireNotNull(CreatorEffectGraphV25.forClip(clip, preview = true)) {
+                            "Preview creator-effect graph was not created"
+                        },
+                    )
                 } else {
                     SharedVideoPipeline.compositedExportEffectsFor(clip)
                 },
