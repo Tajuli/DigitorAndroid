@@ -1,6 +1,8 @@
 package com.tajuli.digitorandroid.editor.render
 
 import android.content.Context
+import com.tajuli.digitorandroid.editor.model.*
+import com.tajuli.digitorandroid.editor.processing.EyeTrackStore
 import android.opengl.GLES20
 import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.util.GlProgram
@@ -33,31 +35,35 @@ import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 internal class CreatorEffectGraphV25 private constructor(
     private val clip: TimelineClip,
     private val preview: Boolean,
+    private val transformedInput: Boolean,
 ) : GlEffect {
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram =
-        Program(clip, preview, useHdr)
+        Program(context.applicationContext, clip, preview, useHdr, transformedInput)
 
     companion object {
-        fun forClip(clip: TimelineClip, preview: Boolean): CreatorEffectGraphV25? {
+        fun forClip(clip: TimelineClip, preview: Boolean, transformedInput: Boolean = false): CreatorEffectGraphV25? {
             val editableNodes = clip.nodeGraph.nodes.filter { node ->
                 node.kind == NodeKind.SERIAL || node.kind == NodeKind.PARALLEL
             }
             if (preview) {
-                return if (editableNodes.isNotEmpty()) CreatorEffectGraphV25(clip, true) else null
+                return if (editableNodes.isNotEmpty()) CreatorEffectGraphV25(clip, true, transformedInput) else null
             }
             val hasFx = editableNodes.any { node ->
                 !resolveCreatorEffectsV25(node.visibleEffects()).isIdentity ||
+                    node.visibleEffects().any { EyeEffectCatalog.contains(it.name) } ||
                     clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
             }
-            return if (hasFx) CreatorEffectGraphV25(clip, false) else null
+            return if (hasFx) CreatorEffectGraphV25(clip, false, transformedInput) else null
         }
     }
 
     private class Program(
+        private val context: Context,
         private val clip: TimelineClip,
         private val preview: Boolean,
         private val useHighPrecisionColorComponents: Boolean,
+        private val transformedInput: Boolean,
     ) : BaseGlShaderProgram(
         /* useHighPrecisionColorComponents = */ useHighPrecisionColorComponents,
         /* texturePoolCapacity = */ 1,
@@ -111,6 +117,7 @@ internal class CreatorEffectGraphV25 private constructor(
                 val media3OutputFbo = outputFboHolder[0]
                 val currentClip = if (preview) PreviewProjectRegistry.clip(clip.id) ?: clip else clip
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
+                val eyePose = if (currentClip.hasEyeEffects()) EyeTrackStore.load(context, currentClip)?.at(sourceUs) else null
                 val slotTextures = IntArray(plan.operations.size) { inputTexId }
                 var scratchCursor = 0
 
@@ -154,12 +161,13 @@ internal class CreatorEffectGraphV25 private constructor(
                                 )
                             }
                             val vector = resolveTimedCreatorEffectsV26(effectsWithTiming, currentClip, sourceUs)
-                            if (vector.isIdentity) {
+                            val eyes = resolveEyeEffects(effectsWithTiming, currentClip, sourceUs)
+                            if (vector.isIdentity && (eyePose == null || eyes.all { it == 0f })) {
                                 slotTextures[operation.slot] = input
                             } else {
                                 val (texture, fbo) = nextScratch()
                                 focus(fbo)
-                                renderNode(nodeProgram, input, vector, evaluated.id, sourceUs)
+                                renderNode(nodeProgram, input, vector, evaluated.id, sourceUs, eyes, eyePose, currentClip)
                                 slotTextures[operation.slot] = texture
                             }
                         }
@@ -228,6 +236,9 @@ internal class CreatorEffectGraphV25 private constructor(
             v: CreatorEffectVectorV25,
             nodeId: String,
             sourceUs: Long,
+            eyes: FloatArray,
+            pose: EyePose?,
+            currentClip: TimelineClip,
         ) {
             program.use()
             program.setSamplerTexIdUniform("uTexSampler", inputTexture, 0)
@@ -235,6 +246,23 @@ internal class CreatorEffectGraphV25 private constructor(
                 "uTexelSize",
                 floatArrayOf(1f / inputWidth.toFloat(), 1f / inputHeight.toFloat()),
             )
+            val transform = if (transformedInput) currentClip.evaluatedDisplayTransformV1(
+                (sourceUs-currentClip.sourceInUs).coerceAtLeast(0L)) else null
+            val radians = Math.toRadians((transform?.rotationDegrees ?: 0f).toDouble())
+            fun safeScale(value: Float) = if (kotlin.math.abs(value) < .0001f) .0001f else value
+            program.setFloatsUniform("uEyeTransform", floatArrayOf(kotlin.math.cos(radians).toFloat(),
+                kotlin.math.sin(radians).toFloat(), safeScale(transform?.scaleX ?: 1f), safeScale(transform?.scaleY ?: 1f)))
+            program.setFloatsUniform("uEyeTranslation", floatArrayOf(transform?.positionX ?: 0f, -(transform?.positionY ?: 0f)))
+            program.setFloatsUniform("uEyesA", eyes.copyOfRange(0, 4))
+            program.setFloatsUniform("uEyesB", eyes.copyOfRange(4, 8))
+            program.setFloatsUniform("uEyesC", eyes.copyOfRange(8, 12))
+            fun eyeUniform(eye: TrackedEye?) = if (eye == null) floatArrayOf(0f,0f,0f,0f)
+                else floatArrayOf(eye.x, eye.y, eye.radius, 0f)
+            program.setFloatsUniform("uLeftEye", eyeUniform(pose?.left))
+            program.setFloatsUniform("uRightEye", eyeUniform(pose?.right))
+            program.setFloatsUniform("uEyeState", floatArrayOf(pose?.left?.open ?: 0f,
+                pose?.right?.open ?: 0f, pose?.left?.roll ?: 0f, pose?.right?.roll ?: 0f))
+            program.setFloatUniform("uEyeTime", sourceUs.toFloat() / 1_000_000f)
             program.setFloatUniform("uBlur", v.blur)
             program.setFloatUniform("uSharpen", v.sharpen)
             program.setFloatUniform("uGlow", v.glow)
@@ -316,10 +344,11 @@ internal class CreatorEffectGraphV25 private constructor(
                 }
             """
 
-            private const val NODE_FRAGMENT_SHADER = """
+            private val NODE_FRAGMENT_SHADER = """
                 precision highp float;
                 uniform sampler2D uTexSampler;
                 uniform vec2 uTexelSize;
+                $EYE_EFFECT_SHADER
                 uniform float uBlur;
                 uniform float uSharpen;
                 uniform float uGlow;
@@ -462,6 +491,7 @@ internal class CreatorEffectGraphV25 private constructor(
                     rgb *= 1.0 + (flick - 0.5) * uFlicker * 0.12;
                     rgb += vec3(flash * uFlicker * 0.22);
 
+                    rgb = applyEyeEffects(rgb, uv);
                     gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), center.a);
                 }
             """

@@ -39,7 +39,7 @@ object SharedVideoPipeline {
         BeautyFaceEffectV36.baseForClip(clip, preview = false)?.let(::add)
         addAll(SharedColorPipeline.effectsFor(clip))
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = false)?.let(::add)
-        CreatorEffectGraphV25.forClip(clip, preview = false)?.let(::add)
+        CreatorEffectGraphV25.forClip(clip, preview = false, transformedInput = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = false)?.let(::add)
         BodyEffectGraphV102.forClip(clip, preview = false)?.let(::add)
         if (clip.resolvedCutoutV43().chromaKeyCanApplyV71()) {
@@ -87,7 +87,7 @@ object SharedVideoPipeline {
         BeautyFaceEffectV36.baseForClip(clip, preview = true)?.let(::add)
         addAll(SharedColorPipeline.previewEffectsFor(clip))
         AdaptiveSkinQualifierEffectV39.forClip(clip, preview = true)?.let(::add)
-        CreatorEffectGraphV25.forClip(clip, preview = true)?.let(::add)
+        CreatorEffectGraphV25.forClip(clip, preview = true, transformedInput = true)?.let(::add)
         BeautyFaceEffectV36.finishForClip(clip, preview = true)?.let(::add)
         BodyEffectGraphV102.forClip(clip, preview = true)?.let(::add)
         add(residentPreviewCutoutEffect(clip))

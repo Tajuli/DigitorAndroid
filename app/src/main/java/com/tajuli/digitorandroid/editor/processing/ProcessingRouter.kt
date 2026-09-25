@@ -6,6 +6,7 @@ import androidx.media3.transformer.ExportException
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.hasBodyEffectsV102
+import com.tajuli.digitorandroid.editor.model.hasEyeEffects
 import com.tajuli.digitorandroid.editor.render.VisualOverlayRenderEnvironmentV19
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -47,6 +48,11 @@ class ProcessingRouter(context: Context) {
         // Export settings are applied to a snapshot only. Timeline/source trims and the editor project
         // remain untouched while render geometry, target FPS and bitrate all resolve consistently.
         val exportProject = settings.applyTo(project)
+        val eyeClips = exportProject.tracks.filter { it.kind == TrackKind.VIDEO }
+            .flatMap { it.clips }.filter { it.hasEyeEffects() }
+        check(eyeClips.all { EyeTrackStore.load(appContext, it)?.covers(it) == true }) {
+            "Eye tracking is incomplete. Open Effects > Eyes and select Analyze Eyes before export."
+        }
         val quality = settings.quality
         val formatLabel = exportProject.exportFormatLabelV73()
 
@@ -256,6 +262,7 @@ class ProcessingRouter(context: Context) {
             }
         }
 
+        check(eyeClips.isEmpty()) { "Eyes effects require GPU export on this device; CPU export cannot render tracked eyes." }
         onProgress(ExportProgress.Stage("No compatible GPU · CPU fallback · $formatLabel · ${quality.label}", 0f))
         return cpu.export(exportProject, output, quality, onProgress)
     }

@@ -34,7 +34,7 @@ data class CreatorEffectVectorV25(
 }
 
 object CreatorEffectCatalogV25 {
-    val categories: List<String> = listOf("Basic", "Glitch", "Retro", "Lens", "Motion", "Body")
+    val categories: List<String> = listOf("Basic", "Glitch", "Retro", "Lens", "Motion", "Body", "Eyes")
 
     val presets: List<CreatorEffectPresetV25> = listOf(
         // Basic
@@ -110,7 +110,7 @@ object CreatorEffectCatalogV25 {
         p("Triple Clone", "Body"),
         p("Clone Echo", "Body"),
         p("Mirror Clone", "Body"),
-    )
+    ) + EyeEffectCatalog.names.map { p(it, "Eyes") }
 
     private val byName = presets.associateBy { it.name.lowercase() }
 

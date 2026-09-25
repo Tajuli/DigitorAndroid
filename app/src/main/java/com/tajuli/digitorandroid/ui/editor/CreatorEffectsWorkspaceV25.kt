@@ -81,6 +81,7 @@ fun CreatorEffectsWorkspace(
         ?.takeIf { it.clipId == clip.id && it.nodeId == node.id }
         ?.effectId
     var category by remember { mutableStateOf("Basic") }
+    var eyesReady by remember(clip.uri, clip.sourceInUs, clip.sourceOutUs) { mutableStateOf(false) }
     var bodySettingsExpanded by remember(clip.id) { mutableStateOf(false) }
     val categoryPresets = remember(category) { CreatorEffectCatalogV25.inCategory(category) }
     val nodeEffects = node.visibleEffects()
@@ -121,6 +122,10 @@ fun CreatorEffectsWorkspace(
                     Text(name, fontSize = 8.sp, color = if (selected) Fx25Accent else Color.White.copy(alpha = .82f))
                 }
             }
+        }
+
+        if (category == "Eyes") {
+            EyeAnalysisControls(clip) { eyesReady = it }
         }
 
         if (category == "Portrait") {
@@ -354,7 +359,7 @@ fun CreatorEffectsWorkspace(
                 HorizontalDivider(color = Fx25Divider)
             }
 
-            if (bodyMatteReady) {
+            if (bodyMatteReady && (category != "Eyes" || eyesReady)) {
                 LazyRow(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
