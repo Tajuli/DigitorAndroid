@@ -52,6 +52,7 @@ import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisRuntimeV66
 import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
 import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
+import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 
 private val Fx25Panel = Color(0xFF0B0B0F)
 private val Fx25Raised = Color(0xFF17171C)
@@ -386,6 +387,7 @@ fun CreatorEffectsWorkspace(
                                 vm.deleteEffectTimelineV26(
                                     EffectTimelineSelectionV26(clip.id, node.id, liveEffect.id),
                                 )
+                                PreviewProjectRegistry.update(vm.state.value.project)
                                 PreviewExportCoordinator.refreshActivePreviews(40L)
                             } else {
                                 vm.addEffectToSelectedNode(preset.name)
@@ -393,6 +395,7 @@ fun CreatorEffectsWorkspace(
                                 val updatedNode = updatedClip
                                     ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
                                 updatedNode?.effects?.lastOrNull { it.name == preset.name }?.let { selectEffect(it.id) }
+                                PreviewProjectRegistry.update(vm.state.value.project)
                                 PreviewExportCoordinator.refreshActivePreviews(40L)
                             }
                         }
