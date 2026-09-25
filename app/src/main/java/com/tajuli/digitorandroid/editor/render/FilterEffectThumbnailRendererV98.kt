@@ -37,6 +37,7 @@ import com.tajuli.digitorandroid.editor.model.creatorFilterMarkerNameV36
 import com.tajuli.digitorandroid.editor.model.creatorFilterPresetV36
 import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
 import com.tajuli.digitorandroid.editor.processing.PortraitLensBlurV99
+import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -241,10 +242,30 @@ internal object FilterEffectThumbnailRendererV98 {
         )
     }
 
+    internal fun renderPreviewEffectForTest(
+        context: Context,
+        effectName: String,
+    ): Bitmap {
+        val preset = CreatorEffectCatalogV25.find(effectName)
+            ?: error("Unknown creator effect preset: " + effectName)
+        val clip = clipWithEffect(
+            id = "preview-test-effect-" + effectName.lowercase().replace(' ', '-'),
+            effect = NodeEffect(name = preset.name, amount = FULL_PREVIEW_AMOUNT),
+        )
+        val base = baseThumbnail(context.applicationContext)
+        return renderProductionFrame(
+            context = context.applicationContext,
+            clip = clip,
+            base = base,
+            preview = true,
+        )
+    }
+
     private fun renderProductionFrame(
         context: Context,
         clip: TimelineClip,
         base: Bitmap,
+        preview: Boolean = false,
     ): Bitmap {
         val track = TimelineTrack(
             id = "thumb-v1",
@@ -258,6 +279,10 @@ internal object FilterEffectThumbnailRendererV98 {
             height = THUMBNAIL_HEIGHT,
             tracks = listOf(track),
         )
+        if (preview) {
+            PreviewProjectRegistry.update(project)
+        }
+
         val sourceColor = ColorInfo.Builder()
             .setColorSpace(C.COLOR_SPACE_BT709)
             .setColorRange(C.COLOR_RANGE_FULL)
@@ -335,7 +360,11 @@ internal object FilterEffectThumbnailRendererV98 {
                 0,
                 VideoFrameProcessor.INPUT_TYPE_BITMAP,
                 inputFormat,
-                SharedVideoPipeline.compositedExportEffectsFor(clip),
+                if (preview) {
+                    SharedVideoPipeline.compositedPreviewEffectsFor(clip)
+                } else {
+                    SharedVideoPipeline.compositedExportEffectsFor(clip)
+                },
                 0L,
             )
 
@@ -355,6 +384,7 @@ internal object FilterEffectThumbnailRendererV98 {
             error.get()?.let { throw it }
             return requireNotNull(result.get()) { "Thumbnail graph produced no RGBA bitmap" }
         } finally {
+            if (preview) PreviewProjectRegistry.clear(project)
             runCatching { graph.release() }
             imageReader.close()
             readerThread.quitSafely()
