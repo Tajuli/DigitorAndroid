@@ -133,6 +133,22 @@ internal object SoftwarePreviewRenderer {
         if (scaled !== decoded) decoded.recycle()
 
         val working = mutableArgb8888(scaled) ?: return@withSoftwarePreviewDecode null
+
+        // On devices where MediaCodec -> realtime GPU preview stalls, keep visual parity by
+        // processing the software-decoded frame through the exact production Media3 effect chain.
+        // This covers the full creator catalog (RGB Split, glitches, lens/motion and Body), not only
+        // the small CPU reference subset.
+        ExactFallbackEffectRendererV103.render(
+            context = context.applicationContext,
+            clip = clip,
+            source = working,
+            sourceTimeUs = safeSourceUs,
+        )?.let { exact ->
+            if (exact !== working && !working.isRecycled) working.recycle()
+            return@withSoftwarePreviewDecode exact
+        }
+
+        // Last-resort path for devices where even Bitmap -> GPU processing is unavailable.
         applyCubeTetrahedral(working, lutFor(clip, safeSourceUs))
         applyCpuSpatialEffects(working, clip, safeSourceUs)
         working
@@ -167,6 +183,15 @@ internal object SoftwarePreviewRenderer {
         val scaled = scaleDown(decoded, maxLongEdge)
         if (scaled !== decoded) decoded.recycle()
         val working = mutableArgb8888(scaled) ?: return null
+        ExactFallbackEffectRendererV103.render(
+            context = context.applicationContext,
+            clip = clip,
+            source = working,
+            sourceTimeUs = sourceTimeUs,
+        )?.let { exact ->
+            if (exact !== working && !working.isRecycled) working.recycle()
+            return exact
+        }
         applyCubeTetrahedral(working, lutFor(clip, sourceTimeUs))
         applyCpuSpatialEffects(working, clip, sourceTimeUs)
         return working
