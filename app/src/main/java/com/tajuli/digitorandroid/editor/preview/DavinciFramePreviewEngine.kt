@@ -62,6 +62,7 @@ class DavinciFramePreviewEngine(
         val timelineUs: Long,
         val activeLayerCount: Int,
         val renderTimeMs: Long,
+        val projectRevision: Long = 0L,
     )
 
     private data class Request(
@@ -69,6 +70,7 @@ class DavinciFramePreviewEngine(
         val timelineUs: Long,
         val isPlaying: Boolean,
         val revision: Long,
+        val projectRevision: Long,
         val startedNs: Long = System.nanoTime(),
     )
 
@@ -145,6 +147,7 @@ class DavinciFramePreviewEngine(
     private var lastRequestedTimelineUs = Long.MIN_VALUE
     private var lastProjectRef: TimelineProject? = null
     private var latestRequestStartedNs = 0L
+    private var requestedProjectRevision = 0L
 
     val frame: StateFlow<Frame?> = mutableFrame.asStateFlow()
 
@@ -301,7 +304,7 @@ class DavinciFramePreviewEngine(
     fun submit(project: TimelineProject, timelineUs: Long, isPlaying: Boolean) {
         if (closed.get()) return
         val safeTimelineUs = timelineUs.coerceIn(0L, project.durationUs.coerceAtLeast(0L))
-        PreviewProjectRegistry.update(project)
+        val snapshot = PreviewProjectRegistry.update(project)
         resumeProject.set(project)
         resumeTimelineUs.set(safeTimelineUs)
         if (exportSuspended.get()) return
@@ -311,6 +314,7 @@ class DavinciFramePreviewEngine(
             timelineUs = safeTimelineUs,
             isPlaying = isPlaying,
             revision = revision.incrementAndGet(),
+            projectRevision = snapshot.revision,
         )
         pendingRequest.set(request)
         handler.removeCallbacks(requestDrain)
@@ -319,6 +323,7 @@ class DavinciFramePreviewEngine(
 
     private fun handleRequest(request: Request) {
         if (exportSuspended.get()) return
+        requestedProjectRevision = request.projectRevision
         latestRequestStartedNs = request.startedNs
         val layers = activeLayerSpecsAt(request.project, request.timelineUs)
         if (layers.isEmpty()) {
@@ -412,6 +417,7 @@ class DavinciFramePreviewEngine(
                             activeLayerCount = session?.sources?.size ?: layers.size,
                             renderTimeMs = ((System.nanoTime() - latestRequestStartedNs) / 1_000_000L)
                                 .coerceAtLeast(0L),
+                            projectRevision = requestedProjectRevision,
                         )
                     }
 

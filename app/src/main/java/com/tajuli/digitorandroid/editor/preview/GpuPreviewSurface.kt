@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -60,7 +61,8 @@ fun GpuPreviewSurface(
     onQualifierColorSample: ((Float, Float, Float) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
-    val project by PreviewProjectRegistry.flow.collectAsState()
+    val projectSnapshot by PreviewProjectRegistry.snapshots.collectAsState()
+    val project = projectSnapshot.project
     val gpuFrame by engine.frame.collectAsState()
     val previewClock by PreviewTransformClock.flow.collectAsState()
     val exportActive by PreviewExportCoordinator.exportActive.collectAsState()
@@ -94,7 +96,8 @@ fun GpuPreviewSurface(
     }
     // A MediaExtractor/MediaCodec GPU frame can never represent a native JPEG/PNG TimelineClip.
     // Even if a previous video frame is still resident, force the image through software decode.
-    val gpuFrameFresh = !activeIsImage && gpuFrame != null &&
+    val gpuFrameCurrent = gpuFrame?.projectRevision == projectSnapshot.revision
+    val gpuFrameFresh = !activeIsImage && gpuFrameCurrent && gpuFrame != null &&
         (requestedTimelineUs == null || gpuDeltaUs <= GPU_FRAME_FRESH_TOLERANCE_US)
     val staleRequestedFrame = gpuFrame != null &&
         requestedTimelineUs != null &&
@@ -253,7 +256,11 @@ fun GpuPreviewSurface(
         )
 
         val softwareFrame = fallbackBitmap
-        val showingSoftwareFrame =
+        // A fallback decoded for an older project must never cover an effect update in flight.
+        // Keep the Surface covered by an explicit updating state until the matching GPU revision
+        // arrives; this makes the selected card and visible pixels one atomic UI state.
+        val effectUpdateInFlight = !activeIsImage && gpuFrame != null && !gpuFrameCurrent
+        val showingSoftwareFrame = !effectUpdateInFlight &&
             !exportActive && softwareFallbackActive && !gpuFrameFresh && softwareFrame != null && !softwareFrame.isRecycled
 
         if (showingSoftwareFrame && softwareFrame != null) {
@@ -275,6 +282,15 @@ fun GpuPreviewSurface(
                 contentDescription = if (fallbackClip?.isImageV21 == true) "Still image preview" else "Software fallback preview",
                 modifier = imageModifier,
                 contentScale = ContentScale.Fit,
+            )
+        }
+
+        if (effectUpdateInFlight && !exportActive) {
+            Box(fittedModifier.background(PREVIEW_PASTEBOARD_GRAY))
+            Text(
+                text = "Updating preview…",
+                color = Color.White.copy(alpha = .72f),
+                modifier = Modifier.align(Alignment.Center),
             )
         }
 
