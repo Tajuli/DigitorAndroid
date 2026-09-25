@@ -6,7 +6,10 @@ import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import com.tajuli.digitorandroid.editor.model.BodyEffectCatalogV102
+import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.processing.CpuNodeEffectsProcessor
 import com.tajuli.digitorandroid.editor.render.SharedColorPipeline
 import kotlin.math.max
@@ -138,14 +141,16 @@ internal object SoftwarePreviewRenderer {
         // processing the software-decoded frame through the exact production Media3 effect chain.
         // This covers the full creator catalog (RGB Split, glitches, lens/motion and Body), not only
         // the small CPU reference subset.
-        ExactFallbackEffectRendererV103.render(
-            context = context.applicationContext,
-            clip = clip,
-            source = working,
-            sourceTimeUs = safeSourceUs,
-        )?.let { exact ->
-            if (exact !== working && !working.isRecycled) working.recycle()
-            return@withSoftwarePreviewDecode exact
+        if (clip.hasActiveCreatorEffectsV103()) {
+            ExactFallbackEffectRendererV103.render(
+                context = context.applicationContext,
+                clip = clip,
+                source = working,
+                sourceTimeUs = safeSourceUs,
+            )?.let { exact ->
+                if (exact !== working && !working.isRecycled) working.recycle()
+                return@withSoftwarePreviewDecode exact
+            }
         }
 
         // Last-resort path for devices where even Bitmap -> GPU processing is unavailable.
@@ -183,19 +188,33 @@ internal object SoftwarePreviewRenderer {
         val scaled = scaleDown(decoded, maxLongEdge)
         if (scaled !== decoded) decoded.recycle()
         val working = mutableArgb8888(scaled) ?: return null
-        ExactFallbackEffectRendererV103.render(
-            context = context.applicationContext,
-            clip = clip,
-            source = working,
-            sourceTimeUs = sourceTimeUs,
-        )?.let { exact ->
-            if (exact !== working && !working.isRecycled) working.recycle()
-            return exact
+        if (clip.hasActiveCreatorEffectsV103()) {
+            ExactFallbackEffectRendererV103.render(
+                context = context.applicationContext,
+                clip = clip,
+                source = working,
+                sourceTimeUs = sourceTimeUs,
+            )?.let { exact ->
+                if (exact !== working && !working.isRecycled) working.recycle()
+                return exact
+            }
         }
         applyCubeTetrahedral(working, lutFor(clip, sourceTimeUs))
         applyCpuSpatialEffects(working, clip, sourceTimeUs)
         return working
     }
+
+    private fun TimelineClip.hasActiveCreatorEffectsV103(): Boolean =
+        nodeGraph.nodes.any { node ->
+            node.visibleEffects().any { effect ->
+                effect.enabled &&
+                    effect.amount > 0f &&
+                    (
+                        CreatorEffectCatalogV25.find(effect.name) != null ||
+                            BodyEffectCatalogV102.isBodyEffect(effect.name)
+                        )
+            }
+        }
 
     private fun applyCpuSpatialEffects(
         bitmap: Bitmap,
