@@ -19,7 +19,10 @@ import androidx.media3.common.util.TimestampIterator
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.MultipleInputVideoGraph
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.TimelineTrack
+import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.render.ParityRenderContract
+import com.tajuli.digitorandroid.editor.render.ResolveVideoCompositorSettings
 import com.tajuli.digitorandroid.editor.render.SharedVideoPipeline
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -112,6 +115,21 @@ internal object ExactFallbackEffectRendererV103 {
 
         try {
             graph.initialize()
+            graph.setCompositorSettings(
+                ResolveVideoCompositorSettings(
+                    outputWidth = width,
+                    outputHeight = height,
+                    videoTracks = listOf(
+                        TimelineTrack(
+                            id = "fallback-v1",
+                            name = "V1",
+                            kind = TrackKind.VIDEO,
+                            clips = listOf(clip),
+                        ),
+                    ),
+                    livePreview = false,
+                ),
+            )
             graph.setOutputSurfaceInfo(SurfaceInfo(imageReader.surface, width, height))
             graph.registerInput(0)
             graph.registerInputStream(
