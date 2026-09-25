@@ -4,6 +4,10 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.tajuli.digitorandroid.editor.model.ClipNodeGraph
+import com.tajuli.digitorandroid.editor.model.NodeEffect
+import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.preview.ExactFallbackEffectRendererV103
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -75,6 +79,50 @@ class FilterEffectThumbnailRendererV98InstrumentedTest {
         val preview = FilterEffectThumbnailRendererV98.renderPreviewEffectForTest(context, "Blur")
 
         assertFalse(pixels(base).contentEquals(pixels(preview)))
+    }
+
+    @Test
+    fun rgbSplit_exactSoftwareFallbackGraph_changesPixels() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val base = FilterEffectThumbnailRendererV98.baseThumbnailForTest(context)
+        val graph = ClipNodeGraph.default()
+        val selected = graph.selectedNodeId
+        val clip = TimelineClip(
+            id = "fallback-rgb-split",
+            uri = "content://test/fallback",
+            label = "fallback",
+            timelineStartUs = 2_000_000L,
+            sourceInUs = 1_000_000L,
+            sourceOutUs = 6_000_000L,
+            nodeGraph = graph.copy(
+                nodes = graph.nodes.map { node ->
+                    if (node.id == selected) {
+                        node.copy(
+                            effects = listOf(
+                                NodeEffect(
+                                    id = "rgb-split",
+                                    name = "RGB Split",
+                                    amount = 1f,
+                                ),
+                            ),
+                        )
+                    } else {
+                        node
+                    }
+                },
+                revision = graph.revision + 1L,
+            ),
+        )
+
+        val rendered = ExactFallbackEffectRendererV103.render(
+            context = context,
+            clip = clip,
+            source = base,
+            sourceTimeUs = 3_000_000L,
+        )
+
+        requireNotNull(rendered)
+        assertFalse(pixels(base).contentEquals(pixels(rendered)))
     }
 
     @Test
