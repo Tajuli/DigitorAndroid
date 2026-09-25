@@ -149,7 +149,7 @@ internal object ExactFallbackEffectRendererV103 {
     }
 
     private fun queueBitmapWhenReady(
-        graph: VideoGraph,
+        graph: MultipleInputVideoGraph,
         bitmap: Bitmap,
         timestampUs: Long,
     ): Boolean {
