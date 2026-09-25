@@ -16,6 +16,7 @@ import androidx.media3.common.Format
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import com.tajuli.digitorandroid.editor.model.BodyEffectCatalogV102
+import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
@@ -958,14 +959,25 @@ private fun staticSpatialHash(clip: TimelineClip): Int {
             .map { key -> key.sourceTimeUs to key.node.advancedColor.qualifier }
             .hashCode()
 
-        // Body effects are semantically resident, but some vendor GL/Media3 graphs can keep an
-        // already-processed paused frame after a live project mutation. Rebuild only when Body
-        // preset membership changes (add/remove/enable), not when its amount slider changes.
-        // This keeps one-tap apply/remove deterministic without making slider edits rebuild codecs.
-        val bodyMembership = node.visibleEffects()
-            .filter { BodyEffectCatalogV102.isBodyEffect(it.name) }
-            .map { effect -> effect.name.lowercase() to effect.enabled }
-        result = 31 * result + bodyMembership.hashCode()
+        // Some vendor GL/Media3 stacks can keep an already-processed paused frame after a
+        // live effect mutation. Rebuild the graph when creator-effect structure changes, while
+        // deliberately excluding amount so slider edits stay zero-latency through the resident
+        // PreviewProjectRegistry-backed shader.
+        val creatorEffectStructure = node.visibleEffects()
+            .filter { effect ->
+                CreatorEffectCatalogV25.find(effect.name) != null ||
+                    BodyEffectCatalogV102.isBodyEffect(effect.name)
+            }
+            .map { effect ->
+                listOf(
+                    effect.id,
+                    effect.name.lowercase(),
+                    effect.enabled.toString(),
+                    effect.sourceStartUsV26?.toString().orEmpty(),
+                    effect.sourceEndUsV26?.toString().orEmpty(),
+                )
+            }
+        result = 31 * result + creatorEffectStructure.hashCode()
     }
     return result
 }
