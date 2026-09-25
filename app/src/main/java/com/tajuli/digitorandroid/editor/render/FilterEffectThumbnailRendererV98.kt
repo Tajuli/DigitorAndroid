@@ -35,7 +35,9 @@ import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.creatorFilterMarkerNameV36
 import com.tajuli.digitorandroid.editor.model.creatorFilterPresetV36
+import com.tajuli.digitorandroid.editor.processing.PersonCutoutMaskStoreV43
 import com.tajuli.digitorandroid.editor.processing.PortraitLensBlurV99
+import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -107,6 +109,9 @@ internal object FilterEffectThumbnailRendererV98 {
                 id = "thumb-effect-" + effectName.lowercase().replace(' ', '-'),
                 effect = NodeEffect(name = preset.name, amount = FULL_PREVIEW_AMOUNT),
             )
+            if (preset.category == "Body") {
+                installBodyThumbnailMatteV102(appContext, clip, base.width, base.height)
+            }
             renderProductionFrame(appContext, clip, base)
         }
 
@@ -136,6 +141,46 @@ internal object FilterEffectThumbnailRendererV98 {
             )
             Bitmap.createBitmap(blurred, width, height, Bitmap.Config.ARGB_8888)
         }
+
+    private fun installBodyThumbnailMatteV102(
+        context: Context,
+        clip: TimelineClip,
+        width: Int,
+        height: Int,
+    ) {
+        val mask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        try {
+            val canvas = Canvas(mask)
+            val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                style = Paint.Style.FILL
+            }
+            val limb = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+                strokeWidth = width * .075f
+            }
+            val cx = width * .50f
+            canvas.drawCircle(cx, height * .24f, height * .105f, fill)
+            canvas.drawRoundRect(
+                cx - width * .095f,
+                height * .34f,
+                cx + width * .095f,
+                height * .73f,
+                width * .055f,
+                width * .055f,
+                fill,
+            )
+            canvas.drawLine(cx - width * .075f, height * .42f, cx - width * .18f, height * .64f, limb)
+            canvas.drawLine(cx + width * .075f, height * .42f, cx + width * .18f, height * .64f, limb)
+            canvas.drawLine(cx - width * .048f, height * .68f, cx - width * .105f, height * .92f, limb)
+            canvas.drawLine(cx + width * .048f, height * .68f, cx + width * .105f, height * .92f, limb)
+            PersonCutoutMaskStoreV43.save(context, clip.uri, PREVIEW_TIME_US, mask)
+        } finally {
+            mask.recycle()
+        }
+    }
 
     /** Used by tests and by any future explicit "None" item. */
     suspend fun renderIdentity(context: Context): Bitmap =
@@ -197,10 +242,30 @@ internal object FilterEffectThumbnailRendererV98 {
         )
     }
 
+    internal fun renderPreviewEffectForTest(
+        context: Context,
+        effectName: String,
+    ): Bitmap {
+        val preset = CreatorEffectCatalogV25.find(effectName)
+            ?: error("Unknown creator effect preset: " + effectName)
+        val clip = clipWithEffect(
+            id = "preview-test-effect-" + effectName.lowercase().replace(' ', '-'),
+            effect = NodeEffect(name = preset.name, amount = FULL_PREVIEW_AMOUNT),
+        )
+        val base = baseThumbnail(context.applicationContext)
+        return renderProductionFrame(
+            context = context.applicationContext,
+            clip = clip,
+            base = base,
+            preview = true,
+        )
+    }
+
     private fun renderProductionFrame(
         context: Context,
         clip: TimelineClip,
         base: Bitmap,
+        preview: Boolean = false,
     ): Bitmap {
         val track = TimelineTrack(
             id = "thumb-v1",
@@ -214,6 +279,10 @@ internal object FilterEffectThumbnailRendererV98 {
             height = THUMBNAIL_HEIGHT,
             tracks = listOf(track),
         )
+        if (preview) {
+            PreviewProjectRegistry.update(project)
+        }
+
         val sourceColor = ColorInfo.Builder()
             .setColorSpace(C.COLOR_SPACE_BT709)
             .setColorRange(C.COLOR_RANGE_FULL)
@@ -291,7 +360,18 @@ internal object FilterEffectThumbnailRendererV98 {
                 0,
                 VideoFrameProcessor.INPUT_TYPE_BITMAP,
                 inputFormat,
-                SharedVideoPipeline.compositedExportEffectsFor(clip),
+                if (preview) {
+                    // Diagnostic path: exercise the exact resident V25 creator-effect shader in
+                    // preview mode, but do not force unrelated Surface/MediaCodec-only resident
+                    // preview stages through a BITMAP input graph.
+                    listOf(
+                        requireNotNull(CreatorEffectGraphV25.forClip(clip, preview = true)) {
+                            "Preview creator-effect graph was not created"
+                        },
+                    )
+                } else {
+                    SharedVideoPipeline.compositedExportEffectsFor(clip)
+                },
                 0L,
             )
 
@@ -311,6 +391,7 @@ internal object FilterEffectThumbnailRendererV98 {
             error.get()?.let { throw it }
             return requireNotNull(result.get()) { "Thumbnail graph produced no RGBA bitmap" }
         } finally {
+            if (preview) PreviewProjectRegistry.clear(project)
             runCatching { graph.release() }
             imageReader.close()
             readerThread.quitSafely()

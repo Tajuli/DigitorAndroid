@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.transformer.ExportException
 import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.hasBodyEffectsV102
 import com.tajuli.digitorandroid.editor.render.VisualOverlayRenderEnvironmentV19
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -47,6 +49,30 @@ class ProcessingRouter(context: Context) {
         val exportProject = settings.applyTo(project)
         val quality = settings.quality
         val formatLabel = exportProject.exportFormatLabelV73()
+
+        // Semantic Body/Clone effects are defined by the durable PP-MattingV2 track. Never export
+        // an unchanged source silently just because that track has not finished yet. If the auto
+        // analysis launched from the Effects UI is still running for a required clip, let it finish
+        // before taking the export lease. If analysis failed/cancelled/incomplete, fail loudly and
+        // keep the user's destination untouched.
+        val bodyClips = exportProject.tracks
+            .asSequence()
+            .filter { it.kind == TrackKind.VIDEO }
+            .flatMap { it.clips.asSequence() }
+            .filter { it.hasBodyEffectsV102() }
+            .toList()
+        if (bodyClips.isNotEmpty()) {
+            var missing = bodyClips.filterNot { hasPersonCutoutCoverageV43(appContext, it) }
+            val runtime = CutoutAnalysisRuntimeV66.state.value
+            if (missing.isNotEmpty() && runtime.busy && missing.any { it.id == runtime.clipId }) {
+                onProgress(ExportProgress.Stage("Finishing Body effect analysis…", 0f))
+                CutoutAnalysisRuntimeV66.state.first { !it.busy }
+                missing = bodyClips.filterNot { hasPersonCutoutCoverageV43(appContext, it) }
+            }
+            check(missing.isEmpty()) {
+                "Body effect analysis is incomplete. Open Effects > Body and let Analyze body finish before export."
+            }
+        }
 
         // Export is always allowed, even when Pro Cutout is incomplete or was cancelled. The render
         // stages use whatever durable matte frames already exist and pass through the original frame

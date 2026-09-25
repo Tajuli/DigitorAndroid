@@ -7,15 +7,16 @@ import org.junit.Test
 
 class CreatorEffectV25Test {
     @Test
-    fun catalogHasFiftyOneUniqueCreatorEffects() {
+    fun catalogHasUniqueCreatorEffectsAndExpectedFamilies() {
         val presets = CreatorEffectCatalogV25.presets
-        assertEquals(51, presets.size)
-        assertEquals(51, presets.map { it.name.lowercase() }.toSet().size)
-        assertEquals(listOf("Basic", "Glitch", "Retro", "Lens", "Motion"), CreatorEffectCatalogV25.categories)
+        assertEquals(presets.size, presets.map { it.name.lowercase() }.toSet().size)
+        assertEquals(listOf("Basic", "Glitch", "Retro", "Lens", "Motion", "Body"), CreatorEffectCatalogV25.categories)
         assertEquals(11, CreatorEffectCatalogV25.inCategory("Basic").size)
-        CreatorEffectCatalogV25.categories.filterNot { it == "Basic" }.forEach { category ->
-            assertEquals(10, CreatorEffectCatalogV25.inCategory(category).size)
-        }
+        assertEquals(10, CreatorEffectCatalogV25.inCategory("Glitch").size)
+        assertEquals(10, CreatorEffectCatalogV25.inCategory("Retro").size)
+        assertEquals(10, CreatorEffectCatalogV25.inCategory("Lens").size)
+        assertEquals(10, CreatorEffectCatalogV25.inCategory("Motion").size)
+        assertEquals(10, CreatorEffectCatalogV25.inCategory("Body").size)
     }
 
     @Test

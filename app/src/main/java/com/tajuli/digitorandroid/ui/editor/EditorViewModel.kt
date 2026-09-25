@@ -36,6 +36,7 @@ import com.tajuli.digitorandroid.editor.model.VirtualStabilizationModeV1
 import com.tajuli.digitorandroid.editor.model.audioSelection
 import com.tajuli.digitorandroid.editor.processing.CreatorMediaProcessor
 import com.tajuli.digitorandroid.editor.processing.VirtualCameraAnalyzerV1
+import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 import java.util.ArrayDeque
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -93,7 +94,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun publish(next: UiState) {
-        _state.value = next.copy(canUndo = undoStack.isNotEmpty(), canRedo = redoStack.isNotEmpty())
+        val published = next.copy(
+            canUndo = undoStack.isNotEmpty(),
+            canRedo = redoStack.isNotEmpty(),
+        )
+        // Realtime GPU effects resolve live parameters from PreviewProjectRegistry. Publish the
+        // project synchronously with editor state so a paused-frame effect/filter/correction edit
+        // can never race Compose's later previewEngine.submit() call and render a stale snapshot.
+        PreviewProjectRegistry.update(published.project)
+        _state.value = published
     }
 
     private fun checkpoint(label: String, coalesce: Boolean = false) {
@@ -1097,7 +1106,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val selected = graph.selectedNodeId ?: return@updatePrimaryClip clip
         val node = graph.nodes.firstOrNull { it.id == selected } ?: return@updatePrimaryClip clip
         if (node.kind != NodeKind.SERIAL && node.kind != NodeKind.PARALLEL) return@updatePrimaryClip clip
-        clip.copy(nodeGraph = graph.copy(nodes = graph.nodes.map { if (it.id == selected) transform(it) else it }))
+        val updatedNode = transform(node)
+        if (updatedNode == node) return@updatePrimaryClip clip
+        clip.copy(
+            nodeGraph = graph.copy(
+                nodes = graph.nodes.map { if (it.id == selected) updatedNode else it },
+                revision = graph.revision + 1L,
+            ),
+        )
     }
 
     private fun updatePrimaryClip(recordHistory: Boolean = true, transform: (TimelineClip) -> TimelineClip) {

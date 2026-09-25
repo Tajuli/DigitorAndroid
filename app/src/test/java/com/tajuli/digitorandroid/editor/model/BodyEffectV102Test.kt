@@ -1,0 +1,88 @@
+package com.tajuli.digitorandroid.editor.model
+
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class BodyEffectV102Test {
+    private val clip = TimelineClip(
+        uri = "content://body-test",
+        label = "body",
+        timelineStartUs = 0L,
+        sourceInUs = 1_000_000L,
+        sourceOutUs = 5_000_000L,
+    )
+
+    @Test
+    fun bodyPresetsStayOutOfFullFrameV25Vector() {
+        val effect = NodeEffect(name = "Neon Outline", amount = 1f)
+        assertTrue(resolveCreatorEffectsV25(listOf(effect)).isIdentity)
+        assertFalse(resolveBodyEffectsV102(listOf(effect)).isIdentity)
+    }
+
+    @Test
+    fun bodyEffectUsesSameV26SourceTimeBarContract() {
+        val effect = NodeEffect(
+            name = "Body RGB Split",
+            amount = .8f,
+            sourceStartUsV26 = 2_000_000L,
+            sourceEndUsV26 = 3_000_000L,
+        )
+        assertTrue(resolveTimedBodyEffectsV102(listOf(effect), clip, 2_500_000L).rgbSplit > 0f)
+        assertTrue(resolveTimedBodyEffectsV102(listOf(effect), clip, 3_500_000L).isIdentity)
+    }
+
+    @Test
+    fun catalogContainsCreatorFacingBodyFamily() {
+        assertTrue(BodyEffectCatalogV102.names.contains("Body Glow"))
+        assertTrue(BodyEffectCatalogV102.names.contains("Neon Outline"))
+        assertTrue(BodyEffectCatalogV102.names.contains("Body Aura"))
+        assertTrue(BodyEffectCatalogV102.names.contains("Body RGB Split"))
+        assertTrue(BodyEffectCatalogV102.names.contains("Body Silhouette"))
+        assertTrue(BodyEffectCatalogV102.names.contains("Body Pulse"))
+        assertTrue(BodyEffectCatalogV102.names.contains("Body Clone"))
+        assertTrue(BodyEffectCatalogV102.names.contains("Triple Clone"))
+        assertTrue(BodyEffectCatalogV102.names.contains("Clone Echo"))
+        assertTrue(BodyEffectCatalogV102.names.contains("Mirror Clone"))
+    }
+
+    @Test
+    fun clipDetectsEnabledBodyEffectsForExportReadiness() {
+        val selected = clip.nodeGraph.selectedNodeId
+        val bodyClip = clip.copy(
+            nodeGraph = clip.nodeGraph.copy(
+                nodes = clip.nodeGraph.nodes.map { node ->
+                    if (node.id == selected) {
+                        node.copy(effects = listOf(NodeEffect(name = "Body Clone", amount = 1f)))
+                    } else {
+                        node
+                    }
+                },
+            ),
+        )
+        assertTrue(bodyClip.hasBodyEffectsV102())
+
+        val disabled = bodyClip.copy(
+            nodeGraph = bodyClip.nodeGraph.copy(
+                nodes = bodyClip.nodeGraph.nodes.map { node ->
+                    if (node.id == selected) {
+                        node.copy(effects = listOf(NodeEffect(name = "Body Clone", amount = 0f)))
+                    } else {
+                        node
+                    }
+                },
+            ),
+        )
+        assertFalse(disabled.hasBodyEffectsV102())
+    }
+
+    @Test
+    fun clonePresetsResolveOnlyIntoSemanticBodyVector() {
+        val half = resolveBodyEffectsV102(listOf(NodeEffect(name = "Triple Clone", amount = .5f)))
+        val full = resolveBodyEffectsV102(listOf(NodeEffect(name = "Triple Clone", amount = 1f)))
+        assertTrue(half.clone > 0f)
+        assertTrue(half.cloneTriple > 0f)
+        assertTrue(half.cloneTriple < full.cloneTriple)
+        assertTrue(resolveCreatorEffectsV25(listOf(NodeEffect(name = "Triple Clone"))).isIdentity)
+    }
+}

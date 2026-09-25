@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,7 +20,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -33,16 +37,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
+import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.model.resolvedCutoutV43
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
+import com.tajuli.digitorandroid.editor.processing.CutoutAnalysisRuntimeV66
+import com.tajuli.digitorandroid.editor.processing.hasPersonCutoutCoverageV43
+import com.tajuli.digitorandroid.editor.preview.PreviewProjectRegistry
 
 private val Fx25Panel = Color(0xFF0B0B0F)
 private val Fx25Raised = Color(0xFF17171C)
@@ -72,10 +81,13 @@ fun CreatorEffectsWorkspace(
         ?.takeIf { it.clipId == clip.id && it.nodeId == node.id }
         ?.effectId
     var category by remember { mutableStateOf("Basic") }
+    var bodySettingsExpanded by remember(clip.id) { mutableStateOf(false) }
     val categoryPresets = remember(category) { CreatorEffectCatalogV25.inCategory(category) }
     val nodeEffects = node.visibleEffects()
     val selectedEffect = nodeEffects.firstOrNull { it.id == selectedEffectId }
     val selectedEffectName = selectedEffect?.name
+    val appContext = LocalContext.current.applicationContext
+    val bodyMatteReady = category != "Body" || hasPersonCutoutCoverageV43(appContext, clip)
 
     fun selectEffect(effectId: String) {
         TimelineTextSelectionBusV10.clear()
@@ -116,7 +128,234 @@ fun CreatorEffectsWorkspace(
             return@Column
         }
 
-        LazyRow(
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(rememberScrollState()),
+        ) {
+            if (category == "Body") {
+                val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
+                val matteReady = bodyMatteReady
+                val analyzingThisClip = analysisRuntime.busy && analysisRuntime.clipId == clip.id
+                val expectedFrames = analysisRuntime.expectedFrames.coerceAtLeast(0)
+                val processedFrames = analysisRuntime.savedFrames.coerceAtLeast(0)
+                val progress = if (expectedFrames > 0) {
+                    (processedFrames.toFloat() / expectedFrames.toFloat()).coerceIn(0f, 1f)
+                } else {
+                    0f
+                }
+                val progressPercent = if (matteReady) 100 else (progress * 100f).toInt().coerceIn(0, 100)
+
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(Fx25Raised)
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        when {
+                            matteReady ->
+                                "Body analysis is complete. Body effects are ready to apply."
+                            analyzingThisClip ->
+                                "Body analysis is in progress. Effects will become available when the analysis is complete."
+                            else ->
+                                "Body analysis must be completed before Body effects can be applied. Review the analysis settings if required, then select Analyze Body."
+                        },
+                        fontSize = 8.sp,
+                        color = if (matteReady) Fx25Accent else Color.White.copy(alpha = .88f),
+                    )
+
+                    if (analyzingThisClip) {
+                        Text(
+                            if (expectedFrames > 0) progressPercent.toString() + "%" else "0%",
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Fx25Accent,
+                        )
+                        if (expectedFrames > 0) {
+                            LinearProgressIndicator(
+                                progress = { progress },
+                                modifier = Modifier.fillMaxWidth().height(3.dp),
+                            )
+                        } else {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth().height(3.dp),
+                            )
+                        }
+                    } else if (matteReady) {
+                        Text(
+                            "Body matte · Ready · 100%",
+                            fontSize = 7.sp,
+                            color = Fx25Muted,
+                        )
+                    }
+
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = { bodySettingsExpanded = !bodySettingsExpanded },
+                            enabled = !analysisRuntime.busy,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(
+                                "Settings",
+                                fontSize = 8.sp,
+                            )
+                        }
+                        FilledTonalButton(
+                            onClick = {
+                                bodySettingsExpanded = false
+                                vm.analyzeSelectedPersonCutoutV43()
+                            },
+                            enabled = !analysisRuntime.busy,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text("Analyze Body", fontSize = 8.sp)
+                        }
+                    }
+                }
+            }
+
+            if (category == "Body" && bodySettingsExpanded) {
+                val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
+                val settings = clip.resolvedCutoutV43()
+                val analysisBusy = analysisRuntime.busy && analysisRuntime.clipId == clip.id
+
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Text(
+                        "PP-MattingV2 settings",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                    )
+
+                    Text("Matting resolution · person ROI", fontSize = 8.sp, color = Fx25Muted)
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        listOf(
+                            256 to "256\nFast",
+                            320 to "320\nBalanced",
+                            384 to "384\nQuality",
+                            512 to "512\nMax",
+                        ).forEach { (size, label) ->
+                            BodyMatteChoiceV102(
+                                label = label,
+                                selected = settings.mattingSizeV69 == size,
+                                enabled = !analysisBusy,
+                            ) {
+                                vm.setSelectedCutoutV43(
+                                    settings.copy(mattingSizeV69 = size),
+                                    status = "Body matte resolution · " + size + " px · Analyze required",
+                                    coalesce = false,
+                                )
+                            }
+                        }
+                    }
+
+                    Text("Analysis quality", fontSize = 8.sp, color = Fx25Muted)
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        listOf(
+                            CutoutAnalysisQualityV47.LOW to "Low\n4 fps",
+                            CutoutAnalysisQualityV47.MEDIUM to "Medium\n12 fps",
+                            CutoutAnalysisQualityV47.HIGH to "High\nEvery frame",
+                        ).forEach { (quality, label) ->
+                            BodyMatteChoiceV102(
+                                label = label,
+                                selected = settings.analysisQualityV47 == quality,
+                                enabled = !analysisBusy,
+                            ) {
+                                vm.setSelectedCutoutV43(
+                                    settings.copy(analysisQualityV47 = quality),
+                                    status = "Body matte quality · " + quality.name.lowercase().replaceFirstChar { it.uppercase() } + " · Analyze required",
+                                    coalesce = false,
+                                )
+                            }
+                        }
+                    }
+
+                    Text(
+                        "Resolution, quality, Hair Detail and Temporal Stability are baked into the analyzed matte. Changing them requires a new compatible analysis.",
+                        fontSize = 7.sp,
+                        color = Fx25Muted,
+                    )
+
+                    BodyMatteSliderV102(
+                        label = "Hair Detail",
+                        value = settings.hairDetailV44,
+                        range = 0f..1f,
+                        enabled = !analysisBusy,
+                    ) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(hairDetailV44 = it),
+                            status = "Body matte Hair Detail changed · Analyze required",
+                            coalesce = false,
+                        )
+                    }
+                    BodyMatteSliderV102(
+                        label = "Temporal Stability",
+                        value = settings.temporalStabilityV44,
+                        range = 0f..0.92f,
+                        enabled = !analysisBusy,
+                    ) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(temporalStabilityV44 = it),
+                            status = "Body matte Temporal Stability changed · Analyze required",
+                            coalesce = false,
+                        )
+                    }
+
+                    Text("Live matte shaping", fontSize = 8.sp, color = Fx25Muted)
+                    BodyMatteSliderV102("Shrink / Grow", settings.edgeShiftV44, -.18f..0.18f) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(edgeShiftV44 = it),
+                            status = "Body matte edge shift updated",
+                        )
+                    }
+                    BodyMatteSliderV102("Edge Clean", settings.edgeCleanV44, 0f..1f) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(edgeCleanV44 = it),
+                            status = "Body matte edge clean updated",
+                        )
+                    }
+                    BodyMatteSliderV102("Dehalo", settings.dehaloV44, 0f..1f) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(dehaloV44 = it),
+                            status = "Body matte dehalo updated",
+                        )
+                    }
+                    BodyMatteSliderV102("Alpha Bias", settings.personThreshold, .05f..0.95f) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(personThreshold = it),
+                            status = "Body matte alpha bias updated",
+                        )
+                    }
+                    BodyMatteSliderV102("Edge Softness", settings.personFeather, .005f..0.45f) {
+                        vm.setSelectedCutoutV43(
+                            settings.copy(personFeather = it),
+                            status = "Body matte edge softness updated",
+                        )
+                    }
+                }
+
+                HorizontalDivider(color = Fx25Divider)
+            }
+
+            if (bodyMatteReady) {
+                LazyRow(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -147,11 +386,14 @@ fun CreatorEffectsWorkspace(
                                 vm.deleteEffectTimelineV26(
                                     EffectTimelineSelectionV26(clip.id, node.id, liveEffect.id),
                                 )
+                                PreviewProjectRegistry.update(vm.state.value.project)
                             } else {
                                 vm.addEffectToSelectedNode(preset.name)
-                                val updatedNode = vm.state.value.project.clip(clip.id)
+                                val updatedClip = vm.state.value.project.clip(clip.id)
+                                val updatedNode = updatedClip
                                     ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
                                 updatedNode?.effects?.lastOrNull { it.name == preset.name }?.let { selectEffect(it.id) }
+                                PreviewProjectRegistry.update(vm.state.value.project)
                             }
                         }
                         .padding(5.dp),
@@ -185,6 +427,8 @@ fun CreatorEffectsWorkspace(
                 }
             }
         }
+
+
 
         HorizontalDivider(color = Fx25Divider)
 
@@ -246,7 +490,7 @@ fun CreatorEffectsWorkspace(
         HorizontalDivider(color = Fx25Divider)
 
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 6.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             val effects = nodeEffects
@@ -322,6 +566,61 @@ fun CreatorEffectsWorkspace(
                 }
             }
         }
+            }
+    }
+    }
+}
+
+@Composable
+private fun RowScope.BodyMatteChoiceV102(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    if (selected) {
+        FilledTonalButton(
+            enabled = enabled,
+            onClick = onClick,
+            modifier = Modifier.weight(1f),
+        ) {
+            Text("✓ " + label, fontSize = 7.sp)
+        }
+    } else {
+        OutlinedButton(
+            enabled = enabled,
+            onClick = onClick,
+            modifier = Modifier.weight(1f),
+        ) {
+            Text(label, fontSize = 7.sp)
+        }
+    }
+}
+
+@Composable
+private fun BodyMatteSliderV102(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    enabled: Boolean = true,
+    onValueChange: (Float) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(label, fontSize = 8.sp, color = Color.White.copy(alpha = .86f))
+            Spacer(Modifier.weight(1f))
+            Text("%.2f".format(value), fontSize = 7.sp, color = Fx25Muted)
+        }
+        Slider(
+            value = value.coerceIn(range.start, range.endInclusive),
+            onValueChange = onValueChange,
+            valueRange = range,
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth().height(28.dp),
+        )
     }
 }
 

@@ -6,7 +6,11 @@ import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import com.tajuli.digitorandroid.editor.model.BodyEffectCatalogV102
+import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.visibleEffects
+import com.tajuli.digitorandroid.editor.processing.CpuNodeEffectsProcessor
 import com.tajuli.digitorandroid.editor.render.SharedColorPipeline
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -74,6 +78,7 @@ internal object SoftwarePreviewRenderer {
     // Access is serialized by PreviewExportCoordinator.previewDecodeGate.
     private var cachedSession: RetrieverSession? = null
     private var cachedLut: CachedLut? = null
+    private val nodeEffectsProcessor = CpuNodeEffectsProcessor()
 
     fun render(
         context: Context,
@@ -131,7 +136,26 @@ internal object SoftwarePreviewRenderer {
         if (scaled !== decoded) decoded.recycle()
 
         val working = mutableArgb8888(scaled) ?: return@withSoftwarePreviewDecode null
+
+        // On devices where MediaCodec -> realtime GPU preview stalls, keep visual parity by
+        // processing the software-decoded frame through the exact production Media3 effect chain.
+        // This covers the full creator catalog (RGB Split, glitches, lens/motion and Body), not only
+        // the small CPU reference subset.
+        if (clip.hasActiveCreatorEffectsV103()) {
+            ExactFallbackEffectRendererV103.render(
+                context = context.applicationContext,
+                clip = clip,
+                source = working,
+                sourceTimeUs = safeSourceUs,
+            )?.let { exact ->
+                if (exact !== working && !working.isRecycled) working.recycle()
+                return@withSoftwarePreviewDecode exact
+            }
+        }
+
+        // Last-resort path for devices where even Bitmap -> GPU processing is unavailable.
         applyCubeTetrahedral(working, lutFor(clip, safeSourceUs))
+        applyCpuSpatialEffects(working, clip, safeSourceUs)
         working
     }
 
@@ -164,8 +188,50 @@ internal object SoftwarePreviewRenderer {
         val scaled = scaleDown(decoded, maxLongEdge)
         if (scaled !== decoded) decoded.recycle()
         val working = mutableArgb8888(scaled) ?: return null
+        if (clip.hasActiveCreatorEffectsV103()) {
+            ExactFallbackEffectRendererV103.render(
+                context = context.applicationContext,
+                clip = clip,
+                source = working,
+                sourceTimeUs = sourceTimeUs,
+            )?.let { exact ->
+                if (exact !== working && !working.isRecycled) working.recycle()
+                return exact
+            }
+        }
         applyCubeTetrahedral(working, lutFor(clip, sourceTimeUs))
+        applyCpuSpatialEffects(working, clip, sourceTimeUs)
         return working
+    }
+
+    private fun TimelineClip.hasActiveCreatorEffectsV103(): Boolean =
+        nodeGraph.nodes.any { node ->
+            node.visibleEffects().any { effect ->
+                effect.enabled &&
+                    effect.amount > 0f &&
+                    (
+                        CreatorEffectCatalogV25.find(effect.name) != null ||
+                            BodyEffectCatalogV102.isBodyEffect(effect.name)
+                        )
+            }
+        }
+
+    private fun applyCpuSpatialEffects(
+        bitmap: Bitmap,
+        clip: TimelineClip,
+        sourceTimeUs: Long,
+    ) {
+        if (bitmap.width <= 0 || bitmap.height <= 0) return
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        nodeEffectsProcessor.processClipArgb8888(
+            pixels = pixels,
+            width = bitmap.width,
+            height = bitmap.height,
+            clip = clip,
+            sourceTimeUs = sourceTimeUs,
+        )
+        bitmap.setPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
     }
 
     private fun mutableArgb8888(bitmap: Bitmap): Bitmap? {

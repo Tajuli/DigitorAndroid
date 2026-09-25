@@ -15,12 +15,15 @@ import androidx.media3.common.ColorInfo
 import androidx.media3.common.Format
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import com.tajuli.digitorandroid.editor.model.BodyEffectCatalogV102
+import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
 import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.TransitionPairV22
 import com.tajuli.digitorandroid.editor.model.transitionPairsV22
+import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.render.DigitorRenderCore
 import com.tajuli.digitorandroid.editor.render.transitionGhostIdV22
 import java.io.Closeable
@@ -955,6 +958,26 @@ private fun staticSpatialHash(clip: TimelineClip): Int {
             .keyframes
             .map { key -> key.sourceTimeUs to key.node.advancedColor.qualifier }
             .hashCode()
+
+        // Some vendor GL/Media3 stacks can keep an already-processed paused frame after a
+        // live effect mutation. Rebuild the graph when creator-effect structure changes, while
+        // deliberately excluding amount so slider edits stay zero-latency through the resident
+        // PreviewProjectRegistry-backed shader.
+        val creatorEffectStructure = node.visibleEffects()
+            .filter { effect ->
+                CreatorEffectCatalogV25.find(effect.name) != null ||
+                    BodyEffectCatalogV102.isBodyEffect(effect.name)
+            }
+            .map { effect ->
+                listOf(
+                    effect.id,
+                    effect.name.lowercase(),
+                    effect.enabled.toString(),
+                    effect.sourceStartUsV26?.toString().orEmpty(),
+                    effect.sourceEndUsV26?.toString().orEmpty(),
+                )
+            }
+        result = 31 * result + creatorEffectStructure.hashCode()
     }
     return result
 }
