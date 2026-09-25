@@ -2,6 +2,7 @@ package com.tajuli.digitorandroid.editor.processing
 
 import android.content.Context
 import android.os.Build
+import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
 import android.graphics.BitmapFactory
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
@@ -57,6 +58,25 @@ object EyeTrackStore {
 
 /** Accurate 24 Hz source-time contours, separate from the sparse beauty cache. */
 class EyeTrackingAnalyzer(private val context: Context) {
+    private fun downscale(bitmap: Bitmap): Bitmap {
+        val edge = max(bitmap.width, bitmap.height)
+        if (edge <= 720) return bitmap
+        val scale = 720f / edge
+        val result = Bitmap.createScaledBitmap(bitmap, max(1, (bitmap.width*scale).toInt()),
+            max(1, (bitmap.height*scale).toInt()), true)
+        if (result !== bitmap) bitmap.recycle()
+        return result
+    }
+    private fun decodeLegacyImage(uri: Uri): Bitmap {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+        options.inJustDecodeBounds = false
+        options.inSampleSize = 1
+        while (max(options.outWidth, options.outHeight) / options.inSampleSize > 1440) options.inSampleSize *= 2
+        val bitmap = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+            ?: error("Could not decode image")
+        return downscale(bitmap)
+    }
     companion object { private val analysisMutex = Mutex() }
 
     suspend fun analyze(clip: TimelineClip, onProgress: (Int) -> Unit = {}): EyeTrack =
@@ -112,7 +132,10 @@ class EyeTrackingAnalyzer(private val context: Context) {
                 previous = stable
                 return stable
             }
+            var lease: PreviewExportCoordinator.AnalysisLease? = null
             try {
+                if (!clip.isImageV21) lease = PreviewExportCoordinator.acquireAnalysisLease()
+                currentCoroutineContext().ensureActive()
                 val samples = ArrayList<EyeSample>()
                 if (clip.isImageV21) {
                     val bitmap = if (Build.VERSION.SDK_INT >= 28) ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, Uri.parse(clip.uri))) { decoder, info, _ ->
@@ -120,8 +143,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
                         val scale = min(1f, 720f / max(info.size.width, info.size.height))
                         decoder.setTargetSize(max(1, (info.size.width*scale).toInt()), max(1, (info.size.height*scale).toInt()))
                     }
-                    else context.contentResolver.openInputStream(Uri.parse(clip.uri))?.use { BitmapFactory.decodeStream(it) }
-                        ?: error("Could not decode image")
+                    else decodeLegacyImage(Uri.parse(clip.uri))
                     try {
                         val pose = detect(bitmap)
                         // Still-image poses are repeated at the same cadence for ordinary interpolation.
@@ -140,7 +162,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
                         currentCoroutineContext().ensureActive()
                         val bitmap = if (Build.VERSION.SDK_INT >= 27) retriever.getScaledFrameAtTime(time, MediaMetadataRetriever.OPTION_CLOSEST,
                             max(1, (width*scale).toInt()), max(1, (height*scale).toInt()))
-                        else retriever.getFrameAtTime(time, MediaMetadataRetriever.OPTION_CLOSEST)
+                        else retriever.getFrameAtTime(time, MediaMetadataRetriever.OPTION_CLOSEST)?.let { downscale(it) }
                         val pose = try { bitmap?.let { detect(it) } } finally { bitmap?.recycle() }
                         samples += EyeSample(time, pose)
                         onProgress(((time-clip.sourceInUs)*100/(clip.sourceOutUs-clip.sourceInUs).coerceAtLeast(1)).toInt())
@@ -153,6 +175,8 @@ class EyeTrackingAnalyzer(private val context: Context) {
                 EyeTrackStore.save(context, clip, track)
                 onProgress(100)
                 track
-            } finally { runCatching { retriever.release() }; detector.close() }
+            } finally {
+                try { runCatching { retriever.release() }; detector.close() } finally { lease?.close() }
+            }
         } }
 }

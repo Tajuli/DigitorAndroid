@@ -117,7 +117,7 @@ internal class CreatorEffectGraphV25 private constructor(
                 val media3OutputFbo = outputFboHolder[0]
                 val currentClip = if (preview) PreviewProjectRegistry.clip(clip.id) ?: clip else clip
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
-                val eyePose = if (currentClip.hasEyeEffects()) EyeTrackStore.load(context, currentClip)?.at(sourceUs) else null
+                val eyePose = if (currentClip.nodeGraph.nodes.any { node -> node.visibleEffects().any { EyeEffectCatalog.contains(it.name) } }) EyeTrackStore.load(context, currentClip)?.at(sourceUs) else null
                 val slotTextures = IntArray(plan.operations.size) { inputTexId }
                 var scratchCursor = 0
 

@@ -13,7 +13,8 @@ object EyeEffectCatalog {
 
 fun TimelineClip.hasEyeEffects(): Boolean = nodeGraph.nodes.any { node ->
     (node.kind == NodeKind.SERIAL || node.kind == NodeKind.PARALLEL) &&
-        node.visibleEffects().any { it.enabled && it.amount > 0f && EyeEffectCatalog.contains(it.name) }
+        node.visibleEffects().any { EyeEffectCatalog.contains(it.name) &&
+            ((it.enabled && it.amount > 0f) || nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)) }
 }
 
 fun resolveEyeEffects(effects: List<NodeEffect>, clip: TimelineClip, timeUs: Long): FloatArray {
