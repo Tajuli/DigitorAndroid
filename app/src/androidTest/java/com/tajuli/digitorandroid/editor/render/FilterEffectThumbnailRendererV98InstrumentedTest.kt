@@ -67,6 +67,17 @@ class FilterEffectThumbnailRendererV98InstrumentedTest {
     }
 
     @Test
+    fun blurEffect_realtimePreviewGraph_changesPixels() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        FilterEffectThumbnailRendererV98.clearMemoryCacheForTest()
+
+        val base = FilterEffectThumbnailRendererV98.baseThumbnailForTest(context)
+        val preview = FilterEffectThumbnailRendererV98.renderPreviewEffectForTest(context, "Blur")
+
+        assertFalse(pixels(base).contentEquals(pixels(preview)))
+    }
+
+    @Test
     fun bodyEffectThumbnail_runsSemanticProductionGraph() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         FilterEffectThumbnailRendererV98.clearMemoryCacheForTest()
