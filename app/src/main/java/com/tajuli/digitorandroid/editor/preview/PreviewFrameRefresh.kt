@@ -2,8 +2,6 @@ package com.tajuli.digitorandroid.editor.preview
 
 import android.os.Handler
 import android.os.Looper
-import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
-import com.tajuli.digitorandroid.editor.model.TimelineProject
 
 /**
  * Re-submits the editor's current paused playhead after a lifecycle/Surface/export hand-off.
@@ -18,25 +16,6 @@ import com.tajuli.digitorandroid.editor.model.TimelineProject
  * identity for paused redraws.
  */
 private val previewRefreshHandler = Handler(Looper.getMainLooper())
-
-internal fun resolvePreviewRefreshTimelineUs(
-    project: TimelineProject,
-    staleGpuTimelineUs: Long?,
-): Long {
-    val clock = PreviewTransformClock.flow.value
-    val activeClip = project.clip(clock.clipId)
-    if (activeClip != null) {
-        return (activeClip.timelineStartUs + clock.localUs)
-            .coerceIn(
-                activeClip.timelineStartUs,
-                activeClip.timelineEndUs.coerceAtLeast(activeClip.timelineStartUs),
-            )
-            .coerceIn(0L, project.durationUs.coerceAtLeast(0L))
-    }
-    return staleGpuTimelineUs
-        ?.coerceIn(0L, project.durationUs.coerceAtLeast(0L))
-        ?: 0L
-}
 
 internal fun DavinciFramePreviewEngine.scheduleCurrentFrameRefresh(delayMs: Long = 120L) {
     val engine = this
