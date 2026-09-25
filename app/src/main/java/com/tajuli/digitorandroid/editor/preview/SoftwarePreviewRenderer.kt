@@ -7,6 +7,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.processing.CpuNodeEffectsProcessor
 import com.tajuli.digitorandroid.editor.render.SharedColorPipeline
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -74,6 +75,7 @@ internal object SoftwarePreviewRenderer {
     // Access is serialized by PreviewExportCoordinator.previewDecodeGate.
     private var cachedSession: RetrieverSession? = null
     private var cachedLut: CachedLut? = null
+    private val nodeEffectsProcessor = CpuNodeEffectsProcessor()
 
     fun render(
         context: Context,
@@ -132,6 +134,7 @@ internal object SoftwarePreviewRenderer {
 
         val working = mutableArgb8888(scaled) ?: return@withSoftwarePreviewDecode null
         applyCubeTetrahedral(working, lutFor(clip, safeSourceUs))
+        applyCpuSpatialEffects(working, clip, safeSourceUs)
         working
     }
 
@@ -165,7 +168,26 @@ internal object SoftwarePreviewRenderer {
         if (scaled !== decoded) decoded.recycle()
         val working = mutableArgb8888(scaled) ?: return null
         applyCubeTetrahedral(working, lutFor(clip, sourceTimeUs))
+        applyCpuSpatialEffects(working, clip, sourceTimeUs)
         return working
+    }
+
+    private fun applyCpuSpatialEffects(
+        bitmap: Bitmap,
+        clip: TimelineClip,
+        sourceTimeUs: Long,
+    ) {
+        if (bitmap.width <= 0 || bitmap.height <= 0) return
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        nodeEffectsProcessor.processClipArgb8888(
+            pixels = pixels,
+            width = bitmap.width,
+            height = bitmap.height,
+            clip = clip,
+            sourceTimeUs = sourceTimeUs,
+        )
+        bitmap.setPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
     }
 
     private fun mutableArgb8888(bitmap: Bitmap): Bitmap? {
