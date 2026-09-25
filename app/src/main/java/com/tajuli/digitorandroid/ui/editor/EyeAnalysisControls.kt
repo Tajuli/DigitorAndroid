@@ -1,5 +1,7 @@
 package com.tajuli.digitorandroid.ui.editor
 
+import android.util.Log
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -28,7 +30,8 @@ internal fun EyeAnalysisControls(clip: TimelineClip, onReady: (Boolean) -> Unit)
     }
     DisposableEffect(clip.uri, clip.sourceInUs, clip.sourceOutUs) { onDispose { job?.cancel() } }
     Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(if (job != null) "$percent%" else message, color = Color.White, fontSize = 10.sp)
+        Text(if (job != null) "$percent%" else message, color = Color.White, fontSize = 10.sp,
+            maxLines = 3, overflow = TextOverflow.Ellipsis)
         Text("24 fps tracking · blink aware · follows head tilt", color = Color(0xFF909098), fontSize = 8.sp)
         if (job != null) {
             LinearProgressIndicator(progress = { percent / 100f }, modifier = Modifier.fillMaxWidth())
@@ -48,7 +51,10 @@ internal fun EyeAnalysisControls(clip: TimelineClip, onReady: (Boolean) -> Unit)
                         message = "Analysis cancelled. Select Analyze Eyes to retry."
                         throw cancelled
                     } catch (error: Exception) {
-                        message = error.message ?: "Eye analysis failed. Please retry."
+                        Log.e("DigitorEyeAnalysis", "Eye analysis failed", error)
+                        message = if (error is NullPointerException)
+                            "Face detector could not start. Install the latest build and retry."
+                        else error.message?.take(160) ?: "Eye analysis failed. Please retry."
                     } finally { job = null }
                 }
             }) { Text("Analyze Eyes") }

@@ -15,3 +15,9 @@ Validation:
 - Local Gradle Android compilation cannot resolve the repository's pre-existing Android Gradle Plugin 9.3.0. Android CI/device validation remains required.
 
 Device QA still needed: fast head turns, occlusion, eyeglasses, profile faces, rotated source video, API 24/26 image orientation, trim/split/reopen, scaled/rotated clips, parallel mixers, export at different frame rates, and cancel/retry during long analysis. No claim of superior quality to CapCut is made without a side-by-side device comparison.
+
+## Minified detector initialization fix
+
+The phone APK from commit `05ca9295f7d039f361c58edfd8fa1ecb9eee335e` retained ML Kit manifest entries and registrar classes, but DEX inspection confirmed that R8 removed the public no-argument constructors of CommonComponentRegistrar, VisionCommonRegistrar and FaceRegistrar. Reflection could not instantiate the registrars, so `FaceDetection.getClient` dereferenced a null internal factory before decoding any frame.
+
+The targeted ComponentRegistrar keep rule preserves both class identities and public constructors. CI now reads the actual phone and release APK DEX tables and merged manifest before accepting the artifacts. `verify_mlkit_apk.py` reproduces the failure on the original phone APK. No manual ML Kit reinitialization or invented eye positions are used to hide the error. The UI also bounds failure text so the retry button remains visible; full exception details stay in logcat.
