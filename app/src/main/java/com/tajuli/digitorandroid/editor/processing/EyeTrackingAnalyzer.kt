@@ -9,16 +9,21 @@ import android.net.Uri
 import android.os.Build
 import com.google.gson.Gson
 import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.tajuli.digitorandroid.editor.model.BeautyRectV28
+import com.tajuli.digitorandroid.editor.model.EyePose
 import com.tajuli.digitorandroid.editor.model.EyeSample
 import com.tajuli.digitorandroid.editor.model.EyeTrack
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.TrackedEye
 import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
 import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -43,8 +48,9 @@ object EyeTrackStore {
         val key = key(clip)
         cache[key]?.let { return it }
         if (!checked.add(key)) return null
-        val result = runCatching { gson.fromJson(file(context, clip).readText(), EyeTrack::class.java) }
-            .getOrNull()?.takeIf { it.covers(clip) } ?: return null
+        val result = runCatching {
+            gson.fromJson(file(context, clip).readText(), EyeTrack::class.java)
+        }.getOrNull()?.takeIf { it.covers(clip) } ?: return null
         cache[key] = result
         return result
     }
@@ -65,23 +71,38 @@ object EyeTrackStore {
     }
 }
 
+private data class FaceRoiV103(
+    val left: Int,
+    val top: Int,
+    val right: Int,
+    val bottom: Int,
+) {
+    val width: Int get() = (right - left).coerceAtLeast(1)
+    val height: Int get() = (bottom - top).coerceAtLeast(1)
+}
+
+private data class InferenceFrameV103(
+    val bitmap: Bitmap,
+    val region: FaceRoiV103,
+)
+
 /**
  * Fast full-clip face tracking.
  *
- * A dedicated single thread keeps MediaPipe's GPU delegate on the thread where it was created.
- * VIDEO mode reuses MediaPipe temporal tracking between samples. Sampling at 12 Hz stays below the
- * 100 ms interpolation ceiling in EyeTrack while cutting inference work roughly in half versus the
- * old 24 Hz ML Kit scan.
+ * Preview GPU/codec resources are released before MediaPipe is created so the GPU delegate gets the
+ * first chance at the device GPU. Decoded frames use a 512 px working edge only as a crop source;
+ * landmark inference itself is limited to a 320 px input. After acquisition, a padded motion-safe
+ * face ROI is tracked and periodically reacquired from the full frame.
  */
 class EyeTrackingAnalyzer(private val context: Context) {
-    private fun downscale(bitmap: Bitmap): Bitmap {
+    private fun downscaleDecodeFrame(bitmap: Bitmap): Bitmap {
         val edge = max(bitmap.width, bitmap.height)
-        if (edge <= ANALYSIS_LONG_EDGE) return bitmap
-        val scale = ANALYSIS_LONG_EDGE.toFloat() / edge
+        if (edge <= DECODE_LONG_EDGE) return bitmap
+        val scale = DECODE_LONG_EDGE.toFloat() / edge
         val result = Bitmap.createScaledBitmap(
             bitmap,
-            max(1, (bitmap.width * scale).toInt()),
-            max(1, (bitmap.height * scale).toInt()),
+            max(1, (bitmap.width * scale).roundToInt()),
+            max(1, (bitmap.height * scale).roundToInt()),
             true,
         )
         if (result !== bitmap) bitmap.recycle()
@@ -101,7 +122,175 @@ class EyeTrackingAnalyzer(private val context: Context) {
         val bitmap = context.contentResolver.openInputStream(uri)?.use {
             BitmapFactory.decodeStream(it, null, options)
         } ?: error("Could not decode image")
-        return downscale(bitmap)
+        return downscaleDecodeFrame(bitmap)
+    }
+
+    private fun fullFrameRegion(bitmap: Bitmap): FaceRoiV103 =
+        FaceRoiV103(0, 0, bitmap.width, bitmap.height)
+
+    private fun motionSafeRoi(pose: EyePose, width: Int, height: Int): FaceRoiV103? {
+        val face = pose.face ?: return null
+        if (width <= 1 || height <= 1) return null
+
+        val faceWidth = ((face.right - face.left) * width).coerceAtLeast(1f)
+        val faceHeight = ((face.bottom - face.top) * height).coerceAtLeast(1f)
+        val maxSquare = min(width, height).coerceAtLeast(1)
+        val side = max(
+            ROI_MIN_SIDE_PX.toFloat(),
+            max(faceWidth, faceHeight) * ROI_EXPANSION,
+        ).roundToInt().coerceAtMost(maxSquare)
+
+        val centerX = ((face.left + face.right) * .5f * width).roundToInt()
+        val centerY = ((face.top + face.bottom) * .5f * height).roundToInt()
+        val left = (centerX - side / 2).coerceIn(0, (width - side).coerceAtLeast(0))
+        val top = (centerY - side / 2).coerceIn(0, (height - side).coerceAtLeast(0))
+        return FaceRoiV103(left, top, left + side, top + side)
+    }
+
+    private fun prepareInferenceFrame(
+        frame: Bitmap,
+        roi: FaceRoiV103?,
+    ): InferenceFrameV103 {
+        val region = roi ?: fullFrameRegion(frame)
+        val cropped = if (
+            region.left == 0 &&
+            region.top == 0 &&
+            region.right == frame.width &&
+            region.bottom == frame.height
+        ) {
+            frame
+        } else {
+            Bitmap.createBitmap(
+                frame,
+                region.left,
+                region.top,
+                region.width,
+                region.height,
+            )
+        }
+
+        val scale = LANDMARK_INPUT_LONG_EDGE.toFloat() /
+            max(cropped.width, cropped.height).coerceAtLeast(1)
+        val targetWidth = max(1, (cropped.width * scale).roundToInt())
+        val targetHeight = max(1, (cropped.height * scale).roundToInt())
+        val scaled = Bitmap.createScaledBitmap(cropped, targetWidth, targetHeight, true)
+
+        if (cropped !== frame && scaled !== cropped) cropped.recycle()
+        if (scaled === frame) {
+            // The decoded working frame is intentionally owned by the caller. This branch is only
+            // possible when a tiny source already matches 320 px, so make a separate inference copy.
+            return InferenceFrameV103(
+                frame.copy(Bitmap.Config.ARGB_8888, false),
+                region,
+            )
+        }
+        return InferenceFrameV103(scaled, region)
+    }
+
+    private fun mapRect(
+        rect: BeautyRectV28?,
+        region: FaceRoiV103,
+        frameWidth: Int,
+        frameHeight: Int,
+    ): BeautyRectV28? {
+        rect ?: return null
+        fun x(value: Float) =
+            (region.left + value * region.width) / frameWidth.toFloat()
+        fun y(value: Float) =
+            (region.top + value * region.height) / frameHeight.toFloat()
+        return BeautyRectV28(
+            x(rect.left),
+            y(rect.top),
+            x(rect.right),
+            y(rect.bottom),
+        ).normalized()
+    }
+
+    private fun mapEye(
+        eye: TrackedEye,
+        region: FaceRoiV103,
+        frameWidth: Int,
+        frameHeight: Int,
+    ): TrackedEye {
+        return eye.copy(
+            x = (region.left + eye.x * region.width) / frameWidth.toFloat(),
+            y = (region.top + eye.y * region.height) / frameHeight.toFloat(),
+            radius = eye.radius * region.width / frameWidth.toFloat(),
+        )
+    }
+
+    private fun remapPose(
+        pose: EyePose,
+        region: FaceRoiV103,
+        frameWidth: Int,
+        frameHeight: Int,
+    ): EyePose = EyePose(
+        left = mapEye(pose.left, region, frameWidth, frameHeight),
+        right = mapEye(pose.right, region, frameWidth, frameHeight),
+        identity = pose.identity,
+        face = mapRect(pose.face, region, frameWidth, frameHeight),
+        mouth = mapRect(pose.mouth, region, frameWidth, frameHeight),
+    )
+
+    private fun stabilizeGlobal(previous: EyePose?, fresh: EyePose?): EyePose? {
+        fresh ?: return null
+        previous ?: return fresh
+        if (
+            hypot(
+                fresh.left.x - previous.left.x,
+                fresh.left.y - previous.left.y,
+            ) >= max(fresh.left.radius, .01f) * .20f
+        ) {
+            return fresh
+        }
+        return fresh.copy(
+            left = previous.left.interpolate(fresh.left, .80f).copy(open = fresh.left.open),
+            right = previous.right.interpolate(fresh.right, .80f).copy(open = fresh.right.open),
+        )
+    }
+
+    private fun detectFrame(
+        detector: EyeLandmarkDetector,
+        frame: Bitmap,
+        timeUs: Long,
+        roi: FaceRoiV103?,
+    ): EyePose? {
+        val input = prepareInferenceFrame(frame, roi)
+        return try {
+            detector.detect(
+                bitmap = input.bitmap,
+                timeUs = timeUs,
+                stabilizeInInputSpace = false,
+            )?.let {
+                remapPose(
+                    pose = it,
+                    region = input.region,
+                    frameWidth = frame.width,
+                    frameHeight = frame.height,
+                )
+            }
+        } finally {
+            input.bitmap.recycle()
+        }
+    }
+
+    private fun detectTrackedFrame(
+        detector: EyeLandmarkDetector,
+        frame: Bitmap,
+        timeUs: Long,
+        preferredRoi: FaceRoiV103?,
+    ): EyePose? {
+        val first = detectFrame(detector, frame, timeUs, preferredRoi)
+        if (first != null || preferredRoi == null) return first
+
+        // If the face outruns the padded ROI, reacquire from the whole frame immediately. VIDEO mode
+        // requires increasing timestamps, so the retry advances MediaPipe's timestamp by 1 ms only.
+        return detectFrame(
+            detector = detector,
+            frame = frame,
+            timeUs = timeUs + ROI_RETRY_TIMESTAMP_US,
+            roi = null,
+        )
     }
 
     suspend fun analyze(
@@ -110,9 +299,12 @@ class EyeTrackingAnalyzer(private val context: Context) {
         onProgress: (Int) -> Unit = {},
     ): EyeTrack {
         val executor = Executors.newSingleThreadExecutor { task ->
-            Thread(task, "DigitorFaceTrackingGPU").apply { priority = Thread.NORM_PRIORITY }
+            Thread(task, "DigitorFaceTrackingGPU").apply {
+                priority = Thread.NORM_PRIORITY
+            }
         }
         val dispatcher = executor.asCoroutineDispatcher()
+
         return try {
             withContext(dispatcher) {
                 analysisMutex.withLock {
@@ -121,22 +313,22 @@ class EyeTrackingAnalyzer(private val context: Context) {
                         return@withLock it
                     }
 
-                    val detector = EyeLandmarkDetector(
-                        context = context,
-                        runningMode = RunningMode.VIDEO,
-                        preferGpu = true,
-                    )
-                    onBackend(detector.gpuAccelerated)
-
-                    val retriever = MediaMetadataRetriever()
                     var lease: PreviewExportCoordinator.AnalysisLease? = null
+                    var detector: EyeLandmarkDetector? = null
+                    val retriever = MediaMetadataRetriever()
                     try {
-                        if (!clip.isImageV21) {
-                            lease = PreviewExportCoordinator.acquireAnalysisLease()
-                        }
+                        // GPU/codec handoff must happen before MediaPipe GPU delegate creation.
+                        lease = PreviewExportCoordinator.acquireAnalysisLease("Face Tracking")
                         currentCoroutineContext().ensureActive()
-                        val samples = ArrayList<EyeSample>()
 
+                        detector = EyeLandmarkDetector(
+                            context = context,
+                            runningMode = RunningMode.VIDEO,
+                            preferGpu = true,
+                        )
+                        onBackend(detector.gpuAccelerated)
+
+                        val samples = ArrayList<EyeSample>()
                         if (clip.isImageV21) {
                             val bitmap = if (Build.VERSION.SDK_INT >= 28) {
                                 ImageDecoder.decodeBitmap(
@@ -148,19 +340,24 @@ class EyeTrackingAnalyzer(private val context: Context) {
                                     decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
                                     val scale = min(
                                         1f,
-                                        ANALYSIS_LONG_EDGE.toFloat() /
+                                        DECODE_LONG_EDGE.toFloat() /
                                             max(info.size.width, info.size.height),
                                     )
                                     decoder.setTargetSize(
-                                        max(1, (info.size.width * scale).toInt()),
-                                        max(1, (info.size.height * scale).toInt()),
+                                        max(1, (info.size.width * scale).roundToInt()),
+                                        max(1, (info.size.height * scale).roundToInt()),
                                     )
                                 }
                             } else {
                                 decodeLegacyImage(Uri.parse(clip.uri))
                             }
                             try {
-                                val pose = detector.detect(bitmap, clip.sourceInUs)
+                                val pose = detectFrame(
+                                    detector = detector,
+                                    frame = bitmap,
+                                    timeUs = clip.sourceInUs,
+                                    roi = null,
+                                )
                                 var time = clip.sourceInUs
                                 while (time < clip.sourceOutUs) {
                                     samples += EyeSample(time, pose)
@@ -179,15 +376,22 @@ class EyeTrackingAnalyzer(private val context: Context) {
                             val height = retriever
                                 .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
                                 ?.toIntOrNull() ?: 720
-                            val scale = min(
+                            val decodeScale = min(
                                 1f,
-                                ANALYSIS_LONG_EDGE.toFloat() / max(width, height),
+                                DECODE_LONG_EDGE.toFloat() / max(width, height),
                             )
-                            val decodeWidth = max(1, (width * scale).toInt())
-                            val decodeHeight = max(1, (height * scale).toInt())
-                            val duration = (clip.sourceOutUs - clip.sourceInUs).coerceAtLeast(1L)
+                            val decodeWidth =
+                                max(1, (width * decodeScale).roundToInt())
+                            val decodeHeight =
+                                max(1, (height * decodeScale).roundToInt())
+                            val duration =
+                                (clip.sourceOutUs - clip.sourceInUs).coerceAtLeast(1L)
 
                             var time = clip.sourceInUs
+                            var sampleIndex = 0
+                            var activeRoi: FaceRoiV103? = null
+                            var previousPose: EyePose? = null
+
                             while (time < clip.sourceOutUs) {
                                 currentCoroutineContext().ensureActive()
                                 val bitmap = if (Build.VERSION.SDK_INT >= 27) {
@@ -201,21 +405,42 @@ class EyeTrackingAnalyzer(private val context: Context) {
                                     retriever.getFrameAtTime(
                                         time,
                                         MediaMetadataRetriever.OPTION_CLOSEST,
-                                    )?.let { downscale(it) }
+                                    )?.let { downscaleDecodeFrame(it) }
                                 }
-                                val pose = try {
-                                    bitmap?.let { detector.detect(it, time) }
+
+                                val rawPose = try {
+                                    bitmap?.let { frame ->
+                                        val periodicReacquire =
+                                            activeRoi == null ||
+                                                sampleIndex % FULL_REACQUIRE_SAMPLES == 0
+                                        detectTrackedFrame(
+                                            detector = detector,
+                                            frame = frame,
+                                            timeUs = time,
+                                            preferredRoi =
+                                                if (periodicReacquire) null else activeRoi,
+                                        ).also { pose ->
+                                            activeRoi = pose?.let {
+                                                motionSafeRoi(it, frame.width, frame.height)
+                                            }
+                                        }
+                                    }
                                 } finally {
                                     bitmap?.recycle()
                                 }
+
+                                val pose = stabilizeGlobal(previousPose, rawPose)
+                                previousPose = pose
                                 samples += EyeSample(time, pose)
                                 onProgress(
                                     (((time - clip.sourceInUs) * 100L) / duration)
                                         .toInt()
                                         .coerceIn(0, 99),
                                 )
+                                sampleIndex += 1
                                 time += SAMPLE_INTERVAL_US
                             }
+
                             if (samples.lastOrNull()?.timeUs != clip.sourceOutUs) {
                                 currentCoroutineContext().ensureActive()
                                 val bitmap = if (Build.VERSION.SDK_INT >= 27) {
@@ -229,13 +454,21 @@ class EyeTrackingAnalyzer(private val context: Context) {
                                     retriever.getFrameAtTime(
                                         clip.sourceOutUs,
                                         MediaMetadataRetriever.OPTION_CLOSEST,
-                                    )?.let { downscale(it) }
+                                    )?.let { downscaleDecodeFrame(it) }
                                 }
-                                val pose = try {
-                                    bitmap?.let { detector.detect(it, clip.sourceOutUs) }
+                                val rawPose = try {
+                                    bitmap?.let { frame ->
+                                        detectTrackedFrame(
+                                            detector = detector,
+                                            frame = frame,
+                                            timeUs = clip.sourceOutUs,
+                                            preferredRoi = activeRoi,
+                                        )
+                                    }
                                 } finally {
                                     bitmap?.recycle()
                                 }
+                                val pose = stabilizeGlobal(previousPose, rawPose)
                                 samples += EyeSample(clip.sourceOutUs, pose)
                             }
                         }
@@ -256,7 +489,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
                     } finally {
                         try {
                             runCatching { retriever.release() }
-                            detector.close()
+                            detector?.close()
                         } finally {
                             lease?.close()
                         }
@@ -270,7 +503,12 @@ class EyeTrackingAnalyzer(private val context: Context) {
     }
 
     companion object {
-        private const val ANALYSIS_LONG_EDGE = 512
+        private const val DECODE_LONG_EDGE = 512
+        private const val LANDMARK_INPUT_LONG_EDGE = 320
+        private const val ROI_MIN_SIDE_PX = 112
+        private const val ROI_EXPANSION = 2.55f
+        private const val FULL_REACQUIRE_SAMPLES = 6
+        private const val ROI_RETRY_TIMESTAMP_US = 1_000L
         private const val SAMPLE_INTERVAL_US = 83_333L
         private val analysisMutex = Mutex()
     }
