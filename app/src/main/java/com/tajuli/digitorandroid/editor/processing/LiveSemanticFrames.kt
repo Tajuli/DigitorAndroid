@@ -36,7 +36,6 @@ internal class LiveSemanticWorker(private val context: Context) : AutoCloseable 
     private val worker = Executors.newSingleThreadExecutor { task -> Thread(task, "DigitorLiveTracking") }
     private val busy = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
-    private var face: EyeLandmarkDetector? = null
     private var body: ImageSegmenter? = null
     @Volatile private var lastKey = ""
     fun reserve(clip: TimelineClip, timeUs: Long, eyes: Boolean, person: Boolean): Boolean {
@@ -51,7 +50,9 @@ internal class LiveSemanticWorker(private val context: Context) : AutoCloseable 
         worker.execute {
             try {
                 if (closed.get()) return@execute
-                val pose = if (eyes) (face ?: EyeLandmarkDetector(context).also { face = it }).detect(bitmap, timeUs) else null
+                // Face effects use the durable ncnn Vulkan EyeTrack. This worker is retained only
+                // for preview-only body semantics; never start the obsolete MediaPipe face path.
+                val pose: EyePose? = null
                 val mask = if (person) bodyMask(bitmap) else null
                 if (closed.get()) mask?.recycle()
                 else {
@@ -89,7 +90,7 @@ internal class LiveSemanticWorker(private val context: Context) : AutoCloseable 
     }
     override fun close() {
         if (!closed.compareAndSet(false,true)) return
-        worker.execute { face?.close(); body?.close() }
+        worker.execute { body?.close() }
         worker.shutdown()
     }
 }
