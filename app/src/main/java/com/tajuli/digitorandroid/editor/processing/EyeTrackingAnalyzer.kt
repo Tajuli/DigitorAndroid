@@ -286,7 +286,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
         // If the face outruns the padded ROI, reacquire from the whole frame immediately. VIDEO mode
         // requires increasing timestamps, so the retry advances MediaPipe's timestamp by 1 ms only.
         return detectFrame(
-            detector = activeDetector,
+            detector = detector,
             frame = frame,
             timeUs = timeUs + ROI_RETRY_TIMESTAMP_US,
             roi = null,
