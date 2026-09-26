@@ -44,6 +44,10 @@ internal object PreviewExportCoordinator {
      * the held playhead frame after an anchor is written so the new alpha mask is visible without
      * requiring the user to scrub, toggle a slider, or reopen the project.
      */
+    fun refreshTrackedPreviews() {
+        engines.forEach { it.refreshTrackedFrame() }
+    }
+
     fun refreshActivePreviews(delayMs: Long = 0L) {
         engines.forEach { engine -> engine.scheduleCurrentFrameRefresh(delayMs) }
     }

@@ -3,7 +3,6 @@ package com.tajuli.digitorandroid.editor.processing
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
-import android.os.SystemClock
 import android.util.Log
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.ByteBufferExtractor
@@ -40,19 +39,17 @@ internal class LiveSemanticWorker(private val context: Context) : AutoCloseable 
     private val closed = AtomicBoolean(false)
     private var face: EyeLandmarkDetector? = null
     private var body: ImageSegmenter? = null
-    @Volatile private var nextAt = 0L
     @Volatile private var lastKey = ""
     fun reserve(clip: TimelineClip, timeUs: Long, eyes: Boolean, person: Boolean): Boolean {
         if (closed.get() || (!eyes && !person) || PreviewExportCoordinator.exportActive.value || CutoutAnalysisRuntimeV66.state.value.busy) return false
         val key = "${clip.id}|${clip.uri}|$timeUs|$eyes|$person"
-        if (key == lastKey || SystemClock.elapsedRealtime() < nextAt || !busy.compareAndSet(false, true)) return false
+        if (key == lastKey || !busy.compareAndSet(false, true)) return false
         lastKey = key
         return true
     }
     fun abandon() { busy.set(false) }
     fun submit(clip: TimelineClip, timeUs: Long, bitmap: Bitmap, eyes: Boolean, person: Boolean) {
         worker.execute {
-            val started = SystemClock.elapsedRealtime()
             try {
                 if (closed.get()) return@execute
                 val pose = if (eyes) runBlocking { (face ?: EyeLandmarkDetector().also { face = it }).detect(bitmap) } else null
@@ -60,15 +57,13 @@ internal class LiveSemanticWorker(private val context: Context) : AutoCloseable 
                 if (closed.get()) mask?.recycle()
                 else {
                     LiveSemanticFrames.put(clip, LiveSemanticFrames.Frame(clip.uri, timeUs, pose, mask))
-                    PreviewExportCoordinator.refreshActivePreviews()
                 }
             } catch (error: Exception) {
                 Log.e("DigitorLiveTracking", "Tracking frame failed", error)
             } finally {
                 bitmap.recycle()
-                nextAt = SystemClock.elapsedRealtime() + (SystemClock.elapsedRealtime()-started).coerceIn(80L, 400L)
                 busy.set(false)
-                if(!closed.get()) PreviewExportCoordinator.refreshActivePreviews(420L)
+                if(!closed.get()) PreviewExportCoordinator.refreshTrackedPreviews()
             }
         }
     }

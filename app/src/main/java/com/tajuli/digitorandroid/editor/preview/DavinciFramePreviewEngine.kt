@@ -317,6 +317,19 @@ class DavinciFramePreviewEngine(
         handler.post(requestDrain)
     }
 
+    // Tracking is data arrival, not a transport command. Playback consumes the new cache on
+    // its next frame; only a paused viewer needs a new decode. Coalesce simultaneous results.
+    private val trackedFrameRefresh = Runnable {
+        if (closed.get() || exportSuspended.get() || playing || pendingRequest.get() != null) return@Runnable
+        val project = resumeProject.get() ?: return@Runnable
+        submit(project.copy(), resumeTimelineUs.get(), false)
+    }
+
+    internal fun refreshTrackedFrame() {
+        handler.removeCallbacks(trackedFrameRefresh)
+        handler.post(trackedFrameRefresh)
+    }
+
     private fun handleRequest(request: Request) {
         if (exportSuspended.get()) return
         latestRequestStartedNs = request.startedNs
@@ -946,7 +959,7 @@ private fun sessionKey(
     },
 )
 
-private fun staticSpatialHash(clip: TimelineClip): Int {
+internal fun staticSpatialHash(clip: TimelineClip): Int {
     var result = clip.nodeGraph.edges.hashCode()
     result = 31 * result + clip.transition.hashCode()
     clip.nodeGraph.nodes.forEach { node ->
@@ -959,25 +972,9 @@ private fun staticSpatialHash(clip: TimelineClip): Int {
             .map { key -> key.sourceTimeUs to key.node.advancedColor.qualifier }
             .hashCode()
 
-        // Some vendor GL/Media3 stacks can keep an already-processed paused frame after a
-        // live effect mutation. Rebuild the graph when creator-effect structure changes, while
-        // deliberately excluding amount so slider edits stay zero-latency through the resident
-        // PreviewProjectRegistry-backed shader.
-        val creatorEffectStructure = node.visibleEffects()
-            .filter { effect ->
-                CreatorEffectCatalogV25.find(effect.name) != null ||
-                    BodyEffectCatalogV102.isBodyEffect(effect.name)
-            }
-            .map { effect ->
-                listOf(
-                    effect.id,
-                    effect.name.lowercase(),
-                    effect.enabled.toString(),
-                    effect.sourceStartUsV26?.toString().orEmpty(),
-                    effect.sourceEndUsV26?.toString().orEmpty(),
-                )
-            }
-        result = 31 * result + creatorEffectStructure.hashCode()
+        // Creator/body shaders are resident and read the live registry. Changing presets,
+        // enable flags or time spans needs a frame resubmit, not decoder/model reconstruction.
+
     }
     return result
 }
