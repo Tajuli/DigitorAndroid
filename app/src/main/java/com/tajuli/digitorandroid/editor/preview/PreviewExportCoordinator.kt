@@ -70,18 +70,23 @@ internal object PreviewExportCoordinator {
      */
     fun acquireAnalysisLease(owner: String = "semantic analysis"): AnalysisLease {
         previewDecodeGate.acquireUninterruptibly()
+        val attempted = engines.toList()
         val suspended = mutableListOf<DavinciFramePreviewEngine>()
         try {
             SoftwarePreviewRenderer.releaseCachedDecoderForExport()
-            engines.toList().forEach { engine ->
+            attempted.forEach { engine ->
                 if (!engine.suspendForExternalGpuWork()) {
-                    throw IllegalStateException("Preview resources did not release for $owner")
+                    throw IllegalStateException(
+                        "Preview resources did not release for $owner. Please retry once preview settles.",
+                    )
                 }
                 suspended += engine
             }
             return AnalysisLease(suspended)
         } catch (error: Throwable) {
-            suspended.forEach { engine ->
+            // Include the engine whose wait timed out. Its resume call is deferred internally until
+            // any already-running release action finishes, preventing teardown/rebuild races.
+            attempted.forEach { engine ->
                 engine.resumeAfterExternalGpuWork()
                 engine.scheduleCurrentFrameRefresh(180L)
             }
@@ -134,7 +139,7 @@ internal object PreviewExportCoordinator {
             }
             return ExportLease(suspended)
         } catch (error: Throwable) {
-            suspended.forEach {
+            attempted.forEach {
                 it.resumeAfterExternalGpuWork()
                 it.scheduleCurrentFrameRefresh(180L)
             }
