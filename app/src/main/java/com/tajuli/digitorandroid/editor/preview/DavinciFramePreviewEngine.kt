@@ -121,6 +121,9 @@ class DavinciFramePreviewEngine(
     private val appContext = context.applicationContext
     private val closed = AtomicBoolean(false)
     private val exportSuspended = AtomicBoolean(false)
+    private val externalSuspendReleaseComplete = AtomicBoolean(false)
+    private val externalSuspendLatch = AtomicReference<CountDownLatch?>(null)
+    private val resumeAfterPendingSuspend = AtomicBoolean(false)
     private val revision = AtomicLong(0L)
     private val pendingRequest = AtomicReference<Request?>(null)
     private val mutableFrame = MutableStateFlow<Frame?>(null)
@@ -229,49 +232,73 @@ class DavinciFramePreviewEngine(
     internal fun suspendForExternalGpuWork(): Boolean {
         // A closed engine already owns no decoder/GL resources, so it must not block analysis.
         if (closed.get()) return true
-        if (!exportSuspended.compareAndSet(false, true)) return true
 
-        pendingRequest.set(null)
-        legacyPlaying.set(false)
-        handler.removeCallbacks(requestDrain)
-        handler.removeCallbacks(playbackPump)
-        handler.removeCallbacks(legacyPauseWatchdog)
+        val newRequest = exportSuspended.compareAndSet(false, true)
+        if (newRequest) {
+            externalSuspendReleaseComplete.set(false)
+            resumeAfterPendingSuspend.set(false)
 
-        val latch = CountDownLatch(1)
-        val releaseAction = Runnable {
-            try {
-                lastProjectRef?.let(resumeProject::set)
-                if (lastRequestedTimelineUs != Long.MIN_VALUE) {
-                    resumeTimelineUs.set(lastRequestedTimelineUs.coerceAtLeast(0L))
+            pendingRequest.set(null)
+            legacyPlaying.set(false)
+            handler.removeCallbacks(requestDrain)
+            handler.removeCallbacks(playbackPump)
+            handler.removeCallbacks(legacyPauseWatchdog)
+
+            val latch = CountDownLatch(1)
+            externalSuspendLatch.set(latch)
+            val releaseAction = Runnable {
+                try {
+                    lastProjectRef?.let(resumeProject::set)
+                    if (lastRequestedTimelineUs != Long.MIN_VALUE) {
+                        resumeTimelineUs.set(lastRequestedTimelineUs.coerceAtLeast(0L))
+                    }
+                    stopPlayback()
+                    // Detach the viewer surface before releasing MediaCodec/Media3. On slower vendor
+                    // stacks this prevents the final GL present from holding the graph release path.
+                    runCatching { session?.core?.setOutputSurface(null) }
+                    replaceSession(null)
+                    lastProjectRef = null
+                    lastRequestedTimelineUs = Long.MIN_VALUE
+                } finally {
+                    externalSuspendReleaseComplete.set(true)
+                    latch.countDown()
+                    if (resumeAfterPendingSuspend.getAndSet(false)) {
+                        // A lease acquisition may have timed out while this release was still
+                        // running. Complete the release first, then rebuild preview; never race the
+                        // queued teardown with a new decoder/GL session.
+                        resumeAfterExternalGpuWork()
+                    }
                 }
-                stopPlayback()
-                // Detach the viewer surface before releasing MediaCodec/Media3. On slower vendor
-                // stacks this prevents the final GL present from holding the graph release path.
-                runCatching { session?.core?.setOutputSurface(null) }
-                replaceSession(null)
-                lastProjectRef = null
-                lastRequestedTimelineUs = Long.MIN_VALUE
-            } finally {
-                latch.countDown()
+            }
+
+            if (Looper.myLooper() == renderThread.looper) {
+                releaseAction.run()
+            } else {
+                // Preempt queued preview work. A currently running decode/build cooperatively sees
+                // exportSuspended and exits at the nearest safe point.
+                handler.postAtFrontOfQueue(releaseAction)
             }
         }
 
-        return if (Looper.myLooper() == renderThread.looper) {
-            releaseAction.run()
-            true
-        } else {
-            // External analysis/export must preempt queued preview work; otherwise a long
-            // decoder/graph backlog can make the handoff hit the timeout even though the engine
-            // itself is healthy.
-            handler.postAtFrontOfQueue(releaseAction)
-            runCatching {
-                latch.await(EXPORT_RELEASE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            }.getOrDefault(false)
-        }
+        if (externalSuspendReleaseComplete.get()) return true
+        val latch = externalSuspendLatch.get() ?: return false
+        return runCatching {
+            latch.await(EXPORT_RELEASE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        }.getOrDefault(false)
     }
 
     internal fun resumeAfterExternalGpuWork() {
-        if (closed.get() || !exportSuspended.compareAndSet(true, false)) return
+        if (closed.get() || !exportSuspended.get()) return
+        if (!externalSuspendReleaseComplete.get()) {
+            resumeAfterPendingSuspend.set(true)
+            return
+        }
+        if (!exportSuspended.compareAndSet(true, false)) return
+
+        resumeAfterPendingSuspend.set(false)
+        externalSuspendReleaseComplete.set(false)
+        externalSuspendLatch.set(null)
+
         val project = resumeProject.get() ?: legacyProject.get() ?: return
         val safeTimelineUs = resumeTimelineUs.get()
             .coerceIn(0L, project.durationUs.coerceAtLeast(0L))
