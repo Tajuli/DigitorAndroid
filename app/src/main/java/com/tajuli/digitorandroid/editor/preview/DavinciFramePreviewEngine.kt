@@ -157,7 +157,11 @@ class DavinciFramePreviewEngine(
             if (closed.get() || exportSuspended.get()) return
             val request = pendingRequest.getAndSet(null) ?: return
             runCatching { handleRequest(request) }
-                .onFailure { failPreview("request", it) }
+                .onFailure { error ->
+                    if (error !is PreviewSuspendRequested) {
+                        failPreview("request", error)
+                    }
+                }
             if (pendingRequest.get() != null && !closed.get() && !exportSuspended.get()) {
                 handler.post(this)
             }
@@ -241,6 +245,9 @@ class DavinciFramePreviewEngine(
                     resumeTimelineUs.set(lastRequestedTimelineUs.coerceAtLeast(0L))
                 }
                 stopPlayback()
+                // Detach the viewer surface before releasing MediaCodec/Media3. On slower vendor
+                // stacks this prevents the final GL present from holding the graph release path.
+                runCatching { session?.core?.setOutputSurface(null) }
                 replaceSession(null)
                 lastProjectRef = null
                 lastRequestedTimelineUs = Long.MIN_VALUE
@@ -349,8 +356,15 @@ class DavinciFramePreviewEngine(
         val wantedKey = sessionKey(request.project, layers)
         val sessionChanged = session?.key != wantedKey
         if (sessionChanged) {
-            replaceSession(buildSession(request.project, layers, wantedKey))
+            throwIfExternalSuspendRequested()
+            val built = buildSession(request.project, layers, wantedKey)
+            if (exportSuspended.get()) {
+                runCatching { built.close() }
+                throw PreviewSuspendRequested()
+            }
+            replaceSession(built)
         }
+        throwIfExternalSuspendRequested()
         val active = session ?: return
 
         val timelineChanged = request.timelineUs != lastRequestedTimelineUs
@@ -368,6 +382,7 @@ class DavinciFramePreviewEngine(
             playAnchorNs = System.nanoTime()
 
             if (!wasPlaying || sessionChanged || transportDriftUs > HARD_RESYNC_US) {
+                throwIfExternalSuspendRequested()
                 active.resetForPlayback(request.timelineUs)
             }
             playing = true
@@ -377,16 +392,26 @@ class DavinciFramePreviewEngine(
             val wasPlaying = playing
             stopPlayback()
             when {
-                sessionChanged || wasPlaying || timelineChanged -> active.seekAndRender(request.timelineUs)
+                sessionChanged || wasPlaying || timelineChanged -> {
+                    throwIfExternalSuspendRequested()
+                    active.seekAndRender(request.timelineUs)
+                }
                 // MultipleInputVideoGraph.redraw() re-presents its already-processed output frame;
                 // it does not run a changed LUT/spatial shader over the held decoder texture again.
                 // Re-submit the same playhead frame so paused slider/effect changes are visible now.
-                projectChanged -> active.seekAndRender(request.timelineUs)
+                projectChanged -> {
+                    throwIfExternalSuspendRequested()
+                    active.seekAndRender(request.timelineUs)
+                }
             }
         }
 
         lastRequestedTimelineUs = request.timelineUs
         lastProjectRef = request.project
+    }
+
+    private fun throwIfExternalSuspendRequested() {
+        if (exportSuspended.get()) throw PreviewSuspendRequested()
     }
 
     private fun currentPlaybackTimelineUs(): Long {
@@ -407,7 +432,12 @@ class DavinciFramePreviewEngine(
         val prepared = mutableListOf<PreparedLayer>()
         var core: DigitorRenderCore? = null
         try {
-            layers.forEach { layer -> prepared += prepareLayer(layer) }
+            throwIfExternalSuspendRequested()
+            layers.forEach { layer ->
+                throwIfExternalSuspendRequested()
+                prepared += prepareLayer(layer)
+            }
+            throwIfExternalSuspendRequested()
             val generation = ++sessionGeneration
             core = DigitorRenderCore(
                 context = appContext,
@@ -437,9 +467,12 @@ class DavinciFramePreviewEngine(
                     }
                 },
             )
+            throwIfExternalSuspendRequested()
             previewSurface?.takeIf { it.isValid }?.let(core::setOutputSurface)
+            throwIfExternalSuspendRequested()
 
             val sources = prepared.mapIndexed { index, item ->
+                throwIfExternalSuspendRequested()
                 val codec = createConfiguredPreviewDecoder(
                     mime = item.mime,
                     format = item.platformFormat,
@@ -623,12 +656,17 @@ class DavinciFramePreviewEngine(
         }
 
         fun seekAndRender(timelineUs: Long) {
+            if (exportSuspended.get()) return
             clearPausedOutputs()
             core.flush()
-            sources.forEach { source -> source.resetToTimeline(timelineUs) }
+            sources.forEach { source ->
+                if (exportSuspended.get()) return
+                source.resetToTimeline(timelineUs)
+            }
 
             sources.forEachIndexed { index, source ->
-                val around = source.decodeAroundTarget()
+                if (exportSuspended.get()) return
+                val around = source.decodeAroundTarget { exportSuspended.get() }
                 val before = around.atOrBefore
                 val after = around.after
                 when {
@@ -691,6 +729,7 @@ class DavinciFramePreviewEngine(
 
         override fun close() {
             clearPausedOutputs()
+            runCatching { core.setOutputSurface(null) }
             sources.forEach { source -> runCatching { source.close() } }
             runCatching { core.close() }
         }
@@ -818,12 +857,17 @@ class DavinciFramePreviewEngine(
             }
         }
 
-        fun decodeAroundTarget(): AroundTarget {
+        fun decodeAroundTarget(shouldAbort: () -> Boolean = { false }): AroundTarget {
             val targetSourceUs = playbackFloorSourceUs
             var candidate: HeldOutput? = null
             var future: HeldOutput? = null
 
             for (step in 0 until MAX_SCRUB_STEPS) {
+                if (shouldAbort()) {
+                    candidate?.let(::releaseWithoutRendering)
+                    future?.let(::releaseWithoutRendering)
+                    return AroundTarget(null, null)
+                }
                 feedInput(2)
                 val outputIndex = codec.dequeueOutputBuffer(bufferInfo, SCRUB_DEQUEUE_TIMEOUT_US)
                 when {
@@ -873,6 +917,8 @@ class DavinciFramePreviewEngine(
         }
     }
 
+    private class PreviewSuspendRequested : RuntimeException()
+
     private companion object {
         const val TAG = "DigitorSharedPreview"
         const val PLAYBACK_PUMP_MS = 4L
@@ -885,7 +931,7 @@ class DavinciFramePreviewEngine(
         const val MAX_SCRUB_STEPS = 280
         const val SCRUB_DEQUEUE_TIMEOUT_US = 1_000L
         const val LEGACY_IDLE_PAUSE_MS = 180L
-        const val EXPORT_RELEASE_TIMEOUT_MS = 5_000L
+        const val EXPORT_RELEASE_TIMEOUT_MS = 15_000L
     }
 }
 
