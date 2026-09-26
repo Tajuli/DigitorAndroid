@@ -3,7 +3,7 @@ project(digitor_ppmatting_ncnn LANGUAGES CXX)
 
 # V69 chooses 256/320/384/512 at runtime. The selected ncnn graph is fixed-shape, but the JNI bridge
 # itself must not bake one compile-time tensor size into the shared library.
-add_library(digitor_ppmatting_ncnn SHARED PpMattingNcnnVulkanJni.cpp)
+add_library(digitor_ppmatting_ncnn SHARED PpMattingNcnnVulkanJni.cpp FaceTrackingNcnnVulkanJni.cpp)
 target_compile_features(digitor_ppmatting_ncnn PRIVATE cxx_std_17)
 target_compile_options(digitor_ppmatting_ncnn PRIVATE -O3 -ffast-math -fvisibility=hidden)
 
