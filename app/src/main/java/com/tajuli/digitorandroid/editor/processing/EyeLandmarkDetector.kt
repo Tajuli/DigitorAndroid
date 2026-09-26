@@ -59,7 +59,25 @@ internal class EyeLandmarkDetector(
         }
 
         gpuAccelerated = created != null
-        gpuFailureReason = if (gpuAccelerated) null else gpuFailure?.message?.take(180)
+        gpuFailureReason = if (gpuAccelerated) {
+            null
+        } else {
+            gpuFailure?.let { error ->
+                buildString {
+                    append(error.javaClass.simpleName)
+                    error.message?.takeIf { it.isNotBlank() }?.let {
+                        append(": ")
+                        append(it)
+                    }
+                    error.cause?.takeIf { it !== error }?.message
+                        ?.takeIf { it.isNotBlank() && it != error.message }
+                        ?.let {
+                            append(" · cause: ")
+                            append(it)
+                        }
+                }.take(220)
+            } ?: "Unknown GPU delegate initialization failure"
+        }
         landmarker = created ?: create(context, Delegate.CPU)
     }
 
