@@ -223,7 +223,8 @@ class DavinciFramePreviewEngine(
      * starts. Export must not start until the release action has actually finished.
      */
     internal fun suspendForExternalGpuWork(): Boolean {
-        if (closed.get()) return false
+        // A closed engine already owns no decoder/GL resources, so it must not block analysis.
+        if (closed.get()) return true
         if (!exportSuspended.compareAndSet(false, true)) return true
 
         pendingRequest.set(null)
