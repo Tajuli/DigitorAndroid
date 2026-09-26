@@ -57,9 +57,9 @@ internal fun EyeAnalysisControls(
 
         Text(
             text = when (state?.gpuAccelerated) {
-                true -> "12 fps motion tracking · MediaPipe GPU · continues offscreen"
-                false -> "12 fps motion tracking · CPU fallback · continues offscreen"
-                null -> "Fast motion tracking · GPU preferred · continues offscreen"
+                true -> "12 fps motion tracking · ncnn Vulkan GPU · continues offscreen"
+                false -> "12 fps motion tracking · ncnn CPU fallback · continues offscreen"
+                null -> "Fast motion tracking · ncnn Vulkan preferred · continues offscreen"
             },
             color = Color(0xFF909098),
             fontSize = 8.sp,
@@ -67,7 +67,7 @@ internal fun EyeAnalysisControls(
 
         if (state?.gpuAccelerated == false && !state.gpuFailureReason.isNullOrBlank()) {
             Text(
-                text = "GPU init: " + state.gpuFailureReason,
+                text = "Tracking backend: " + state.gpuFailureReason,
                 color = Color(0xFFB8B8C0),
                 fontSize = 7.sp,
                 maxLines = 3,
