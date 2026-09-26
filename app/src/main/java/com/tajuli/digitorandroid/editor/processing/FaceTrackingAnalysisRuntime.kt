@@ -7,6 +7,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -71,8 +72,7 @@ object FaceTrackingAnalysisRuntime {
             )
         }
 
-        lateinit var job: Job
-        job = scope.launch {
+        val job = scope.launch {
             try {
                 EyeTrackingAnalyzer(context.applicationContext).analyze(
                     clip = clip,
@@ -139,7 +139,9 @@ object FaceTrackingAnalysisRuntime {
                     )
                 }
             } finally {
-                jobs.remove(key, job)
+                currentCoroutineContext()[Job]?.let { current ->
+                    jobs.remove(key, current)
+                }
             }
         }
         jobs[key] = job
