@@ -45,8 +45,8 @@ def program_for(path):
     text = Path(path).read_text()
     vertex = re.search(r'VERTEX_SHADER = """(.*?)"""', text, re.S).group(1)
     fragment = re.search(r'NODE_FRAGMENT_SHADER = """(.*?)"""', text, re.S).group(1)
-    eye = Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/EyeEffectShader.kt').read_text().split('"""')[1]
-    fragment = fragment.replace('$EYE_EFFECT_SHADER', eye)
+    eye = Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/BodyDecorationShader.kt').read_text().split('"""')[1]
+    fragment = fragment.replace('$BODY_DECORATION_SHADER', eye)
     program = fn(gl, 'glCreateProgram', U)()
     for src, kind in [(vertex, 0x8B31), (fragment, 0x8B30)]:
         fn(gl, 'glAttachShader', None, U, U)(program, compile_one(src, kind))
@@ -57,7 +57,7 @@ def program_for(path):
 
 
 base = 'app/src/main/java/com/tajuli/digitorandroid/editor/render/'
-program = program_for(base + 'CreatorEffectGraphV25.kt')
+program = program_for(base + 'BodyEffectGraphV102.kt')
 fn(gl, 'glUseProgram', None, U)(program)
 location = fn(gl, 'glGetUniformLocation', I, U, c.c_char_p)
 def vec(name, values):
@@ -73,9 +73,16 @@ fn(gl,'glBindTexture',None,U,U)(0x0DE1,ident)
 for key,val in [(0x2801,0x2601),(0x2800,0x2601),(0x2802,0x812F),(0x2803,0x812F)]:
     fn(gl,'glTexParameteri',None,U,U,I)(0x0DE1,key,val)
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
-vec('uEyeTransform',[1,0,1,1]); vec('uEyeTranslation',[0,0]); vec('uTexelSize',[1/w,1/h]); uniform('uEyeTime',.35)
-vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0]); vec('uEyeState',[1,1,0,0])
-vec('uFaceRegion',[.5,.5,.25,.35]);vec('uMouthRegion',[.5,.35,.08,.045])
+vec('uTexelSize',[1/w,1/h]);vec('uBodyBounds',[.5,.5,.2,.35]);uniform('uTime',.35)
+uniform('uHasMaskA',1);uniform('uHasMaskB',1);uniform('uAlphaBias',.5);uniform('uEdgeSoftness',.04)
+mask=np.zeros_like(source);mask[:,:,3]=255
+mask[((x-w*.5)/(w*.2))**2+((y-h*.5)/(h*.35))**2<1,:3]=255
+for unit in [1,2]:
+    mid=U();fn(gl,'glGenTextures',None,I,P)(1,c.byref(mid))
+    fn(gl,'glActiveTexture',None,U)(0x84C0+unit);fn(gl,'glBindTexture',None,U,U)(0x0DE1,mid)
+    for key,val in [(0x2801,0x2601),(0x2800,0x2601),(0x2802,0x812F),(0x2803,0x812F)]:fn(gl,'glTexParameteri',None,U,U,I)(0x0DE1,key,val)
+    fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,mask.ctypes.data)
+    fn(gl,'glUniform1i',None,I,I)(location(program,('uMaskA' if unit==1 else 'uMaskB').encode()),unit)
 vertices=np.array([-1,-1,0,1,1,-1,0,1,-1,1,0,1,1,1,0,1],np.float32)
 attribute=fn(gl,'glGetAttribLocation',I,U,c.c_char_p)(program,b'aFramePosition')
 fn(gl,'glEnableVertexAttribArray',None,U)(attribute)
@@ -87,27 +94,19 @@ def render():
     fn(gl,'glReadPixels',None,I,I,I,I,U,U,P)(0,0,w,h,0x1908,0x1401,out.ctypes.data)
     assert fn(gl,'glGetError',U)()==0
     return out
-def amounts(index, strength=1):
-    a=[0.]*28
-    if index>=0: a[index]=strength
-    for name,part in zip(['uEyesA','uEyesB','uEyesC','uEyesD','uEyesE','uFunnyA','uFunnyB'],[a[i:i+4] for i in range(0,28,4)]): vec(name,part)
-amounts(-1); assert np.array_equal(render(),source),'Zero strength'
+def amounts(index):
+    a=[0.]*32
+    if index>=0:a[index]=1.
+    for i in range(8):vec('uDecor'+str(i),a[i*4:i*4+4])
+amounts(-1);assert np.array_equal(render(),source),'Zero strength'
 results=[]
-for index in range(27):
-    amounts(index); vec('uEyeState',[1,1,0,0])
-    out=render(); results.append(out)
-    assert np.max(np.abs(out[:,:,:3].astype(int)-source[:,:,:3].astype(int)))>2, ('Invisible',index)
+for index in range(31):
+    amounts(index);out=render();results.append(out)
+    assert np.max(np.abs(out[:,:,:3].astype(int)-source[:,:,:3].astype(int)))>2,('Invisible',index)
     assert np.array_equal(out[:,:,3],source[:,:,3]),('Alpha',index)
-    vec('uEyeState',[0,0,0,0]);
-    if index<16 or index==17: assert np.array_equal(render(),source),('Blink',index)
-    vec('uEyeState',[1,1,0,0]); vec('uLeftEye',[0,0,0,0]); vec('uRightEye',[0,0,0,0])
-    vec('uFaceRegion',[0,0,0,0]);vec('uMouthRegion',[0,0,0,0])
-    assert np.array_equal(render(),source),('Missing face',index)
-    vec('uFaceRegion',[.5,.5,.25,.35]);vec('uMouthRegion',[.5,.35,.08,.045])
-    vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0])
-for i in range(27):
-    for j in range(i): assert not np.array_equal(results[i],results[j]),('Duplicate',i,j)
-# Movement and head tilt must alter the actual rendered pixels.
-amounts(1); before=render(); vec('uLeftEye',[.42,.4,.055,0]); vec('uEyeState',[1,1,.6,0])
-assert not np.array_equal(before,render()),'Tracking uniforms ignored'
-print('PASS: production shader compiles/links; 27 distinct visible effects; zero, blink, missing face, alpha and tracking checks pass.')
+    uniform('uHasMaskA',0);uniform('uHasMaskB',0)
+    assert np.array_equal(render(),source),('Missing matte',index)
+    uniform('uHasMaskA',1);uniform('uHasMaskB',1)
+for i in range(31):
+    for j in range(i):assert not np.array_equal(results[i],results[j]),('Duplicate',i,j)
+print('PASS: 31 body decorations compile/link and visibly differ; zero strength, missing matte, alpha preservation pass.')

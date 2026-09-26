@@ -5,6 +5,12 @@ internal const val EYE_EFFECT_SHADER = """
     uniform vec4 uEyesA;
     uniform vec4 uEyesB;
     uniform vec4 uEyesC;
+    uniform vec4 uEyesD;
+    uniform vec4 uEyesE;
+    uniform vec4 uFunnyA;
+    uniform vec4 uFunnyB;
+    uniform vec4 uFaceRegion;
+    uniform vec4 uMouthRegion;
     uniform vec4 uLeftEye;
     uniform vec4 uRightEye;
     uniform vec4 uEyeState;
@@ -87,7 +93,65 @@ internal const val EYE_EFFECT_SHADER = """
         if(uEyesC.w>.001) {
             light+=uEyesC.w*eyePalette(a/6.28318+r*.18-t*.15)*(ring+core*.8+halo*.18);
         }
+        if(uEyesD.x>.001) {
+            float side=sign(eye.x-(uLeftEye.x+uRightEye.x)*.5);
+            float axis=p.x-side*max(p.y,0.0)*.32;
+            float noise=.16*sin(p.y*18.0-t*25.0)+.07*sin(p.y*43.0+t*17.0);
+            float bolt=exp(-abs(axis-noise)*22.0)*smoothstep(-.2,.2,p.y);
+            float beam=exp(-axis*axis*38.0)*smoothstep(-.2,.2,p.y);
+            light+=uEyesD.x*(vec3(1,.7,.3)*(bolt*.9+halo*.3)+vec3(1,.95,.85)*(beam+core));
+        }
+        if(uEyesD.y>.001 || uEyesD.z>.001) {
+            float drift=p.x+.16*sin(p.y*6.0+t*6.0);
+            float fire=exp(-drift*drift*(2.0+abs(p.y)))*smoothstep(-4.0,-.2,p.y)*(1.0-smoothstep(.1,.7,p.y));
+            float tongues=.4+.6*eyeNoise(vec2(p.x*5.0,p.y*4.0+t*7.0));
+            light+=(uEyesD.y*vec3(1,.2,.01)+uEyesD.z*vec3(1,.015,.45))*(fire*tongues*2.0+core+halo*.15);
+        }
+        if(uEyesD.w>.001) {
+            float h=(-p.y-1.7)/3.0;
+            float side=sign(eye.x-(uLeftEye.x+uRightEye.x)*.5);
+            float curve=side*(.35+h*h*.9);
+            float horn=exp(-pow((p.x-curve)/max(.03,.38*(1.0-h)),2.0))*step(0.0,h)*(1.0-step(1.0,h));
+            light+=uEyesD.w*vec3(1,.04,.65)*horn*(1.1+.5*sin(t*8.0+h*9.0));
+        }
+        if(uEyesE.y>.001) {
+            float flare=exp(-p.y*p.y*160.0)*exp(-abs(p.x)*.45);
+            light+=uEyesE.y*(vec3(1,.05,.7)*(core+halo*.4)+vec3(1,.7,.95)*flare);
+        }
         return light*openness;
+    }
+    vec2 eyeSourceUv(vec2 uv) {
+        vec2 p=uv*2.0-1.0-uEyeTranslation;
+        return vec2(uEyeTransform.x*p.x+uEyeTransform.y*p.y,-uEyeTransform.y*p.x+uEyeTransform.x*p.y)/uEyeTransform.zw*.5+.5;
+    }
+    vec2 eyeFrameUv(vec2 uv) {
+        vec2 p=(uv*2.0-1.0)*uEyeTransform.zw;
+        return (vec2(uEyeTransform.x*p.x-uEyeTransform.y*p.y,uEyeTransform.y*p.x+uEyeTransform.x*p.y)+uEyeTranslation)*.5+.5;
+    }
+    vec2 regionalWarp(vec2 uv,vec4 region,vec2 scale,float amount) {
+        if(region.z<.001 || region.w<.001 || amount<.001) return uv;
+        vec2 p=(uv-region.xy)/region.zw;
+        float weight=1.0-smoothstep(.25,1.5,length(p));
+        return region.xy+(uv-region.xy)/mix(vec2(1),scale,weight*amount);
+    }
+    vec2 funnyUv(vec2 uv) {
+        vec2 p=eyeSourceUv(uv);
+        if(uFaceRegion.z<.001) return uv;
+        p=regionalWarp(p,uFaceRegion,vec2(1.55,1.35),uFunnyA.w);
+        p=regionalWarp(p,uMouthRegion,vec2(1.1,1.9),uFunnyA.x);
+        p=regionalWarp(p,uMouthRegion,vec2(1.8,1.1),uFunnyA.z);
+        p=regionalWarp(p,uMouthRegion,vec2(1.65,1.5),uFunnyB.x);
+        p=regionalWarp(p,uMouthRegion,vec2(2.1,1.9),uFunnyB.y);
+        p=regionalWarp(p,uMouthRegion,vec2(.55,1.2),uFunnyB.z);
+        vec2 f=(p-uFaceRegion.xy)/max(uFaceRegion.zw,vec2(.001));
+        float faceWeight=1.0-smoothstep(.4,1.2,length(f));
+        p.y+=uFunnyA.y*.12*uFaceRegion.w*sin(f.x*3.14159)*faceWeight;
+        p.x+=uFunnyB.z*.18*uFaceRegion.z*sin(f.y*3.0)*faceWeight;
+        if(uEyesE.z>.001) {
+            float band=floor(p.y*70.0);
+            p.x+=(eyeHash(vec2(band,floor(uEyeTime*9.0)))-.5)*.075*uEyesE.z*faceWeight;
+        }
+        return clamp(eyeFrameUv(p),.001,.999);
     }
     vec3 applyEyeEffects(vec3 rgb, vec2 uv) {
         vec2 ndc=uv*2.0-1.0-uEyeTranslation;
@@ -96,6 +160,14 @@ internal const val EYE_EFFECT_SHADER = """
         uv=ndc*.5+.5;
         vec3 light=eyeLight(uv,uLeftEye,uEyeState.x,uEyeState.z)
                   +eyeLight(uv,uRightEye,uEyeState.y,uEyeState.w);
+        if(uFaceRegion.z>.001 && uFaceRegion.w>.001) {
+            vec2 p=(uv-uFaceRegion.xy)/uFaceRegion.zw;
+            float inside=1.0-smoothstep(.85,1.05,length(p));
+            float scan=exp(-pow((p.y-sin(uEyeTime*2.0))*24.0,2.0));
+            light+=uEyesE.x*vec3(.02,.8,1)*scan*inside;
+            float grid=exp(-abs(sin(p.x*20.0))*30.0)+exp(-abs(sin(p.y*16.0+uEyeTime))*30.0);
+            light+=uEyesE.w*vec3(.02,.7,.5)*grid*inside*.45;
+        }
         // Screen-like energy response retains image texture and rolls bright cores into white.
         return rgb+(1.0-rgb)*(1.0-exp(-light*1.8));
     }

@@ -11,6 +11,11 @@ import com.tajuli.digitorandroid.editor.render.VisualOverlayRenderEnvironmentV19
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
 
 @UnstableApi
 class ProcessingRouter(context: Context) {
@@ -50,8 +55,12 @@ class ProcessingRouter(context: Context) {
         val exportProject = settings.applyTo(project)
         val eyeClips = exportProject.tracks.filter { it.kind == TrackKind.VIDEO }
             .flatMap { it.clips }.filter { it.hasEyeEffects() }
-        check(eyeClips.all { EyeTrackStore.load(appContext, it)?.covers(it) == true }) {
-            "Eye tracking is incomplete. Open Effects > Eyes and select Analyze Eyes before export."
+        for (clip in eyeClips) {
+            if(EyeTrackStore.load(appContext,clip)?.covers(clip)!=true) {
+                EyeTrackingAnalyzer(appContext).analyze(clip) { percent ->
+                    onProgress(ExportProgress.Stage("Preparing face effects · $percent%",percent/100f))
+                }
+            }
         }
         val quality = settings.quality
         val formatLabel = exportProject.exportFormatLabelV73()
@@ -75,8 +84,24 @@ class ProcessingRouter(context: Context) {
                 CutoutAnalysisRuntimeV66.state.first { !it.busy }
                 missing = bodyClips.filterNot { hasPersonCutoutCoverageV43(appContext, it) }
             }
-            check(missing.isEmpty()) {
-                "Body effect analysis is incomplete. Open Effects > Body and let Analyze body finish before export."
+            for(clip in missing) {
+                withContext(Dispatchers.Default) {
+                    check(CutoutAnalysisRuntimeV66.begin(clip.id,false,0)) { "Another body analysis is running. Retry export when it finishes." }
+                    val jobContext = currentCoroutineContext()
+                    try {
+                        PreviewExportCoordinator.acquireAnalysisLease().use {
+                            GpuPersonCutoutAnalyzerV47(appContext).analyzeAndStore(clip,onAnchorStored={ count ->
+                                jobContext.ensureActive()
+                                CutoutAnalysisRuntimeV66.updateSavedFrames(count)
+                                onProgress(ExportProgress.Stage("Preparing body effects · $count frames",0f))
+                            })
+                        }
+                        CutoutAnalysisRuntimeV66.markCompleted(personCutoutSavedFrameCountV66(appContext,clip))
+                    } catch(error: Exception) {
+                        CutoutAnalysisRuntimeV66.markFailed(personCutoutSavedFrameCountV66(appContext,clip),error.message)
+                        throw error
+                    } finally { CutoutAnalysisRuntimeV66.clearIfClip(clip.id) }
+                }
             }
         }
 
@@ -262,6 +287,7 @@ class ProcessingRouter(context: Context) {
             }
         }
 
+        check(bodyClips.isEmpty()) { "Body effects require GPU export on this device." }
         check(eyeClips.isEmpty()) { "Eyes effects require GPU export on this device; CPU export cannot render tracked eyes." }
         onProgress(ExportProgress.Stage("No compatible GPU · CPU fallback · $formatLabel · ${quality.label}", 0f))
         return cpu.export(exportProject, output, quality, onProgress)

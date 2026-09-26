@@ -1,20 +1,12 @@
-# Tracked Eyes effects
+# Automatic tracked effects
 
-Effects > Eyes > Analyze Eyes performs a cancellable, 24 Hz source-frame analysis. Once complete, tap an effect to add it to the selected editable node, tap again to remove it, and use the existing amount/keyframe and timeline-duration controls.
+Tap a preset to apply it immediately. A preview-only GPU frame tap downsamples the current decoded frame and performs asynchronous face detection / CPU person segmentation. There is no required Analyze button or full-clip scan before selection. Tracking still has model startup and inference latency; instant zero-latency tracking is not promised. Preview frames expire after 250 ms and never satisfy export coverage.
 
-Twelve original procedural presets: Fire, Laser, Lightning, Plasma, Ice, Galaxy, Neon, Solar, Cyber, Heart, Star and Rainbow Eyes. No competitor assets are copied. Uses the existing bundled ML Kit face detector; no new ML dependency or model download.
+27 eye/face presets include Fire, Laser, Electric Eyes, two Flame Eyes variants, Flaming Horns, reflection, scans and seven regional face distortions. 31 additional body decorations include wings, rings, particles, strokes and clones. These are original procedural variants, not copied CapCut assets or exact reproductions. Musical Notes and Shape Trails use body-relative patterns, not hand tracking; trails are procedural, not optical-flow motion histories. Generative outfits, 3D Dragon Year and other reference transformations needing separate assets/models are not implemented.
 
-The tracker records eye contours, head roll, eyelid aperture and classification-based openness. It follows one primary face, interpolates nearby samples, suppresses missing detections, rejects large position jumps/identity changes, and publishes durable data only after complete analysis. Video analysis takes the shared preview/export decoder lease, then restores the paused frame. Cancellation waits for an in-flight detector task before releasing its bitmap/detector. Reopening a project uses the saved track; changing the source trim requires analysis again. Tracking currently targets one visible face, not independent multi-person selection or gaze-direction estimation. Laser beams extend along the eye axis; they do not infer a 3D gaze vector.
+Export automatically computes missing complete eye/person tracks before rendering using the shared GPU graphs. Unsupported CPU fallback fails explicitly. Face tracking targets one primary face and records eye contours, blink, face and mouth bounds. Source time, effect timing, node amounts/keyframes and alpha are preserved. Full tracking caches are only published after complete analysis.
 
-Eyes execute in the existing resident creator GPU graph with the owning serial/parallel node, timeline membership and amount keyframes. Preview and export share the same shader and source clock. The legacy transformed-input paths invert the clip display transform when locating the eyes. Alpha is preserved. Missing or closed eyes do not receive invented fallback positions. Export rejects missing analysis and unsupported CPU-only execution instead of silently omitting the effect. Thumbnails detect eyes on the common photograph and render the production shader.
-
-Validation:
-- `python3 tools/validation/verify_eye_effects_gl.py`: Mesa/EGL compiles and renders the actual production shader. Checks all 12 presets are visible and distinct, zero intensity, closed eyes, missing eyes, alpha preservation, and movement/roll uniforms.
-- `EyeEffectsTest`: source-time interpolation, blink values, missing samples, identity changes, discontinuities, timed enable/amount controls and angular wraparound.
-- Local standalone Kotlin model compilation and behavioral checks pass with lightweight timeline dependency stubs; this is not a full Android build.
-- Local Gradle Android compilation cannot resolve the repository's pre-existing Android Gradle Plugin 9.3.0. Android CI/device validation remains required.
-
-Device QA still needed: fast head turns, occlusion, eyeglasses, profile faces, rotated source video, API 24/26 image orientation, trim/split/reopen, scaled/rotated clips, parallel mixers, export at different frame rates, and cancel/retry during long analysis. No claim of superior quality to CapCut is made without a side-by-side device comparison.
+Validation: actual production eye and body shaders compile and render under Mesa/EGL; all 27 face/eye and 31 body variants have distinct visible output, zero-strength identity, missing-detection behavior and preserved alpha. Android CI and physical-device testing remain necessary. Device QA includes fast turns, occlusion, glasses, rotated source media, transform/trim/reopen, preview latency and export parity. No comparative superiority claim is made without side-by-side testing.
 
 ## Minified detector initialization fix
 

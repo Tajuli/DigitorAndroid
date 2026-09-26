@@ -18,11 +18,12 @@ data class BodyEffectVectorV102(
     val cloneTriple: Float = 0f,
     val cloneEcho: Float = 0f,
     val cloneMirror: Float = 0f,
+    val decorations: Map<Int, Float> = emptyMap(),
 ) {
     val isIdentity: Boolean
         get() = outline == 0f && glow == 0f && aura == 0f && rgbSplit == 0f &&
             silhouette == 0f && pulse == 0f && clone == 0f && cloneTriple == 0f &&
-            cloneEcho == 0f && cloneMirror == 0f
+            cloneEcho == 0f && cloneMirror == 0f && decorations.isEmpty()
 }
 
 object BodyEffectCatalogV102 {
@@ -45,6 +46,7 @@ object BodyEffectCatalogV102 {
 
     fun find(name: String): BodyEffectVectorV102? =
         vectors.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+            ?: BodyDecorationCatalog.index(name).takeIf { it >= 0 }?.let { BodyEffectVectorV102(decorations = mapOf(it to 1f)) }
 
     fun isBodyEffect(name: String): Boolean = find(name) != null
 }
@@ -65,6 +67,9 @@ fun resolveBodyEffectsV102(effects: List<NodeEffect>): BodyEffectVectorV102 {
             cloneTriple = (out.cloneTriple + preset.cloneTriple * amount).coerceIn(0f, 1.5f),
             cloneEcho = (out.cloneEcho + preset.cloneEcho * amount).coerceIn(0f, 1.5f),
             cloneMirror = (out.cloneMirror + preset.cloneMirror * amount).coerceIn(0f, 1.5f),
+            decorations = (out.decorations.keys + preset.decorations.keys).associateWith {
+                ((out.decorations[it] ?: 0f)+(preset.decorations[it] ?: 0f)*amount).coerceIn(0f,1f)
+            },
         )
     }
     return out

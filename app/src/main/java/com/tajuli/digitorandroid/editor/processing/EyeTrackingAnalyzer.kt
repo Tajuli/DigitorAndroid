@@ -33,7 +33,7 @@ object EyeTrackStore {
     private fun key(clip: TimelineClip) = MessageDigest.getInstance("SHA-256")
         .digest("${clip.uri}|${clip.sourceInUs}|${clip.sourceOutUs}".toByteArray())
         .joinToString("") { "%02x".format(it) }
-    private fun file(context: Context, clip: TimelineClip) = File(context.filesDir, "eye_tracks_v1/${key(clip)}.json")
+    private fun file(context: Context, clip: TimelineClip) = File(context.filesDir, "eye_tracks_v2/${key(clip)}.json")
     fun load(context: Context, clip: TimelineClip): EyeTrack? {
         val key = key(clip)
         cache[key]?.let { return it }
@@ -82,56 +82,8 @@ class EyeTrackingAnalyzer(private val context: Context) {
     suspend fun analyze(clip: TimelineClip, onProgress: (Int) -> Unit = {}): EyeTrack =
         withContext(Dispatchers.Default) { analysisMutex.withLock {
             EyeTrackStore.load(context, clip)?.let { onProgress(100); return@withLock it }
-            val options = FaceDetectorOptions.Builder()
-                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
-                .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
-                .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
-                .setMinFaceSize(.08f).enableTracking().build()
-            val detector = FaceDetection.getClient(options)
+            val detector = EyeLandmarkDetector()
             val retriever = MediaMetadataRetriever()
-            var selectedIdentity: Int? = null
-            var previous: EyePose? = null
-            suspend fun detect(bitmap: Bitmap): EyePose? {
-                // Await the native task to completion before releasing detector/bitmap on cancel.
-                val faces = withContext(NonCancellable) {
-                    kotlin.coroutines.suspendCoroutine<List<Face>> { continuation ->
-                        detector.process(InputImage.fromBitmap(bitmap, 0))
-                            .addOnSuccessListener { continuation.resume(it) }
-                            .addOnFailureListener { continuation.resumeWithException(it) }
-                            .addOnCanceledListener { continuation.resumeWithException(CancellationException("Face detection cancelled")) }
-                    }
-                }
-                currentCoroutineContext().ensureActive()
-                val face = if (selectedIdentity == null) faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }
-                    else faces.firstOrNull { it.trackingId == selectedIdentity }
-                if (face == null) { selectedIdentity = null; previous = null; return null }
-                selectedIdentity = face.trackingId
-                fun eye(type: Int, probability: Float?): TrackedEye? {
-                    val points = face.getContour(type)?.points ?: return null
-                    if (points.size < 8) return null
-                    val a = points[0]; val b = points[points.size / 2]
-                    val length = hypot(b.x-a.x, b.y-a.y)
-                    if (length < 3f) return null
-                    var angle = atan2(b.y-a.y, b.x-a.x)
-                    if (cos(angle) < 0) angle += PI.toFloat()
-                    val cx = (a.x+b.x)*.5f; val cy = (a.y+b.y)*.5f
-                    val aperture = points.maxOf { abs(-(it.x-cx)*sin(angle)+(it.y-cy)*cos(angle)) } / length
-                    val openness = min(((aperture-.035f)/.10f).coerceIn(0f, 1f), probability ?: 1f)
-                    return TrackedEye(cx/bitmap.width, cy/bitmap.height, length*.5f/bitmap.width, angle, openness)
-                }
-                val left = eye(FaceContour.LEFT_EYE, face.leftEyeOpenProbability) ?: return null
-                val right = eye(FaceContour.RIGHT_EYE, face.rightEyeOpenProbability) ?: return null
-                val fresh = EyePose(left, right, selectedIdentity)
-                // Mild stabilization only for sub-eye-width jitter; preserve fast motion and blinks.
-                val old = previous
-                val stable = if (old != null && old.identity == fresh.identity &&
-                    hypot(left.x-old.left.x, left.y-old.left.y) < left.radius*.20f) {
-                    fresh.copy(left = old.left.interpolate(left, .8f).copy(open = left.open),
-                        right = old.right.interpolate(right, .8f).copy(open = right.open))
-                } else fresh
-                previous = stable
-                return stable
-            }
             var lease: PreviewExportCoordinator.AnalysisLease? = null
             try {
                 if (!clip.isImageV21) lease = PreviewExportCoordinator.acquireAnalysisLease()
@@ -145,7 +97,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
                     }
                     else decodeLegacyImage(Uri.parse(clip.uri))
                     try {
-                        val pose = detect(bitmap)
+                        val pose = detector.detect(bitmap)
                         // Still-image poses are repeated at the same cadence for ordinary interpolation.
                         var time = clip.sourceInUs
                         while (time < clip.sourceOutUs) { samples += EyeSample(time, pose); time += 41_667L }
@@ -163,7 +115,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
                         val bitmap = if (Build.VERSION.SDK_INT >= 27) retriever.getScaledFrameAtTime(time, MediaMetadataRetriever.OPTION_CLOSEST,
                             max(1, (width*scale).toInt()), max(1, (height*scale).toInt()))
                         else retriever.getFrameAtTime(time, MediaMetadataRetriever.OPTION_CLOSEST)?.let { downscale(it) }
-                        val pose = try { bitmap?.let { detect(it) } } finally { bitmap?.recycle() }
+                        val pose = try { bitmap?.let { detector.detect(it) } } finally { bitmap?.recycle() }
                         samples += EyeSample(time, pose)
                         onProgress(((time-clip.sourceInUs)*100/(clip.sourceOutUs-clip.sourceInUs).coerceAtLeast(1)).toInt())
                         time += 41_667L

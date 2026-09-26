@@ -117,7 +117,7 @@ internal class CreatorEffectGraphV25 private constructor(
                 val media3OutputFbo = outputFboHolder[0]
                 val currentClip = if (preview) PreviewProjectRegistry.clip(clip.id) ?: clip else clip
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
-                val eyePose = if (currentClip.nodeGraph.nodes.any { node -> node.visibleEffects().any { EyeEffectCatalog.contains(it.name) } }) EyeTrackStore.load(context, currentClip)?.at(sourceUs) else null
+                val eyePose = if (currentClip.nodeGraph.nodes.any { node -> node.visibleEffects().any { EyeEffectCatalog.contains(it.name) } }) (if(preview) com.tajuli.digitorandroid.editor.processing.LiveSemanticFrames.pose(currentClip,sourceUs) else null) ?: EyeTrackStore.load(context, currentClip)?.at(sourceUs) else null
                 val slotTextures = IntArray(plan.operations.size) { inputTexId }
                 var scratchCursor = 0
 
@@ -256,6 +256,14 @@ internal class CreatorEffectGraphV25 private constructor(
             program.setFloatsUniform("uEyesA", eyes.copyOfRange(0, 4))
             program.setFloatsUniform("uEyesB", eyes.copyOfRange(4, 8))
             program.setFloatsUniform("uEyesC", eyes.copyOfRange(8, 12))
+            program.setFloatsUniform("uEyesD", eyes.copyOfRange(12,16))
+            program.setFloatsUniform("uEyesE", eyes.copyOfRange(16,20))
+            program.setFloatsUniform("uFunnyA", eyes.copyOfRange(20,24))
+            program.setFloatsUniform("uFunnyB", floatArrayOf(eyes[24],eyes[25],eyes[26],0f))
+            fun region(r: BeautyRectV28?) = if(r==null) floatArrayOf(0f,0f,0f,0f) else
+                floatArrayOf((r.left+r.right)*.5f,1f-(r.top+r.bottom)*.5f,(r.right-r.left)*.5f,(r.bottom-r.top)*.5f)
+            program.setFloatsUniform("uFaceRegion", region(pose?.face))
+            program.setFloatsUniform("uMouthRegion", region(pose?.mouth))
             fun eyeUniform(eye: TrackedEye?) = if (eye == null) floatArrayOf(0f,0f,0f,0f)
                 else floatArrayOf(eye.x, eye.y, eye.radius, 0f)
             program.setFloatsUniform("uLeftEye", eyeUniform(pose?.left))
@@ -398,7 +406,7 @@ internal class CreatorEffectGraphV25 private constructor(
                 }
 
                 void main() {
-                    vec2 uv = creatorUv(vTexCoord);
+                    vec2 uv = funnyUv(creatorUv(vTexCoord));
                     vec4 center = texture2D(uTexSampler, uv);
                     float radius = 1.0 + uBlur * 4.0 + uGlow * 1.7;
                     vec2 o = uTexelSize * radius;

@@ -6,7 +6,11 @@ import kotlin.math.abs
 object EyeEffectCatalog {
     val names = listOf("Fire Eyes", "Laser Eyes", "Lightning Eyes", "Plasma Eyes",
         "Ice Eyes", "Galaxy Eyes", "Neon Eyes", "Solar Eyes", "Cyber Eyes",
-        "Heart Eyes", "Star Eyes", "Rainbow Eyes")
+        "Heart Eyes", "Star Eyes", "Rainbow Eyes",
+        "Electric Eyes", "Flame Eyes", "Flame Eyes 2", "Flaming Horns",
+        "Outline Scan", "Eye Reflection", "Face Glitch", "Futuristic Lab 2",
+        "Cheer", "Embarrassed Face", "Fake Laugh", "Big Head", "Gorilla Face", "Big Mouth", "Bend")
+    val funnyNames get() = names.drop(20)
     fun index(name: String): Int = names.indexOfFirst { it.equals(name, true) }
     fun contains(name: String): Boolean = index(name) >= 0
 }
@@ -34,10 +38,11 @@ data class TrackedEye(val x: Float, val y: Float, val radius: Float, val roll: F
             radius + (other.radius-radius)*t, roll + delta*t, open + (other.open-open)*t)
     }
 }
-data class EyePose(val left: TrackedEye, val right: TrackedEye, val identity: Int?)
+data class EyePose(val left: TrackedEye, val right: TrackedEye, val identity: Int?,
+    val face: BeautyRectV28? = null, val mouth: BeautyRectV28? = null)
 data class EyeSample(val timeUs: Long, val pose: EyePose?)
-data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 1) {
-    fun covers(clip: TimelineClip): Boolean = version == 1 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
+data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 2) {
+    fun covers(clip: TimelineClip): Boolean = version == 2 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
     fun at(timeUs: Long): EyePose? {
         if (timeUs < startUs || timeUs > endUs || samples.isEmpty()) return null
         val index = samples.binarySearchBy(timeUs) { it.timeUs }
@@ -51,6 +56,8 @@ data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val sam
         if (b.timeUs - a.timeUs > 100_000L || pa.identity != pb.identity ||
             abs(pa.left.x - pb.left.x) + abs(pa.left.y - pb.left.y) > .18f) return null
         val t = (timeUs - a.timeUs).toFloat() / (b.timeUs - a.timeUs).coerceAtLeast(1)
-        return EyePose(pa.left.interpolate(pb.left, t), pa.right.interpolate(pb.right, t), pa.identity)
+        return EyePose(pa.left.interpolate(pb.left, t), pa.right.interpolate(pb.right, t), pa.identity,
+            pa.face?.let { a -> pb.face?.let { a.lerp(it,t) } },
+            pa.mouth?.let { a -> pb.mouth?.let { a.lerp(it,t) } })
     }
 }
