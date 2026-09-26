@@ -68,14 +68,14 @@ internal object PreviewExportCoordinator {
      * decode/GL resources, let semantic analysis own the decoder budget, then restore the exact
      * paused playhead when the lease closes.
      */
-    fun acquireAnalysisLease(): AnalysisLease {
+    fun acquireAnalysisLease(owner: String = "semantic analysis"): AnalysisLease {
         previewDecodeGate.acquireUninterruptibly()
         val suspended = mutableListOf<DavinciFramePreviewEngine>()
         try {
             SoftwarePreviewRenderer.releaseCachedDecoderForExport()
             engines.toList().forEach { engine ->
                 if (!engine.suspendForExternalGpuWork()) {
-                    throw IllegalStateException("Preview resources did not release for Auto Cutout analysis")
+                    throw IllegalStateException("Preview resources did not release for $owner")
                 }
                 suspended += engine
             }
