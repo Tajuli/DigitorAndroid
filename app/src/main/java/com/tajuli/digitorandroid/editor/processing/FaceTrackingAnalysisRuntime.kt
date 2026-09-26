@@ -19,6 +19,7 @@ data class FaceTrackingAnalysisState(
     val progress: Int = 0,
     val ready: Boolean = false,
     val gpuAccelerated: Boolean? = null,
+    val gpuFailureReason: String? = null,
     val message: String = "Analyze face tracking before applying these effects.",
 )
 
@@ -94,11 +95,23 @@ object FaceTrackingAnalysisRuntime {
                             states + (
                                 key to current.copy(
                                     gpuAccelerated = gpu,
+                                    gpuFailureReason = if (gpu) null else current.gpuFailureReason,
                                     message = if (gpu) {
                                         "Analyzing face motion · GPU accelerated"
                                     } else {
                                         "Analyzing face motion · CPU compatibility fallback"
                                     },
+                                )
+                            )
+                        }
+                    },
+                    onBackendFailure = { reason ->
+                        _states.update { states ->
+                            val current = states[key] ?: FaceTrackingAnalysisState()
+                            states + (
+                                key to current.copy(
+                                    gpuAccelerated = false,
+                                    gpuFailureReason = reason?.take(180),
                                 )
                             )
                         }
