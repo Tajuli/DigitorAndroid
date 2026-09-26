@@ -286,7 +286,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
         // If the face outruns the padded ROI, reacquire from the whole frame immediately. VIDEO mode
         // requires increasing timestamps, so the retry advances MediaPipe's timestamp by 1 ms only.
         return detectFrame(
-            detector = detector,
+            detector = activeDetector,
             frame = frame,
             timeUs = timeUs + ROI_RETRY_TIMESTAMP_US,
             roi = null,
@@ -321,12 +321,13 @@ class EyeTrackingAnalyzer(private val context: Context) {
                         lease = PreviewExportCoordinator.acquireAnalysisLease("Face Tracking")
                         currentCoroutineContext().ensureActive()
 
-                        detector = EyeLandmarkDetector(
+                        val activeDetector = EyeLandmarkDetector(
                             context = context,
                             runningMode = RunningMode.VIDEO,
                             preferGpu = true,
                         )
-                        onBackend(detector.gpuAccelerated)
+                        detector = activeDetector
+                        onBackend(activeDetector.gpuAccelerated)
 
                         val samples = ArrayList<EyeSample>()
                         if (clip.isImageV21) {
@@ -353,7 +354,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
                             }
                             try {
                                 val pose = detectFrame(
-                                    detector = detector,
+                                    detector = activeDetector,
                                     frame = bitmap,
                                     timeUs = clip.sourceInUs,
                                     roi = null,
@@ -414,7 +415,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
                                             activeRoi == null ||
                                                 sampleIndex % FULL_REACQUIRE_SAMPLES == 0
                                         detectTrackedFrame(
-                                            detector = detector,
+                                            detector = activeDetector,
                                             frame = frame,
                                             timeUs = time,
                                             preferredRoi =
@@ -459,7 +460,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
                                 val rawPose = try {
                                     bitmap?.let { frame ->
                                         detectTrackedFrame(
-                                            detector = detector,
+                                            detector = activeDetector,
                                             frame = frame,
                                             timeUs = clip.sourceOutUs,
                                             preferredRoi = activeRoi,
