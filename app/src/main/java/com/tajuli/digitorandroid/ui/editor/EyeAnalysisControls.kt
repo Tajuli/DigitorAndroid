@@ -65,6 +65,16 @@ internal fun EyeAnalysisControls(
             fontSize = 8.sp,
         )
 
+        if (state?.gpuAccelerated == false && !state.gpuFailureReason.isNullOrBlank()) {
+            Text(
+                text = "GPU init: " + state.gpuFailureReason,
+                color = Color(0xFFB8B8C0),
+                fontSize = 7.sp,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
         if (state?.running == true) {
             LinearProgressIndicator(
                 progress = { state.progress / 100f },
