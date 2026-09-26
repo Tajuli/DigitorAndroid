@@ -41,7 +41,10 @@ internal class LiveSemanticPreviewEffect(private val clip: TimelineClip) : GlEff
         override fun drawFrame(inputTexId: Int,presentationTimeUs: Long) {
             val current=PreviewProjectRegistry.clip(clip.id)?:clip
             val time=ParityRenderContract.sourceTimeUs(current,presentationTimeUs)
-            val eyes=current.hasEyeEffects();val person=current.hasBodyEffectsV102()
+            // Face effects are gated behind a durable full-clip ncnn Vulkan track. Do not
+            // start the old MediaPipe live-face path here; preview consumes EyeTrackStore instead.
+            val eyes=false
+            val person=current.hasBodyEffectsV102()
             if(worker.reserve(current,time,eyes,person)) {
                 val output=IntArray(1);GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING,output,0)
                 try {
