@@ -44,3 +44,5 @@
 -keep class com.google.mlkit.** implements com.google.firebase.components.ComponentRegistrar {
     public <init>();
 }
+
+-keep class com.tajuli.digitorandroid.editor.processing.NcnnVulkanFaceTrackingNativeV103 { *; }
