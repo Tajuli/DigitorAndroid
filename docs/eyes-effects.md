@@ -1,17 +1,48 @@
 # Face-tracked effects
 
-Eyes and Funny Faces are gated by a full-clip face-tracking analysis. Their effect thumbnails remain hidden until the selected clip has a complete compatible track. Analysis progress and Cancel are visible in the Effects panel. The tracking job belongs to a process-lifetime runtime rather than the composable, so switching category or leaving the Effects panel does not cancel the work.
+Eyes and Funny Faces are gated by a full-clip face-tracking analysis. Their effect thumbnails remain
+hidden until the selected clip has a complete compatible track. Analysis progress and Cancel are
+visible in the Effects panel. The tracking job belongs to a process-lifetime runtime rather than the
+composable, so switching category or leaving the Effects panel does not cancel the work while the
+app process remains alive.
 
-Face analysis uses MediaPipe Face Landmarker in VIDEO mode. It prefers the Android GPU delegate and falls back to CPU when GPU initialization is unavailable. GPU creation and inference run on one dedicated worker thread as required by MediaPipe. Frames are sampled at 12 Hz with a 512 px long edge; the durable EyeTrack interpolates between adjacent samples under its existing 100 ms safety limit. VIDEO mode also lets MediaPipe reuse temporal tracking between frames instead of forcing a fresh face detection on every sample.
+## Native ncnn Vulkan tracking
 
-27 eye/face presets include Fire, Laser, Electric Eyes, two Flame Eyes variants, Flaming Horns, reflection, scans and seven regional face distortions. 31 additional body decorations include wings, rings, particles, strokes and clones. These are original procedural variants, not copied CapCut assets or exact reproductions. Musical Notes and Shape Trails use body-relative patterns, not hand tracking; trails are procedural, not optical-flow motion histories. Generative outfits, 3D Dragon Year and other reference transformations needing separate assets/models are not implemented.
+Face tracking now uses the same native ncnn Vulkan runtime as PP-MattingV2. It does not use the
+MediaPipe Tasks GPU delegate at runtime.
 
-Face tracking records both eyes, eye openness, roll, face bounds and mouth bounds for one primary face. The complete track is cached only after analysis succeeds. Source time, effect timing, node amounts/keyframes and alpha are preserved. Export reuses the cached track and still prepares a missing track if a project reaches export without compatible coverage.
+The build downloads pinned Apache-2.0 MediaPipe-derived ONNX graphs and converts them with the same
+pnnx/ncnn toolchain already used by PP-MattingV2:
 
-Body semantic effects keep the PP-MattingV2 workflow. Their person matte path is independent from the face-analysis gate.
+- BlazeFace short-range detector: 128×128, used for acquisition/reacquisition.
+- Face Mesh: 468 landmarks at 192×192, used inside the tracked face ROI.
 
-Validation from earlier revisions: production eye and body shaders compile and render under Mesa/EGL; all 27 face/eye and 31 body variants have distinct visible output, zero-strength identity, missing-detection behavior and preserved alpha. Device QA should cover fast turns, occlusion, glasses, rotated source media, trim/reopen, background panel changes, preview latency and export parity.
+The decoded working frame is capped at a 512 px long edge only as a source for ROI sampling. Dense
+landmark inference never processes that whole 512 px frame. After acquisition, the native engine
+uses a generously padded, roll-normalized landmarks-to-ROI crop and only runs the detector
+periodically or when the ROI loses the face. Both networks use a persistent ncnn Net with
+`use_vulkan_compute=true`, the default Vulkan device, reusable Vulkan allocators, fp16 capabilities
+when supported, and the same packaged ncnn Android Vulkan library as PP-MattingV2.
 
-## Live refresh correction
+If ncnn reports no usable Vulkan compute device, the exact same ncnn graphs can run on CPU as a
+compatibility fallback. On devices where PP-MattingV2 reports ncnn Vulkan, face tracking is expected
+to use that same Vulkan device/runtime as well.
 
-Tracked-effect inference completion coalesces refresh work on the preview engine thread. During playback the next naturally decoded frame consumes the result; completion does not send a pause command. A paused viewer resubmits its latest requested cursor only if no newer transport request is pending. Preset changes reuse resident shaders and decoders unless graph topology requires a rebuild.
+The old MediaPipe live-face preview tap is not used for Eyes/Funny Faces after this change. Preview
+and export consume the durable ncnn-generated EyeTrack, preventing a second incompatible tracking
+backend from overriding the analyzed result.
+
+Tracking samples are stored at 12 Hz and interpolated by EyeTrack between adjacent samples. The
+native tracker records both eyes, eye openness, roll, face bounds and mouth bounds for one primary
+face. Complete tracks are cached only after analysis succeeds.
+
+27 eye/face presets include Fire, Laser, Electric Eyes, two Flame Eyes variants, Flaming Horns,
+reflection, scans and regional face distortions. 31 additional body decorations include wings,
+rings, particles, strokes and clones. These are original procedural variants, not copied CapCut
+assets or exact reproductions.
+
+Body semantic effects keep the PP-MattingV2 workflow. Their person-matte path is independent from
+the face-analysis gate.
+
+Device QA should cover fast turns, occlusion, glasses, rotated source media, trim/reopen, background
+panel changes, preview latency, ncnn GPU backend label, and export parity.
