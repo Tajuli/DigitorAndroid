@@ -176,15 +176,19 @@ class EyeTrackingAnalyzer(private val context: Context) {
         val scaled = Bitmap.createScaledBitmap(cropped, targetWidth, targetHeight, true)
 
         if (cropped !== frame && scaled !== cropped) cropped.recycle()
-        if (scaled === frame) {
-            // The decoded working frame is intentionally owned by the caller. This branch is only
-            // possible when a tiny source already matches 320 px, so make a separate inference copy.
-            return InferenceFrameV103(
-                frame.copy(Bitmap.Config.ARGB_8888, false),
-                region,
-            )
+
+        // BitmapImageBuilder requires software ARGB_8888. MediaMetadataRetriever/ImageDecoder and
+        // createScaledBitmap are allowed to return RGB_565, RGBA_F16, HARDWARE or config=null.
+        // Always hand MediaPipe an owned ARGB_8888 bitmap instead of trusting the decoder config.
+        var inferenceBitmap = scaled
+        if (inferenceBitmap === frame || inferenceBitmap.config != Bitmap.Config.ARGB_8888) {
+            val argb = inferenceBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                ?: error("Could not convert tracking frame to ARGB_8888")
+            if (inferenceBitmap !== frame) inferenceBitmap.recycle()
+            inferenceBitmap = argb
         }
-        return InferenceFrameV103(scaled, region)
+
+        return InferenceFrameV103(inferenceBitmap, region)
     }
 
     private fun mapRect(
@@ -296,6 +300,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
     suspend fun analyze(
         clip: TimelineClip,
         onBackend: (gpuAccelerated: Boolean) -> Unit = {},
+        onBackendFailure: (String?) -> Unit = {},
         onProgress: (Int) -> Unit = {},
     ): EyeTrack {
         val executor = Executors.newSingleThreadExecutor { task ->
@@ -328,6 +333,9 @@ class EyeTrackingAnalyzer(private val context: Context) {
                         )
                         detector = activeDetector
                         onBackend(activeDetector.gpuAccelerated)
+                        if (!activeDetector.gpuAccelerated) {
+                            onBackendFailure(activeDetector.gpuFailureReason)
+                        }
 
                         val samples = ArrayList<EyeSample>()
                         if (clip.isImageV21) {
