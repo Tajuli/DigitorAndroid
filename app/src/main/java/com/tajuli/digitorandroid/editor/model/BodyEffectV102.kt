@@ -84,11 +84,8 @@ fun resolveTimedBodyEffectsV102(
 
 
 /** True when this clip contains at least one enabled semantic Body/Clone effect. */
-fun TimelineClip.hasBodyEffectsV102(): Boolean =
-    nodeGraph.nodes
-        .asSequence()
-        .filter { it.kind == NodeKind.SERIAL || it.kind == NodeKind.PARALLEL }
-        .flatMap { it.visibleEffects().asSequence() }
-        .any { effect ->
-            effect.enabled && effect.amount > 0f && BodyEffectCatalogV102.isBodyEffect(effect.name)
-        }
+fun TimelineClip.hasBodyEffectsV102(): Boolean = nodeGraph.nodes.any { node ->
+    (node.kind == NodeKind.SERIAL || node.kind == NodeKind.PARALLEL) &&
+        node.visibleEffects().any { effect -> BodyEffectCatalogV102.isBodyEffect(effect.name) &&
+            ((effect.enabled && effect.amount > 0f) || nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)) }
+}

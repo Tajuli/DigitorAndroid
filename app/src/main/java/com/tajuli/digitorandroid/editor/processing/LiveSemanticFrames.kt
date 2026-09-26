@@ -44,7 +44,7 @@ internal class LiveSemanticWorker(private val context: Context) : AutoCloseable 
     @Volatile private var lastKey = ""
     fun reserve(clip: TimelineClip, timeUs: Long, eyes: Boolean, person: Boolean): Boolean {
         if (closed.get() || (!eyes && !person) || PreviewExportCoordinator.exportActive.value || CutoutAnalysisRuntimeV66.state.value.busy) return false
-        val key = "${clip.uri}|$timeUs|$eyes|$person"
+        val key = "${clip.id}|${clip.uri}|$timeUs|$eyes|$person"
         if (key == lastKey || SystemClock.elapsedRealtime() < nextAt || !busy.compareAndSet(false, true)) return false
         lastKey = key
         return true
@@ -63,7 +63,6 @@ internal class LiveSemanticWorker(private val context: Context) : AutoCloseable 
                     PreviewExportCoordinator.refreshActivePreviews()
                 }
             } catch (error: Exception) {
-                lastKey = ""
                 Log.e("DigitorLiveTracking", "Tracking frame failed", error)
             } finally {
                 bitmap.recycle()
