@@ -82,6 +82,10 @@ fun CreatorEffectsWorkspace(
         ?.effectId
     var category by remember { mutableStateOf("Basic") }
     var bodySettingsExpanded by remember(clip.id) { mutableStateOf(false) }
+    var faceTrackingReady by remember(clip.id, clip.uri, clip.sourceInUs, clip.sourceOutUs) {
+        mutableStateOf(false)
+    }
+    val faceTrackingCategory = category == "Eyes" || category == "Funny Faces"
     val categoryPresets = remember(category) { CreatorEffectCatalogV25.inCategory(category) }
     val nodeEffects = node.visibleEffects()
     val selectedEffect = nodeEffects.firstOrNull { it.id == selectedEffectId }
@@ -121,9 +125,10 @@ fun CreatorEffectsWorkspace(
             }
         }
 
-        if (category == "Eyes" || category == "Funny Faces") {
-            Text("Tap an effect to apply. Face tracking starts automatically.",
-                color = Color.White, fontSize = 9.sp, modifier = Modifier.padding(10.dp))
+        if (faceTrackingCategory) {
+            EyeAnalysisControls(clip) { ready ->
+                faceTrackingReady = ready
+            }
         }
 
         if (category == "Portrait") {
@@ -277,7 +282,7 @@ fun CreatorEffectsWorkspace(
                 HorizontalDivider(color = Fx25Divider)
             }
 
-            if (true) {
+            if (!faceTrackingCategory || faceTrackingReady) {
                 LazyRow(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
