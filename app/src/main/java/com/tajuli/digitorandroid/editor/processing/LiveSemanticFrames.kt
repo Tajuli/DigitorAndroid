@@ -15,7 +15,6 @@ import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
-import kotlinx.coroutines.runBlocking
 
 /** Preview-only data. Never satisfies full-clip export coverage. At most eight resident clips. */
 internal object LiveSemanticFrames {
@@ -52,7 +51,7 @@ internal class LiveSemanticWorker(private val context: Context) : AutoCloseable 
         worker.execute {
             try {
                 if (closed.get()) return@execute
-                val pose = if (eyes) runBlocking { (face ?: EyeLandmarkDetector().also { face = it }).detect(bitmap) } else null
+                val pose = if (eyes) (face ?: EyeLandmarkDetector(context).also { face = it }).detect(bitmap, timeUs) else null
                 val mask = if (person) bodyMask(bitmap) else null
                 if (closed.get()) mask?.recycle()
                 else {
