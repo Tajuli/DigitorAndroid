@@ -109,10 +109,17 @@ internal object FilterEffectThumbnailRendererV98 {
                 id = "thumb-effect-" + effectName.lowercase().replace(' ', '-'),
                 effect = NodeEffect(name = preset.name, amount = FULL_PREVIEW_AMOUNT),
             )
-            if (preset.category == "Body") {
+            if (com.tajuli.digitorandroid.editor.model.BodyEffectCatalogV102.isBodyEffect(preset.name)) {
                 installBodyThumbnailMatteV102(appContext, clip, base.width, base.height)
             }
-            renderProductionFrame(appContext, clip, base)
+            if (com.tajuli.digitorandroid.editor.model.EyeEffectCatalog.contains(preset.name)) {
+                val imageFile = java.io.File(appContext.cacheDir, "eye-effect-thumbnail-source.png")
+                if (!imageFile.exists()) imageFile.outputStream().use { base.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                val imageClip = clip.copy(uri = android.net.Uri.fromFile(imageFile).toString(),
+                    visualMediaV21 = com.tajuli.digitorandroid.editor.model.TimelineVisualMediaV21.IMAGE)
+                com.tajuli.digitorandroid.editor.processing.EyeTrackingAnalyzer(appContext).analyze(imageClip)
+                renderProductionFrame(appContext, imageClip, base)
+            } else renderProductionFrame(appContext, clip, base)
         }
 
     suspend fun renderPortraitLensBlur(context: Context): Bitmap =
@@ -191,7 +198,7 @@ internal object FilterEffectThumbnailRendererV98 {
     private suspend fun renderCached(
         context: Context,
         key: String,
-        producer: (Context, Bitmap) -> Bitmap,
+        producer: suspend (Context, Bitmap) -> Bitmap,
     ): Bitmap {
         cache.get(key)?.let { return it }
         return withContext(Dispatchers.Default) {

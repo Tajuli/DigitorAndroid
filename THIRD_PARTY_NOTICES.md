@@ -109,3 +109,21 @@ license is introduced. The mobile-tuned 32-tap disk blur and foreground rejectio
 - License: https://github.com/PaddlePaddle/PaddleSeg/blob/release/2.10/LICENSE
 - Existing runtime: ncnn (BSD 3-Clause), with the existing MIT-licensed ONNX Runtime fallback.
 - The build's pinned existing PP-MattingV2 ONNX checksum and model packaging remain unchanged.
+
+
+## Face motion tracking
+
+Face-tracked Eyes / Funny Faces use two MediaPipe-derived neural networks repackaged by
+`yakhyo/mediapipe-face-mesh-onnx` and converted to ncnn format at build time:
+
+- BlazeFace short-range detector, 128×128
+- Face Mesh, 468 landmarks, 192×192
+- Upstream model/conversion repository: https://github.com/yakhyo/mediapipe-face-mesh-onnx
+- License: Apache License 2.0
+- Source model family: Google MediaPipe, Apache License 2.0
+- Runtime: ncnn Vulkan, BSD 3-Clause
+
+Digitor pins the downloaded ONNX assets by SHA-256 before pnnx conversion. Runtime tracking does
+not use the MediaPipe Tasks GPU delegate; both detector and landmark inference use the same native
+ncnn Vulkan runtime packaged for PP-MattingV2. CPU inference of the same ncnn graphs is retained only
+as a compatibility fallback when no usable Vulkan compute device is available.

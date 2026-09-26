@@ -10,13 +10,18 @@ class CreatorEffectV25Test {
     fun catalogHasUniqueCreatorEffectsAndExpectedFamilies() {
         val presets = CreatorEffectCatalogV25.presets
         assertEquals(presets.size, presets.map { it.name.lowercase() }.toSet().size)
-        assertEquals(listOf("Basic", "Glitch", "Retro", "Lens", "Motion", "Body"), CreatorEffectCatalogV25.categories)
+        assertEquals(listOf("Basic", "Glitch", "Retro", "Lens", "Motion", "Body", "Eyes", "Funny Faces", "Glowing Lines", "Stroke", "Clone"), CreatorEffectCatalogV25.categories)
         assertEquals(11, CreatorEffectCatalogV25.inCategory("Basic").size)
         assertEquals(10, CreatorEffectCatalogV25.inCategory("Glitch").size)
         assertEquals(10, CreatorEffectCatalogV25.inCategory("Retro").size)
         assertEquals(10, CreatorEffectCatalogV25.inCategory("Lens").size)
         assertEquals(10, CreatorEffectCatalogV25.inCategory("Motion").size)
         assertEquals(10, CreatorEffectCatalogV25.inCategory("Body").size)
+        assertEquals(20, CreatorEffectCatalogV25.inCategory("Eyes").size)
+        assertEquals(7, CreatorEffectCatalogV25.inCategory("Funny Faces").size)
+        assertEquals(20, CreatorEffectCatalogV25.inCategory("Glowing Lines").size)
+        assertEquals(7, CreatorEffectCatalogV25.inCategory("Stroke").size)
+        assertEquals(4, CreatorEffectCatalogV25.inCategory("Clone").size)
     }
 
     @Test

@@ -44,6 +44,10 @@ internal object PreviewExportCoordinator {
      * the held playhead frame after an anchor is written so the new alpha mask is visible without
      * requiring the user to scrub, toggle a slider, or reopen the project.
      */
+    fun refreshTrackedPreviews() {
+        engines.forEach { it.refreshTrackedFrame() }
+    }
+
     fun refreshActivePreviews(delayMs: Long = 0L) {
         engines.forEach { engine -> engine.scheduleCurrentFrameRefresh(delayMs) }
     }
@@ -64,20 +68,25 @@ internal object PreviewExportCoordinator {
      * decode/GL resources, let semantic analysis own the decoder budget, then restore the exact
      * paused playhead when the lease closes.
      */
-    fun acquireAnalysisLease(): AnalysisLease {
+    fun acquireAnalysisLease(owner: String = "semantic analysis"): AnalysisLease {
         previewDecodeGate.acquireUninterruptibly()
+        val attempted = engines.toList()
         val suspended = mutableListOf<DavinciFramePreviewEngine>()
         try {
             SoftwarePreviewRenderer.releaseCachedDecoderForExport()
-            engines.toList().forEach { engine ->
+            attempted.forEach { engine ->
                 if (!engine.suspendForExternalGpuWork()) {
-                    throw IllegalStateException("Preview resources did not release for Auto Cutout analysis")
+                    throw IllegalStateException(
+                        "Preview resources did not release for $owner. Please retry once preview settles.",
+                    )
                 }
                 suspended += engine
             }
             return AnalysisLease(suspended)
         } catch (error: Throwable) {
-            suspended.forEach { engine ->
+            // Include the engine whose wait timed out. Its resume call is deferred internally until
+            // any already-running release action finishes, preventing teardown/rebuild races.
+            attempted.forEach { engine ->
                 engine.resumeAfterExternalGpuWork()
                 engine.scheduleCurrentFrameRefresh(180L)
             }
@@ -130,7 +139,7 @@ internal object PreviewExportCoordinator {
             }
             return ExportLease(suspended)
         } catch (error: Throwable) {
-            suspended.forEach {
+            attempted.forEach {
                 it.resumeAfterExternalGpuWork()
                 it.scheduleCurrentFrameRefresh(180L)
             }
