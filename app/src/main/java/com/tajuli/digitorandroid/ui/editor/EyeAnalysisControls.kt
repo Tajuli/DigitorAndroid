@@ -1,63 +1,86 @@
 package com.tajuli.digitorandroid.ui.editor
 
-import android.util.Log
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tajuli.digitorandroid.editor.model.TimelineClip
-import com.tajuli.digitorandroid.editor.processing.EyeTrackStore
-import com.tajuli.digitorandroid.editor.processing.EyeTrackingAnalyzer
-import kotlinx.coroutines.*
+import com.tajuli.digitorandroid.editor.processing.FaceTrackingAnalysisRuntime
 
 @Composable
-internal fun EyeAnalysisControls(clip: TimelineClip, onReady: (Boolean) -> Unit) {
+internal fun EyeAnalysisControls(
+    clip: TimelineClip,
+    onReady: (Boolean) -> Unit,
+) {
     val context = LocalContext.current.applicationContext
-    val scope = rememberCoroutineScope()
-    var job by remember(clip.uri, clip.sourceInUs, clip.sourceOutUs) { mutableStateOf<Job?>(null) }
-    var percent by remember(clip.id) { mutableIntStateOf(0) }
-    var message by remember(clip.id) { mutableStateOf("Analyze eyes before applying an Eyes effect. Keep one face clearly visible.") }
-    var ready by remember(clip.uri, clip.sourceInUs, clip.sourceOutUs) { mutableStateOf(false) }
-    LaunchedEffect(clip.uri, clip.sourceInUs, clip.sourceOutUs) {
-        ready = withContext(Dispatchers.IO) { EyeTrackStore.load(context, clip)?.covers(clip) == true }
-        if (ready) message = "Done · Eyes tracked"
-        onReady(ready)
+    val states by FaceTrackingAnalysisRuntime.states.collectAsState()
+    val key = FaceTrackingAnalysisRuntime.key(clip)
+    val state = states[key]
+
+    LaunchedEffect(key) {
+        FaceTrackingAnalysisRuntime.refresh(context, clip)
     }
-    DisposableEffect(clip.uri, clip.sourceInUs, clip.sourceOutUs) { onDispose { job?.cancel() } }
-    Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(if (job != null) "$percent%" else message, color = Color.White, fontSize = 10.sp,
-            maxLines = 3, overflow = TextOverflow.Ellipsis)
-        Text("24 fps tracking · blink aware · follows head tilt", color = Color(0xFF909098), fontSize = 8.sp)
-        if (job != null) {
-            LinearProgressIndicator(progress = { percent / 100f }, modifier = Modifier.fillMaxWidth())
-            OutlinedButton(onClick = { job?.cancel() }) { Text("Cancel") }
-        } else if (!ready) {
-            FilledTonalButton(onClick = {
-                percent = 0
-                job = scope.launch {
-                    try {
-                        EyeTrackingAnalyzer(context).analyze(clip) { value ->
-                            scope.launch { percent = value }
-                        }
-                        ready = true
-                        message = "Done · Eyes tracked"
-                        onReady(true)
-                    } catch (cancelled: CancellationException) {
-                        message = "Analysis cancelled. Select Analyze Eyes to retry."
-                        throw cancelled
-                    } catch (error: Exception) {
-                        Log.e("DigitorEyeAnalysis", "Eye analysis failed", error)
-                        message = if (error is NullPointerException)
-                            "Face detector could not start. Install the latest build and retry."
-                        else error.message?.take(160) ?: "Eye analysis failed. Please retry."
-                    } finally { job = null }
-                }
-            }) { Text("Analyze Eyes") }
+    LaunchedEffect(key, state?.ready) {
+        onReady(state?.ready == true)
+    }
+
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = when {
+                state == null ->
+                    "Face tracking must be analyzed before these effects are available."
+                state.running -> "${state.progress}%"
+                else -> state.message
+            },
+            color = Color.White,
+            fontSize = 10.sp,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+        )
+
+        Text(
+            text = when (state?.gpuAccelerated) {
+                true -> "12 fps motion tracking · MediaPipe GPU · continues offscreen"
+                false -> "12 fps motion tracking · CPU fallback · continues offscreen"
+                null -> "Fast motion tracking · GPU preferred · continues offscreen"
+            },
+            color = Color(0xFF909098),
+            fontSize = 8.sp,
+        )
+
+        if (state?.running == true) {
+            LinearProgressIndicator(
+                progress = { state.progress / 100f },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedButton(
+                onClick = { FaceTrackingAnalysisRuntime.cancel(clip) },
+            ) {
+                Text("Cancel")
+            }
+        } else if (state?.ready != true) {
+            FilledTonalButton(
+                onClick = { FaceTrackingAnalysisRuntime.start(context, clip) },
+            ) {
+                Text("Analyze Face Tracking")
+            }
         }
     }
 }
