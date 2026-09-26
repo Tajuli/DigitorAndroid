@@ -106,8 +106,8 @@ class EyeTrackingAnalyzer(private val context: Context) {
 
     suspend fun analyze(
         clip: TimelineClip,
-        onProgress: (Int) -> Unit = {},
         onBackend: (gpuAccelerated: Boolean) -> Unit = {},
+        onProgress: (Int) -> Unit = {},
     ): EyeTrack {
         val executor = Executors.newSingleThreadExecutor { task ->
             Thread(task, "DigitorFaceTrackingGPU").apply { priority = Thread.NORM_PRIORITY }
