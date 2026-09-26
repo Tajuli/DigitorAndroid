@@ -103,6 +103,24 @@ val downloadHairSegmenterModel by tasks.registering {
     }
 }
 
+val generatedFaceLandmarkerAssets = layout.buildDirectory.dir("generated/faceLandmarkerAssets")
+val faceLandmarkerModelFile = generatedFaceLandmarkerAssets.map { it.file("face_landmarker.task") }
+val downloadFaceLandmarkerModel by tasks.registering {
+    outputs.file(faceLandmarkerModelFile)
+    doLast {
+        val output = faceLandmarkerModelFile.get().asFile
+        downloadGeneratedAssetWithRetry(
+            urls = listOf(
+                "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+                "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task",
+            ),
+            output = output,
+            minimumBytes = 3_000_000L,
+            label = "MediaPipe FaceLandmarker",
+        )
+    }
+}
+
 val generatedFaceSkinModelAssets = layout.buildDirectory.dir("generated/faceSkinSegmenterAssets")
 val faceSkinSegmenterModelFile = generatedFaceSkinModelAssets.map { it.file("selfie_multiclass_256x256.tflite") }
 val downloadFaceSkinSegmenterModel by tasks.registering {
@@ -226,6 +244,7 @@ android {
     }
 
     sourceSets["main"].assets.srcDir(generatedHairModelAssets.get().asFile)
+    sourceSets["main"].assets.srcDir(generatedFaceLandmarkerAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedFaceSkinModelAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedPersonDetectorAssets.get().asFile)
     sourceSets["main"].assets.srcDir(generatedPpMattingV2Assets.get().asFile)
@@ -233,6 +252,7 @@ android {
 
 tasks.named("preBuild").configure {
     dependsOn(downloadHairSegmenterModel)
+    dependsOn(downloadFaceLandmarkerModel)
     dependsOn(downloadFaceSkinSegmenterModel)
     dependsOn(downloadPersonDetectorModel)
     dependsOn(downloadPpMattingV2Model)
