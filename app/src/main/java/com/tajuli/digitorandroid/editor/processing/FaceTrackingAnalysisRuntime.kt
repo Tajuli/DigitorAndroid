@@ -71,7 +71,8 @@ object FaceTrackingAnalysisRuntime {
             )
         }
 
-        val job = scope.launch {
+        lateinit var job: Job
+        job = scope.launch {
             try {
                 EyeTrackingAnalyzer(context.applicationContext).analyze(
                     clip = clip,
@@ -138,7 +139,7 @@ object FaceTrackingAnalysisRuntime {
                     )
                 }
             } finally {
-                jobs.remove(key)
+                jobs.remove(key, job)
             }
         }
         jobs[key] = job
