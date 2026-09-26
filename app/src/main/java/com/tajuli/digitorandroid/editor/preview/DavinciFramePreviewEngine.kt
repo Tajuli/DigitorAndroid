@@ -253,7 +253,10 @@ class DavinciFramePreviewEngine(
             releaseAction.run()
             true
         } else {
-            handler.post(releaseAction)
+            // External analysis/export must preempt queued preview work; otherwise a long
+            // decoder/graph backlog can make the handoff hit the timeout even though the engine
+            // itself is healthy.
+            handler.postAtFrontOfQueue(releaseAction)
             runCatching {
                 latch.await(EXPORT_RELEASE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             }.getOrDefault(false)
