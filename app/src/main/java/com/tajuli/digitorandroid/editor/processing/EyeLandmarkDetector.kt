@@ -2,8 +2,9 @@ package com.tajuli.digitorandroid.editor.processing
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.SystemClock
+import android.util.Log
 import com.google.mediapipe.framework.image.BitmapImageBuilder
-import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
@@ -13,20 +14,17 @@ import com.tajuli.digitorandroid.editor.model.BeautyRectV28
 import com.tajuli.digitorandroid.editor.model.EyePose
 import com.tajuli.digitorandroid.editor.model.TrackedEye
 import kotlin.math.PI
-import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.sin
 
 /**
  * Shared face/eye landmark detector.
  *
- * MediaPipe GPU is preferred. The task is created and used on the same worker thread; callers that
- * choose VIDEO mode therefore get MediaPipe's temporal tracking fast path. CPU is a reliability
- * fallback for devices where the GPU delegate cannot be initialized.
+ * GPU is preferred and retried once after preview resources have been handed off. MediaPipe GPU
+ * objects are created, invoked and closed on the same dedicated analysis thread. CPU remains a
+ * compatibility fallback only after both GPU initialization attempts fail.
  */
 internal class EyeLandmarkDetector(
     context: Context,
@@ -35,21 +33,34 @@ internal class EyeLandmarkDetector(
 ) : AutoCloseable {
     private val landmarker: FaceLandmarker
     val gpuAccelerated: Boolean
+    val gpuFailureReason: String?
 
     private var previous: EyePose? = null
 
     init {
-        var usedGpu = false
-        landmarker = if (preferGpu) {
-            runCatching {
-                create(context, Delegate.GPU).also { usedGpu = true }
-            }.getOrElse {
-                create(context, Delegate.CPU)
+        var created: FaceLandmarker? = null
+        var gpuFailure: Throwable? = null
+
+        if (preferGpu) {
+            repeat(2) { attempt ->
+                if (created != null) return@repeat
+                try {
+                    created = create(context, Delegate.GPU)
+                } catch (error: Throwable) {
+                    gpuFailure = error
+                    Log.w(
+                        "DigitorFaceTracking",
+                        "MediaPipe GPU face landmarker init attempt ${attempt + 1} failed",
+                        error,
+                    )
+                    if (attempt == 0) SystemClock.sleep(60L)
+                }
             }
-        } else {
-            create(context, Delegate.CPU)
         }
-        gpuAccelerated = usedGpu
+
+        gpuAccelerated = created != null
+        gpuFailureReason = if (gpuAccelerated) null else gpuFailure?.message?.take(180)
+        landmarker = created ?: create(context, Delegate.CPU)
     }
 
     private fun create(context: Context, delegate: Delegate): FaceLandmarker {
@@ -61,30 +72,46 @@ internal class EyeLandmarkDetector(
             .setBaseOptions(baseOptions)
             .setRunningMode(runningMode)
             .setNumFaces(1)
-            .setMinFaceDetectionConfidence(.45f)
-            .setMinFacePresenceConfidence(.45f)
-            .setMinTrackingConfidence(.45f)
+            .setMinFaceDetectionConfidence(.42f)
+            .setMinFacePresenceConfidence(.42f)
+            .setMinTrackingConfidence(.42f)
             .setOutputFaceBlendshapes(false)
             .setOutputFacialTransformationMatrixes(false)
             .build()
         return FaceLandmarker.createFromOptions(context, options)
     }
 
-    fun detect(bitmap: Bitmap, timeUs: Long = 0L): EyePose? {
+    fun detect(
+        bitmap: Bitmap,
+        timeUs: Long = 0L,
+        stabilizeInInputSpace: Boolean = true,
+    ): EyePose? {
         val image = BitmapImageBuilder(bitmap).build()
         val result = try {
             when (runningMode) {
-                RunningMode.VIDEO -> landmarker.detectForVideo(image, timeUs.coerceAtLeast(0L) / 1_000L)
+                RunningMode.VIDEO ->
+                    landmarker.detectForVideo(image, timeUs.coerceAtLeast(0L) / 1_000L)
                 RunningMode.IMAGE -> landmarker.detect(image)
-                RunningMode.LIVE_STREAM -> error("LIVE_STREAM requires asynchronous result handling")
+                RunningMode.LIVE_STREAM ->
+                    error("LIVE_STREAM requires asynchronous result handling")
             }
         } finally {
             image.close()
         }
-        return poseFrom(result, bitmap.width, bitmap.height)
+        return poseFrom(
+            result = result,
+            width = bitmap.width,
+            height = bitmap.height,
+            stabilizeInInputSpace = stabilizeInInputSpace,
+        )
     }
 
-    private fun poseFrom(result: FaceLandmarkerResult, width: Int, height: Int): EyePose? {
+    private fun poseFrom(
+        result: FaceLandmarkerResult,
+        width: Int,
+        height: Int,
+        stabilizeInInputSpace: Boolean,
+    ): EyePose? {
         val landmarks = result.faceLandmarks().firstOrNull()
         if (landmarks == null || landmarks.size < 468) {
             previous = null
@@ -128,7 +155,6 @@ internal class EyeLandmarkDetector(
             )
         }
 
-        // MediaPipe Face Mesh canonical eye contours.
         val left = eye(33, 133, 159, 145) ?: return null
         val right = eye(362, 263, 386, 374) ?: return null
 
@@ -144,18 +170,28 @@ internal class EyeLandmarkDetector(
             landmarks.getOrNull(13),
             landmarks.getOrNull(14),
         )
-        val mouth = if (mouthPoints.size < 4) null else BeautyRectV28(
-            mouthPoints.minOf { it.x() },
-            mouthPoints.minOf { it.y() },
-            mouthPoints.maxOf { it.x() },
-            mouthPoints.maxOf { it.y() },
-        ).normalized()
+        val mouth = if (mouthPoints.size < 4) {
+            null
+        } else {
+            BeautyRectV28(
+                mouthPoints.minOf { it.x() },
+                mouthPoints.minOf { it.y() },
+                mouthPoints.maxOf { it.x() },
+                mouthPoints.maxOf { it.y() },
+            ).normalized()
+        }
 
         val fresh = EyePose(left, right, 1, faceRect, mouth)
+        if (!stabilizeInInputSpace) {
+            previous = null
+            return fresh
+        }
+
         val old = previous
         val stable = if (
             old != null &&
-            hypot(left.x - old.left.x, left.y - old.left.y) < max(left.radius, .01f) * .20f
+            hypot(left.x - old.left.x, left.y - old.left.y) <
+                max(left.radius, .01f) * .20f
         ) {
             fresh.copy(
                 left = old.left.interpolate(left, .8f).copy(open = left.open),
