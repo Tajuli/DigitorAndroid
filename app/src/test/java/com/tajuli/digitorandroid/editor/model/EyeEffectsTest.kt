@@ -52,9 +52,40 @@ class EyeEffectsTest {
         assertEquals(.32f, track.at(100_100)!!.left.x, .00001f)
         assertNull(track.at(49_999))
     }
+    @Test fun bridgesOnlyBriefInteriorTrackerDropouts() {
+        val track = EyeTrack(
+            clip.uri,
+            0,
+            100_000,
+            listOf(
+                EyeSample(0, pose(.30f)),
+                EyeSample(33_333, null),
+                EyeSample(66_667, pose(.32f)),
+                EyeSample(100_000, pose(.33f)),
+            ),
+        )
+        assertEquals(.31f, track.at(33_333)!!.left.x, .001f)
+
+        val longLoss = EyeTrack(
+            clip.uri,
+            0,
+            250_000,
+            listOf(
+                EyeSample(0, pose(.30f)),
+                EyeSample(33_333, null),
+                EyeSample(66_667, null),
+                EyeSample(100_000, null),
+                EyeSample(166_667, pose(.40f)),
+                EyeSample(250_000, pose(.42f)),
+            ),
+        )
+        assertNull(longLoss.at(66_667))
+    }
+
     @Test fun requiresFreshAnalysisForTheOldNominalTimestampCache() {
         val current = EyeTrack(clip.uri, 0, clip.sourceOutUs, listOf(EyeSample(0, pose())))
         assertTrue(current.covers(clip))
+        assertFalse(current.copy(version = 6).covers(clip))
         assertFalse(current.copy(version = 5).covers(clip))
         assertFalse(current.copy(version = 4).covers(clip))
         assertFalse(current.copy(version = 3).covers(clip))
