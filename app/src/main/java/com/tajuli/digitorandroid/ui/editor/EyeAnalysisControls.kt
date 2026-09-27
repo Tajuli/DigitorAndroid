@@ -57,8 +57,8 @@ internal fun EyeAnalysisControls(
 
         Text(
             text = when (state?.gpuAccelerated) {
-                true -> "12 fps motion tracking · ncnn Vulkan GPU · continues offscreen"
-                false -> "12 fps motion tracking · ncnn CPU fallback · continues offscreen"
+                true -> "Frame-aligned 12–15 fps tracking · ncnn Vulkan GPU · continues offscreen"
+                false -> "Frame-aligned 12–15 fps tracking · ncnn CPU fallback · continues offscreen"
                 null -> "Fast motion tracking · ncnn Vulkan preferred · continues offscreen"
             },
             color = Color(0xFF909098),
