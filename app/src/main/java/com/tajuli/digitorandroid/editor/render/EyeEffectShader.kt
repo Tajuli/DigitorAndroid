@@ -45,7 +45,9 @@ internal const val EYE_EFFECT_SHADER = """
             // A laser is a ray that starts at the eye and travels OUTWARD. The old abs(p.x)
             // formulation drew an infinite line through the eye in both directions, so on-device
             // it looked as if the beam originated off-screen and merely crossed the face.
-            float side=sign(eye.x-(uLeftEye.x+uRightEye.x)*.5);
+            float eyeMid=(uLeftEye.z>.0001 && uRightEye.z>.0001)
+                ? (uLeftEye.x+uRightEye.x)*.5 : .5;
+            float side=sign(eye.x-eyeMid);
             if(abs(side)<.5) side=1.0;
             float forward=p.x*side;
             float ray=smoothstep(-.05,.14,forward);
