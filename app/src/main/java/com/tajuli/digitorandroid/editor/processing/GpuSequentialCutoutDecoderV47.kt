@@ -76,6 +76,9 @@ internal class GpuSequentialCutoutDecoderV47(
             }
             reader = OesFrameReaderV47(width, height, rotation, analysisLongEdge)
             codec = MediaCodec.createDecoderByType(mime)
+            // The readback shader owns rotation, including the output dimensions. Surface
+            // mode also applies KEY_ROTATION, so leaving it set rotates the pixels twice.
+            format.setInteger(MediaFormat.KEY_ROTATION, 0)
             codec.configure(format, reader.surface, null, 0)
             codec.start()
             extractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
@@ -291,7 +294,9 @@ private class OesFrameReaderV47(
         checkGlV47("read sequential decode")
         readbackBytes.rewind()
         return Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888).also { bitmap ->
-            // Fragment shader swaps R/B and vertically maps for Android's little-endian ARGB memory.
+            // ARGB_8888's raw buffer layout is RGBA bytes (ABGR as a little-endian
+            // Int), unlike getPixels()/setPixels() ARGB Int values. GL_RGBA can be
+            // copied directly; swapping R/B here feeds blue skin to the tracker.
             bitmap.copyPixelsFromBuffer(readbackBytes)
         }
     }
@@ -363,9 +368,9 @@ private class OesFrameReaderV47(
             uniform float uRotation;
 
             vec2 rotateUv(vec2 uv) {
-                if (uRotation > 269.0 && uRotation < 271.0) return vec2(1.0 - uv.y, uv.x);
+                if (uRotation > 269.0 && uRotation < 271.0) return vec2(uv.y, 1.0 - uv.x);
                 if (uRotation > 179.0 && uRotation < 181.0) return vec2(1.0 - uv.x, 1.0 - uv.y);
-                if (uRotation > 89.0 && uRotation < 91.0) return vec2(uv.y, 1.0 - uv.x);
+                if (uRotation > 89.0 && uRotation < 91.0) return vec2(1.0 - uv.y, uv.x);
                 return uv;
             }
 
@@ -375,8 +380,8 @@ private class OesFrameReaderV47(
                 vec2 uv = rotateUv(vec2(vUv.x, 1.0 - vUv.y));
                 vec2 tex = (uTexMatrix * vec4(uv, 0.0, 1.0)).xy;
                 vec4 c = texture2D(uTexture, tex);
-                // RGBA bytes copied to Android ARGB_8888 little-endian memory need R/B swapped.
-                gl_FragColor = vec4(c.b, c.g, c.r, c.a);
+                // Bitmap.copyPixelsFromBuffer expects RGBA byte order, exactly like GL_RGBA.
+                gl_FragColor = c;
             }
         """
     }

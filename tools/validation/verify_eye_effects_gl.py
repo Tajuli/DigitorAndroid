@@ -24,8 +24,8 @@ attrs = (I * 13)(0x3033, 1, 0x3040, 4, 0x3024, 8, 0x3023, 8, 0x3022, 8, 0x3021, 
 config, count = P(), I()
 assert fn(egl, 'eglChooseConfig', U, P, P, P, I, P)(display, attrs, c.byref(config), 1, c.byref(count)) and count.value
 ctx = fn(egl, 'eglCreateContext', P, P, P, P, P)(display, config, None, (I * 3)(0x3098, 2, 0x3038))
-w = h = 128
-surface = fn(egl, 'eglCreatePbufferSurface', P, P, P, P)(display, config, (I * 5)(0x3057, w, 0x3056, h, 0x3038))
+w, h = 128, 96
+surface = fn(egl, 'eglCreatePbufferSurface', P, P, P, P)(display, config, (I * 5)(0x3057, 128, 0x3056, 128, 0x3038))
 assert fn(egl, 'eglMakeCurrent', U, P, P, P, P)(display, surface, surface, ctx)
 create_shader = fn(gl, 'glCreateShader', U, U)
 shader_source = fn(gl, 'glShaderSource', None, U, I, P, P)
@@ -111,3 +111,15 @@ for i in range(27):
 amounts(1); before=render(); vec('uLeftEye',[.42,.4,.055,0]); vec('uEyeState',[1,1,.6,0])
 assert not np.array_equal(before,render()),'Tracking uniforms ignored'
 print('PASS: production shader compiles/links; 27 distinct visible effects; zero, blink, missing face, alpha and tracking checks pass.')
+
+
+# Non-square, off-center coordinates catch axis flips hidden by a square center-only test.
+source[:,:,:3]=30
+fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
+amounts(1); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0])
+for ex,ey in ((.24,.28),(.72,.65)):
+    vec('uLeftEye',[ex,ey,.04,0])
+    delta=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+    py,px=np.unravel_index(np.argmax(delta.sum(axis=2)),(h,w))
+    assert abs(px-(ex*w-.5))<2 and abs(py-((1-ey)*h-.5))<2, ('Eye position',ex,ey,px,py)
+print('PASS: normalized eye centers land on the expected pixels in a non-square frame.')

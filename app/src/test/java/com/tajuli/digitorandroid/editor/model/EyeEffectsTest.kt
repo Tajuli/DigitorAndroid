@@ -55,6 +55,7 @@ class EyeEffectsTest {
     @Test fun requiresFreshAnalysisForTheOldNominalTimestampCache() {
         val current = EyeTrack(clip.uri, 0, clip.sourceOutUs, listOf(EyeSample(0, pose())))
         assertTrue(current.covers(clip))
+        assertFalse(current.copy(version = 5).covers(clip))
         assertFalse(current.copy(version = 4).covers(clip))
         assertFalse(current.copy(version = 3).covers(clip))
         assertFalse(current.copy(version = 2).covers(clip))

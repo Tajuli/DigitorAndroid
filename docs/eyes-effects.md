@@ -45,7 +45,7 @@ A valid mesh is not replaced by a detector crop every sixth sample. Acquisition 
 same frame, failed mesh output invalidates the ROI, and warm-up never seeds video tracking.
 
 The native tracker records both eyes, eye openness, roll, face bounds and mouth bounds for one
-primary face. Cache version 5 invalidates earlier tracks; run Face Tracking again after updating.
+primary face. Cache version 6 invalidates earlier tracks; run Face Tracking again after updating.
 Complete tracks are cached only after analysis succeeds. GPU handoff/cancellation remain intact.
 
 27 eye/face presets include Fire, Laser, Electric Eyes, two Flame Eyes variants, Flaming Horns,
@@ -59,3 +59,28 @@ the face-analysis gate.
 Device QA should cover fast turns, occlusion, glasses, rotated source media, trim/reopen, background
 panel changes, preview latency, ncnn GPU backend label, and export parity.
 
+
+## Decoder pixel contract
+
+The sequential decoder now copies GL_RGBA bytes directly into ARGB_8888 Bitmap storage (raw
+buffer bytes are RGBA; getPixels returns ARGB integers). The old readback shader swapped R/B,
+so switching face analysis from MediaMetadataRetriever to this decoder in adbd494 introduced
+wrong-color model input. This was reproduced with the production GLSL: a red source quadrant
+became blue before the fix. The model adapter still obtains correct ARGB integers via getPixels.
+
+The shader owns clockwise metadata rotation and output dimensions. KEY_ROTATION is cleared
+before configuring MediaCodec because surface-mode codecs otherwise rotate once before the
+shader rotates again. The 90/270 inverse sampling maps were also corrected. SurfaceTexture's
+producer crop/flip matrix remains applied exactly once. Normalized positions do not need a
+960-to-export-resolution scale factor.
+
+Validation: verify_tracking_decoder_gl.py checks the production shader at two resolutions and
+all four right-angle rotations; verify_eye_effects_gl.py now checks off-center eye placement in
+a non-square frame. TrackingFrameDecoderInstrumentedTest checks real MediaCodec/OES/Bitmap
+output, metadata rotation, downscaling, colors, PTS, and the raw-buffer packing contract. This
+instrumented test is included in the existing emulator parity job. Version 6 invalidates the
+wrong-color v5 tracks. Device visual QA remains necessary for neural tracking accuracy.
+
+Android contracts:
+- https://developer.android.com/reference/android/graphics/Bitmap.Config#ARGB_8888
+- https://developer.android.com/reference/android/media/MediaCodec#transformations-when-rendering-onto-surface
