@@ -123,3 +123,16 @@ for ex,ey in ((.24,.28),(.72,.65)):
     py,px=np.unravel_index(np.argmax(delta.sum(axis=2)),(h,w))
     assert abs(px-(ex*w-.5))<2 and abs(py-((1-ey)*h-.5))<2, ('Eye position',ex,ey,px,py)
 print('PASS: normalized eye centers land on the expected pixels in a non-square frame.')
+
+# Laser is a ray, not an infinite line through the face. A viewer-left eye must emit toward the
+# left side only; pixels behind the eye on the inward/right side should stay near the source.
+source[:,:,:3]=30
+fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
+amounts(1)
+vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0])
+laser=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+row=h//2
+outward=laser[max(0,row-2):row+3, 8:36].sum()
+inward=laser[max(0,row-2):row+3, 66:98].sum()
+assert outward > inward*4 + 100, ('Laser must start at eye and travel outward',outward,inward)
+print('PASS: Laser Eyes originates at the eye and emits outward only.')
