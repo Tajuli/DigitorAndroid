@@ -460,6 +460,12 @@ bool RunMesh(
     const float globalRoll = std::atan2(
         points[263].y - points[33].y,
         points[263].x - points[33].x);
+    const float rollDelta = std::isfinite(globalRoll) ? AngleDelta(globalRoll, roi.angle) : 0.f;
+    // A bad mesh roll must not poison either the current effect direction or the next ROI.
+    // Fall back to the detector/tracked ROI angle for this frame instead of rejecting a face
+    // whose eye centers are otherwise perfectly usable.
+    const float stableRoll =
+        std::isfinite(globalRoll) && std::fabs(rollDelta) <= .90f ? globalRoll : roi.angle;
 
     auto fillEye = [&](int offset, const Point& outer, const Point& inner,
                        const Point& top, const Point& bottom) {
@@ -468,7 +474,7 @@ bool RunMesh(
         output[offset + 0] = ((outer.x + inner.x) * 0.5f) / width;
         output[offset + 1] = ((outer.y + inner.y) * 0.5f) / height;
         output[offset + 2] = (eyeWidth * 0.5f) / width;
-        output[offset + 3] = globalRoll;
+        output[offset + 3] = stableRoll;
         output[offset + 4] = Clamp((vertical / eyeWidth - .035f) / .18f, 0.f, 1.f);
     };
     fillEye(0, lOuter, lInner, lTop, lBottom);
@@ -495,26 +501,28 @@ bool RunMesh(
     const float eyeMidOffset = Distance(eyeMid, roiCenter);
     const float roiSide = std::max(48.f, roi.side);
 
-    // The mesh is allowed to move within the crop, but a single frame cannot teleport the eye
-    // pair to the crop edge or rotate the eye line by ~70 degrees while the ROI remains level.
-    // Reject such output and let the caller reacquire from BlazeFace on the same source frame.
-    if (eyeDistance < roiSide * .10f || eyeDistance > roiSide * .55f ||
-        eyeMidOffset > roiSide * .34f ||
-        std::fabs(AngleDelta(globalRoll, roi.angle)) > .55f) {
-        return false;
-    }
+    // Validate only the CURRENT eye pose here. Do not reject a good current frame merely because
+    // the landmark-derived ROI for the NEXT frame is questionable. The v7 build coupled those two
+    // decisions and could turn an otherwise visible face into an all-null track.
+    const bool currentPosePlausible =
+        std::isfinite(leftX) && std::isfinite(leftY) &&
+        std::isfinite(rightX) && std::isfinite(rightY) &&
+        std::isfinite(stableRoll) &&
+        leftX >= -width * .15f && leftX <= width * 1.15f &&
+        rightX >= -width * .15f && rightX <= width * 1.15f &&
+        leftY >= -height * .15f && leftY <= height * 1.15f &&
+        rightY >= -height * .15f && rightY <= height * 1.15f &&
+        eyeDistance >= roiSide * .055f && eyeDistance <= roiSide * .70f &&
+        eyeMidOffset <= roiSide * .60f;
+    if (!currentPosePlausible) return false;
 
-    // Reject a self-propagating bad crop instead of storing obviously impossible eye geometry.
-    // These bounds are intentionally broad: they reject the device failure (an eye hundreds of
-    // pixels outside the face) while allowing strong head turns and perspective changes.
-    if (faceW < 24.f || faceH < 24.f ||
-        eyeDistance < faceW * .12f || eyeDistance > faceW * .78f ||
-        leftX < rawMinX - faceW * .12f || leftX > rawMaxX + faceW * .12f ||
-        rightX < rawMinX - faceW * .12f || rightX > rawMaxX + faceW * .12f ||
-        leftY < rawMinY - faceH * .10f || leftY > rawMaxY + faceH * .70f ||
-        rightY < rawMinY - faceH * .10f || rightY > rawMaxY + faceH * .70f ||
-        !std::isfinite(globalRoll)) {
-        return false;
+    // Face bounds are secondary metadata for regional effects. A few peripheral landmark outliers
+    // must never invalidate otherwise correct eye tracking.
+    if (!std::isfinite(faceW) || !std::isfinite(faceH) || faceW < 4.f || faceH < 4.f) {
+        rawMinX = std::min(leftX, rightX) - eyeDistance;
+        rawMaxX = std::max(leftX, rightX) + eyeDistance;
+        rawMinY = std::min(leftY, rightY) - eyeDistance;
+        rawMaxY = std::max(leftY, rightY) + eyeDistance * 2.f;
     }
 
     const float minX = Clamp(rawMinX, 0.f, static_cast<float>(width));
@@ -536,10 +544,22 @@ bool RunMesh(
     output[16] = Clamp(std::max({mouthL.x, mouthR.x, mouthT.x, mouthB.x}) / width, 0.f, 1.f);
     output[17] = Clamp(std::max({mouthL.y, mouthR.y, mouthT.y, mouthB.y}) / height, 0.f, 1.f);
 
-    const Roi next = face_tracking::LandmarkRoi(points, kLandmarkCount, globalRoll);
-    if (!next.valid || next.side > 1.6f * std::max(width, height)) return false;
+    const Roi next = face_tracking::LandmarkRoi(points, kLandmarkCount, stableRoll);
+    const bool nextRoiPlausible =
+        next.valid &&
+        std::isfinite(next.cx) && std::isfinite(next.cy) && std::isfinite(next.side) &&
+        next.side >= roiSide * .55f && next.side <= roiSide * 1.80f &&
+        next.side <= 1.6f * std::max(width, height) &&
+        std::fabs(AngleDelta(next.angle, stableRoll)) <= .35f &&
+        next.cx >= -width * .30f && next.cx <= width * 1.30f &&
+        next.cy >= -height * .30f && next.cy <= height * 1.30f;
+
     for (int i = 0; i < 18; ++i) if (!std::isfinite(output[i])) return false;
-    engine->roi = next;
+
+    // Crucial separation: return the valid current pose even when next-frame tracking state is bad.
+    // Invalidating ROI makes the following frame reacquire with BlazeFace instead of poisoning the
+    // whole analysis with null poses.
+    engine->roi = nextRoiPlausible ? next : Roi{};
     return true;
 }
 
