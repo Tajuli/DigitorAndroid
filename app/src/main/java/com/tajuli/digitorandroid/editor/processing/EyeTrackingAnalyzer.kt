@@ -8,19 +8,24 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import com.google.gson.Gson
+import com.tajuli.digitorandroid.editor.model.BeautyRectV28
 import com.tajuli.digitorandroid.editor.model.EyePose
 import com.tajuli.digitorandroid.editor.model.EyeSample
 import com.tajuli.digitorandroid.editor.model.EyeTrack
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.model.TrackedEye
 import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
 import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -107,21 +112,78 @@ class EyeTrackingAnalyzer(private val context: Context) {
         return downscaleDecodeFrame(bitmap)
     }
 
-    private fun stabilize(previous: EyePose?, fresh: EyePose?): EyePose? {
-        fresh ?: return null
-        previous ?: return fresh
-        if (
-            hypot(
-                fresh.left.x - previous.left.x,
-                fresh.left.y - previous.left.y,
-            ) >= max(fresh.left.radius, .01f) * .20f
-        ) {
-            return fresh
+    private fun centeredAngle(a: Float, b: Float, c: Float): Float {
+        val x = cos(a) * .20f + cos(b) * .60f + cos(c) * .20f
+        val y = sin(a) * .20f + sin(b) * .60f + sin(c) * .20f
+        return atan2(y, x)
+    }
+
+    private fun centeredEye(
+        previous: TrackedEye,
+        current: TrackedEye,
+        next: TrackedEye,
+    ): TrackedEye = current.copy(
+        x = previous.x * .20f + current.x * .60f + next.x * .20f,
+        y = previous.y * .20f + current.y * .60f + next.y * .20f,
+        radius = previous.radius * .20f + current.radius * .60f + next.radius * .20f,
+        roll = centeredAngle(previous.roll, current.roll, next.roll),
+        // Blink/open state is intentionally current-frame only; smoothing it makes eyelid effects lag.
+        open = current.open,
+    )
+
+    private fun centeredRect(
+        previous: BeautyRectV28?,
+        current: BeautyRectV28?,
+        next: BeautyRectV28?,
+    ): BeautyRectV28? {
+        if (previous == null || current == null || next == null) return current
+        return BeautyRectV28(
+            left = previous.left * .20f + current.left * .60f + next.left * .20f,
+            top = previous.top * .20f + current.top * .60f + next.top * .20f,
+            right = previous.right * .20f + current.right * .60f + next.right * .20f,
+            bottom = previous.bottom * .20f + current.bottom * .60f + next.bottom * .20f,
+        ).normalized()
+    }
+
+    /**
+     * Offline zero-phase stabilization.
+     *
+     * Full-clip analysis already has future samples, so causal previous->current smoothing is the
+     * wrong tradeoff: it visibly trails head motion. A symmetric 20/60/20 filter suppresses ncnn
+     * landmark jitter while preserving linear motion at the current timestamp (no phase delay).
+     */
+    private fun stabilizeTrackZeroPhase(samples: List<EyeSample>): List<EyeSample> {
+        if (samples.size < 3) return samples
+        return samples.mapIndexed { index, sample ->
+            val current = sample.pose ?: return@mapIndexed sample
+            val previousSample = samples.getOrNull(index - 1) ?: return@mapIndexed sample
+            val nextSample = samples.getOrNull(index + 1) ?: return@mapIndexed sample
+            val previous = previousSample.pose ?: return@mapIndexed sample
+            val next = nextSample.pose ?: return@mapIndexed sample
+
+            if (previous.identity != current.identity || next.identity != current.identity) {
+                return@mapIndexed sample
+            }
+            if (sample.timeUs - previousSample.timeUs > MAX_CENTERED_GAP_US ||
+                nextSample.timeUs - sample.timeUs > MAX_CENTERED_GAP_US
+            ) {
+                return@mapIndexed sample
+            }
+
+            val span = hypot(next.left.x - previous.left.x, next.left.y - previous.left.y)
+            if (span > max(current.left.radius, .01f) * MAX_CENTERED_MOTION_RADII) {
+                return@mapIndexed sample
+            }
+
+            sample.copy(
+                pose = current.copy(
+                    left = centeredEye(previous.left, current.left, next.left),
+                    right = centeredEye(previous.right, current.right, next.right),
+                    face = centeredRect(previous.face, current.face, next.face),
+                    mouth = centeredRect(previous.mouth, current.mouth, next.mouth),
+                ),
+            )
         }
-        return fresh.copy(
-            left = previous.left.interpolate(fresh.left, .80f).copy(open = fresh.left.open),
-            right = previous.right.interpolate(fresh.right, .80f).copy(open = fresh.right.open),
-        )
     }
 
     suspend fun analyze(
@@ -214,7 +276,6 @@ class EyeTrackingAnalyzer(private val context: Context) {
                             val duration =
                                 (clip.sourceOutUs - clip.sourceInUs).coerceAtLeast(1L)
 
-                            var previousPose: EyePose? = null
                             var time = clip.sourceInUs
                             while (time < clip.sourceOutUs) {
                                 currentCoroutineContext().ensureActive()
@@ -237,9 +298,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
                                 } finally {
                                     bitmap?.recycle()
                                 }
-                                val pose = stabilize(previousPose, rawPose)
-                                previousPose = pose
-                                samples += EyeSample(time, pose)
+                                samples += EyeSample(time, rawPose)
 
                                 onProgress(
                                     (((time - clip.sourceInUs) * 100L) / duration)
@@ -269,10 +328,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
                                 } finally {
                                     bitmap?.recycle()
                                 }
-                                samples += EyeSample(
-                                    clip.sourceOutUs,
-                                    stabilize(previousPose, rawPose),
-                                )
+                                samples += EyeSample(clip.sourceOutUs, rawPose)
                             }
                         }
 
@@ -281,11 +337,16 @@ class EyeTrackingAnalyzer(private val context: Context) {
                             "No clear face found. Keep one face clearly visible and retry."
                         }
 
+                        val stabilizedSamples = if (clip.isImageV21) {
+                            samples
+                        } else {
+                            stabilizeTrackZeroPhase(samples)
+                        }
                         val track = EyeTrack(
                             clip.uri,
                             clip.sourceInUs,
                             clip.sourceOutUs,
-                            samples,
+                            stabilizedSamples,
                         )
                         EyeTrackStore.save(context, clip, track)
                         onProgress(100)
@@ -309,6 +370,8 @@ class EyeTrackingAnalyzer(private val context: Context) {
     companion object {
         private const val DECODE_LONG_EDGE = 512
         private const val SAMPLE_INTERVAL_US = 83_333L
+        private const val MAX_CENTERED_GAP_US = 110_000L
+        private const val MAX_CENTERED_MOTION_RADII = 7.0f
         private val analysisMutex = Mutex()
     }
 }
