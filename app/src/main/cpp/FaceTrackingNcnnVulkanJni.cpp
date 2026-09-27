@@ -39,6 +39,7 @@ struct FaceEngine {
     bool gpu = false;
     std::string gpuName = "CPU";
     Roi roi;
+    int frameCounter = 0;
     double lastInferenceMs = -1.0;
 
     ~FaceEngine() {
@@ -75,6 +76,25 @@ inline float Sigmoid(float x) {
 
 inline float Clamp(float x, float lo, float hi) {
     return std::max(lo, std::min(hi, x));
+}
+
+inline float AngleDelta(float a, float b) {
+    float d = a - b;
+    while (d > kPi) d -= 2.f * kPi;
+    while (d < -kPi) d += 2.f * kPi;
+    return d;
+}
+
+bool RoiNeedsDetectorCorrection(const Roi& tracked, const Roi& detected) {
+    if (!tracked.valid || !detected.valid) return true;
+    const float dx = tracked.cx - detected.cx;
+    const float dy = tracked.cy - detected.cy;
+    const float centerDistance = std::sqrt(dx * dx + dy * dy);
+    const float scale = std::max(48.f, detected.side);
+    const float ratio = tracked.side / scale;
+    return centerDistance > scale * .12f ||
+        ratio < .78f || ratio > 1.28f ||
+        std::fabs(AngleDelta(tracked.angle, detected.angle)) > .28f;
 }
 
 inline int A(jint pixel) { return (pixel >> 24) & 0xff; }
@@ -354,14 +374,27 @@ bool RunMesh(
     if (!score.empty() && Sigmoid(static_cast<const float*>(score)[0]) < 0.5f) return false;
 
     const float* lm = landmarks;
-    const Point lOuter = MapMeshPoint(lm, 33, roi);
-    const Point lInner = MapMeshPoint(lm, 133, roi);
-    const Point lTop = MapMeshPoint(lm, 159, roi);
-    const Point lBottom = MapMeshPoint(lm, 145, roi);
-    const Point rOuter = MapMeshPoint(lm, 362, roi);
-    const Point rInner = MapMeshPoint(lm, 263, roi);
-    const Point rTop = MapMeshPoint(lm, 386, roi);
-    const Point rBottom = MapMeshPoint(lm, 374, roi);
+    Point points[kLandmarkCount];
+    for (int i = 0; i < kLandmarkCount; ++i) {
+        points[i] = MapMeshPoint(lm, i, roi);
+        if (!std::isfinite(points[i].x) || !std::isfinite(points[i].y)) return false;
+    }
+
+    const Point lOuter = points[33];
+    const Point lInner = points[133];
+    const Point lTop = points[159];
+    const Point lBottom = points[145];
+    const Point rOuter = points[362];
+    const Point rInner = points[263];
+    const Point rTop = points[386];
+    const Point rBottom = points[374];
+
+    // Use one face-level roll for both eyes. Per-eye corner roll is much noisier and was producing
+    // +60/-80 degree laser directions in the device recording even while the head was nearly level.
+    // MediaPipe's tracking ROI itself uses landmark 33 -> 263 for this same eye-line direction.
+    const float globalRoll = std::atan2(
+        points[263].y - points[33].y,
+        points[263].x - points[33].x);
 
     auto fillEye = [&](int offset, const Point& outer, const Point& inner,
                        const Point& top, const Point& bottom) {
@@ -370,54 +403,63 @@ bool RunMesh(
         output[offset + 0] = ((outer.x + inner.x) * 0.5f) / width;
         output[offset + 1] = ((outer.y + inner.y) * 0.5f) / height;
         output[offset + 2] = (eyeWidth * 0.5f) / width;
-        output[offset + 3] = std::atan2(inner.y - outer.y, inner.x - outer.x);
-        output[offset + 4] = Clamp((vertical / eyeWidth - 0.035f) / 0.18f, 0.f, 1.f);
+        output[offset + 3] = globalRoll;
+        output[offset + 4] = Clamp((vertical / eyeWidth - .035f) / .18f, 0.f, 1.f);
     };
     fillEye(0, lOuter, lInner, lTop, lBottom);
     fillEye(5, rOuter, rInner, rTop, rBottom);
 
-    float minX = static_cast<float>(width);
-    float minY = static_cast<float>(height);
-    float maxX = 0.f;
-    float maxY = 0.f;
-    for (int i = 0; i < kLandmarkCount; ++i) {
-        const Point p = MapMeshPoint(lm, i, roi);
-        minX = std::min(minX, p.x);
-        minY = std::min(minY, p.y);
-        maxX = std::max(maxX, p.x);
-        maxY = std::max(maxY, p.y);
+    float rawMinX = points[0].x, rawMinY = points[0].y;
+    float rawMaxX = points[0].x, rawMaxY = points[0].y;
+    for (int i = 1; i < kLandmarkCount; ++i) {
+        rawMinX = std::min(rawMinX, points[i].x);
+        rawMinY = std::min(rawMinY, points[i].y);
+        rawMaxX = std::max(rawMaxX, points[i].x);
+        rawMaxY = std::max(rawMaxY, points[i].y);
     }
-    minX = Clamp(minX, 0.f, static_cast<float>(width));
-    minY = Clamp(minY, 0.f, static_cast<float>(height));
-    maxX = Clamp(maxX, 0.f, static_cast<float>(width));
-    maxY = Clamp(maxY, 0.f, static_cast<float>(height));
+
+    const float faceW = rawMaxX - rawMinX;
+    const float faceH = rawMaxY - rawMinY;
+    const float leftX = output[0] * width;
+    const float leftY = output[1] * height;
+    const float rightX = output[5] * width;
+    const float rightY = output[6] * height;
+    const float eyeDistance = Distance(Point{leftX, leftY}, Point{rightX, rightY});
+
+    // Reject a self-propagating bad crop instead of storing obviously impossible eye geometry.
+    // These bounds are intentionally broad: they reject the device failure (an eye hundreds of
+    // pixels outside the face) while allowing strong head turns and perspective changes.
+    if (faceW < 24.f || faceH < 24.f ||
+        eyeDistance < faceW * .12f || eyeDistance > faceW * .78f ||
+        leftX < rawMinX - faceW * .12f || leftX > rawMaxX + faceW * .12f ||
+        rightX < rawMinX - faceW * .12f || rightX > rawMaxX + faceW * .12f ||
+        leftY < rawMinY - faceH * .10f || leftY > rawMaxY + faceH * .70f ||
+        rightY < rawMinY - faceH * .10f || rightY > rawMaxY + faceH * .70f ||
+        !std::isfinite(globalRoll)) {
+        return false;
+    }
+
+    const float minX = Clamp(rawMinX, 0.f, static_cast<float>(width));
+    const float minY = Clamp(rawMinY, 0.f, static_cast<float>(height));
+    const float maxX = Clamp(rawMaxX, 0.f, static_cast<float>(width));
+    const float maxY = Clamp(rawMaxY, 0.f, static_cast<float>(height));
 
     output[10] = minX / width;
     output[11] = minY / height;
     output[12] = maxX / width;
     output[13] = maxY / height;
 
-    const Point mouthL = MapMeshPoint(lm, 61, roi);
-    const Point mouthR = MapMeshPoint(lm, 291, roi);
-    const Point mouthT = MapMeshPoint(lm, 13, roi);
-    const Point mouthB = MapMeshPoint(lm, 14, roi);
-    output[14] = std::min({mouthL.x, mouthR.x, mouthT.x, mouthB.x}) / width;
-    output[15] = std::min({mouthL.y, mouthR.y, mouthT.y, mouthB.y}) / height;
-    output[16] = std::max({mouthL.x, mouthR.x, mouthT.x, mouthB.x}) / width;
-    output[17] = std::max({mouthL.y, mouthR.y, mouthT.y, mouthB.y}) / height;
+    const Point mouthL = points[61];
+    const Point mouthR = points[291];
+    const Point mouthT = points[13];
+    const Point mouthB = points[14];
+    output[14] = Clamp(std::min({mouthL.x, mouthR.x, mouthT.x, mouthB.x}) / width, 0.f, 1.f);
+    output[15] = Clamp(std::min({mouthL.y, mouthR.y, mouthT.y, mouthB.y}) / height, 0.f, 1.f);
+    output[16] = Clamp(std::max({mouthL.x, mouthR.x, mouthT.x, mouthB.x}) / width, 0.f, 1.f);
+    output[17] = Clamp(std::max({mouthL.y, mouthR.y, mouthT.y, mouthB.y}) / height, 0.f, 1.f);
 
-    // Build the next crop from un-clipped landmarks in the roll-normalized plane.
-    // Source-axis bounds + 2.15 padding used to change scale with head rotation,
-    // while the detector reset that scale every sixth sample.
-    Point points[kLandmarkCount];
-    for (int i = 0; i < kLandmarkCount; ++i) points[i] = MapMeshPoint(lm, i, roi);
-    const float lcx = (lOuter.x + lInner.x) * 0.5f;
-    const float lcy = (lOuter.y + lInner.y) * 0.5f;
-    const float rcx = (rOuter.x + rInner.x) * 0.5f;
-    const float rcy = (rOuter.y + rInner.y) * 0.5f;
-    const Roi next = face_tracking::LandmarkRoi(
-        points, kLandmarkCount, std::atan2(rcy - lcy, rcx - lcx));
-    if (!next.valid || next.side > 2.f * std::max(width, height)) return false;
+    const Roi next = face_tracking::LandmarkRoi(points, kLandmarkCount, globalRoll);
+    if (!next.valid || next.side > 1.6f * std::max(width, height)) return false;
     for (int i = 0; i < 18; ++i) if (!std::isfinite(output[i])) return false;
     engine->roi = next;
     return true;
@@ -541,25 +583,35 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanFaceTrackingNativeV10
     const auto started = std::chrono::steady_clock::now();
 
     bool ok = false;
-    // A healthy mesh owns its ROI. Replacing it on a fixed cadence introduces a
-    // detector/mesh crop discontinuity even when the subject has not moved.
+
+    // Periodically ask BlazeFace for an absolute reference, but do not replace a healthy mesh ROI
+    // unless the detector says the tracked crop has materially drifted. This keeps #1724's drift
+    // correction without reintroducing a fixed-cadence crop jump.
+    if (engine->roi.valid && engine->frameCounter % 6 == 0) {
+        Roi detected;
+        if (RunDetector(engine, pixels, width, height, &detected) &&
+            RoiNeedsDetectorCorrection(engine->roi, detected)) {
+            engine->roi = detected;
+        }
+    }
+
     if (engine->roi.valid) {
         ok = RunMesh(engine, pixels, width, height, engine->roi, output);
     }
+
     if (!ok) {
         engine->roi.valid = false;
         Roi acquired;
         if (RunDetector(engine, pixels, width, height, &acquired)) {
             engine->roi = acquired;
+            // One mesh pass only. The model's own reference pipeline uses landmarks->ROI for the
+            // NEXT video frame; a second mesh pass on the same frame made the crop self-amplify.
             ok = RunMesh(engine, pixels, width, height, engine->roi, output);
-            if (ok) {
-                // Refine on the same frame so acquisition and subsequent frames
-                // both publish landmarks from the mesh-derived crop convention.
-                ok = RunMesh(engine, pixels, width, height, engine->roi, output);
-            }
         }
     }
+
     if (!ok) engine->roi.valid = false;
+    engine->frameCounter += 1;
 
     const auto ended = std::chrono::steady_clock::now();
     engine->lastInferenceMs =
