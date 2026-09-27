@@ -87,12 +87,6 @@ inline float Clamp(float x, float lo, float hi) {
     return std::max(lo, std::min(hi, x));
 }
 
-inline float WrapAngleDelta(float delta) {
-    while (delta > kPi) delta -= 2.f * kPi;
-    while (delta < -kPi) delta += 2.f * kPi;
-    return delta;
-}
-
 inline int A(jint pixel) { return (pixel >> 24) & 0xff; }
 inline int R(jint pixel) { return (pixel >> 16) & 0xff; }
 inline int G(jint pixel) { return (pixel >> 8) & 0xff; }
@@ -422,10 +416,8 @@ bool RunMesh(
     output[16] = std::max({mouthL.x, mouthR.x, mouthT.x, mouthB.x}) / width;
     output[17] = std::max({mouthL.y, mouthR.y, mouthT.y, mouthB.y}) / height;
 
-    // Landmarks-to-ROI video tracking. Keep the crop stable without smoothing the returned eye
-    // coordinates themselves. The old code replaced the ROI abruptly (and also forced a detector
-    // reacquire every six samples), which made the crop breathe/shift and could move landmarks
-    // slightly forward/back even when the face motion was smooth.
+    // Landmarks-to-ROI video tracking: keep a generously padded, roll-normalized ROI between
+    // detector reacquisitions. This is the motion-safe crop, analogous to PP-Matting's ROI path.
     const float faceW = std::max(1.f, maxX - minX);
     const float faceH = std::max(1.f, maxY - minY);
     const float centerX = (minX + maxX) * 0.5f;
@@ -434,35 +426,11 @@ bool RunMesh(
     const float lcy = (lOuter.y + lInner.y) * 0.5f;
     const float rcx = (rOuter.x + rInner.x) * 0.5f;
     const float rcy = (rOuter.y + rInner.y) * 0.5f;
-
-    Roi candidate;
-    candidate.cx = centerX;
-    candidate.cy = centerY;
-    candidate.side = std::max(64.f, std::max(faceW, faceH) * 2.15f);
-    candidate.angle = std::atan2(rcy - lcy, rcx - lcx);
-    candidate.valid = true;
-
-    const Roi previousRoi = roi;
-    const float centerJump = std::sqrt(
-        (candidate.cx - previousRoi.cx) * (candidate.cx - previousRoi.cx) +
-        (candidate.cy - previousRoi.cy) * (candidate.cy - previousRoi.cy));
-    const bool largeMotion =
-        !previousRoi.valid || centerJump > std::max(24.f, previousRoi.side * 0.32f);
-
-    if (largeMotion) {
-        engine->roi = candidate;
-    } else {
-        constexpr float kCenterAlpha = 0.72f;
-        constexpr float kSideAlpha = 0.58f;
-        constexpr float kAngleAlpha = 0.68f;
-        engine->roi.cx = previousRoi.cx + (candidate.cx - previousRoi.cx) * kCenterAlpha;
-        engine->roi.cy = previousRoi.cy + (candidate.cy - previousRoi.cy) * kCenterAlpha;
-        engine->roi.side =
-            previousRoi.side + (candidate.side - previousRoi.side) * kSideAlpha;
-        engine->roi.angle =
-            previousRoi.angle + WrapAngleDelta(candidate.angle - previousRoi.angle) * kAngleAlpha;
-        engine->roi.valid = true;
-    }
+    engine->roi.cx = centerX;
+    engine->roi.cy = centerY;
+    engine->roi.side = std::max(64.f, std::max(faceW, faceH) * 2.15f);
+    engine->roi.angle = std::atan2(rcy - lcy, rcx - lcx);
+    engine->roi.valid = true;
     return true;
 }
 
@@ -583,12 +551,10 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanFaceTrackingNativeV10
     const auto started = std::chrono::steady_clock::now();
 
     bool ok = false;
+    const bool periodicReacquire =
+        !engine->roi.valid || (engine->frameCounter % 6 == 0);
 
-    // Keep using the current motion-safe ROI while Face Mesh is confident. A forced detector
-    // reacquisition every six samples changed the crop geometry even on a perfectly tracked face,
-    // creating visible forward/back oscillation in eye effects. Reacquire only after ROI tracking
-    // actually loses the face.
-    if (engine->roi.valid) {
+    if (!periodicReacquire) {
         ok = RunMesh(engine, pixels, width, height, engine->roi, output);
     }
 
