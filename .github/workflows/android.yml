@@ -80,7 +80,10 @@ jobs:
           PY
 
       - name: Validate production eye-effect shader
-        run: python3 tools/validation/verify_eye_effects_gl.py
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1 libgl1
+          python3 tools/validation/verify_eye_effects_gl.py
 
       - name: Upload fixed PP-MattingV2 ONNX graphs
         uses: actions/upload-artifact@v4
