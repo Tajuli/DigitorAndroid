@@ -72,8 +72,18 @@ data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val sam
         val left = validAtOrBefore(if (exact >= 0) exact else insertion - 1)
         val right = validAtOrAfter(if (exact >= 0) exact else insertion)
 
-        if (left == null) return right?.takeIf { it.timeUs - timeUs <= 50_000L }?.pose
-        if (right == null) return left.takeIf { timeUs - it.timeUs <= 50_000L }?.pose
+        if (left == null) {
+            val explicitMissing = (0 until insertion.coerceAtMost(samples.size))
+                .any { samples[it].timeUs <= timeUs && samples[it].pose == null }
+            return if (explicitMissing) null
+            else right?.takeIf { it.timeUs - timeUs <= 50_000L }?.pose
+        }
+        if (right == null) {
+            val explicitMissing = (insertion.coerceAtLeast(0) until samples.size)
+                .any { samples[it].timeUs >= timeUs && samples[it].pose == null }
+            return if (explicitMissing) null
+            else left.takeIf { timeUs - it.timeUs <= 50_000L }?.pose
+        }
         if (left.timeUs == right.timeUs) return left.pose
 
         val pa = left.pose ?: return null
