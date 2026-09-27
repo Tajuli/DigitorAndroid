@@ -42,8 +42,15 @@ internal const val EYE_EFFECT_SHADER = """
             light+=uEyesA.x*(vec3(1,.17,.015)*flame*.9+vec3(1,.75,.2)*core+vec3(.3,.045,0)*halo);
         }
         if(uEyesA.y>.001) {
-            float beam=exp(-p.y*p.y*210.0)*exp(-abs(p.x)*.065);
-            float bloom=exp(-p.y*p.y*16.0)*exp(-abs(p.x)*.12);
+            // A laser is a ray that starts at the eye and travels OUTWARD. The old abs(p.x)
+            // formulation drew an infinite line through the eye in both directions, so on-device
+            // it looked as if the beam originated off-screen and merely crossed the face.
+            float side=sign(eye.x-(uLeftEye.x+uRightEye.x)*.5);
+            if(abs(side)<.5) side=1.0;
+            float forward=p.x*side;
+            float ray=smoothstep(-.05,.14,forward);
+            float beam=exp(-p.y*p.y*210.0)*exp(-max(forward,0.0)*.065)*ray;
+            float bloom=exp(-p.y*p.y*16.0)*exp(-max(forward,0.0)*.12)*ray;
             light+=uEyesA.y*(vec3(1,.04,.02)*bloom*.8+vec3(1,.75,.6)*(beam+core));
         }
         if(uEyesA.z>.001) {
