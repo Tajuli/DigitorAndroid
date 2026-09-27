@@ -12,6 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Face tracking crop regression tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror tools/validation/face_tracking_geometry_test.cpp -o /tmp/face-tracking-geometry-test
+          /tmp/face-tracking-geometry-test
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -174,3 +179,4 @@ jobs:
             app/build/outputs/androidTest-results/
           if-no-files-found: warn
           retention-days: 7
+

@@ -4,11 +4,9 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
-import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import com.google.gson.Gson
-import com.tajuli.digitorandroid.editor.model.EyePose
 import com.tajuli.digitorandroid.editor.model.EyeSample
 import com.tajuli.digitorandroid.editor.model.EyeTrack
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -17,7 +15,6 @@ import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
-import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -39,7 +36,7 @@ object EyeTrackStore {
         .joinToString("") { "%02x".format(it) }
 
     private fun file(context: Context, clip: TimelineClip) =
-        File(context.filesDir, "eye_tracks_v4/${key(clip)}.json")
+        File(context.filesDir, "eye_tracks_v5/${key(clip)}.json")
 
     fun load(context: Context, clip: TimelineClip): EyeTrack? {
         val key = key(clip)
@@ -71,7 +68,7 @@ object EyeTrackStore {
 /**
  * Full-clip face motion tracking on the same ncnn Vulkan runtime as PP-MattingV2.
  *
- * The decoded working frame is capped at 512 px only to preserve enough source detail for ROI
+ * The decoded working frame is capped at 960 px only to preserve enough source detail for ROI
  * sampling. Native inference is much smaller: BlazeFace reacquisition runs at 128x128 and the
  * persistent Face Mesh ROI runs at 192x192. Between reacquisitions the native engine follows the
  * landmarks-to-ROI crop, so the full frame is not sent through a landmark network.
@@ -107,23 +104,6 @@ class EyeTrackingAnalyzer(private val context: Context) {
         return downscaleDecodeFrame(bitmap)
     }
 
-    private fun stabilize(previous: EyePose?, fresh: EyePose?): EyePose? {
-        fresh ?: return null
-        previous ?: return fresh
-        if (
-            hypot(
-                fresh.left.x - previous.left.x,
-                fresh.left.y - previous.left.y,
-            ) >= max(fresh.left.radius, .01f) * .20f
-        ) {
-            return fresh
-        }
-        return fresh.copy(
-            left = previous.left.interpolate(fresh.left, .80f).copy(open = fresh.left.open),
-            right = previous.right.interpolate(fresh.right, .80f).copy(open = fresh.right.open),
-        )
-    }
-
     suspend fun analyze(
         clip: TimelineClip,
         onBackend: (gpuAccelerated: Boolean) -> Unit = {},
@@ -147,7 +127,6 @@ class EyeTrackingAnalyzer(private val context: Context) {
 
                     var lease: PreviewExportCoordinator.AnalysisLease? = null
                     var tracker: NcnnVulkanFaceTrackerV103? = null
-                    val retriever = MediaMetadataRetriever()
                     try {
                         // Give ncnn Vulkan the same exclusive GPU/codec handoff used by PP-MattingV2.
                         lease = PreviewExportCoordinator.acquireAnalysisLease("Face Tracking")
@@ -198,82 +177,38 @@ class EyeTrackingAnalyzer(private val context: Context) {
                             }
                             onProgress(100)
                         } else {
-                            retriever.setDataSource(context, Uri.parse(clip.uri))
-                            val width = retriever
-                                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                                ?.toIntOrNull() ?: 720
-                            val height = retriever
-                                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                                ?.toIntOrNull() ?: 720
-                            val scale = min(
-                                1f,
-                                DECODE_LONG_EDGE.toFloat() / max(width, height),
-                            )
-                            val decodeWidth = max(1, (width * scale).roundToInt())
-                            val decodeHeight = max(1, (height * scale).roundToInt())
-                            val duration =
-                                (clip.sourceOutUs - clip.sourceInUs).coerceAtLeast(1L)
-
-                            var previousPose: EyePose? = null
-                            var time = clip.sourceInUs
-                            while (time < clip.sourceOutUs) {
-                                currentCoroutineContext().ensureActive()
-                                val bitmap = if (Build.VERSION.SDK_INT >= 27) {
-                                    retriever.getScaledFrameAtTime(
-                                        time,
-                                        MediaMetadataRetriever.OPTION_CLOSEST,
-                                        decodeWidth,
-                                        decodeHeight,
+                            // Keep the pose on the frame's real presentation timestamp. Retrieving
+                            // OPTION_CLOSEST at a nominal 12 Hz stamped neighboring video frames
+                            // with the requested time, making the overlay alternately lead/lag.
+                            val jobContext = currentCoroutineContext()
+                            val duration = (clip.sourceOutUs - clip.sourceInUs).coerceAtLeast(1L)
+                            GpuSequentialCutoutDecoderV47(context, DECODE_LONG_EDGE).decodeTargets(
+                                uri = Uri.parse(clip.uri),
+                                // Include a short preroll so a trim between frames has a left
+                                // interpolation anchor, instead of borrowing a future pose.
+                                startUs = (clip.sourceInUs - 100_000L).coerceAtLeast(0L),
+                                endUs = clip.sourceOutUs,
+                                targetTimesUs = emptyList(),
+                                emitEveryFrame = true,
+                            ) { sourceTimeUs, bitmap ->
+                                try {
+                                    jobContext.ensureActive()
+                                    val previousTimeUs = samples.lastOrNull()?.timeUs
+                                    if (previousTimeUs == null || sourceTimeUs > previousTimeUs) {
+                                        // No causal smoothing: it delays the eyes behind head motion.
+                                        samples += EyeSample(sourceTimeUs, activeTracker.detect(bitmap))
+                                    }
+                                    onProgress(
+                                        (((sourceTimeUs - clip.sourceInUs) * 100L) / duration)
+                                            .toInt().coerceIn(0, 99),
                                     )
-                                } else {
-                                    retriever.getFrameAtTime(
-                                        time,
-                                        MediaMetadataRetriever.OPTION_CLOSEST,
-                                    )?.let { downscaleDecodeFrame(it) }
-                                }
-
-                                val rawPose = try {
-                                    bitmap?.let(activeTracker::detect)
                                 } finally {
-                                    bitmap?.recycle()
+                                    bitmap.recycle()
                                 }
-                                val pose = stabilize(previousPose, rawPose)
-                                previousPose = pose
-                                samples += EyeSample(time, pose)
-
-                                onProgress(
-                                    (((time - clip.sourceInUs) * 100L) / duration)
-                                        .toInt()
-                                        .coerceIn(0, 99),
-                                )
-                                time += SAMPLE_INTERVAL_US
                             }
-
-                            if (samples.lastOrNull()?.timeUs != clip.sourceOutUs) {
-                                currentCoroutineContext().ensureActive()
-                                val bitmap = if (Build.VERSION.SDK_INT >= 27) {
-                                    retriever.getScaledFrameAtTime(
-                                        clip.sourceOutUs,
-                                        MediaMetadataRetriever.OPTION_CLOSEST,
-                                        decodeWidth,
-                                        decodeHeight,
-                                    )
-                                } else {
-                                    retriever.getFrameAtTime(
-                                        clip.sourceOutUs,
-                                        MediaMetadataRetriever.OPTION_CLOSEST,
-                                    )?.let { downscaleDecodeFrame(it) }
-                                }
-                                val rawPose = try {
-                                    bitmap?.let(activeTracker::detect)
-                                } finally {
-                                    bitmap?.recycle()
-                                }
-                                samples += EyeSample(
-                                    clip.sourceOutUs,
-                                    stabilize(previousPose, rawPose),
-                                )
-                            }
+                            check(samples.isNotEmpty()) { "No video frames decoded for face tracking" }
+                            // The last decoded frame is held until the exclusive trim end.
+                            samples += EyeSample(clip.sourceOutUs, samples.last().pose)
                         }
 
                         currentCoroutineContext().ensureActive()
@@ -292,7 +227,6 @@ class EyeTrackingAnalyzer(private val context: Context) {
                         track
                     } finally {
                         try {
-                            runCatching { retriever.release() }
                             tracker?.close()
                         } finally {
                             lease?.close()
@@ -307,8 +241,9 @@ class EyeTrackingAnalyzer(private val context: Context) {
     }
 
     companion object {
-        private const val DECODE_LONG_EDGE = 512
+        private const val DECODE_LONG_EDGE = 960
         private const val SAMPLE_INTERVAL_US = 83_333L
         private val analysisMutex = Mutex()
     }
 }
+

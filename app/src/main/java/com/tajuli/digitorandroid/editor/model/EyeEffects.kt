@@ -41,8 +41,8 @@ data class TrackedEye(val x: Float, val y: Float, val radius: Float, val roll: F
 data class EyePose(val left: TrackedEye, val right: TrackedEye, val identity: Int?,
     val face: BeautyRectV28? = null, val mouth: BeautyRectV28? = null)
 data class EyeSample(val timeUs: Long, val pose: EyePose?)
-data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 4) {
-    fun covers(clip: TimelineClip): Boolean = version == 4 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
+data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 5) {
+    fun covers(clip: TimelineClip): Boolean = version == 5 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
     fun at(timeUs: Long): EyePose? {
         if (timeUs < startUs || timeUs > endUs || samples.isEmpty()) return null
         val index = samples.binarySearchBy(timeUs) { it.timeUs }
@@ -61,3 +61,4 @@ data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val sam
             pa.mouth?.let { a -> pb.mouth?.let { a.lerp(it,t) } })
     }
 }
+

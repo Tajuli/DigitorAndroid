@@ -38,4 +38,25 @@ class EyeEffectsTest {
         val b=a.copy(roll=-3.1f)
         assertTrue(kotlin.math.abs(a.interpolate(b,.5f).roll)>3f)
     }
+    @Test fun preservesFractionalRateAndVariableFrameTimestampsThroughATrim() {
+        val samples = listOf(
+            EyeSample(33_367, pose(.30f)),
+            EyeSample(66_733, pose(.31f)),
+            EyeSample(133_467, pose(.33f)),
+            EyeSample(166_833, pose(.34f)),
+        )
+        val track = EyeTrack(clip.uri, 50_000, 200_000, samples)
+        // A preroll frame is a valid left anchor, not a reason to shift source time.
+        assertEquals(.304985f, track.at(50_000)!!.left.x, .00001f)
+        for (sample in samples.drop(1)) assertEquals(sample.pose, track.at(sample.timeUs))
+        assertEquals(.32f, track.at(100_100)!!.left.x, .00001f)
+        assertNull(track.at(49_999))
+    }
+    @Test fun requiresFreshAnalysisForTheOldNominalTimestampCache() {
+        val current = EyeTrack(clip.uri, 0, clip.sourceOutUs, listOf(EyeSample(0, pose())))
+        assertTrue(current.covers(clip))
+        assertFalse(current.copy(version = 4).covers(clip))
+        assertFalse(current.copy(version = 3).covers(clip))
+        assertFalse(current.copy(version = 2).covers(clip))
+    }
 }

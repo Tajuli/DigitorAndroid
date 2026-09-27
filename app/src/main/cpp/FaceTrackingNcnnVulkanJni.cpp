@@ -11,6 +11,7 @@
 
 #include <gpu.h>
 #include <net.h>
+#include "FaceTrackingGeometry.h"
 
 namespace {
 constexpr const char* kTag = "FaceTrackNcnnVk";
@@ -21,18 +22,8 @@ constexpr int kRegValues = 16;
 constexpr int kLandmarkCount = 468;
 constexpr float kPi = 3.14159265358979323846f;
 
-struct Roi {
-    float cx = 0.f;
-    float cy = 0.f;
-    float side = 0.f;
-    float angle = 0.f; // radians, source eye-line angle
-    bool valid = false;
-};
-
-struct Point {
-    float x = 0.f;
-    float y = 0.f;
-};
+using face_tracking::Point;
+using face_tracking::Roi;
 
 struct FaceEngine {
     ncnn::Net detector;
@@ -48,7 +39,6 @@ struct FaceEngine {
     bool gpu = false;
     std::string gpuName = "CPU";
     Roi roi;
-    int frameCounter = 0;
     double lastInferenceMs = -1.0;
 
     ~FaceEngine() {
@@ -416,21 +406,20 @@ bool RunMesh(
     output[16] = std::max({mouthL.x, mouthR.x, mouthT.x, mouthB.x}) / width;
     output[17] = std::max({mouthL.y, mouthR.y, mouthT.y, mouthB.y}) / height;
 
-    // Landmarks-to-ROI video tracking: keep a generously padded, roll-normalized ROI between
-    // detector reacquisitions. This is the motion-safe crop, analogous to PP-Matting's ROI path.
-    const float faceW = std::max(1.f, maxX - minX);
-    const float faceH = std::max(1.f, maxY - minY);
-    const float centerX = (minX + maxX) * 0.5f;
-    const float centerY = (minY + maxY) * 0.5f;
+    // Build the next crop from un-clipped landmarks in the roll-normalized plane.
+    // Source-axis bounds + 2.15 padding used to change scale with head rotation,
+    // while the detector reset that scale every sixth sample.
+    Point points[kLandmarkCount];
+    for (int i = 0; i < kLandmarkCount; ++i) points[i] = MapMeshPoint(lm, i, roi);
     const float lcx = (lOuter.x + lInner.x) * 0.5f;
     const float lcy = (lOuter.y + lInner.y) * 0.5f;
     const float rcx = (rOuter.x + rInner.x) * 0.5f;
     const float rcy = (rOuter.y + rInner.y) * 0.5f;
-    engine->roi.cx = centerX;
-    engine->roi.cy = centerY;
-    engine->roi.side = std::max(64.f, std::max(faceW, faceH) * 2.15f);
-    engine->roi.angle = std::atan2(rcy - lcy, rcx - lcx);
-    engine->roi.valid = true;
+    const Roi next = face_tracking::LandmarkRoi(
+        points, kLandmarkCount, std::atan2(rcy - lcy, rcx - lcx));
+    if (!next.valid || next.side > 2.f * std::max(width, height)) return false;
+    for (int i = 0; i < 18; ++i) if (!std::isfinite(output[i])) return false;
+    engine->roi = next;
     return true;
 }
 
@@ -455,6 +444,7 @@ void WarmUp(FaceEngine* engine) {
     roi.valid = true;
     float out[18] = {};
     RunMesh(engine, pixels.data(), 256, 256, roi, out);
+    engine->roi = Roi{}; // Warm-up pixels must never seed the first real frame.
     engine->lastInferenceMs = -1.0;
 }
 } // namespace
@@ -551,27 +541,29 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanFaceTrackingNativeV10
     const auto started = std::chrono::steady_clock::now();
 
     bool ok = false;
-    const bool periodicReacquire =
-        !engine->roi.valid || (engine->frameCounter % 6 == 0);
-
-    if (!periodicReacquire) {
+    // A healthy mesh owns its ROI. Replacing it on a fixed cadence introduces a
+    // detector/mesh crop discontinuity even when the subject has not moved.
+    if (engine->roi.valid) {
         ok = RunMesh(engine, pixels, width, height, engine->roi, output);
     }
-
     if (!ok) {
+        engine->roi.valid = false;
         Roi acquired;
         if (RunDetector(engine, pixels, width, height, &acquired)) {
             engine->roi = acquired;
             ok = RunMesh(engine, pixels, width, height, engine->roi, output);
-        } else {
-            engine->roi.valid = false;
+            if (ok) {
+                // Refine on the same frame so acquisition and subsequent frames
+                // both publish landmarks from the mesh-derived crop convention.
+                ok = RunMesh(engine, pixels, width, height, engine->roi, output);
+            }
         }
     }
+    if (!ok) engine->roi.valid = false;
 
     const auto ended = std::chrono::steady_clock::now();
     engine->lastInferenceMs =
         std::chrono::duration<double, std::milli>(ended - started).count();
-    engine->frameCounter += 1;
     env->ReleaseIntArrayElements(pixelArray, pixels, JNI_ABORT);
 
     if (!ok) return JNI_FALSE;
@@ -607,3 +599,4 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanFaceTrackingNativeV10
     std::lock_guard<std::mutex> guard(gFaceEngineMutex);
     delete reinterpret_cast<FaceEngine*>(handle);
 }
+
