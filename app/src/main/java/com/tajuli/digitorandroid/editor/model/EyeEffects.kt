@@ -41,24 +41,56 @@ data class TrackedEye(val x: Float, val y: Float, val radius: Float, val roll: F
 data class EyePose(val left: TrackedEye, val right: TrackedEye, val identity: Int?,
     val face: BeautyRectV28? = null, val mouth: BeautyRectV28? = null)
 data class EyeSample(val timeUs: Long, val pose: EyePose?)
-data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 6) {
-    fun covers(clip: TimelineClip): Boolean = version == 6 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
+data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 7) {
+    fun covers(clip: TimelineClip): Boolean = version == 7 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
+
+    private fun validAtOrBefore(index: Int): EyeSample? {
+        var i = index.coerceAtMost(samples.lastIndex)
+        while (i >= 0) {
+            samples[i].pose?.let { return samples[i] }
+            if (index - i >= 4) break
+            i--
+        }
+        return null
+    }
+
+    private fun validAtOrAfter(index: Int): EyeSample? {
+        var i = index.coerceAtLeast(0)
+        while (i <= samples.lastIndex) {
+            samples[i].pose?.let { return samples[i] }
+            if (i - index >= 4) break
+            i++
+        }
+        return null
+    }
+
     fun at(timeUs: Long): EyePose? {
         if (timeUs < startUs || timeUs > endUs || samples.isEmpty()) return null
-        val index = samples.binarySearchBy(timeUs) { it.timeUs }
-        if (index >= 0) return samples[index].pose
-        val right = -index - 1
-        val a = samples.getOrNull(right - 1) ?: return null
-        val b = samples.getOrNull(right) ?: return if (timeUs - a.timeUs <= 50_000L) a.pose else null
-        val pa = a.pose ?: return null
-        val pb = b.pose ?: return null
-        // Do not invent motion across a missing face, scene cut or different tracked person.
-        if (b.timeUs - a.timeUs > 100_000L || pa.identity != pb.identity ||
+        val exact = samples.binarySearchBy(timeUs) { it.timeUs }
+        val insertion = if (exact >= 0) exact else -exact - 1
+
+        val left = validAtOrBefore(if (exact >= 0) exact else insertion - 1)
+        val right = validAtOrAfter(if (exact >= 0) exact else insertion)
+
+        if (left == null) return right?.takeIf { it.timeUs - timeUs <= 50_000L }?.pose
+        if (right == null) return left.takeIf { timeUs - it.timeUs <= 50_000L }?.pose
+        if (left.timeUs == right.timeUs) return left.pose
+
+        val pa = left.pose ?: return null
+        val pb = right.pose ?: return null
+        // Bridge only brief model dropouts. Longer losses/scene cuts stay missing instead of
+        // dragging a stale face across the frame.
+        if (right.timeUs - left.timeUs > 120_000L || pa.identity != pb.identity ||
             abs(pa.left.x - pb.left.x) + abs(pa.left.y - pb.left.y) > .18f) return null
-        val t = (timeUs - a.timeUs).toFloat() / (b.timeUs - a.timeUs).coerceAtLeast(1)
-        return EyePose(pa.left.interpolate(pb.left, t), pa.right.interpolate(pb.right, t), pa.identity,
-            pa.face?.let { a -> pb.face?.let { a.lerp(it,t) } },
-            pa.mouth?.let { a -> pb.mouth?.let { a.lerp(it,t) } })
+        val t = (timeUs - left.timeUs).toFloat() /
+            (right.timeUs - left.timeUs).coerceAtLeast(1L).toFloat()
+        return EyePose(
+            pa.left.interpolate(pb.left, t.coerceIn(0f, 1f)),
+            pa.right.interpolate(pb.right, t.coerceIn(0f, 1f)),
+            pa.identity,
+            pa.face?.let { a -> pb.face?.let { a.lerp(it, t.coerceIn(0f, 1f)) } },
+            pa.mouth?.let { a -> pb.mouth?.let { a.lerp(it, t.coerceIn(0f, 1f)) } },
+        )
     }
 }
 
