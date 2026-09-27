@@ -425,6 +425,19 @@ bool RunMesh(
     const float rightX = output[5] * width;
     const float rightY = output[6] * height;
     const float eyeDistance = Distance(Point{leftX, leftY}, Point{rightX, rightY});
+    const Point eyeMid{(leftX + rightX) * .5f, (leftY + rightY) * .5f};
+    const Point roiCenter{roi.cx, roi.cy};
+    const float eyeMidOffset = Distance(eyeMid, roiCenter);
+    const float roiSide = std::max(48.f, roi.side);
+
+    // The mesh is allowed to move within the crop, but a single frame cannot teleport the eye
+    // pair to the crop edge or rotate the eye line by ~70 degrees while the ROI remains level.
+    // Reject such output and let the caller reacquire from BlazeFace on the same source frame.
+    if (eyeDistance < roiSide * .10f || eyeDistance > roiSide * .55f ||
+        eyeMidOffset > roiSide * .34f ||
+        std::fabs(AngleDelta(globalRoll, roi.angle)) > .55f) {
+        return false;
+    }
 
     // Reject a self-propagating bad crop instead of storing obviously impossible eye geometry.
     // These bounds are intentionally broad: they reject the device failure (an eye hundreds of
