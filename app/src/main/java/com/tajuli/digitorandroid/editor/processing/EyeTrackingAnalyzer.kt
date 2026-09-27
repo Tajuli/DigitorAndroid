@@ -186,6 +186,39 @@ class EyeTrackingAnalyzer(private val context: Context) {
         }
     }
 
+    private fun resolveVideoSampleIntervalUs(retriever: MediaMetadataRetriever): Long {
+        if (Build.VERSION.SDK_INT < 28) return FALLBACK_SAMPLE_INTERVAL_US
+
+        val frameCount = retriever
+            .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)
+            ?.toLongOrNull()
+            ?.takeIf { it > 1L }
+            ?: return FALLBACK_SAMPLE_INTERVAL_US
+        val durationUs = retriever
+            .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+            ?.toLongOrNull()
+            ?.times(1_000L)
+            ?.takeIf { it > 0L }
+            ?: return FALLBACK_SAMPLE_INTERVAL_US
+
+        val sourceFrameUs = durationUs.toDouble() / frameCount.toDouble()
+        if (!sourceFrameUs.isFinite() || sourceFrameUs <= 0.0) {
+            return FALLBACK_SAMPLE_INTERVAL_US
+        }
+
+        // Use an integer number of source frames per tracking sample. This prevents
+        // MediaMetadataRetriever OPTION_CLOSEST from alternating between a frame before and after
+        // the requested timestamp (visible as forward/back tracking wobble on ~29.85 fps sources).
+        val sourceFps = 1_000_000.0 / sourceFrameUs
+        val stride = (sourceFps / TARGET_TRACKING_FPS)
+            .roundToInt()
+            .coerceAtLeast(1)
+        return (sourceFrameUs * stride)
+            .roundToInt()
+            .toLong()
+            .coerceIn(MIN_SAMPLE_INTERVAL_US, MAX_SAMPLE_INTERVAL_US)
+    }
+
     suspend fun analyze(
         clip: TimelineClip,
         onBackend: (gpuAccelerated: Boolean) -> Unit = {},
@@ -261,6 +294,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
                             onProgress(100)
                         } else {
                             retriever.setDataSource(context, Uri.parse(clip.uri))
+                            val sampleIntervalUs = resolveVideoSampleIntervalUs(retriever)
                             val width = retriever
                                 .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
                                 ?.toIntOrNull() ?: 720
@@ -305,7 +339,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
                                         .toInt()
                                         .coerceIn(0, 99),
                                 )
-                                time += SAMPLE_INTERVAL_US
+                                time += sampleIntervalUs
                             }
 
                             if (samples.lastOrNull()?.timeUs != clip.sourceOutUs) {
@@ -369,7 +403,11 @@ class EyeTrackingAnalyzer(private val context: Context) {
 
     companion object {
         private const val DECODE_LONG_EDGE = 512
-        private const val SAMPLE_INTERVAL_US = 83_333L
+        private const val SAMPLE_INTERVAL_US = 83_333L // still-image synthetic track only
+        private const val FALLBACK_SAMPLE_INTERVAL_US = 83_333L
+        private const val TARGET_TRACKING_FPS = 15.0
+        private const val MIN_SAMPLE_INTERVAL_US = 50_000L
+        private const val MAX_SAMPLE_INTERVAL_US = 100_000L
         private const val MAX_CENTERED_GAP_US = 110_000L
         private const val MAX_CENTERED_MOTION_RADII = 7.0f
         private val analysisMutex = Mutex()
