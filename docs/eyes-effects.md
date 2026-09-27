@@ -32,18 +32,9 @@ The old MediaPipe live-face preview tap is not used for Eyes/Funny Faces after t
 and export consume the durable ncnn-generated EyeTrack, preventing a second incompatible tracking
 backend from overriding the analyzed result.
 
-Tracking samples are aligned to an integer number of source frames (normally about 12–15 Hz) and
-interpolated by EyeTrack between adjacent samples. This avoids OPTION_CLOSEST alternating between a
-source frame before/after the requested timestamp on fractional-rate clips such as 29.85 fps. Native
-ROI tracking now reacquires with BlazeFace only when Face Mesh actually loses the face; it no longer
-forces a detector reset every six samples. The ROI crop itself is softly stabilized while returned
-eye coordinates remain current-frame coordinates. After full-clip analysis, a symmetric 20/60/20
-zero-phase pass removes small landmark jitter without the temporal lag caused by the old causal
-previous-to-current smoother. Eye openness remains unsmoothed so blinks stay frame-current.
-
-The native tracker records both eyes, eye openness, roll, face bounds and mouth bounds for one
-primary face. Corrected tracks use cache version 3, so older laggy v2 tracks are automatically
-invalidated and must be analyzed again. Complete tracks are cached only after analysis succeeds.
+Tracking samples are stored at 12 Hz and interpolated by EyeTrack between adjacent samples. The
+native tracker records both eyes, eye openness, roll, face bounds and mouth bounds for one primary
+face. Complete tracks are cached only after analysis succeeds.
 
 27 eye/face presets include Fire, Laser, Electric Eyes, two Flame Eyes variants, Flaming Horns,
 reflection, scans and regional face distortions. 31 additional body decorations include wings,
