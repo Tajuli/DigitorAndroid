@@ -264,110 +264,45 @@ bool RunDetector(
     }
     if (reg.empty() || score.empty()) return false;
 
-    struct Detection {
-        float score = 0.f;
-        float cx = 0.f;
-        float cy = 0.f;
-        float w = 0.f;
-        float h = 0.f;
-        Point eye0;
-        Point eye1;
-    };
-
-    auto decode = [&](int index, float probability) -> Detection {
-        const Point anchor = Anchors()[index];
-        Detection d;
-        d.score = probability;
-        d.cx = RegAt(reg, index, 0) / kDetectorSize + anchor.x;
-        d.cy = RegAt(reg, index, 1) / kDetectorSize + anchor.y;
-        d.w = std::fabs(RegAt(reg, index, 2)) / kDetectorSize;
-        d.h = std::fabs(RegAt(reg, index, 3)) / kDetectorSize;
-        d.eye0 = Point{
-            RegAt(reg, index, 4) / kDetectorSize + anchor.x,
-            RegAt(reg, index, 5) / kDetectorSize + anchor.y,
-        };
-        d.eye1 = Point{
-            RegAt(reg, index, 6) / kDetectorSize + anchor.x,
-            RegAt(reg, index, 7) / kDetectorSize + anchor.y,
-        };
-        return d;
-    };
-
-    std::vector<Detection> candidates;
-    candidates.reserve(64);
-    int bestIndex = -1;
-    float bestScore = .5f;
+    float bestScore = 0.5f;
+    int best = -1;
     for (int i = 0; i < kAnchorCount; ++i) {
         const float probability = Sigmoid(ScoreAt(score, i));
-        if (probability < .5f) continue;
-        candidates.push_back(decode(i, probability));
         if (probability > bestScore) {
             bestScore = probability;
-            bestIndex = static_cast<int>(candidates.size()) - 1;
+            best = i;
         }
     }
-    if (bestIndex < 0 || candidates.empty()) return false;
+    if (best < 0) return false;
 
-    const Detection best = candidates[bestIndex];
-    auto iou = [](const Detection& a, const Detection& b) -> float {
-        const float ax1 = a.cx - a.w * .5f, ay1 = a.cy - a.h * .5f;
-        const float ax2 = a.cx + a.w * .5f, ay2 = a.cy + a.h * .5f;
-        const float bx1 = b.cx - b.w * .5f, by1 = b.cy - b.h * .5f;
-        const float bx2 = b.cx + b.w * .5f, by2 = b.cy + b.h * .5f;
-        const float iw = std::max(0.f, std::min(ax2, bx2) - std::max(ax1, bx1));
-        const float ih = std::max(0.f, std::min(ay2, by2) - std::max(ay1, by1));
-        const float inter = iw * ih;
-        const float uni = a.w * a.h + b.w * b.h - inter;
-        return uni > 1e-9f ? inter / uni : 0.f;
-    };
+    const Point anchor = Anchors()[best];
+    const float cxN = RegAt(reg, best, 0) / kDetectorSize + anchor.x;
+    const float cyN = RegAt(reg, best, 1) / kDetectorSize + anchor.y;
+    const float wN = std::fabs(RegAt(reg, best, 2)) / kDetectorSize;
+    const float hN = std::fabs(RegAt(reg, best, 3)) / kDetectorSize;
 
-    // MediaPipe BlazeFace uses weighted NMS. Blend the highest-score face with its overlapping
-    // anchors instead of letting the ROI jump when two neighboring SSD anchors exchange rank.
-    float weightSum = 0.f;
-    Detection blended;
-    for (const Detection& candidate : candidates) {
-        if (iou(best, candidate) <= .30f) continue;
-        const float weight = candidate.score;
-        weightSum += weight;
-        blended.cx += candidate.cx * weight;
-        blended.cy += candidate.cy * weight;
-        blended.w += candidate.w * weight;
-        blended.h += candidate.h * weight;
-        blended.eye0.x += candidate.eye0.x * weight;
-        blended.eye0.y += candidate.eye0.y * weight;
-        blended.eye1.x += candidate.eye1.x * weight;
-        blended.eye1.y += candidate.eye1.y * weight;
-    }
-    if (weightSum <= 0.f) return false;
-    blended.cx /= weightSum;
-    blended.cy /= weightSum;
-    blended.w /= weightSum;
-    blended.h /= weightSum;
-    blended.eye0.x /= weightSum;
-    blended.eye0.y /= weightSum;
-    blended.eye1.x /= weightSum;
-    blended.eye1.y /= weightSum;
+    const float cx = (cxN * kDetectorSize - padX) / scale;
+    const float cy = (cyN * kDetectorSize - padY) / scale;
+    const float bw = wN * kDetectorSize / scale;
+    const float bh = hN * kDetectorSize / scale;
 
-    const float cx = (blended.cx * kDetectorSize - padX) / scale;
-    const float cy = (blended.cy * kDetectorSize - padY) / scale;
-    const float bw = blended.w * kDetectorSize / scale;
-    const float bh = blended.h * kDetectorSize / scale;
-    const Point eye0{
-        (blended.eye0.x * kDetectorSize - padX) / scale,
-        (blended.eye0.y * kDetectorSize - padY) / scale,
+    auto keypoint = [&](int k) -> Point {
+        const float xN = RegAt(reg, best, 4 + 2 * k) / kDetectorSize + anchor.x;
+        const float yN = RegAt(reg, best, 5 + 2 * k) / kDetectorSize + anchor.y;
+        return Point{
+            (xN * kDetectorSize - padX) / scale,
+            (yN * kDetectorSize - padY) / scale,
+        };
     };
-    const Point eye1{
-        (blended.eye1.x * kDetectorSize - padX) / scale,
-        (blended.eye1.y * kDetectorSize - padY) / scale,
-    };
+    const Point eye0 = keypoint(0);
+    const Point eye1 = keypoint(1);
 
     roiOut->cx = cx;
     roiOut->cy = cy;
     roiOut->side = std::max(48.f, 1.5f * std::max(bw, bh));
     roiOut->angle = std::atan2(eye1.y - eye0.y, eye1.x - eye0.x);
-    roiOut->valid = std::isfinite(roiOut->cx) && std::isfinite(roiOut->cy) &&
-        std::isfinite(roiOut->side) && std::isfinite(roiOut->angle);
-    return roiOut->valid;
+    roiOut->valid = true;
+    return true;
 }
 
 ncnn::Mat BuildMeshInput(
