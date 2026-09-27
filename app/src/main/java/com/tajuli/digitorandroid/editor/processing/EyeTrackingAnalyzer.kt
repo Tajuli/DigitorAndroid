@@ -44,7 +44,7 @@ object EyeTrackStore {
         .joinToString("") { "%02x".format(it) }
 
     private fun file(context: Context, clip: TimelineClip) =
-        File(context.filesDir, "eye_tracks_v2/${key(clip)}.json")
+        File(context.filesDir, "eye_tracks_v3/${key(clip)}.json")
 
     fun load(context: Context, clip: TimelineClip): EyeTrack? {
         val key = key(clip)
