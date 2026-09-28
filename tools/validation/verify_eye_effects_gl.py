@@ -136,3 +136,22 @@ outward=laser[max(0,row-2):row+3, 8:36].sum()
 inward=laser[max(0,row-2):row+3, 66:98].sum()
 assert outward > inward*4 + 100, ('Laser must start at eye and travel outward',outward,inward)
 print('PASS: Laser Eyes originates at the eye and emits outward only.')
+
+# Blink gating is independent per eye. <=0.18 must be fully off; >=0.30 is fully on.
+vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); amounts(1)
+vec('uEyeState',[.35,.35,0,0])
+both_open=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+vec('uEyeState',[.15,.35,0,0])
+left_blink=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+vec('uEyeState',[.35,.15,0,0])
+right_blink=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+vec('uEyeState',[.15,.15,0,0])
+both_blink=render()
+left_slice=np.s_[:, :w//2, :]
+right_slice=np.s_[:, w//2:, :]
+assert left_blink[left_slice].sum() < both_open[left_slice].sum()*.20, 'Left blink must turn off left effect'
+assert right_blink[right_slice].sum() < both_open[right_slice].sum()*.20, 'Right blink must turn off right effect'
+assert right_blink[left_slice].sum() > both_open[left_slice].sum()*.70, 'Right blink must not turn off left effect'
+assert left_blink[right_slice].sum() > both_open[right_slice].sum()*.70, 'Left blink must not turn off right effect'
+assert np.array_equal(both_blink,source), 'Both closed eyes must remove visible eye effects'
+print('PASS: per-eye blink gate independently disables closed-eye effects.')
