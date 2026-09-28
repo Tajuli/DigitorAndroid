@@ -9,10 +9,17 @@ class EyeEffectsTest {
         val eye = TrackedEye(x, .4f, .04f, 0f, open)
         return EyePose(eye, eye.copy(x = x+.3f), id)
     }
-    @Test fun interpolatesMotionAndBlinkInSourceTime() {
-        val track = EyeTrack(clip.uri, 0, 100_000, listOf(EyeSample(0, pose()), EyeSample(40_000, pose(.32f, open=0f))))
-        assertEquals(.31f, track.at(20_000)!!.left.x, .0001f)
-        assertEquals(.5f, track.at(20_000)!!.left.open, .0001f)
+    @Test fun interpolatesMotionButUsesNearestFrameBlinkState() {
+        val track = EyeTrack(
+            clip.uri,
+            0,
+            100_000,
+            listOf(EyeSample(0, pose(open=1f)), EyeSample(40_000, pose(.32f, open=0f))),
+        )
+        assertEquals(.3095f, track.at(19_000)!!.left.x, .0001f)
+        assertEquals(1f, track.at(19_000)!!.left.open, 0f)
+        assertEquals(.3105f, track.at(21_000)!!.left.x, .0001f)
+        assertEquals(0f, track.at(21_000)!!.left.open, 0f)
         assertNull(track.at(-1))
         assertNull(track.at(100_001))
     }
@@ -85,6 +92,7 @@ class EyeEffectsTest {
     @Test fun requiresFreshAnalysisForTheOldNominalTimestampCache() {
         val current = EyeTrack(clip.uri, 0, clip.sourceOutUs, listOf(EyeSample(0, pose())))
         assertTrue(current.covers(clip))
+        assertFalse(current.copy(version = 8).covers(clip))
         assertFalse(current.copy(version = 7).covers(clip))
         assertFalse(current.copy(version = 6).covers(clip))
         assertFalse(current.copy(version = 5).covers(clip))
