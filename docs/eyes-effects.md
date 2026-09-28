@@ -84,3 +84,23 @@ wrong-color v5 tracks. Device visual QA remains necessary for neural tracking ac
 Android contracts:
 - https://developer.android.com/reference/android/graphics/Bitmap.Config#ARGB_8888
 - https://developer.android.com/reference/android/media/MediaCodec#transformations-when-rendering-onto-surface
+
+
+## Per-frame analysis and blink gating
+
+Video face analysis runs once for every decoded source frame. The sequential MediaCodec/OES decoder
+emits each frame at its actual presentation timestamp (PTS), and each unique PTS receives one ncnn
+Vulkan face-tracking inference and one EyeSample. There is no fixed 12 fps video sampling interval.
+A short decode preroll may be analyzed to seed tracking around a trim boundary, but persisted video
+samples still use the decoder's real source-frame timestamps. Still images retain their lightweight
+synthetic timeline samples because the image pixels do not change.
+
+Eye openness is also treated as a per-frame signal. Position/radius/roll may interpolate between
+adjacent EyeSamples for arbitrary preview times, but eye openness uses the nearest decoded frame so
+a blink is not smeared across time. The production eye shader applies an independent gate to each
+eye: `smoothstep(0.18, 0.30, open)`. Therefore a closed left eye removes only the left-eye effect,
+a closed right eye removes only the right-eye effect, and closing both eyes removes both visible
+eye effects. Face-level effects that are not emitted from an eye remain independent.
+
+These semantics use EyeTrack cache version 9 / `eye_tracks_v9`, forcing a fresh analysis after the
+upgrade.
