@@ -26,7 +26,10 @@ internal const val EYE_EFFECT_SHADER = """
     }
     vec3 eyePalette(float t) { return .5+.5*cos(6.28318*(t+vec3(0,.33,.67))); }
     vec3 eyeLight(vec2 uv, vec4 eye, float openness, float roll) {
-        if (eye.z < .0001 || openness < .02) return vec3(0);
+        // Blink gate is per eye. Closed eyelids remove that eye's effect completely; the short
+        // transition avoids a hard pop while still following the per-frame openness signal.
+        float blinkGate=smoothstep(.18,.30,openness);
+        if (eye.z < .0001 || blinkGate < .001) return vec3(0);
         vec2 d=(vec2(uv.x,1.0-uv.y)-eye.xy)*vec2(1.0,uTexelSize.x/uTexelSize.y);
         float c=cos(roll),s=sin(roll);
         vec2 p=vec2(c*d.x+s*d.y,-s*d.x+c*d.y)/eye.z;
@@ -127,7 +130,7 @@ internal const val EYE_EFFECT_SHADER = """
             float flare=exp(-p.y*p.y*160.0)*exp(-abs(p.x)*.45);
             light+=uEyesE.y*(vec3(1,.05,.7)*(core+halo*.4)+vec3(1,.7,.95)*flare);
         }
-        return light*openness;
+        return light*blinkGate;
     }
     vec2 eyeSourceUv(vec2 uv) {
         vec2 p=uv*2.0-1.0-uEyeTranslation;
