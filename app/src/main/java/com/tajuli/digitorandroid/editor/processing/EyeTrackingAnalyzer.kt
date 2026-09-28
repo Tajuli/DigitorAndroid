@@ -36,7 +36,7 @@ object EyeTrackStore {
         .joinToString("") { "%02x".format(it) }
 
     private fun file(context: Context, clip: TimelineClip) =
-        File(context.filesDir, "eye_tracks_v8/${key(clip)}.json")
+        File(context.filesDir, "eye_tracks_v9/${key(clip)}.json")
 
     fun load(context: Context, clip: TimelineClip): EyeTrack? {
         val key = key(clip)
@@ -177,9 +177,9 @@ class EyeTrackingAnalyzer(private val context: Context) {
                             }
                             onProgress(100)
                         } else {
-                            // Keep the pose on the frame's real presentation timestamp. Retrieving
-                            // OPTION_CLOSEST at a nominal 12 Hz stamped neighboring video frames
-                            // with the requested time, making the overlay alternately lead/lag.
+                            // VIDEO IS PER-FRAME: every decoded source frame in the trim is sent to
+                            // ncnn Vulkan exactly once and stored at MediaCodec's real presentation
+                            // timestamp. There is no fixed-fps sampling or guessed timestamp here.
                             val jobContext = currentCoroutineContext()
                             val duration = (clip.sourceOutUs - clip.sourceInUs).coerceAtLeast(1L)
                             GpuSequentialCutoutDecoderV47(context, DECODE_LONG_EDGE).decodeTargets(
@@ -207,8 +207,6 @@ class EyeTrackingAnalyzer(private val context: Context) {
                                 }
                             }
                             check(samples.isNotEmpty()) { "No video frames decoded for face tracking" }
-                            // The last decoded frame is held until the exclusive trim end.
-                            samples += EyeSample(clip.sourceOutUs, samples.last().pose)
                         }
 
                         currentCoroutineContext().ensureActive()
@@ -242,7 +240,7 @@ class EyeTrackingAnalyzer(private val context: Context) {
 
     companion object {
         private const val DECODE_LONG_EDGE = 960
-        private const val SAMPLE_INTERVAL_US = 83_333L
+        private const val SAMPLE_INTERVAL_US = 83_333L // still-image synthetic timeline only
         private val analysisMutex = Mutex()
     }
 }
