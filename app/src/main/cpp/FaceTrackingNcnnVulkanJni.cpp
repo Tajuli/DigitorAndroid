@@ -346,12 +346,6 @@ Point MapMeshPoint(const float* lm, int index, const Roi& roi) {
     };
 }
 
-float Distance(const Point& a, const Point& b) {
-    const float dx = b.x - a.x;
-    const float dy = b.y - a.y;
-    return std::sqrt(dx * dx + dy * dy);
-}
-
 bool RunMesh(
         FaceEngine* engine,
         const jint* pixels,
@@ -421,7 +415,7 @@ bool RunMesh(
     const float rightOpen = face_tracking::BlinkOpenness(rightEar, &engine->rightEyeClosed);
 
     auto fillEye = [&](int offset, const Point& outer, const Point& inner, float openness) {
-        const float eyeWidth = std::max(3.f, Distance(outer, inner));
+        const float eyeWidth = std::max(3.f, face_tracking::Distance(outer, inner));
         output[offset + 0] = ((outer.x + inner.x) * 0.5f) / width;
         output[offset + 1] = ((outer.y + inner.y) * 0.5f) / height;
         output[offset + 2] = (eyeWidth * 0.5f) / width;
@@ -446,10 +440,10 @@ bool RunMesh(
     const float leftY = output[1] * height;
     const float rightX = output[5] * width;
     const float rightY = output[6] * height;
-    const float eyeDistance = Distance(Point{leftX, leftY}, Point{rightX, rightY});
+    const float eyeDistance = face_tracking::Distance(Point{leftX, leftY}, Point{rightX, rightY});
     const Point eyeMid{(leftX + rightX) * .5f, (leftY + rightY) * .5f};
     const Point roiCenter{roi.cx, roi.cy};
-    const float eyeMidOffset = Distance(eyeMid, roiCenter);
+    const float eyeMidOffset = face_tracking::Distance(eyeMid, roiCenter);
     const float roiSide = std::max(48.f, roi.side);
 
     // Validate only the CURRENT eye pose here. Do not reject a good current frame merely because
