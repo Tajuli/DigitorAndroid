@@ -179,6 +179,29 @@ vec('uHeadPose',[0,0,0,1])
 vec('uGazePose',[-1,0,0,1])
 print('PASS: shared gaze steers both lasers; frontal gaze ignores pitch bias and foreshortens toward camera.')
 
+# Electric Eyes shares Laser's gaze model: directional when looking aside, radial when looking at camera.
+amounts(12)
+vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[1,0,.35,1])
+electric_right=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+assert electric_right[:, 86:].sum() > electric_right[:, :42].sum()*1.20 + 100, 'Electric Eyes must follow right gaze'
+vec('uGazePose',[0,.28,.92,1])
+electric_front=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+electric_center=electric_front[max(0,row-18):min(h,row+19), 28:100].sum()
+electric_edges=electric_front[:14].sum()+electric_front[-14:].sum()+electric_front[:, :12].sum()+electric_front[:, -12:].sum()
+assert electric_center > electric_edges*1.10 + 100, 'Camera-facing Electric Eyes must read as forward energy burst'
+print('PASS: Electric Eyes follows gaze and switches to camera-facing energy burst.')
+
+# Fire/Flame are eye-anchored procedural flames with temporal turbulence, not static blobs.
+vec('uGazePose',[0,0,1,1]); vec('uHeadPose',[0,0,0,1])
+amounts(0); uniform('uEyeTime',.20); fire_a=render()
+uniform('uEyeTime',.47); fire_b=render()
+assert not np.array_equal(fire_a,fire_b), 'Fire Eyes must flicker/turbulate over time'
+amounts(13); uniform('uEyeTime',.31); flame_a=render()
+amounts(14); uniform('uEyeTime',.31); flame_b=render()
+assert not np.array_equal(flame_a,flame_b), 'Flame variants must remain visually distinct'
+uniform('uEyeTime',.35)
+print('PASS: Fire/Flame effects are dynamic, eye-anchored and visually distinct.')
+
 # Blink gating is independent per eye. <=0.18 must be fully off; >=0.30 is fully on.
 # Use frontal gaze so each eye's flare stays local. With side gaze, the open opposite eye's
 # shared laser ray can legitimately cross the closed eye's half of the frame.
