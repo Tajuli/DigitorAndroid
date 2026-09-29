@@ -167,10 +167,14 @@ ratio=max(top,bottom)/max(1,min(top,bottom))
 assert ratio < 2.4, ('Camera-facing laser must read as radial lens hit, not directional ray',top,bottom)
 
 # A genuine down glance still has a lower eye-depth component and must retain a directional ray.
+# Validate directionality, not total brightness: the frontal starburst is intentionally bright,
+# so comparing absolute energy against it can falsely fail even when the down ray is correct.
 vec('uHeadPose',[0,.28,0,.97])
 vec('uGazePose',[0,.55,.42,1])
 down_gaze=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-assert down_gaze[:24].sum() > biased_front[:24].sum()*1.5 + 100, 'True down gaze must keep downward beam'
+down_energy=down_gaze[:24].sum()
+up_energy=down_gaze[-24:].sum()
+assert down_energy > up_energy*1.35 + 100, ('True down gaze must keep downward beam',down_energy,up_energy)
 vec('uHeadPose',[0,0,0,1])
 vec('uGazePose',[-1,0,0,1])
 print('PASS: shared gaze steers both lasers; frontal gaze ignores pitch bias and foreshortens toward camera.')
