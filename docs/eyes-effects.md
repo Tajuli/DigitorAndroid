@@ -114,3 +114,7 @@ eye effects. Face-level effects that are not emitted from an eye remain independ
 
 These semantics use EyeTrack cache version 11 / `eye_tracks_v11`, forcing a fresh analysis after
 the upgrade.
+
+
+### 3D gaze tracking
+Laser Eyes now uses the Face Mesh 3D face orientation plus lightweight pupil refinement so both beams share the subject's gaze direction; frontal gaze is rendered with camera-facing foreshortening.
