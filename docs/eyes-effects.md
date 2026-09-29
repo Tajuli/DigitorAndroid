@@ -45,7 +45,7 @@ A valid mesh is not replaced by a detector crop every sixth sample. Acquisition 
 same frame, failed mesh output invalidates the ROI, and warm-up never seeds video tracking.
 
 The native tracker records both eyes, eye openness, roll, face bounds and mouth bounds for one
-primary face. Cache version 6 invalidates earlier tracks; run Face Tracking again after updating.
+primary face. Current blink-aware tracks use cache version 10; run Face Tracking again after updating.
 Complete tracks are cached only after analysis succeeds. GPU handoff/cancellation remain intact.
 
 27 eye/face presets include Fire, Laser, Electric Eyes, two Flame Eyes variants, Flaming Horns,
@@ -97,10 +97,20 @@ synthetic timeline samples because the image pixels do not change.
 
 Eye openness is also treated as a per-frame signal. Position/radius/roll may interpolate between
 adjacent EyeSamples for arbitrary preview times, but eye openness uses the nearest decoded frame so
-a blink is not smeared across time. The production eye shader applies an independent gate to each
-eye: `smoothstep(0.18, 0.30, open)`. Therefore a closed left eye removes only the left-eye effect,
+a blink is not smeared across time.
+
+Blink detection is computed natively from a rotation-invariant, three-pair Eye Aspect Ratio (EAR)
+instead of a single upper/lower eyelid pair. The left eye uses Face Mesh pairs 159/145, 158/153 and
+160/144 over corners 33/133; the right eye uses 386/374, 385/380 and 387/373 over corners 362/263.
+Each eye has independent hysteresis: it closes at EAR <= 0.18 and does not reopen until EAR >= 0.23.
+While closed, the stored eye openness is exactly zero. A short missing per-frame pose may still
+bridge position, but its eye openness is forced to zero so Fire/Laser cannot shine through an
+uncertain/blink frame.
+
+The production eye shader applies a final independent per-eye gate:
+`smoothstep(0.18, 0.30, open)`. Therefore a closed left eye removes only the left-eye effect,
 a closed right eye removes only the right-eye effect, and closing both eyes removes both visible
 eye effects. Face-level effects that are not emitted from an eye remain independent.
 
-These semantics use EyeTrack cache version 9 / `eye_tracks_v9`, forcing a fresh analysis after the
-upgrade.
+These semantics use EyeTrack cache version 10 / `eye_tracks_v10`, forcing a fresh analysis after
+the upgrade.
