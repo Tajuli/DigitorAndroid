@@ -64,10 +64,19 @@ internal const val EYE_EFFECT_SHADER = """
             float along=dot(p,dir);
             float across=p.x*dir.y-p.y*dir.x;
             float ray=smoothstep(-.05,.13,along);
-            float sideGate=smoothstep(.04,.18,projected);
+
+            // Face-mesh pitch has a small downward bias on real frontal footage (especially when
+            // the chin is a little low). Do not turn that bias into a long 2D laser. When the
+            // recovered 3D gaze is strongly forward, collapse the projected ray into the
+            // foreshortened camera-facing flare. A real side/down glance lowers gazeForward via
+            // pupil displacement, so directional beams are still preserved.
+            float forwardLock=smoothstep(.84,.96,gazeForward);
+            float rayProjected=projected*(1.0-forwardLock);
+            float sideGate=smoothstep(.04,.18,rayProjected)*(1.0-forwardLock);
             float beam=exp(-across*across*230.0)*exp(-max(along,0.0)*.06)*ray*sideGate;
             float bloom=exp(-across*across*18.0)*exp(-max(along,0.0)*.11)*ray*sideGate;
-            float frontGate=(1.0-smoothstep(.055,.24,projected))*smoothstep(.62,.90,gazeForward);
+            float frontGate=smoothstep(.78,.92,gazeForward)*
+                (1.0-smoothstep(.38,.68,projected));
             float cameraCore=exp(-dot(p,p)*2.6);
             float cameraRing=exp(-pow((length(p)-.62)*8.0,2.0));
             light+=uEyesA.y*(
