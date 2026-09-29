@@ -39,6 +39,8 @@ struct FaceEngine {
     bool gpu = false;
     std::string gpuName = "CPU";
     Roi roi;
+    bool leftEyeClosed = false;
+    bool rightEyeClosed = false;
     int frameCounter = 0;
     double lastInferenceMs = -1.0;
 
@@ -402,18 +404,32 @@ bool RunMesh(
     const float stableRoll =
         std::isfinite(globalRoll) && std::fabs(rollDelta) <= .90f ? globalRoll : roi.angle;
 
-    auto fillEye = [&](int offset, const Point& outer, const Point& inner,
-                       const Point& top, const Point& bottom) {
+    // Multi-pair EAR is substantially more reliable for blinks than one vertical lid pair.
+    // Left: corners 33/133, lid pairs 159/145, 158/153, 160/144.
+    // Right: corners 362/263, lid pairs 386/374, 385/380, 387/373.
+    const float leftEar = face_tracking::EyeAspectRatio(
+        points[33], points[133],
+        points[159], points[145],
+        points[158], points[153],
+        points[160], points[144]);
+    const float rightEar = face_tracking::EyeAspectRatio(
+        points[362], points[263],
+        points[386], points[374],
+        points[385], points[380],
+        points[387], points[373]);
+    const float leftOpen = face_tracking::BlinkOpenness(leftEar, &engine->leftEyeClosed);
+    const float rightOpen = face_tracking::BlinkOpenness(rightEar, &engine->rightEyeClosed);
+
+    auto fillEye = [&](int offset, const Point& outer, const Point& inner, float openness) {
         const float eyeWidth = std::max(3.f, Distance(outer, inner));
-        const float vertical = Distance(top, bottom);
         output[offset + 0] = ((outer.x + inner.x) * 0.5f) / width;
         output[offset + 1] = ((outer.y + inner.y) * 0.5f) / height;
         output[offset + 2] = (eyeWidth * 0.5f) / width;
         output[offset + 3] = stableRoll;
-        output[offset + 4] = Clamp((vertical / eyeWidth - .035f) / .18f, 0.f, 1.f);
+        output[offset + 4] = openness;
     };
-    fillEye(0, lOuter, lInner, lTop, lBottom);
-    fillEye(5, rOuter, rInner, rTop, rBottom);
+    fillEye(0, lOuter, lInner, leftOpen);
+    fillEye(5, rOuter, rInner, rightOpen);
 
     float rawMinX = points[0].x, rawMinY = points[0].y;
     float rawMaxX = points[0].x, rawMaxY = points[0].y;
