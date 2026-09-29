@@ -154,6 +154,9 @@ vec('uGazePose',[-1,0,0,1])
 print('PASS: shared gaze steers both lasers and frontal gaze foreshortens toward camera.')
 
 # Blink gating is independent per eye. <=0.18 must be fully off; >=0.30 is fully on.
+# Use frontal gaze so each eye's flare stays local. With side gaze, the open opposite eye's
+# shared laser ray can legitimately cross the closed eye's half of the frame.
+vec('uGazePose',[0,0,1,1])
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); amounts(1)
 vec('uEyeState',[.35,.35,0,0])
 both_open=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
