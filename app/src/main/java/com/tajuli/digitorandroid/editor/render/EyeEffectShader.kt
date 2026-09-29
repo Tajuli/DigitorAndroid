@@ -70,18 +70,40 @@ internal const val EYE_EFFECT_SHADER = """
             // recovered 3D gaze is strongly forward, collapse the projected ray into the
             // foreshortened camera-facing flare. A real side/down glance lowers gazeForward via
             // pupil displacement, so directional beams are still preserved.
-            float forwardLock=smoothstep(.84,.96,gazeForward);
+            // Camera-facing mode is decided from both the 3D head normal and eye-depth
+            // confidence, not from projected X/Y alone. This prevents a noisy pitch estimate from
+            // drawing a long diagonal ray while the subject is visibly looking into the lens.
+            float cameraFacing=
+                smoothstep(.80,.92,uHeadPose.w)*
+                smoothstep(.60,.82,gazeForward);
+            float forwardLock=max(smoothstep(.82,.94,gazeForward),cameraFacing);
             float rayProjected=projected*(1.0-forwardLock);
-            float sideGate=smoothstep(.04,.18,rayProjected)*(1.0-forwardLock);
+            float sideGate=smoothstep(.05,.20,rayProjected)*
+                (1.0-forwardLock)*(1.0-forwardLock);
             float beam=exp(-across*across*230.0)*exp(-max(along,0.0)*.06)*ray*sideGate;
             float bloom=exp(-across*across*18.0)*exp(-max(along,0.0)*.11)*ray*sideGate;
-            float frontGate=smoothstep(.78,.92,gazeForward)*
-                (1.0-smoothstep(.38,.68,projected));
-            float cameraCore=exp(-dot(p,p)*2.6);
-            float cameraRing=exp(-pow((length(p)-.62)*8.0,2.0));
+
+            // A ray aimed at the camera has almost no meaningful 2D length. Render it as a
+            // foreshortened lens hit: compact white core, expanding circular glow/rings and a
+            // radial starburst. This reads as light travelling out of the screen toward the viewer.
+            float frontGate=max(
+                cameraFacing,
+                smoothstep(.78,.92,gazeForward)*(1.0-smoothstep(.32,.62,projected)));
+            float cameraCore=exp(-r*r*1.55);
+            float cameraHalo=exp(-r*r*.20);
+            float cameraRing=exp(-pow((r-.78)*7.0,2.0));
+            float cameraRing2=exp(-pow((r-1.55)*4.2,2.0));
+            float cameraSpokes=pow(abs(cos(a*4.0)),18.0)*exp(-r*.38);
             light+=uEyesA.y*(
-                vec3(1,.04,.02)*(bloom*.8+frontGate*cameraRing*.55)+
-                vec3(1,.78,.64)*(beam+core+frontGate*cameraCore*1.8)
+                vec3(1,.04,.02)*(
+                    bloom*.8+
+                    frontGate*(cameraRing*.52+cameraRing2*.20+cameraHalo*.16)
+                )+
+                vec3(1,.78,.64)*(
+                    beam+
+                    core*(1.0-frontGate)+
+                    frontGate*(cameraCore*2.5+cameraSpokes*.75)
+                )
             );
         }
         if(uEyesA.z>.001) {

@@ -151,18 +151,27 @@ eye_band=front[max(0,row-12):min(h,row+13), 34:94].sum()
 far_edges=front[:, :14].sum()+front[:, -14:].sum()
 assert eye_band > far_edges*2 + 100, ('Frontal gaze should read as camera-facing flare',eye_band,far_edges)
 
-# Real footage can report a modest downward 2D pitch while the 3D forward component is still
-# camera-facing. That must not become a long beam toward the bottom of frame.
-vec('uGazePose',[0,.36,.95,1])
+# Real footage can report a modest downward 2D pitch while the 3D head and eye-depth still
+# say camera-facing. That must become a radial lens hit, never a long beam toward frame bottom.
+vec('uHeadPose',[0,.28,0,.97])
+vec('uGazePose',[0,.36,.90,1])
 biased_front=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-biased_eye_band=biased_front[max(0,row-12):min(h,row+13), 34:94].sum()
+biased_eye_band=biased_front[max(0,row-16):min(h,row+17), 30:98].sum()
 biased_far=biased_front[:18].sum()+biased_front[-18:].sum()+biased_front[:, :14].sum()+biased_front[:, -14:].sum()
-assert biased_eye_band > biased_far*1.20 + 100, ('Forward gaze must suppress pitch-biased long ray',biased_eye_band,biased_far)
+assert biased_eye_band > biased_far*1.35 + 100, ('Camera-facing gaze must suppress pitch-biased long ray',biased_eye_band,biased_far)
 
-# A genuine down glance still has a lower forward component and must retain a directional ray.
-vec('uGazePose',[0,.55,.45,1])
+# The camera-facing result should be roughly radial rather than strongly downward-biased.
+top=biased_front[:row, 28:100].sum()
+bottom=biased_front[row:, 28:100].sum()
+ratio=max(top,bottom)/max(1,min(top,bottom))
+assert ratio < 2.4, ('Camera-facing laser must read as radial lens hit, not directional ray',top,bottom)
+
+# A genuine down glance still has a lower eye-depth component and must retain a directional ray.
+vec('uHeadPose',[0,.28,0,.97])
+vec('uGazePose',[0,.55,.42,1])
 down_gaze=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
 assert down_gaze[:24].sum() > biased_front[:24].sum()*1.5 + 100, 'True down gaze must keep downward beam'
+vec('uHeadPose',[0,0,0,1])
 vec('uGazePose',[-1,0,0,1])
 print('PASS: shared gaze steers both lasers; frontal gaze ignores pitch bias and foreshortens toward camera.')
 
