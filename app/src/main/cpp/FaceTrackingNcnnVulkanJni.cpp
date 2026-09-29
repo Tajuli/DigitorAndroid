@@ -20,9 +20,12 @@ constexpr int kMeshSize = 192;
 constexpr int kAnchorCount = 896;
 constexpr int kRegValues = 16;
 constexpr int kLandmarkCount = 468;
+constexpr int kOutputCount = 24;
 constexpr float kPi = 3.14159265358979323846f;
 
 using face_tracking::Point;
+using face_tracking::Point3;
+using face_tracking::FaceOrientation;
 using face_tracking::Roi;
 
 struct FaceEngine {
@@ -333,17 +336,99 @@ ncnn::Mat BuildMeshInput(
     return input;
 }
 
-Point MapMeshPoint(const float* lm, int index, const Roi& roi) {
+Point3 MapMeshPoint3(const float* lm, int index, const Roi& roi) {
     const float u = lm[index * 3 + 0];
     const float v = lm[index * 3 + 1];
-    const float dx = (u - kMeshSize * 0.5f) * roi.side / kMeshSize;
-    const float dy = (v - kMeshSize * 0.5f) * roi.side / kMeshSize;
+    const float z = lm[index * 3 + 2];
+    const float unit = roi.side / kMeshSize;
+    const float dx = (u - kMeshSize * 0.5f) * unit;
+    const float dy = (v - kMeshSize * 0.5f) * unit;
+    const float dz = z * unit;
     const float cosA = std::cos(roi.angle);
     const float sinA = std::sin(roi.angle);
-    return Point{
+    return Point3{
         roi.cx + cosA * dx - sinA * dy,
         roi.cy + sinA * dx + cosA * dy,
+        dz,
     };
+}
+
+struct PupilEstimate {
+    float x = 0.f;
+    float y = 0.f;
+    float confidence = 0.f;
+};
+
+PupilEstimate EstimatePupil(
+        const jint* pixels,
+        int width,
+        int height,
+        const Point& center,
+        float roll,
+        float halfWidth,
+        float halfHeight,
+        float openness) {
+    PupilEstimate result;
+    if (pixels == nullptr || width < 2 || height < 2 || openness < .34f ||
+        halfWidth < 2.f || halfHeight < 1.f || !std::isfinite(roll)) {
+        return result;
+    }
+
+    struct Sample { float u, v, luminance; };
+    Sample samples[77];
+    int count = 0;
+    float sumLuminance = 0.f;
+    float minLuminance = 255.f;
+    const float c = std::cos(roll), s = std::sin(roll);
+
+    for (int gy = 0; gy < 7; ++gy) {
+        const float v = -0.62f + 1.24f * gy / 6.f;
+        for (int gx = 0; gx < 11; ++gx) {
+            const float u = -0.82f + 1.64f * gx / 10.f;
+            if (u * u + 1.35f * v * v > .94f) continue;
+            const float lx = u * halfWidth;
+            const float ly = v * halfHeight;
+            const float sx = center.x + c * lx - s * ly;
+            const float sy = center.y + s * lx + c * ly;
+            if (sx < 0.f || sy < 0.f || sx > width - 1.f || sy > height - 1.f) continue;
+            const float luminance =
+                .2126f * SampleChannel(pixels, width, height, sx, sy, 0) +
+                .7152f * SampleChannel(pixels, width, height, sx, sy, 1) +
+                .0722f * SampleChannel(pixels, width, height, sx, sy, 2);
+            samples[count++] = Sample{u, v, luminance};
+            sumLuminance += luminance;
+            minLuminance = std::min(minLuminance, luminance);
+        }
+    }
+    if (count < 16) return result;
+
+    const float mean = sumLuminance / count;
+    const float contrast = mean - minLuminance;
+    if (!std::isfinite(contrast) || contrast < 8.f) return result;
+
+    float weightSum = 0.f;
+    float weightedX = 0.f;
+    float weightedY = 0.f;
+    for (int i = 0; i < count; ++i) {
+        const float darkness = Clamp(
+            (mean - samples[i].luminance) / std::max(contrast, 1.f), 0.f, 1.f);
+        if (darkness < .14f) continue;
+        const float centerPrior = std::max(
+            .25f,
+            1.f - .28f * (samples[i].u * samples[i].u + samples[i].v * samples[i].v));
+        const float weight = darkness * darkness * centerPrior;
+        weightSum += weight;
+        weightedX += samples[i].u * weight;
+        weightedY += samples[i].v * weight;
+    }
+    if (weightSum < 1e-4f) return result;
+
+    result.x = Clamp(weightedX / weightSum, -1.f, 1.f);
+    result.y = Clamp(weightedY / weightSum, -1.f, 1.f);
+    result.confidence = Clamp(contrast / 72.f, 0.f, 1.f) *
+        Clamp(weightSum / (count * .22f), 0.f, 1.f);
+    if (result.confidence < .10f) return PupilEstimate{};
+    return result;
 }
 
 bool RunMesh(
@@ -371,9 +456,12 @@ bool RunMesh(
 
     const float* lm = landmarks;
     Point points[kLandmarkCount];
+    Point3 points3[kLandmarkCount];
     for (int i = 0; i < kLandmarkCount; ++i) {
-        points[i] = MapMeshPoint(lm, i, roi);
-        if (!std::isfinite(points[i].x) || !std::isfinite(points[i].y)) return false;
+        points3[i] = MapMeshPoint3(lm, i, roi);
+        points[i] = Point{points3[i].x, points3[i].y};
+        if (!std::isfinite(points3[i].x) || !std::isfinite(points3[i].y) ||
+            !std::isfinite(points3[i].z)) return false;
     }
 
     const Point lOuter = points[33];
@@ -424,6 +512,63 @@ bool RunMesh(
     };
     fillEye(0, lOuter, lInner, leftOpen);
     fillEye(5, rOuter, rInner, rightOpen);
+
+    const FaceOrientation orientation = face_tracking::FaceOrientationFromPlane(
+        points3[234], points3[454], points3[10], points3[152], stableRoll);
+    const float headYaw = orientation.valid ? orientation.yaw : 0.f;
+    const float headPitch = orientation.valid ? orientation.pitch : 0.f;
+    const float headForward = orientation.valid ? orientation.forward : 1.f;
+
+    const Point leftCenter{(lOuter.x + lInner.x) * .5f, (lOuter.y + lInner.y) * .5f};
+    const Point rightCenter{(rOuter.x + rInner.x) * .5f, (rOuter.y + rInner.y) * .5f};
+    const float leftWidth = std::max(3.f, face_tracking::Distance(lOuter, lInner));
+    const float rightWidth = std::max(3.f, face_tracking::Distance(rOuter, rInner));
+    const float leftHeight = (
+        face_tracking::Distance(points[159], points[145]) +
+        face_tracking::Distance(points[158], points[153]) +
+        face_tracking::Distance(points[160], points[144])) / 3.f;
+    const float rightHeight = (
+        face_tracking::Distance(points[386], points[374]) +
+        face_tracking::Distance(points[385], points[380]) +
+        face_tracking::Distance(points[387], points[373])) / 3.f;
+
+    const PupilEstimate leftPupil = EstimatePupil(
+        pixels, width, height, leftCenter, stableRoll,
+        leftWidth * .46f, std::max(1.2f, leftHeight * .58f), leftOpen);
+    const PupilEstimate rightPupil = EstimatePupil(
+        pixels, width, height, rightCenter, stableRoll,
+        rightWidth * .46f, std::max(1.2f, rightHeight * .58f), rightOpen);
+
+    const float pupilWeight = leftPupil.confidence + rightPupil.confidence;
+    float pupilX = 0.f, pupilY = 0.f;
+    if (pupilWeight > .12f) {
+        pupilX = (leftPupil.x * leftPupil.confidence +
+            rightPupil.x * rightPupil.confidence) / pupilWeight;
+        pupilY = (leftPupil.y * leftPupil.confidence +
+            rightPupil.y * rightPupil.confidence) / pupilWeight;
+        const float agreement = 1.f - Clamp(
+            std::fabs(leftPupil.x - rightPupil.x) * .65f +
+            std::fabs(leftPupil.y - rightPupil.y) * .35f,
+            0.f, 1.f);
+        const float reliability =
+            Clamp(pupilWeight * .70f, 0.f, 1.f) * (.35f + .65f * agreement);
+        pupilX *= reliability;
+        pupilY *= reliability;
+    }
+
+    const float gazeX = Clamp(headYaw + pupilX * .85f * headForward, -1.f, 1.f);
+    const float gazeY = Clamp(headPitch + pupilY * .55f * headForward, -1.f, 1.f);
+    const float pupilMagnitude =
+        Clamp(std::sqrt(pupilX * pupilX + pupilY * pupilY), 0.f, 1.f);
+    const float gazeForward =
+        Clamp(headForward * (1.f - .62f * pupilMagnitude), 0.f, 1.f);
+
+    output[18] = headYaw;
+    output[19] = headPitch;
+    output[20] = headForward;
+    output[21] = gazeX;
+    output[22] = gazeY;
+    output[23] = gazeForward;
 
     float rawMinX = points[0].x, rawMinY = points[0].y;
     float rawMaxX = points[0].x, rawMaxY = points[0].y;
@@ -499,7 +644,7 @@ bool RunMesh(
         next.cx >= -width * .30f && next.cx <= width * 1.30f &&
         next.cy >= -height * .30f && next.cy <= height * 1.30f;
 
-    for (int i = 0; i < 18; ++i) if (!std::isfinite(output[i])) return false;
+    for (int i = 0; i < kOutputCount; ++i) if (!std::isfinite(output[i])) return false;
 
     // Crucial separation: return the valid current pose even when next-frame tracking state is bad.
     // Invalidating ROI makes the following frame reacquire with BlazeFace instead of poisoning the
@@ -527,7 +672,7 @@ void WarmUp(FaceEngine* engine) {
     roi.cy = 128.f;
     roi.side = 160.f;
     roi.valid = true;
-    float out[18] = {};
+    float out[kOutputCount] = {};
     RunMesh(engine, pixels.data(), 256, 256, roi, out);
     engine->roi = Roi{}; // Warm-up pixels must never seed the first real frame.
     engine->leftEyeClosed = false;
@@ -616,7 +761,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanFaceTrackingNativeV10
         jfloatArray outputArray) {
     if (handle == 0 || pixelArray == nullptr || outputArray == nullptr) return JNI_FALSE;
     if (width <= 1 || height <= 1 || env->GetArrayLength(pixelArray) < width * height ||
-        env->GetArrayLength(outputArray) < 18) {
+        env->GetArrayLength(outputArray) < kOutputCount) {
         ThrowJava(env, "java/lang/IllegalArgumentException", "Invalid face tracking frame buffers");
         return JNI_FALSE;
     }
@@ -625,7 +770,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanFaceTrackingNativeV10
     jint* pixels = env->GetIntArrayElements(pixelArray, nullptr);
     if (pixels == nullptr) return JNI_FALSE;
 
-    float output[18] = {};
+    float output[kOutputCount] = {};
     const auto started = std::chrono::steady_clock::now();
 
     bool ok = false;
@@ -665,7 +810,7 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanFaceTrackingNativeV10
     env->ReleaseIntArrayElements(pixelArray, pixels, JNI_ABORT);
 
     if (!ok) return JNI_FALSE;
-    env->SetFloatArrayRegion(outputArray, 0, 18, output);
+    env->SetFloatArrayRegion(outputArray, 0, kOutputCount, output);
     return env->ExceptionCheck() ? JNI_FALSE : JNI_TRUE;
 }
 

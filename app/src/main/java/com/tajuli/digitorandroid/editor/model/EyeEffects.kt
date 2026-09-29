@@ -45,11 +45,22 @@ data class TrackedEye(val x: Float, val y: Float, val radius: Float, val roll: F
         )
     }
 }
-data class EyePose(val left: TrackedEye, val right: TrackedEye, val identity: Int?,
-    val face: BeautyRectV28? = null, val mouth: BeautyRectV28? = null)
+data class EyePose(
+    val left: TrackedEye,
+    val right: TrackedEye,
+    val identity: Int?,
+    val face: BeautyRectV28? = null,
+    val mouth: BeautyRectV28? = null,
+    val headYaw: Float = 0f,
+    val headPitch: Float = 0f,
+    val headForward: Float = 1f,
+    val gazeX: Float = 0f,
+    val gazeY: Float = 0f,
+    val gazeForward: Float = 1f,
+)
 data class EyeSample(val timeUs: Long, val pose: EyePose?)
-data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 11) {
-    fun covers(clip: TimelineClip): Boolean = version == 11 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
+data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 12) {
+    fun covers(clip: TimelineClip): Boolean = version == 12 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
 
     private fun validAtOrBefore(index: Int): EyeSample? {
         var i = index.coerceAtMost(samples.lastIndex)
@@ -124,6 +135,12 @@ data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val sam
             pa.identity,
             pa.face?.let { a -> pb.face?.let { a.lerp(it, clampedT) } },
             pa.mouth?.let { a -> pb.mouth?.let { a.lerp(it, clampedT) } },
+            headYaw = pa.headYaw + (pb.headYaw - pa.headYaw) * clampedT,
+            headPitch = pa.headPitch + (pb.headPitch - pa.headPitch) * clampedT,
+            headForward = pa.headForward + (pb.headForward - pa.headForward) * clampedT,
+            gazeX = pa.gazeX + (pb.gazeX - pa.gazeX) * clampedT,
+            gazeY = pa.gazeY + (pb.gazeY - pa.gazeY) * clampedT,
+            gazeForward = pa.gazeForward + (pb.gazeForward - pa.gazeForward) * clampedT,
         )
     }
 }

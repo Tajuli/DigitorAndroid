@@ -14,6 +14,8 @@ internal const val EYE_EFFECT_SHADER = """
     uniform vec4 uLeftEye;
     uniform vec4 uRightEye;
     uniform vec4 uEyeState;
+    uniform vec4 uHeadPose;
+    uniform vec4 uGazePose;
     uniform float uEyeTime;
     uniform vec4 uEyeTransform;
     uniform vec2 uEyeTranslation;
@@ -45,18 +47,33 @@ internal const val EYE_EFFECT_SHADER = """
             light+=uEyesA.x*(vec3(1,.17,.015)*flame*.9+vec3(1,.75,.2)*core+vec3(.3,.045,0)*halo);
         }
         if(uEyesA.y>.001) {
-            // A laser is a ray that starts at the eye and travels OUTWARD. The old abs(p.x)
-            // formulation drew an infinite line through the eye in both directions, so on-device
-            // it looked as if the beam originated off-screen and merely crossed the face.
-            float eyeMid=(uLeftEye.z>.0001 && uRightEye.z>.0001)
-                ? (uLeftEye.x+uRightEye.x)*.5 : .5;
-            float side=sign(eye.x-eyeMid);
-            if(abs(side)<.5) side=1.0;
-            float forward=p.x*side;
-            float ray=smoothstep(-.05,.14,forward);
-            float beam=exp(-p.y*p.y*210.0)*exp(-max(forward,0.0)*.065)*ray;
-            float bloom=exp(-p.y*p.y*16.0)*exp(-max(forward,0.0)*.12)*ray;
-            light+=uEyesA.y*(vec3(1,.04,.02)*bloom*.8+vec3(1,.75,.6)*(beam+core));
+            // Both eyes share one gaze ray. Side glances become parallel projected beams; a
+            // near-frontal gaze is foreshortened into a hot flare so it reads as camera-facing.
+            vec2 gaze=uGazePose.xy;
+            float gazeForward=uGazePose.z;
+            if(uGazePose.w<.5) {
+                float eyeMid=(uLeftEye.z>.0001 && uRightEye.z>.0001)
+                    ? (uLeftEye.x+uRightEye.x)*.5 : .5;
+                float side=sign(eye.x-eyeMid);
+                if(abs(side)<.5) side=1.0;
+                gaze=vec2(side,0.0);
+                gazeForward=0.0;
+            }
+            float projected=length(gaze);
+            vec2 dir=projected>.025 ? gaze/projected : vec2(1.0,0.0);
+            float along=dot(p,dir);
+            float across=p.x*dir.y-p.y*dir.x;
+            float ray=smoothstep(-.05,.13,along);
+            float sideGate=smoothstep(.04,.18,projected);
+            float beam=exp(-across*across*230.0)*exp(-max(along,0.0)*.06)*ray*sideGate;
+            float bloom=exp(-across*across*18.0)*exp(-max(along,0.0)*.11)*ray*sideGate;
+            float frontGate=(1.0-smoothstep(.055,.24,projected))*smoothstep(.62,.90,gazeForward);
+            float cameraCore=exp(-dot(p,p)*2.6);
+            float cameraRing=exp(-pow((length(p)-.62)*8.0,2.0));
+            light+=uEyesA.y*(
+                vec3(1,.04,.02)*(bloom*.8+frontGate*cameraRing*.55)+
+                vec3(1,.78,.64)*(beam+core+frontGate*cameraCore*1.8)
+            );
         }
         if(uEyesA.z>.001) {
             float arc=abs(p.y-.2*sin(p.x*13.0+t*12.0)-.12*sin(p.x*29.0-t*9.0));
@@ -140,11 +157,29 @@ internal const val EYE_EFFECT_SHADER = """
         vec2 p=(uv*2.0-1.0)*uEyeTransform.zw;
         return (vec2(uEyeTransform.x*p.x-uEyeTransform.y*p.y,uEyeTransform.y*p.x+uEyeTransform.x*p.y)+uEyeTranslation)*.5+.5;
     }
+    vec2 faceMetricScale() {
+        return vec2(1.0,uTexelSize.x/uTexelSize.y);
+    }
+    vec2 faceToLocal(vec2 d) {
+        vec2 q=d*faceMetricScale();
+        float c=cos(uHeadPose.z),s=sin(uHeadPose.z);
+        return vec2(c*q.x+s*q.y,-s*q.x+c*q.y);
+    }
+    vec2 faceFromLocal(vec2 d) {
+        float c=cos(uHeadPose.z),s=sin(uHeadPose.z);
+        vec2 q=vec2(c*d.x-s*d.y,s*d.x+c*d.y);
+        return q/faceMetricScale();
+    }
     vec2 regionalWarp(vec2 uv,vec4 region,vec2 scale,float amount) {
         if(region.z<.001 || region.w<.001 || amount<.001) return uv;
-        vec2 p=(uv-region.xy)/region.zw;
-        float weight=1.0-smoothstep(.25,1.5,length(p));
-        return region.xy+(uv-region.xy)/mix(vec2(1),scale,weight*amount);
+        vec2 local=faceToLocal(uv-region.xy);
+        vec2 extent=max(region.zw*faceMetricScale(),vec2(.001));
+        vec2 p=local/extent;
+        p.x+=uHeadPose.x*.14*p.y;
+        float weight=1.0-smoothstep(.24,1.35,length(p));
+        weight=weight*weight*(3.0-2.0*weight);
+        vec2 warped=local/mix(vec2(1),scale,weight*amount);
+        return region.xy+faceFromLocal(warped);
     }
     vec2 funnyUv(vec2 uv) {
         vec2 p=eyeSourceUv(uv);
@@ -155,10 +190,15 @@ internal const val EYE_EFFECT_SHADER = """
         p=regionalWarp(p,uMouthRegion,vec2(1.65,1.5),uFunnyB.x);
         p=regionalWarp(p,uMouthRegion,vec2(2.1,1.9),uFunnyB.y);
         p=regionalWarp(p,uMouthRegion,vec2(.55,1.2),uFunnyB.z);
-        vec2 f=(p-uFaceRegion.xy)/max(uFaceRegion.zw,vec2(.001));
+        vec2 faceExtent=max(uFaceRegion.zw*faceMetricScale(),vec2(.001));
+        vec2 f=faceToLocal(p-uFaceRegion.xy)/faceExtent;
+        f.x+=uHeadPose.x*.10*f.y;
         float faceWeight=1.0-smoothstep(.4,1.2,length(f));
-        p.y+=uFunnyA.y*.12*uFaceRegion.w*sin(f.x*3.14159)*faceWeight;
-        p.x+=uFunnyB.z*.18*uFaceRegion.z*sin(f.y*3.0)*faceWeight;
+        vec2 localShift=vec2(
+            uFunnyB.z*.18*faceExtent.x*sin(f.y*3.0),
+            uFunnyA.y*.12*faceExtent.y*sin(f.x*3.14159)
+        )*faceWeight;
+        p+=faceFromLocal(localShift);
         if(uEyesE.z>.001) {
             float band=floor(p.y*70.0);
             p.x+=(eyeHash(vec2(band,floor(uEyeTime*9.0)))-.5)*.075*uEyesE.z*faceWeight;

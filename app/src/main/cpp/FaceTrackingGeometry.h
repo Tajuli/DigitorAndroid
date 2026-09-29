@@ -7,6 +7,43 @@
 
 namespace face_tracking {
 struct Point { float x = 0.f; float y = 0.f; };
+struct Point3 { float x = 0.f; float y = 0.f; float z = 0.f; };
+struct FaceOrientation {
+    float yaw = 0.f;
+    float pitch = 0.f;
+    float forward = 1.f;
+    bool valid = false;
+};
+
+inline FaceOrientation FaceOrientationFromPlane(
+        const Point3& left,
+        const Point3& right,
+        const Point3& top,
+        const Point3& bottom,
+        float roll) {
+    const Point3 h{right.x - left.x, right.y - left.y, right.z - left.z};
+    const Point3 v{bottom.x - top.x, bottom.y - top.y, bottom.z - top.z};
+    Point3 n{
+        h.y * v.z - h.z * v.y,
+        h.z * v.x - h.x * v.z,
+        h.x * v.y - h.y * v.x,
+    };
+    const float length = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+    FaceOrientation result;
+    if (!std::isfinite(length) || length < 1e-5f || !std::isfinite(roll)) return result;
+    n.x /= length; n.y /= length; n.z /= length;
+    if (n.z < 0.f) { n.x = -n.x; n.y = -n.y; n.z = -n.z; }
+    const float c = std::cos(roll), s = std::sin(roll);
+    const float localX = c * n.x + s * n.y;
+    const float localY = -s * n.x + c * n.y;
+    result.yaw = std::clamp(localX * 1.25f, -1.f, 1.f);
+    result.pitch = std::clamp(localY * 1.25f, -1.f, 1.f);
+    result.forward = std::clamp(n.z, 0.f, 1.f);
+    result.valid = std::isfinite(result.yaw) && std::isfinite(result.pitch) &&
+        std::isfinite(result.forward);
+    return result;
+}
+
 struct Roi {
     float cx = 0.f;
     float cy = 0.f;

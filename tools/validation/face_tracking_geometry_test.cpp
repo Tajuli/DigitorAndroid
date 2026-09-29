@@ -5,7 +5,9 @@
 #include <limits>
 
 using face_tracking::Point;
+using face_tracking::Point3;
 using face_tracking::LandmarkRoi;
+using face_tracking::FaceOrientationFromPlane;
 using face_tracking::EyeAspectRatio;
 using face_tracking::BlinkOpenness;
 
@@ -41,6 +43,22 @@ int main() {
     const auto minimum = LandmarkRoi(small, 2, 0);
     assert(minimum.valid); near(minimum.side, 48.f);
 
+    // 3D face-plane direction: frontal faces point into camera; yaw projects to screen X.
+    const Point3 frontLeft{-1, 0, 0}, frontRight{1, 0, 0};
+    const Point3 frontTop{0, -1, 0}, frontBottom{0, 1, 0};
+    const auto front = FaceOrientationFromPlane(
+        frontLeft, frontRight, frontTop, frontBottom, 0.f);
+    assert(front.valid); near(front.yaw, 0.f); near(front.pitch, 0.f); near(front.forward, 1.f);
+
+    const float yaw = .5235987756f; // 30 degrees.
+    const float cy = std::cos(yaw), sy = std::sin(yaw);
+    const Point3 yawLeft{-cy, 0, sy}, yawRight{cy, 0, -sy};
+    const auto turned = FaceOrientationFromPlane(
+        yawLeft, yawRight, frontTop, frontBottom, 0.f);
+    assert(turned.valid);
+    assert(turned.yaw > .55f);
+    assert(turned.forward > .84f && turned.forward < .88f);
+
     // Blink geometry: three lid pairs provide a robust rotation-invariant EAR.
     const Point outer{0, 0}, inner{10, 0};
     const float openEar = EyeAspectRatio(
@@ -62,5 +80,5 @@ int main() {
     assert(BlinkOpenness(.20f, &closedState) == 0.f && closedState);
     assert(BlinkOpenness(.24f, &closedState) > .5f && !closedState);
 
-    std::cout << "PASS: crop geometry plus multi-landmark EAR blink hysteresis\n";
+    std::cout << "PASS: crop geometry, 3D face orientation, and multi-landmark EAR blink hysteresis\n";
 }

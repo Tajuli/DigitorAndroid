@@ -74,6 +74,7 @@ for key,val in [(0x2801,0x2601),(0x2800,0x2601),(0x2802,0x812F),(0x2803,0x812F)]
     fn(gl,'glTexParameteri',None,U,U,I)(0x0DE1,key,val)
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
 vec('uEyeTransform',[1,0,1,1]); vec('uEyeTranslation',[0,0]); vec('uTexelSize',[1/w,1/h]); uniform('uEyeTime',.35)
+vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[-1,0,0,1])
 vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0]); vec('uEyeState',[1,1,0,0])
 vec('uFaceRegion',[.5,.5,.25,.35]);vec('uMouthRegion',[.5,.35,.08,.045])
 vertices=np.array([-1,-1,0,1,1,-1,0,1,-1,1,0,1,1,1,0,1],np.float32)
@@ -135,7 +136,22 @@ row=h//2
 outward=laser[max(0,row-2):row+3, 8:36].sum()
 inward=laser[max(0,row-2):row+3, 66:98].sum()
 assert outward > inward*4 + 100, ('Laser must start at eye and travel outward',outward,inward)
-print('PASS: Laser Eyes originates at the eye and emits outward only.')
+print('PASS: Laser Eyes originates at the eye and follows left gaze.')
+
+# Shared gaze must steer both eyes the same way, not force left/right divergence.
+vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
+vec('uGazePose',[1,0,0,1])
+right_gaze=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+left_energy=right_gaze[max(0,row-2):row+3, 2:31].sum()
+right_energy=right_gaze[max(0,row-2):row+3, 94:126].sum()
+assert right_energy > left_energy*2 + 100, ('Both laser beams must follow shared right gaze',left_energy,right_energy)
+vec('uGazePose',[0,0,1,1])
+front=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+eye_band=front[max(0,row-12):min(h,row+13), 34:94].sum()
+far_edges=front[:, :14].sum()+front[:, -14:].sum()
+assert eye_band > far_edges*2 + 100, ('Frontal gaze should read as camera-facing flare',eye_band,far_edges)
+vec('uGazePose',[-1,0,0,1])
+print('PASS: shared gaze steers both lasers and frontal gaze foreshortens toward camera.')
 
 # Blink gating is independent per eye. <=0.18 must be fully off; >=0.30 is fully on.
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); amounts(1)

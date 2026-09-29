@@ -270,6 +270,19 @@ internal class CreatorEffectGraphV25 private constructor(
             program.setFloatsUniform("uRightEye", eyeUniform(pose?.right))
             program.setFloatsUniform("uEyeState", floatArrayOf(pose?.left?.open ?: 0f,
                 pose?.right?.open ?: 0f, pose?.left?.roll ?: 0f, pose?.right?.roll ?: 0f))
+            val faceRoll = if (pose == null) 0f else (pose.left.roll + pose.right.roll) * .5f
+            program.setFloatsUniform("uHeadPose", floatArrayOf(
+                pose?.headYaw ?: 0f,
+                pose?.headPitch ?: 0f,
+                faceRoll,
+                pose?.headForward ?: 1f,
+            ))
+            program.setFloatsUniform("uGazePose", floatArrayOf(
+                pose?.gazeX ?: 0f,
+                pose?.gazeY ?: 0f,
+                pose?.gazeForward ?: 1f,
+                if (pose == null) 0f else 1f,
+            ))
             program.setFloatUniform("uEyeTime", sourceUs.toFloat() / 1_000_000f)
             program.setFloatUniform("uBlur", v.blur)
             program.setFloatUniform("uSharpen", v.sharpen)
