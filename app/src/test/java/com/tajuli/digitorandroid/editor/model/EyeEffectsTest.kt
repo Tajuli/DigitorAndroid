@@ -71,7 +71,10 @@ class EyeEffectsTest {
                 EyeSample(100_000, pose(.33f)),
             ),
         )
-        assertEquals(.31f, track.at(33_333)!!.left.x, .001f)
+        val bridged = track.at(33_333)!!
+        assertEquals(.31f, bridged.left.x, .001f)
+        assertEquals(0f, bridged.left.open, 0f)
+        assertEquals(0f, bridged.right.open, 0f)
 
         val longLoss = EyeTrack(
             clip.uri,
