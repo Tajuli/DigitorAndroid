@@ -35,10 +35,15 @@ inline float EyeAspectRatio(
         const Point& lower3) {
     const float width = Distance(outer, inner);
     if (!std::isfinite(width) || width < 1e-4f) return 0.f;
-    const float vertical =
-        (Distance(upper1, lower1) + Distance(upper2, lower2) + Distance(upper3, lower3)) / 3.f;
-    if (!std::isfinite(vertical)) return 0.f;
-    return vertical / width;
+    float v1 = Distance(upper1, lower1);
+    float v2 = Distance(upper2, lower2);
+    float v3 = Distance(upper3, lower3);
+    if (!std::isfinite(v1) || !std::isfinite(v2) || !std::isfinite(v3)) return 0.f;
+    // Median rejects one noisy eyelid pair, which is common at 192 px during fast blinks.
+    if (v1 > v2) std::swap(v1, v2);
+    if (v2 > v3) std::swap(v2, v3);
+    if (v1 > v2) std::swap(v1, v2);
+    return v2 / width;
 }
 
 // Stateful blink hysteresis. Close quickly, but require a clearly reopened eye before turning the
