@@ -48,8 +48,8 @@ data class TrackedEye(val x: Float, val y: Float, val radius: Float, val roll: F
 data class EyePose(val left: TrackedEye, val right: TrackedEye, val identity: Int?,
     val face: BeautyRectV28? = null, val mouth: BeautyRectV28? = null)
 data class EyeSample(val timeUs: Long, val pose: EyePose?)
-data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 9) {
-    fun covers(clip: TimelineClip): Boolean = version == 9 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
+data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 10) {
+    fun covers(clip: TimelineClip): Boolean = version == 10 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
 
     private fun validAtOrBefore(index: Int): EyeSample? {
         var i = index.coerceAtMost(samples.lastIndex)
