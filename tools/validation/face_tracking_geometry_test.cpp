@@ -6,6 +6,8 @@
 
 using face_tracking::Point;
 using face_tracking::LandmarkRoi;
+using face_tracking::EyeAspectRatio;
+using face_tracking::BlinkOpenness;
 
 static void near(float actual, float expected) {
     assert(std::fabs(actual - expected) < .001f);
@@ -38,5 +40,27 @@ int main() {
     const Point small[] = {{0, 0}, {3, 3}};
     const auto minimum = LandmarkRoi(small, 2, 0);
     assert(minimum.valid); near(minimum.side, 48.f);
-    std::cout << "PASS: roll/translation/edge invariance, invalid geometry and minimum crop\n";
+
+    // Blink geometry: three lid pairs provide a robust rotation-invariant EAR.
+    const Point outer{0, 0}, inner{10, 0};
+    const float openEar = EyeAspectRatio(
+        outer, inner,
+        Point{2, -1.5f}, Point{2, 1.5f},
+        Point{5, -1.5f}, Point{5, 1.5f},
+        Point{8, -1.5f}, Point{8, 1.5f});
+    const float closedEar = EyeAspectRatio(
+        outer, inner,
+        Point{2, -.5f}, Point{2, .5f},
+        Point{5, -.5f}, Point{5, .5f},
+        Point{8, -.5f}, Point{8, .5f});
+    near(openEar, .3f); near(closedEar, .1f);
+
+    bool closedState = false;
+    assert(BlinkOpenness(openEar, &closedState) > .9f && !closedState);
+    assert(BlinkOpenness(closedEar, &closedState) == 0.f && closedState);
+    // Hysteresis prevents a half-open noisy frame from flashing the effect back on.
+    assert(BlinkOpenness(.20f, &closedState) == 0.f && closedState);
+    assert(BlinkOpenness(.24f, &closedState) > .5f && !closedState);
+
+    std::cout << "PASS: crop geometry plus multi-landmark EAR blink hysteresis\n";
 }
