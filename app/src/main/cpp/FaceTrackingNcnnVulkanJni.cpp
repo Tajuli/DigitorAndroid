@@ -536,6 +536,9 @@ void WarmUp(FaceEngine* engine) {
     float out[18] = {};
     RunMesh(engine, pixels.data(), 256, 256, roi, out);
     engine->roi = Roi{}; // Warm-up pixels must never seed the first real frame.
+    engine->leftEyeClosed = false;
+    engine->rightEyeClosed = false;
+    engine->frameCounter = 0;
     engine->lastInferenceMs = -1.0;
 }
 } // namespace
