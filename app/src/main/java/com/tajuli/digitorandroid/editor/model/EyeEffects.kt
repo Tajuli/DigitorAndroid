@@ -101,12 +101,29 @@ data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val sam
             abs(pa.left.x - pb.left.x) + abs(pa.left.y - pb.left.y) > .18f) return null
         val t = (timeUs - left.timeUs).toFloat() /
             (right.timeUs - left.timeUs).coerceAtLeast(1L).toFloat()
+        val clampedT = t.coerceIn(0f, 1f)
+        var interpolatedLeft = pa.left.interpolate(pb.left, clampedT)
+        var interpolatedRight = pa.right.interpolate(pb.right, clampedT)
+
+        // With per-frame analysis, a missing pose inside a short bridged interval is real
+        // uncertainty at that frame. Preserve position continuity, but suppress eye-origin effects
+        // until a real face/eye sample returns. This also prevents a blink-related mesh miss from
+        // being filled by two neighboring "open" frames.
+        val leftIndex = samples.binarySearchBy(left.timeUs) { it.timeUs }
+        val rightIndex = samples.binarySearchBy(right.timeUs) { it.timeUs }
+        if (leftIndex >= 0 && rightIndex > leftIndex + 1 &&
+            (leftIndex + 1 until rightIndex).any { samples[it].pose == null }
+        ) {
+            interpolatedLeft = interpolatedLeft.copy(open = 0f)
+            interpolatedRight = interpolatedRight.copy(open = 0f)
+        }
+
         return EyePose(
-            pa.left.interpolate(pb.left, t.coerceIn(0f, 1f)),
-            pa.right.interpolate(pb.right, t.coerceIn(0f, 1f)),
+            interpolatedLeft,
+            interpolatedRight,
             pa.identity,
-            pa.face?.let { a -> pb.face?.let { a.lerp(it, t.coerceIn(0f, 1f)) } },
-            pa.mouth?.let { a -> pb.mouth?.let { a.lerp(it, t.coerceIn(0f, 1f)) } },
+            pa.face?.let { a -> pb.face?.let { a.lerp(it, clampedT) } },
+            pa.mouth?.let { a -> pb.mouth?.let { a.lerp(it, clampedT) } },
         )
     }
 }
