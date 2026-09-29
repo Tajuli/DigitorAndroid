@@ -15,6 +15,47 @@ struct Roi {
     bool valid = false;
 };
 
+
+// Rotation-invariant multi-pair eye aspect ratio (EAR). One eyelid pair is too noisy at 192 px
+// and can remain "open" during a real blink. Averaging three upper/lower pairs follows the actual
+// lid contour and makes closed-eye detection much more reliable.
+inline float Distance(const Point& a, const Point& b) {
+    const float dx = b.x - a.x, dy = b.y - a.y;
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+inline float EyeAspectRatio(
+        const Point& outer,
+        const Point& inner,
+        const Point& upper1,
+        const Point& lower1,
+        const Point& upper2,
+        const Point& lower2,
+        const Point& upper3,
+        const Point& lower3) {
+    const float width = Distance(outer, inner);
+    if (!std::isfinite(width) || width < 1e-4f) return 0.f;
+    const float vertical =
+        (Distance(upper1, lower1) + Distance(upper2, lower2) + Distance(upper3, lower3)) / 3.f;
+    if (!std::isfinite(vertical)) return 0.f;
+    return vertical / width;
+}
+
+// Stateful blink hysteresis. Close quickly, but require a clearly reopened eye before turning the
+// effect back on so a single noisy half-open frame does not flash Fire/Laser during a blink.
+inline float BlinkOpenness(float ear, bool* closed) {
+    if (closed == nullptr || !std::isfinite(ear)) return 0.f;
+    constexpr float kCloseEar = 0.18f;
+    constexpr float kReopenEar = 0.23f;
+    if (*closed) {
+        if (ear >= kReopenEar) *closed = false;
+    } else if (ear <= kCloseEar) {
+        *closed = true;
+    }
+    if (*closed) return 0.f;
+    return std::clamp((ear - kCloseEar) / 0.10f, 0.f, 1.f);
+}
+
 // Measure extent in the eye-line coordinate system. Measuring an axis-aligned
 // source box and then rotating it makes crop scale breathe as the head rolls.
 inline Roi LandmarkRoi(const Point* points, std::size_t count, float angle) {
