@@ -157,17 +157,31 @@ inward=eye_beam[max(0,row-2):row+3, 66:98].sum()
 assert outward > inward*1.20 + 100, ('Electric Eyes must start at eye and travel outward',outward,inward)
 print('PASS: Electric Eyes originates at the eye and follows left gaze.')
 
-# Production Electric Eyes is per-eye driven. Give both eyes the same high-confidence right gaze
-# and verify that both beams project right; shared gaze remains only a low-confidence fallback.
-vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
+# Production Electric Eyes is per-eye driven. Validate each eye in isolation so broad socket
+# bloom/haze from the opposite eye cannot contaminate a far-edge comparison.
 vec('uHeadPose',[0,0,0,.72]); vec('uGazePose',[1,0,.30,1])
-vec('uLeftGaze',[1,0,.30,.95]); vec('uRightGaze',[1,0,.30,.95])
-right_gaze=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None)
-left_energy=right_gaze[max(0,row-4):row+5, 2:31].sum()
-right_energy=right_gaze[max(0,row-4):row+5, 94:126].sum()
-assert right_energy > left_energy*1.12 + 100, ('Both Electric Eyes rays must follow per-eye right gaze',left_energy,right_energy)
+
+# Left eye looking right: energy in front of the eye must exceed energy behind it.
+vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0])
+vec('uLeftGaze',[1,0,.30,.95]); vec('uRightGaze',[0,0,1,0])
+left_eye_right=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None)
+left_forward=left_eye_right[max(0,row-5):row+6, 52:92].sum()
+left_behind=left_eye_right[max(0,row-5):row+6, 4:34].sum()
+assert left_forward > left_behind*1.08 + 100, (
+    'Left Electric Eyes ray must follow right gaze',left_behind,left_forward)
+
+# Right eye looking right: use a symmetric local window around that eye.
+vec('uLeftEye',[0,0,0,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[0,1,0,0])
+vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[1,0,.30,.95])
+right_eye_right=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None)
+right_forward=right_eye_right[max(0,row-5):row+6, 91:127].sum()
+right_behind=right_eye_right[max(0,row-5):row+6, 42:72].sum()
+assert right_forward > right_behind*1.08 + 100, (
+    'Right Electric Eyes ray must follow right gaze',right_behind,right_forward)
+
 vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[0,0,1,1])
 vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
+vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
 front=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
 eye_band=front[max(0,row-12):min(h,row+13), 34:94].sum()
 far_edges=front[:, :14].sum()+front[:, -14:].sum()
