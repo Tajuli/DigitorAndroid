@@ -134,6 +134,9 @@ print('PASS: normalized eye centers land on the expected pixels in a non-square 
 source[:,:,:3]=30
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
 amounts(1)
+# Reset the shared gaze after the preceding frontal anchor test; otherwise this block renders the
+# camera-facing flare and cannot validate a leftward ray.
+vec('uGazePose',[-1,0,0,1]); vec('uHeadPose',[0,0,0,1])
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0])
 eye_beam=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
 row=h//2
