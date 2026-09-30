@@ -157,27 +157,35 @@ inward=eye_beam[max(0,row-2):row+3, 66:98].sum()
 assert outward > inward*1.20 + 100, ('Electric Eyes must start at eye and travel outward',outward,inward)
 print('PASS: Electric Eyes originates at the eye and follows left gaze.')
 
-# Production Electric Eyes is per-eye driven. Validate each eye in isolation so broad socket
-# bloom/haze from the opposite eye cannot contaminate a far-edge comparison.
-vec('uHeadPose',[0,0,0,.72]); vec('uGazePose',[1,0,.30,1])
+# Production Electric Eyes is per-eye driven. Test steering by rendering the same isolated eye
+# with opposite high-confidence gazes and comparing emitted-energy centroids. This cancels the
+# symmetric eye-socket bloom/haze and measures the moving beam itself.
+vec('uHeadPose',[0,0,0,.72]); vec('uGazePose',[0,0,.30,1])
+yy_dir,xx_dir=np.mgrid[:h,:w]
 
-# Left eye looking right: energy in front of the eye must exceed energy behind it.
-vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0])
-vec('uLeftGaze',[1,0,.30,.95]); vec('uRightGaze',[0,0,1,0])
-left_eye_right=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None)
-left_forward=left_eye_right[max(0,row-5):row+6, 52:92].sum()
-left_behind=left_eye_right[max(0,row-5):row+6, 4:34].sum()
-assert left_forward > left_behind*1.08 + 100, (
-    'Left Electric Eyes ray must follow right gaze',left_behind,left_forward)
+def gaze_centroid_x(eye_name, eye_x, gaze_x):
+    if eye_name=='left':
+        vec('uLeftEye',[eye_x,.5,.045,0]); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0])
+        vec('uLeftGaze',[gaze_x,0,.30,.95]); vec('uRightGaze',[0,0,1,0])
+    else:
+        vec('uLeftEye',[0,0,0,0]); vec('uRightEye',[eye_x,.5,.045,0]); vec('uEyeState',[0,1,0,0])
+        vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[gaze_x,0,.30,.95])
+    delta=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None).sum(axis=2)
+    # Suppress the symmetric pupil/socket emitter; steering should be carried by energy farther
+    # than ~1.35 eye radii from the eye center.
+    eye_px=eye_x*w-.5
+    eye_py=.5*h-.5
+    far=((xx_dir-eye_px)**2+(yy_dir-eye_py)**2)>(7.8**2)
+    energy=delta*far
+    total=energy.sum()
+    assert total>200, ('Directional Electric Eyes emitted too little off-eye energy',eye_name,gaze_x,total)
+    return (energy*xx_dir).sum()/total
 
-# Right eye looking right: use a symmetric local window around that eye.
-vec('uLeftEye',[0,0,0,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[0,1,0,0])
-vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[1,0,.30,.95])
-right_eye_right=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None)
-right_forward=right_eye_right[max(0,row-5):row+6, 91:127].sum()
-right_behind=right_eye_right[max(0,row-5):row+6, 42:72].sum()
-assert right_forward > right_behind*1.08 + 100, (
-    'Right Electric Eyes ray must follow right gaze',right_behind,right_forward)
+for eye_name,eye_x in (('left',.35),('right',.65)):
+    cx_left=gaze_centroid_x(eye_name,eye_x,-1)
+    cx_right=gaze_centroid_x(eye_name,eye_x,1)
+    assert cx_right > cx_left + 3.0, (
+        'Electric Eyes gaze must steer beam horizontally',eye_name,cx_left,cx_right)
 
 vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[0,0,1,1])
 vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
