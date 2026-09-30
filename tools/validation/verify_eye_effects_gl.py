@@ -120,15 +120,26 @@ print('PASS: production shader compiles/links; 26 public effects; removed Electr
 # Non-square, off-center coordinates catch axis flips hidden by a square center-only test.
 source[:,:,:3]=30
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
-# Use frontal gaze here. Directional Electric Eyes intentionally has its brightest pixels along the
-# outgoing ray, so "brightest pixel == eye center" is only a valid anchor check in foreshortened mode.
+# Use frontal gaze here. Electric Eyes now has a deliberately broad volumetric/lens bloom, so
+# a single brightest pixel can move a few pixels inside the white-hot socket. Validate the local
+# emitted-energy centroid instead; that tests the real anchor without penalizing natural bloom.
 amounts(1); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0]); vec('uGazePose',[0,0,1,1])
 for ex,ey in ((.24,.28),(.72,.65)):
     vec('uLeftEye',[ex,ey,.04,0])
     delta=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-    py,px=np.unravel_index(np.argmax(delta.sum(axis=2)),(h,w))
-    assert abs(px-(ex*w-.5))<2 and abs(py-((1-ey)*h-.5))<2, ('Eye position',ex,ey,px,py)
-print('PASS: normalized eye centers land on the expected pixels in a non-square frame.')
+    energy=np.clip(delta.sum(axis=2),0,None)
+    expected_x=ex*w-.5
+    expected_y=(1-ey)*h-.5
+    yy,xx=np.mgrid[:h,:w]
+    mask=(np.abs(xx-expected_x)<=12)&(np.abs(yy-expected_y)<=12)
+    local=energy*mask
+    total=local.sum()
+    assert total>100, ('Eye anchor emitted no local energy',ex,ey,total)
+    centroid_x=(local*xx).sum()/total
+    centroid_y=(local*yy).sum()/total
+    assert abs(centroid_x-expected_x)<4.5 and abs(centroid_y-expected_y)<4.5, (
+        'Eye energy centroid',ex,ey,centroid_x,centroid_y)
+print('PASS: normalized eye centers anchor the volumetric Electric Eyes energy in a non-square frame.')
 
 # Electric Eyes is a ray, not an infinite line through the face. A viewer-left eye must emit toward the
 # left side only; pixels behind the eye on the inward/right side should stay near the source.
