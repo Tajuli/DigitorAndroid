@@ -119,7 +119,9 @@ print('PASS: production shader compiles/links; 26 public effects; removed Electr
 # Non-square, off-center coordinates catch axis flips hidden by a square center-only test.
 source[:,:,:3]=30
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
-amounts(1); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0])
+# Use frontal gaze here. Directional Eye Beam intentionally has its brightest pixels along the
+# outgoing ray, so "brightest pixel == eye center" is only a valid anchor check in foreshortened mode.
+amounts(1); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0]); vec('uGazePose',[0,0,1,1])
 for ex,ey in ((.24,.28),(.72,.65)):
     vec('uLeftEye',[ex,ey,.04,0])
     delta=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
