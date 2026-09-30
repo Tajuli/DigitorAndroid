@@ -11,6 +11,10 @@ class EyeEffectsTest {
         open: Float = 1f,
         gazeX: Float = 0f,
         gazeForward: Float = 1f,
+        leftGazeY: Float = 0f,
+        rightGazeY: Float = 0f,
+        leftConfidence: Float = 0f,
+        rightConfidence: Float = 0f,
     ): EyePose {
         val eye = TrackedEye(x, .4f, .04f, 0f, open)
         return EyePose(
@@ -19,6 +23,14 @@ class EyeEffectsTest {
             id,
             gazeX = gazeX,
             gazeForward = gazeForward,
+            leftGazeX = gazeX,
+            leftGazeY = leftGazeY,
+            leftGazeForward = gazeForward,
+            leftGazeConfidence = leftConfidence,
+            rightGazeX = gazeX,
+            rightGazeY = rightGazeY,
+            rightGazeForward = gazeForward,
+            rightGazeConfidence = rightConfidence,
         )
     }
     @Test fun interpolatesMotionButUsesNearestFrameBlinkState() {
@@ -35,19 +47,27 @@ class EyeEffectsTest {
         assertNull(track.at(-1))
         assertNull(track.at(100_001))
     }
-    @Test fun interpolatesSharedGazeWithoutAddingTrackingLag() {
+    @Test fun interpolatesSharedAndIndependentEyeGazeWithoutAddingTrackingLag() {
         val track = EyeTrack(
             clip.uri,
             0,
             40_000,
             listOf(
-                EyeSample(0, pose(gazeX = -1f, gazeForward = .2f)),
-                EyeSample(40_000, pose(gazeX = 1f, gazeForward = .8f)),
+                EyeSample(0, pose(gazeX = -1f, gazeForward = .2f,
+                    leftGazeY = -.8f, rightGazeY = .2f,
+                    leftConfidence = .4f, rightConfidence = .6f)),
+                EyeSample(40_000, pose(gazeX = 1f, gazeForward = .8f,
+                    leftGazeY = .8f, rightGazeY = -.2f,
+                    leftConfidence = .8f, rightConfidence = 1f)),
             ),
         )
         val middle = track.at(20_000)!!
         assertEquals(0f, middle.gazeX, .0001f)
         assertEquals(.5f, middle.gazeForward, .0001f)
+        assertEquals(0f, middle.leftGazeY, .0001f)
+        assertEquals(0f, middle.rightGazeY, .0001f)
+        assertEquals(.6f, middle.leftGazeConfidence, .0001f)
+        assertEquals(.8f, middle.rightGazeConfidence, .0001f)
     }
 
     @Test fun neverInterpolatesAcrossMissingFaceIdentityChangeOrSceneCut() {
@@ -136,6 +156,7 @@ class EyeEffectsTest {
     @Test fun requiresFreshAnalysisForTheOldNominalTimestampCache() {
         val current = EyeTrack(clip.uri, 0, clip.sourceOutUs, listOf(EyeSample(0, pose())))
         assertTrue(current.covers(clip))
+        assertFalse(current.copy(version = 13).covers(clip))
         assertFalse(current.copy(version = 12).covers(clip))
         assertFalse(current.copy(version = 11).covers(clip))
         assertFalse(current.copy(version = 10).covers(clip))

@@ -20,7 +20,7 @@ constexpr int kMeshSize = 192;
 constexpr int kAnchorCount = 896;
 constexpr int kRegValues = 16;
 constexpr int kLandmarkCount = 468;
-constexpr int kOutputCount = 24;
+constexpr int kOutputCount = 32;
 constexpr float kPi = 3.14159265358979323846f;
 
 using face_tracking::Point;
@@ -369,65 +369,87 @@ PupilEstimate EstimatePupil(
         float halfHeight,
         float openness) {
     PupilEstimate result;
-    if (pixels == nullptr || width < 2 || height < 2 || openness < .34f ||
-        halfWidth < 2.f || halfHeight < 1.f || !std::isfinite(roll)) {
-        return result;
-    }
+    if (pixels == nullptr || width < 2 || height < 2 || openness < .30f ||
+        halfWidth < 1.6f || halfHeight < .8f || !std::isfinite(roll)) return result;
 
     struct Sample { float u, v, luminance; };
-    Sample samples[77];
-    int count = 0;
-    float sumLuminance = 0.f;
-    float minLuminance = 255.f;
-    const float c = std::cos(roll), s = std::sin(roll);
-
-    for (int gy = 0; gy < 7; ++gy) {
-        const float v = -0.62f + 1.24f * gy / 6.f;
-        for (int gx = 0; gx < 11; ++gx) {
-            const float u = -0.82f + 1.64f * gx / 10.f;
-            if (u * u + 1.35f * v * v > .94f) continue;
-            const float lx = u * halfWidth;
-            const float ly = v * halfHeight;
-            const float sx = center.x + c * lx - s * ly;
-            const float sy = center.y + s * lx + c * ly;
+    std::vector<Sample> samples;
+    samples.reserve(23 * 13);
+    float sumLuminance = 0.f, minLuminance = 255.f, maxLuminance = 0.f;
+    const float c = std::cos(roll), sn = std::sin(roll);
+    for (int gy = 0; gy < 13; ++gy) {
+        const float v = -0.72f + 1.44f * gy / 12.f;
+        for (int gx = 0; gx < 23; ++gx) {
+            const float u = -0.92f + 1.84f * gx / 22.f;
+            if (u * u + 1.55f * v * v > .98f) continue;
+            const float lx = u * halfWidth, ly = v * halfHeight;
+            const float sx = center.x + c * lx - sn * ly;
+            const float sy = center.y + sn * lx + c * ly;
             if (sx < 0.f || sy < 0.f || sx > width - 1.f || sy > height - 1.f) continue;
             const float luminance =
                 .2126f * SampleChannel(pixels, width, height, sx, sy, 0) +
                 .7152f * SampleChannel(pixels, width, height, sx, sy, 1) +
                 .0722f * SampleChannel(pixels, width, height, sx, sy, 2);
-            samples[count++] = Sample{u, v, luminance};
+            samples.push_back(Sample{u, v, luminance});
             sumLuminance += luminance;
             minLuminance = std::min(minLuminance, luminance);
+            maxLuminance = std::max(maxLuminance, luminance);
         }
     }
-    if (count < 16) return result;
+    if (samples.size() < 48) return result;
+    const float mean = sumLuminance / samples.size();
+    const float darkContrast = mean - minLuminance;
+    const float dynamicRange = maxLuminance - minLuminance;
+    if (!std::isfinite(darkContrast) || !std::isfinite(dynamicRange) ||
+        darkContrast < 5.5f || dynamicRange < 10.f) return result;
 
-    const float mean = sumLuminance / count;
-    const float contrast = mean - minLuminance;
-    if (!std::isfinite(contrast) || contrast < 8.f) return result;
-
-    float weightSum = 0.f;
-    float weightedX = 0.f;
-    float weightedY = 0.f;
-    for (int i = 0; i < count; ++i) {
+    float weightSum = 0.f, weightedX = 0.f, weightedY = 0.f;
+    for (const Sample& sample : samples) {
         const float darkness = Clamp(
-            (mean - samples[i].luminance) / std::max(contrast, 1.f), 0.f, 1.f);
-        if (darkness < .14f) continue;
-        const float centerPrior = std::max(
-            .25f,
-            1.f - .28f * (samples[i].u * samples[i].u + samples[i].v * samples[i].v));
-        const float weight = darkness * darkness * centerPrior;
-        weightSum += weight;
-        weightedX += samples[i].u * weight;
-        weightedY += samples[i].v * weight;
+            (mean - sample.luminance) / std::max(darkContrast, 1.f), 0.f, 1.f);
+        if (darkness < .10f) continue;
+        const float lidPrior = std::max(.34f, 1.f - .56f * std::fabs(sample.v));
+        const float cornerPrior = std::max(.45f, 1.f - .24f * sample.u * sample.u);
+        const float weight = darkness * darkness * darkness * lidPrior * cornerPrior;
+        weightSum += weight; weightedX += sample.u * weight; weightedY += sample.v * weight;
     }
     if (weightSum < 1e-4f) return result;
+    const float firstX = weightedX / weightSum, firstY = weightedY / weightSum;
 
-    result.x = Clamp(weightedX / weightSum, -1.f, 1.f);
-    result.y = Clamp(weightedY / weightSum, -1.f, 1.f);
-    result.confidence = Clamp(contrast / 72.f, 0.f, 1.f) *
-        Clamp(weightSum / (count * .22f), 0.f, 1.f);
-    if (result.confidence < .10f) return PupilEstimate{};
+    float refinedSum = 0.f, refinedX = 0.f, refinedY = 0.f, variance = 0.f;
+    for (const Sample& sample : samples) {
+        const float darkness = Clamp(
+            (mean - sample.luminance) / std::max(darkContrast, 1.f), 0.f, 1.f);
+        if (darkness < .08f) continue;
+        const float dx = (sample.u - firstX) / .62f;
+        const float dy = (sample.v - firstY) / .50f;
+        const float cluster = std::exp(-(dx * dx + dy * dy) * 1.45f);
+        const float lidPrior = std::max(.38f, 1.f - .50f * std::fabs(sample.v));
+        const float weight = darkness * darkness * cluster * lidPrior;
+        refinedSum += weight; refinedX += sample.u * weight; refinedY += sample.v * weight;
+    }
+    if (refinedSum < 1e-4f) return result;
+    result.x = Clamp(refinedX / refinedSum, -1.f, 1.f);
+    result.y = Clamp(refinedY / refinedSum, -1.f, 1.f);
+
+    for (const Sample& sample : samples) {
+        const float darkness = Clamp(
+            (mean - sample.luminance) / std::max(darkContrast, 1.f), 0.f, 1.f);
+        if (darkness < .08f) continue;
+        const float dx = (sample.u - result.x) / .62f;
+        const float dy = (sample.v - result.y) / .50f;
+        const float cluster = std::exp(-(dx * dx + dy * dy) * 1.45f);
+        const float weight = darkness * darkness * cluster;
+        variance += weight * ((sample.u-result.x)*(sample.u-result.x) +
+                              (sample.v-result.y)*(sample.v-result.y));
+    }
+    variance /= std::max(refinedSum, 1e-4f);
+    result.confidence =
+        Clamp(darkContrast / 54.f, 0.f, 1.f) *
+        (.45f + .55f * Clamp(dynamicRange / 82.f, 0.f, 1.f)) *
+        (.35f + .65f * Clamp(refinedSum / (samples.size() * .055f), 0.f, 1.f)) *
+        (.40f + .60f * Clamp(1.f - variance / .34f, 0.f, 1.f));
+    if (result.confidence < .075f) return PupilEstimate{};
     return result;
 }
 
@@ -564,29 +586,23 @@ bool RunMesh(
     output[5] = rightOrigin.x / width;
     output[6] = rightOrigin.y / height;
 
-    const float pupilWeight = leftPupil.confidence + rightPupil.confidence;
-    float pupilX = 0.f, pupilY = 0.f;
-    if (pupilWeight > .12f) {
-        pupilX = (leftPupil.x * leftPupil.confidence +
-            rightPupil.x * rightPupil.confidence) / pupilWeight;
-        pupilY = (leftPupil.y * leftPupil.confidence +
-            rightPupil.y * rightPupil.confidence) / pupilWeight;
-        const float agreement = 1.f - Clamp(
-            std::fabs(leftPupil.x - rightPupil.x) * .65f +
-            std::fabs(leftPupil.y - rightPupil.y) * .35f,
-            0.f, 1.f);
-        const float reliability =
-            Clamp(pupilWeight * .70f, 0.f, 1.f) * (.35f + .65f * agreement);
-        pupilX *= reliability;
-        pupilY *= reliability;
-    }
+    const face_tracking::EyeGaze leftGaze = face_tracking::EyeDrivenGaze(
+        headYaw, headPitch, headForward,
+        leftPupil.x, leftPupil.y, leftPupil.confidence, leftOpen);
+    const face_tracking::EyeGaze rightGaze = face_tracking::EyeDrivenGaze(
+        headYaw, headPitch, headForward,
+        rightPupil.x, rightPupil.y, rightPupil.confidence, rightOpen);
 
-    const float gazeX = Clamp(headYaw + pupilX * .85f * headForward, -1.f, 1.f);
-    const float gazeY = Clamp(headPitch + pupilY * .55f * headForward, -1.f, 1.f);
-    const float pupilMagnitude =
-        Clamp(std::sqrt(pupilX * pupilX + pupilY * pupilY), 0.f, 1.f);
-    const float gazeForward =
-        Clamp(headForward * (1.f - .62f * pupilMagnitude), 0.f, 1.f);
+    const float gazeWeight = leftGaze.confidence + rightGaze.confidence;
+    float gazeX = headYaw, gazeY = headPitch, gazeForward = headForward;
+    if (gazeWeight > .08f) {
+        gazeX = Clamp((leftGaze.x * leftGaze.confidence +
+            rightGaze.x * rightGaze.confidence) / gazeWeight, -1.f, 1.f);
+        gazeY = Clamp((leftGaze.y * leftGaze.confidence +
+            rightGaze.y * rightGaze.confidence) / gazeWeight, -1.f, 1.f);
+        gazeForward = Clamp((leftGaze.forward * leftGaze.confidence +
+            rightGaze.forward * rightGaze.confidence) / gazeWeight, 0.f, 1.f);
+    }
 
     output[18] = headYaw;
     output[19] = headPitch;
@@ -594,6 +610,14 @@ bool RunMesh(
     output[21] = gazeX;
     output[22] = gazeY;
     output[23] = gazeForward;
+    output[24] = leftGaze.x;
+    output[25] = leftGaze.y;
+    output[26] = leftGaze.forward;
+    output[27] = leftGaze.confidence;
+    output[28] = rightGaze.x;
+    output[29] = rightGaze.y;
+    output[30] = rightGaze.forward;
+    output[31] = rightGaze.confidence;
 
     float rawMinX = points[0].x, rawMinY = points[0].y;
     float rawMaxX = points[0].x, rawMaxY = points[0].y;

@@ -52,6 +52,46 @@ inline float ScreenPitchDown(const FaceOrientation& orientation) {
     return std::clamp(-orientation.pitch, -1.f, 1.f);
 }
 
+struct EyeGaze {
+    float x = 0.f;
+    float y = 0.f;
+    float forward = 1.f;
+    float confidence = 0.f;
+};
+
+inline float PupilAxisSignal(float value) {
+    if (!std::isfinite(value)) return 0.f;
+    const float magnitude = std::fabs(value);
+    if (magnitude <= .015f) return 0.f;
+    const float normalized = std::clamp((magnitude - .015f) / .55f, 0.f, 1.f);
+    return std::copysign(normalized, value);
+}
+
+inline EyeGaze EyeDrivenGaze(
+        float headYaw,
+        float headPitch,
+        float headForward,
+        float pupilX,
+        float pupilY,
+        float pupilConfidence,
+        float openness) {
+    EyeGaze result;
+    const float confidence = std::clamp(
+        pupilConfidence * std::clamp((openness - .18f) / .42f, 0.f, 1.f), 0.f, 1.f);
+    const float usable = std::clamp((confidence - .05f) / .34f, 0.f, 1.f);
+    const float irisWeight = usable > 0.f ? (.35f + .65f * usable) : 0.f;
+    const float depthScale = .55f + .45f * std::clamp(headForward, 0.f, 1.f);
+    const float irisX = PupilAxisSignal(pupilX) * 1.08f * irisWeight * depthScale;
+    const float irisY = PupilAxisSignal(pupilY) * 1.22f * irisWeight * depthScale;
+    result.x = std::clamp(headYaw * .78f + irisX, -1.f, 1.f);
+    result.y = std::clamp(headPitch * .78f + irisY, -1.f, 1.f);
+    const float projected = std::clamp(
+        std::sqrt(result.x * result.x + result.y * result.y), 0.f, 1.f);
+    result.forward = std::clamp(headForward * (1.f - .58f * projected), 0.f, 1.f);
+    result.confidence = confidence;
+    return result;
+}
+
 struct Roi {
     float cx = 0.f;
     float cy = 0.f;

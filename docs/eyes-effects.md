@@ -45,7 +45,7 @@ A valid mesh is not replaced by a detector crop every sixth sample. Acquisition 
 same frame, failed mesh output invalidates the ROI, and warm-up never seeds video tracking.
 
 The native tracker records both eyes, eye openness, roll, face bounds and mouth bounds for one
-primary face. Current gaze-aware tracks use cache version 13; run Face Tracking again after updating.
+primary face. Current gaze-aware tracks use cache version 14; run Face Tracking again after updating.
 Complete tracks are cached only after analysis succeeds. GPU handoff/cancellation remain intact.
 
 26 public eye/face presets include Fire, the new Eye Beam, two Flame Eyes variants, Flaming Horns,
@@ -112,9 +112,15 @@ The production eye shader applies a final independent per-eye gate:
 a closed right eye removes only the right-eye effect, and closing both eyes removes both visible
 eye effects. Face-level effects that are not emitted from an eye remain independent.
 
-These semantics use EyeTrack cache version 13 / `eye_tracks_v13`, forcing a fresh analysis after
+These semantics use EyeTrack cache version 14 / `eye_tracks_v14`, forcing a fresh analysis after
 the upgrade.
 
 
 ### 3D gaze tracking
 The legacy Laser Eyes and Electric Eyes presets were removed. Eye Beam uses Face Mesh 3D face orientation plus lightweight pupil refinement, anchors the emission near the pupil, rotates the gaze vector into the same eye-local roll basis as the rendered beam, and uses a white/gold broad-beam look inspired by the supplied reference footage without copying external effect assets. Frontal gaze is rendered with camera-facing foreshortening.
+
+
+### Per-eye gaze tracking
+The legacy Laser Eyes and Electric Eyes presets remain removed. Eye Beam now consumes independent left/right gaze measurements rather than forcing both eyes through one shared direction. Each frame densely samples a roll-normalized eye ROI from the decoded source pixels, estimates the dark iris/pupil cluster with a two-pass robust centroid, exposes per-eye gaze/depth/confidence, and anchors the emitter near that measured pupil. High-confidence iris motion drives the beam angle directly; low-confidence or occluded eyes fall back to a short head/shared emitter instead of creating a long fake ray. Frontal gaze is rendered with camera-facing foreshortening.
+
+Funny Face effects keep the existing face/mouth/head tracking and deformation path; this per-eye gaze upgrade does not change Funny Face tracking behavior.

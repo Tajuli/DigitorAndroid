@@ -16,6 +16,8 @@ internal const val EYE_EFFECT_SHADER = """
     uniform vec4 uEyeState;
     uniform vec4 uHeadPose;
     uniform vec4 uGazePose;
+    uniform vec4 uLeftGaze;
+    uniform vec4 uRightGaze;
     uniform float uEyeTime;
     uniform vec4 uEyeTransform;
     uniform vec2 uEyeTranslation;
@@ -61,7 +63,7 @@ internal const val EYE_EFFECT_SHADER = """
     float gazeCameraFacing(float gazeForward) {
         return smoothstep(.80,.93,uHeadPose.w)*smoothstep(.58,.82,gazeForward);
     }
-    vec3 eyeLight(vec2 uv, vec4 eye, float openness, float roll) {
+    vec3 eyeLight(vec2 uv, vec4 eye, float openness, float roll, vec4 eyeGaze) {
         // Blink gate is per eye. Closed eyelids remove that eye's effect completely; the short
         // transition avoids a hard pop while still following the per-frame openness signal.
         float blinkGate=smoothstep(.18,.30,openness);
@@ -78,15 +80,21 @@ internal const val EYE_EFFECT_SHADER = """
             light+=uEyesA.x*realisticEyeFire(p,t,.37,1.00);
         }
         if(uEyesA.y>.001) {
-            vec2 gaze=uGazePose.xy;
-            float gazeForward=uGazePose.z;
-            if(uGazePose.w<.5) {
-                gaze=vec2(uHeadPose.x,uHeadPose.y);
-                gazeForward=uHeadPose.w;
+            float gazeConfidence=eyeGaze.w;
+            vec2 gaze=eyeGaze.xy;
+            float gazeForward=eyeGaze.z;
+            if(gazeConfidence<.055) {
+                gaze=uGazePose.xy;
+                gazeForward=uGazePose.z;
+                if(uGazePose.w<.5) {
+                    gaze=vec2(uHeadPose.x,uHeadPose.y);
+                    gazeForward=uHeadPose.w;
+                }
+                gazeConfidence=.12;
             }
 
-            // p is already rotated into the eye-local frame. Rotate gaze by the exact same basis;
-            // otherwise a rolled/tilted head makes the beam slide away from the tracked eye.
+            // p is already rotated into the eye-local frame. Rotate this eye's own gaze by the
+            // exact same basis; left/right eyes are never forced to share one direction.
             vec2 localGaze=vec2(c*gaze.x+s*gaze.y,-s*gaze.x+c*gaze.y);
             float projected=length(localGaze);
             vec2 dir=projected>.025 ? localGaze/projected : vec2(1.0,0.0);
@@ -95,7 +103,8 @@ internal const val EYE_EFFECT_SHADER = """
             float cameraFacing=max(
                 gazeCameraFacing(gazeForward),
                 smoothstep(.86,.97,gazeForward)*(1.0-smoothstep(.28,.58,projected)));
-            float directional=(1.0-cameraFacing);
+            float confidenceGate=smoothstep(.10,.52,gazeConfidence);
+            float directional=(1.0-cameraFacing)*mix(.34,1.0,confidenceGate);
             float forward=max(along,0.0);
             float rayGate=smoothstep(-.10,.08,along);
 
@@ -106,12 +115,13 @@ internal const val EYE_EFFECT_SHADER = """
             float hazeWidth=.26+.025*sqrt(forward+0.01);
             float turbulence=eyeFbm(vec2(forward*.34-across*.15-t*.82,across*2.9+t*.19));
             float edgeNoise=mix(.86,1.16,turbulence);
+            float reach=mix(.095,.020,confidenceGate);
             float beamCore=exp(-pow(across/max(coreWidth,.035),2.0))*rayGate*
-                exp(-forward*.020)*directional;
+                exp(-forward*reach)*directional;
             float beamBody=exp(-pow(across/max(beamWidth*edgeNoise,.08),2.0))*rayGate*
-                exp(-forward*.028)*directional;
+                exp(-forward*(reach+.010))*directional;
             float beamHaze=exp(-pow(across/max(hazeWidth,.18),2.0))*rayGate*
-                exp(-forward*.040)*directional*(.68+.48*turbulence);
+                exp(-forward*(reach+.022))*directional*(.68+.48*turbulence);
 
             // The eye itself goes white-hot, close to the supplied reference, so the beam visibly
             // originates from the eye rather than beginning as a detached line.
@@ -263,8 +273,8 @@ internal const val EYE_EFFECT_SHADER = """
         ndc=vec2(uEyeTransform.x*ndc.x+uEyeTransform.y*ndc.y,
                  -uEyeTransform.y*ndc.x+uEyeTransform.x*ndc.y)/uEyeTransform.zw;
         uv=ndc*.5+.5;
-        vec3 light=eyeLight(uv,uLeftEye,uEyeState.x,uEyeState.z)
-                  +eyeLight(uv,uRightEye,uEyeState.y,uEyeState.w);
+        vec3 light=eyeLight(uv,uLeftEye,uEyeState.x,uEyeState.z,uLeftGaze)
+                  +eyeLight(uv,uRightEye,uEyeState.y,uEyeState.w,uRightGaze);
         if(uFaceRegion.z>.001 && uFaceRegion.w>.001) {
             vec2 p=(uv-uFaceRegion.xy)/uFaceRegion.zw;
             float inside=1.0-smoothstep(.85,1.05,length(p));

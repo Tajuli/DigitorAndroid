@@ -68,10 +68,18 @@ data class EyePose(
     val gazeX: Float = 0f,
     val gazeY: Float = 0f,
     val gazeForward: Float = 1f,
+    val leftGazeX: Float = 0f,
+    val leftGazeY: Float = 0f,
+    val leftGazeForward: Float = 1f,
+    val leftGazeConfidence: Float = 0f,
+    val rightGazeX: Float = 0f,
+    val rightGazeY: Float = 0f,
+    val rightGazeForward: Float = 1f,
+    val rightGazeConfidence: Float = 0f,
 )
 data class EyeSample(val timeUs: Long, val pose: EyePose?)
-data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 13) {
-    fun covers(clip: TimelineClip): Boolean = version == 13 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
+data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 14) {
+    fun covers(clip: TimelineClip): Boolean = version == 14 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
 
     private fun validAtOrBefore(index: Int): EyeSample? {
         var i = index.coerceAtMost(samples.lastIndex)
@@ -152,6 +160,18 @@ data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val sam
             gazeX = pa.gazeX + (pb.gazeX - pa.gazeX) * clampedT,
             gazeY = pa.gazeY + (pb.gazeY - pa.gazeY) * clampedT,
             gazeForward = pa.gazeForward + (pb.gazeForward - pa.gazeForward) * clampedT,
+            leftGazeX = pa.leftGazeX + (pb.leftGazeX - pa.leftGazeX) * clampedT,
+            leftGazeY = pa.leftGazeY + (pb.leftGazeY - pa.leftGazeY) * clampedT,
+            leftGazeForward = pa.leftGazeForward +
+                (pb.leftGazeForward - pa.leftGazeForward) * clampedT,
+            leftGazeConfidence = pa.leftGazeConfidence +
+                (pb.leftGazeConfidence - pa.leftGazeConfidence) * clampedT,
+            rightGazeX = pa.rightGazeX + (pb.rightGazeX - pa.rightGazeX) * clampedT,
+            rightGazeY = pa.rightGazeY + (pb.rightGazeY - pa.rightGazeY) * clampedT,
+            rightGazeForward = pa.rightGazeForward +
+                (pb.rightGazeForward - pa.rightGazeForward) * clampedT,
+            rightGazeConfidence = pa.rightGazeConfidence +
+                (pb.rightGazeConfidence - pa.rightGazeConfidence) * clampedT,
         )
     }
 }

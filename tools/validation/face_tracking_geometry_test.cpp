@@ -68,6 +68,16 @@ int main() {
     assert(down.pitch < -.35f);
     assert(face_tracking::ScreenPitchDown(down) > .35f);
 
+    // Independent pupil motion drives each eye independently. Positive pupil Y means look down.
+    const auto eyeDown = face_tracking::EyeDrivenGaze(0.f, 0.f, 1.f, 0.f, .48f, .9f, 1.f);
+    const auto eyeUp = face_tracking::EyeDrivenGaze(0.f, 0.f, 1.f, 0.f, -.48f, .9f, 1.f);
+    assert(eyeDown.y > .65f && eyeDown.confidence > .8f);
+    assert(eyeUp.y < -.65f && eyeUp.confidence > .8f);
+    const auto lowConfidence =
+        face_tracking::EyeDrivenGaze(.25f, .15f, .9f, 1.f, -1.f, .01f, 1.f);
+    assert(lowConfidence.x > .15f && lowConfidence.y > .08f);
+    assert(lowConfidence.confidence < .02f);
+
     // Blink geometry: three lid pairs provide a robust rotation-invariant EAR.
     const Point outer{0, 0}, inner{10, 0};
     const float openEar = EyeAspectRatio(

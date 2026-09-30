@@ -50,7 +50,7 @@ internal class NcnnVulkanFaceTrackerV103 private constructor(
 ) : AutoCloseable {
     private val lock = Any()
     private var pixels = IntArray(0)
-    private val output = FloatArray(24)
+    private val output = FloatArray(32)
 
     val backendLabel: String
         get() = if (gpuAccelerated) {
@@ -127,6 +127,14 @@ internal class NcnnVulkanFaceTrackerV103 private constructor(
                 gazeX = output[21].coerceIn(-1f, 1f),
                 gazeY = output[22].coerceIn(-1f, 1f),
                 gazeForward = output[23].coerceIn(0f, 1f),
+                leftGazeX = output[24].coerceIn(-1f, 1f),
+                leftGazeY = output[25].coerceIn(-1f, 1f),
+                leftGazeForward = output[26].coerceIn(0f, 1f),
+                leftGazeConfidence = output[27].coerceIn(0f, 1f),
+                rightGazeX = output[28].coerceIn(-1f, 1f),
+                rightGazeY = output[29].coerceIn(-1f, 1f),
+                rightGazeForward = output[30].coerceIn(0f, 1f),
+                rightGazeConfidence = output[31].coerceIn(0f, 1f),
             )
         } finally {
             owned?.recycle()

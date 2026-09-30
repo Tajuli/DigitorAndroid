@@ -283,6 +283,18 @@ internal class CreatorEffectGraphV25 private constructor(
                 pose?.gazeForward ?: 1f,
                 if (pose == null) 0f else 1f,
             ))
+            program.setFloatsUniform("uLeftGaze", floatArrayOf(
+                pose?.leftGazeX ?: 0f,
+                pose?.leftGazeY ?: 0f,
+                pose?.leftGazeForward ?: 1f,
+                pose?.leftGazeConfidence ?: 0f,
+            ))
+            program.setFloatsUniform("uRightGaze", floatArrayOf(
+                pose?.rightGazeX ?: 0f,
+                pose?.rightGazeY ?: 0f,
+                pose?.rightGazeForward ?: 1f,
+                pose?.rightGazeConfidence ?: 0f,
+            ))
             program.setFloatUniform("uEyeTime", sourceUs.toFloat() / 1_000_000f)
             program.setFloatUniform("uBlur", v.blur)
             program.setFloatUniform("uSharpen", v.sharpen)

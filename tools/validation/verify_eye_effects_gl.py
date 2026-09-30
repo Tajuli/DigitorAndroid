@@ -75,6 +75,7 @@ for key,val in [(0x2801,0x2601),(0x2800,0x2601),(0x2802,0x812F),(0x2803,0x812F)]
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
 vec('uEyeTransform',[1,0,1,1]); vec('uEyeTranslation',[0,0]); vec('uTexelSize',[1/w,1/h]); uniform('uEyeTime',.35)
 vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[-1,0,0,1])
+vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
 vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0]); vec('uEyeState',[1,1,0,0])
 vec('uFaceRegion',[.5,.5,.25,.35]);vec('uMouthRegion',[.5,.35,.08,.045])
 vertices=np.array([-1,-1,0,1,1,-1,0,1,-1,1,0,1,1,1,0,1],np.float32)
@@ -193,6 +194,32 @@ rolled_up_energy=rolled_down[-24:].sum()
 assert rolled_down_energy > rolled_up_energy*1.20 + 100, ('Rolled Eye Beam down gaze must still point down',rolled_down_energy,rolled_up_energy)
 vec('uEyeState',[1,1,0,0]); vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[-1,0,0,1])
 print('PASS: Eye Beam follows shared gaze, including rolled-head down gaze, and foreshortens toward camera.')
+
+# Real per-eye gaze: each eye can point independently and must not be forced through shared gaze.
+source[:,:,:3]=30
+fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
+amounts(1); vec('uGazePose',[0,0,1,1]); vec('uHeadPose',[0,0,0,1])
+vec('uRightEye',[0,0,0,0]); vec('uLeftEye',[.35,.5,.045,0]); vec('uEyeState',[1,0,0,0])
+vec('uLeftGaze',[0,.82,.30,.95]); vec('uRightGaze',[0,0,1,0])
+left_down=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+assert left_down[:24].sum() > left_down[-24:].sum()*1.15 + 100, 'Left eye real gaze must point down'
+
+vec('uLeftEye',[0,0,0,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[0,1,0,0])
+vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,-.82,.30,.95])
+right_up=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+assert right_up[-24:].sum() > right_up[:24].sum()*1.15 + 100, 'Right eye real gaze must point up independently'
+
+# Low-confidence pupil data must not create a long fake ray; it falls back to frontal/shared pose.
+vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0])
+vec('uGazePose',[0,0,1,1]); vec('uLeftGaze',[1,0,.2,.01])
+low_conf=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+center_conf=low_conf[max(0,row-16):min(h,row+17), 24:62].sum()
+edge_conf=low_conf[:, 100:].sum()
+assert center_conf > edge_conf + 100, 'Low-confidence gaze must stay local instead of drawing a fake long beam'
+
+vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
+vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
+print('PASS: left/right Eye Beam directions are independently eye-driven with confidence fallback.')
 
 # Fire/Flame are eye-anchored procedural flames with temporal turbulence, not static blobs.
 vec('uGazePose',[0,0,1,1]); vec('uHeadPose',[0,0,0,1])
