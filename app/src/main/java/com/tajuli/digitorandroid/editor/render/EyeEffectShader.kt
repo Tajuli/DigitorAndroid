@@ -63,6 +63,13 @@ internal const val EYE_EFFECT_SHADER = """
     float gazeCameraFacing(float gazeForward) {
         return smoothstep(.80,.93,uHeadPose.w)*smoothstep(.58,.82,gazeForward);
     }
+    float electricFrontScore(vec4 gaze) {
+        if(gaze.w<.055) return 0.0;
+        float projected=length(gaze.xy);
+        return smoothstep(.78,.93,uHeadPose.w)*
+            smoothstep(.56,.84,gaze.z)*
+            (1.0-smoothstep(.22,.60,projected));
+    }
     vec3 eyeLight(vec2 uv, vec4 eye, float openness, float roll, vec4 eyeGaze) {
         // Blink gate is per eye. Closed eyelids remove that eye's effect completely; the short
         // transition avoids a hard pop while still following the per-frame openness signal.
@@ -108,6 +115,27 @@ internal const val EYE_EFFECT_SHADER = """
             float forward=max(along,0.0);
             float rayGate=smoothstep(-.08,.10,along);
 
+            // Straight-at-lens gaze still keeps two visible tubes. Each eye gets a short,
+            // slightly inward "graze" direction so the pair appears to pass very close to the
+            // camera instead of collapsing into two glowing eye blobs.
+            float eyeMid=(uLeftEye.z>.0001 && uRightEye.z>.0001)
+                ? (uLeftEye.x+uRightEye.x)*.5 : .5;
+            float eyeSide=sign(eye.x-eyeMid);
+            if(abs(eyeSide)<.5) eyeSide=1.0;
+            vec2 grazeDir=normalize(vec2(-eyeSide*.16,-.025)+localGaze*.24);
+            float grazeAlong=dot(p,grazeDir);
+            float grazeForward=max(grazeAlong,0.0);
+            float grazeAcross=p.x*grazeDir.y-p.y*grazeDir.x;
+            float grazeWindow=smoothstep(-.08,.08,grazeAlong)*
+                (1.0-smoothstep(5.2,8.2,grazeForward));
+            float grazeWidth=.085+.062*grazeForward;
+            float frontTubeCore=exp(-pow(
+                grazeAcross/max(.030+.010*grazeForward,.030),2.0))*
+                grazeWindow*cameraFacing;
+            float frontTubeBody=exp(-pow(
+                grazeAcross/max(grazeWidth,.075),2.25))*
+                grazeWindow*cameraFacing;
+
             // CapCut-reference behavior without copying assets: the beam is not a thin GLSL line.
             // It starts narrow at the pupil, widens into a blown-out volumetric cone, has a
             // white-hot center, warm gold bloom and animated ragged/electric plasma at the edges.
@@ -142,6 +170,27 @@ internal const val EYE_EFFECT_SHADER = """
             electricEdge*=axial*exp(-forward*(reach+.010));
             filament*=axial*exp(-forward*(reach+.006));
 
+            // Subtle ionized smoke/haze sits outside the hot core. It drifts more slowly than the
+            // plasma edge and changes shape over time, which keeps the effect from reading as a
+            // clean computer-drawn tube.
+            float smokeNoise=eyeFbm(vec2(
+                forward*.115-t*.34,
+                shifted*.72+t*.095));
+            float smokeEnvelope=exp(-pow(
+                shifted/max(hazeWidth*1.72,.30),2.0))*rayGate*directional*
+                exp(-forward*(reach+.026));
+            float smoke=smokeEnvelope*
+                smoothstep(.24,.78,smokeNoise)*
+                (1.0-.42*clamp(beamBody,0.0,1.0));
+
+            float frontSmokeNoise=eyeFbm(vec2(
+                grazeForward*.16-t*.29,
+                grazeAcross*.82+t*.12));
+            float frontSmoke=exp(-pow(
+                grazeAcross/max(.30+.10*grazeForward,.30),2.0))*
+                grazeWindow*cameraFacing*
+                smoothstep(.25,.76,frontSmokeNoise);
+
             // Bright eye socket/root flare visually joins the beam to the actual pupil/eyelid.
             float lidWhite=exp(-dot(p*vec2(.58,2.40),p*vec2(.58,2.40))*1.70);
             float rootFlash=exp(-r*r*2.75);
@@ -150,20 +199,26 @@ internal const val EYE_EFFECT_SHADER = """
             // Looking straight into the camera collapses the projected cone into a large soft
             // lens-facing bloom rather than a fake arbitrary screen-space ray.
             float pulse=.94+.06*sin(t*10.5);
-            float lensCore=exp(-r*r*.72);
-            float lensHalo=exp(-r*r*.075)*(1.0-smoothstep(7.0,10.5,r));
-            float lensRing=exp(-pow((r-1.05)*4.4,2.0));
+            float localFrontHalo=exp(-r*r*.105)*(1.0-smoothstep(6.5,9.5,r));
             float front=cameraFacing*pulse;
 
+            // Do not "burn" the eye when the light is aimed at the lens. The local emitter stays
+            // visible, but most frontal energy moves into the two graze tubes and the frame-space
+            // lens flare added below.
+            float localEmitterScale=1.0-.68*cameraFacing;
             light+=uEyesA.y*(
                 vec3(1.00,.995,.93)*(
                     beamCore*2.45+beamBody*1.42+filament*.82+
-                    lidWhite*1.65+rootFlash*1.15+front*lensCore*3.15
+                    (lidWhite*1.30+rootFlash*.88)*localEmitterScale+
+                    frontTubeCore*2.65+frontTubeBody*1.05
                 )+
                 vec3(1.00,.67,.18)*(
                     beamBody*.40+beamHaze*.98+electricEdge*.64+
-                    socketBloom*.25+front*(lensHalo*.52+lensRing*.42)
+                    socketBloom*.20*localEmitterScale+
+                    frontTubeBody*.58+localFrontHalo*.14*front+
+                    smoke*.26+frontSmoke*.28
                 )+
+                vec3(.72,.68,.61)*(smoke*.18+frontSmoke*.20)+
                 vec3(1.00,.28,.015)*(electricEdge*.16+beamHaze*.10)
             );
         }
@@ -291,12 +346,33 @@ internal const val EYE_EFFECT_SHADER = """
         return clamp(eyeFrameUv(p),.001,.999);
     }
     vec3 applyEyeEffects(vec3 rgb, vec2 uv) {
+        vec2 frameUv=uv;
         vec2 ndc=uv*2.0-1.0-uEyeTranslation;
         ndc=vec2(uEyeTransform.x*ndc.x+uEyeTransform.y*ndc.y,
                  -uEyeTransform.y*ndc.x+uEyeTransform.x*ndc.y)/uEyeTransform.zw;
         uv=ndc*.5+.5;
         vec3 light=eyeLight(uv,uLeftEye,uEyeState.x,uEyeState.z,uLeftGaze)
                   +eyeLight(uv,uRightEye,uEyeState.y,uEyeState.w,uRightGaze);
+
+        // When both eyes look into the camera, move the strongest overexposure to the virtual lens
+        // rather than the eye sockets. The two local front tubes remain separate; this broad
+        // frame-space flare is the "lens scorching" cue seen when they skim close to the viewer.
+        vec4 effectiveLeft=uLeftGaze.w<.055 ? vec4(uGazePose.xyz,.12) : uLeftGaze;
+        vec4 effectiveRight=uRightGaze.w<.055 ? vec4(uGazePose.xyz,.12) : uRightGaze;
+        float pairFront=min(electricFrontScore(effectiveLeft),electricFrontScore(effectiveRight));
+        pairFront*=smoothstep(.18,.32,uEyeState.x)*smoothstep(.18,.32,uEyeState.y)*uEyesA.y;
+        vec2 lensP=vec2(frameUv.x-.5,(frameUv.y-.5)*(uTexelSize.x/uTexelSize.y));
+        float lensNoise=eyeFbm(lensP*3.1+vec2(-uEyeTime*.18,uEyeTime*.11));
+        float lensBurn=exp(-dot(lensP*vec2(.88,1.06),lensP*vec2(.88,1.06))*7.5);
+        float lensHalo=exp(-dot(lensP,lensP)*2.6)*(.76+.28*lensNoise);
+        float lensStreak=exp(-lensP.y*lensP.y*115.0)*exp(-abs(lensP.x)*2.1);
+        float lensMist=exp(-dot(lensP*vec2(.72,.92),lensP*vec2(.72,.92))*3.8)*
+            smoothstep(.22,.76,lensNoise);
+        light+=pairFront*(
+            vec3(1.00,.995,.92)*(lensBurn*1.28+lensStreak*.48)+
+            vec3(1.00,.67,.20)*(lensHalo*.34+lensMist*.20)+
+            vec3(.72,.69,.64)*lensMist*.12
+        );
         if(uFaceRegion.z>.001 && uFaceRegion.w>.001) {
             vec2 p=(uv-uFaceRegion.xy)/uFaceRegion.zw;
             float inside=1.0-smoothstep(.85,1.05,length(p));

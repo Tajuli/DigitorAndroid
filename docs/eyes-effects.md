@@ -124,3 +124,12 @@ The legacy Laser Eyes and Electric Eyes presets were removed. Electric Eyes uses
 The legacy Laser Eyes implementation remains removed. The public Electric Eyes preset now uses the new per-eye gaze pipeline and a completely new procedural renderer. Electric Eyes now consumes independent left/right gaze measurements rather than forcing both eyes through one shared direction. Each frame densely samples a roll-normalized eye ROI from the decoded source pixels, estimates the dark iris/pupil cluster with a two-pass robust centroid, exposes per-eye gaze/depth/confidence, and anchors the emitter near that measured pupil. High-confidence iris motion drives the beam angle directly; low-confidence or occluded eyes fall back to a short head/shared emitter instead of creating a long fake ray. Frontal gaze is rendered with camera-facing foreshortening.
 
 Funny Face effects keep the existing face/mouth/head tracking and deformation path; this per-eye gaze upgrade does not change Funny Face tracking behavior.
+
+
+### Electric Eyes lens-graze rendering
+Camera-facing Electric Eyes now keep two distinct short foreshortened tubes, one per tracked eye,
+instead of collapsing the effect into eye-socket glow. When both eyes face the camera, an additional
+frame-space lens flare/halation is composited around the virtual camera lens so the overexposure
+appears to happen at the viewer/lens rather than inside the eyes. Directional beams retain the
+per-eye gaze angle and now carry low-frequency animated ionized haze/smoke outside the white-hot
+core. Funny Face tracking remains unchanged.

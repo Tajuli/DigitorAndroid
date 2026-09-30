@@ -232,6 +232,33 @@ vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
 print('PASS: left/right Electric Eyes directions are independently eye-driven with confidence fallback.')
 
+# Both camera-facing eyes should produce extra frame/lens energy, not just two brighter eye blobs.
+source[:,:,:3]=30
+fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
+amounts(1); vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[0,0,1,1])
+vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
+vec('uLeftGaze',[0,0,1,.95]); vec('uRightGaze',[0,0,1,.95])
+both_front=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+lens_region=both_front[24:72,46:82].sum()
+eye_regions=both_front[34:62,32:48].sum()+both_front[34:62,80:96].sum()
+assert lens_region > 500, ('Frontal pair must illuminate the virtual lens',lens_region)
+assert lens_region > eye_regions*.12, ('Frontal pair must move meaningful energy off the eye sockets',lens_region,eye_regions)
+
+# Electric-beam haze must animate outside the narrow hot core.
+vec('uRightEye',[0,0,0,0]); vec('uLeftEye',[.30,.5,.045,0]); vec('uEyeState',[1,0,0,0])
+vec('uLeftGaze',[1,0,.25,.95]); vec('uRightGaze',[0,0,1,0]); vec('uGazePose',[1,0,.25,1])
+uniform('uEyeTime',.18); smoke_a=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+uniform('uEyeTime',.71); smoke_b=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
+outer=np.zeros((h,w),dtype=bool)
+outer[max(0,row-14):max(0,row-4),40:122]=True
+outer[min(h,row+5):min(h,row+15),40:122]=True
+smoke_delta=np.abs(smoke_a-smoke_b).sum(axis=2)
+assert smoke_delta[outer].sum()>150, 'Electric beam smoke/haze must drift over time'
+uniform('uEyeTime',.35)
+vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
+vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
+print('PASS: frontal Electric Eyes graze the virtual lens and directional beams carry animated haze.')
+
 # Fire/Flame are eye-anchored procedural flames with temporal turbulence, not static blobs.
 vec('uGazePose',[0,0,1,1]); vec('uHeadPose',[0,0,0,1])
 amounts(0); uniform('uEyeTime',.20); fire_a=render()
