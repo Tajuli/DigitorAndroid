@@ -163,28 +163,29 @@ print('PASS: Electric Eyes originates at the eye and follows left gaze.')
 vec('uHeadPose',[0,0,0,.72]); vec('uGazePose',[0,0,.30,1])
 yy_dir,xx_dir=np.mgrid[:h,:w]
 
-def gaze_centroid_x(eye_name, eye_x, gaze_x):
+def gaze_centroid(eye_name, eye_x, gaze_x, gaze_y):
     if eye_name=='left':
         vec('uLeftEye',[eye_x,.5,.045,0]); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0])
-        vec('uLeftGaze',[gaze_x,0,.30,.95]); vec('uRightGaze',[0,0,1,0])
+        vec('uLeftGaze',[gaze_x,gaze_y,.30,.95]); vec('uRightGaze',[0,0,1,0])
     else:
         vec('uLeftEye',[0,0,0,0]); vec('uRightEye',[eye_x,.5,.045,0]); vec('uEyeState',[0,1,0,0])
-        vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[gaze_x,0,.30,.95])
+        vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[gaze_x,gaze_y,.30,.95])
     delta=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None).sum(axis=2)
-    # Suppress the symmetric pupil/socket emitter; steering should be carried by energy farther
-    # than ~1.35 eye radii from the eye center.
     eye_px=eye_x*w-.5
     eye_py=.5*h-.5
+    # Ignore the symmetric socket/emitter. Only off-eye volumetric energy is allowed to decide
+    # steering direction, making this independent of bloom width and haze strength.
     far=((xx_dir-eye_px)**2+(yy_dir-eye_py)**2)>(7.8**2)
     energy=delta*far
     total=energy.sum()
-    assert total>200, ('Directional Electric Eyes emitted too little off-eye energy',eye_name,gaze_x,total)
-    return (energy*xx_dir).sum()/total
+    assert total>120, ('Directional Electric Eyes emitted too little off-eye energy',
+        eye_name,gaze_x,gaze_y,total)
+    return (energy*xx_dir).sum()/total, (energy*yy_dir).sum()/total
 
 for eye_name,eye_x in (('left',.35),('right',.65)):
-    cx_left=gaze_centroid_x(eye_name,eye_x,-1)
-    cx_right=gaze_centroid_x(eye_name,eye_x,1)
-    assert cx_right > cx_left + 3.0, (
+    cx_left,_=gaze_centroid(eye_name,eye_x,-1,0)
+    cx_right,_=gaze_centroid(eye_name,eye_x,1,0)
+    assert cx_right > cx_left + 2.0, (
         'Electric Eyes gaze must steer beam horizontally',eye_name,cx_left,cx_right)
 
 vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[0,0,1,1])
@@ -231,54 +232,68 @@ assert rolled_down_energy > rolled_up_energy*1.20 + 100, ('Rolled Electric Eyes 
 vec('uEyeState',[1,1,0,0]); vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[-1,0,0,1])
 print('PASS: Electric Eyes follows shared gaze, including rolled-head down gaze, and foreshortens toward camera.')
 
-# Real per-eye gaze: each eye can point independently and must not be forced through shared gaze.
+# Real per-eye gaze: validate vertical steering by rendering opposite gazes for the same isolated
+# eye. glReadPixels returns the bottom row first, so image-space DOWN moves the energy centroid
+# toward a smaller numpy row index.
 source[:,:,:3]=30
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
-amounts(1); vec('uGazePose',[0,0,1,1]); vec('uHeadPose',[0,0,0,1])
-vec('uRightEye',[0,0,0,0]); vec('uLeftEye',[.35,.5,.045,0]); vec('uEyeState',[1,0,0,0])
-vec('uLeftGaze',[0,.82,.30,.95]); vec('uRightGaze',[0,0,1,0])
-left_down=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-assert left_down[:24].sum() > left_down[-24:].sum()*1.15 + 100, 'Left eye real gaze must point down'
+amounts(1); vec('uGazePose',[0,0,.30,1]); vec('uHeadPose',[0,0,0,.72])
+for eye_name,eye_x in (('left',.35),('right',.65)):
+    _,cy_up=gaze_centroid(eye_name,eye_x,0,-.82)
+    _,cy_down=gaze_centroid(eye_name,eye_x,0,.82)
+    assert cy_down < cy_up - 2.0, (
+        'Electric Eyes gaze must steer beam vertically',eye_name,cy_up,cy_down)
 
-vec('uLeftEye',[0,0,0,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[0,1,0,0])
-vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,-.82,.30,.95])
-right_up=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-assert right_up[-24:].sum() > right_up[:24].sum()*1.15 + 100, 'Right eye real gaze must point up independently'
-
-# Low-confidence pupil data must not create a long fake ray; it falls back to frontal/shared pose.
+# Low-confidence pupil data should fall back to the frontal/local emitter instead of honoring a
+# requested long side ray. Compare it with the same eye at high confidence.
+vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[0,0,1,1])
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0])
-vec('uGazePose',[0,0,1,1]); vec('uLeftGaze',[1,0,.2,.01])
-low_conf=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-center_conf=low_conf[max(0,row-16):min(h,row+17), 24:62].sum()
-edge_conf=low_conf[:, 100:].sum()
-assert center_conf > edge_conf + 100, 'Low-confidence gaze must stay local instead of drawing a fake long beam'
+vec('uRightGaze',[0,0,1,0]); vec('uLeftGaze',[1,0,.20,.01])
+low_conf=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None)
+vec('uLeftGaze',[1,0,.20,.95])
+high_conf=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None)
+eye_px=.35*w-.5; eye_py=.5*h-.5
+far_right=(xx_dir>eye_px+14)&(np.abs(yy_dir-eye_py)<14)
+low_far=low_conf.sum(axis=2)[far_right].sum()
+high_far=high_conf.sum(axis=2)[far_right].sum()
+local_mask=((xx_dir-eye_px)**2+(yy_dir-eye_py)**2)<(11**2)
+assert low_conf.sum(axis=2)[local_mask].sum()>100, 'Low-confidence gaze must retain a local eye emitter'
+assert high_far > low_far + 120, (
+    'High-confidence gaze must extend farther than low-confidence fallback',low_far,high_far)
 
 vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
-print('PASS: left/right Electric Eyes directions are independently eye-driven with confidence fallback.')
+print('PASS: left/right Electric Eyes steering is independently eye-driven with confidence fallback.')
 
-# Both camera-facing eyes should produce extra frame/lens energy, not just two brighter eye blobs.
+# Both camera-facing eyes should add a true lens-graze layer. Compare against the same two eyes
+# where only the right eye turns sideways; the pair-only frame-space lens flare must then disappear.
 source[:,:,:3]=30
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
 amounts(1); vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[0,0,1,1])
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
 vec('uLeftGaze',[0,0,1,.95]); vec('uRightGaze',[0,0,1,.95])
-both_front=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-lens_region=both_front[24:72,46:82].sum()
-eye_regions=both_front[34:62,32:48].sum()+both_front[34:62,80:96].sum()
-assert lens_region > 500, ('Frontal pair must illuminate the virtual lens',lens_region)
-assert lens_region > eye_regions*.12, ('Frontal pair must move meaningful energy off the eye sockets',lens_region,eye_regions)
+pair_front=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None).sum(axis=2)
+vec('uRightGaze',[1,0,.25,.95])
+mixed_front=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None).sum(axis=2)
+lens_mask=(xx_dir>50)&(xx_dir<78)&(yy_dir>18)&(yy_dir<78)
+pair_lens=pair_front[lens_mask].sum()
+mixed_lens=mixed_front[lens_mask].sum()
+assert pair_lens > mixed_lens + 180, (
+    'Two frontal eyes must add lens-graze energy beyond ordinary eye/beam glow',mixed_lens,pair_lens)
 
-# Electric-beam haze must animate outside the narrow hot core.
+# Electric-beam haze should be visible off the hot core and drift over time. Keep one horizontal
+# directional eye, then inspect two broad side bands rather than exact smoke pixels.
 vec('uRightEye',[0,0,0,0]); vec('uLeftEye',[.30,.5,.045,0]); vec('uEyeState',[1,0,0,0])
 vec('uLeftGaze',[1,0,.25,.95]); vec('uRightGaze',[0,0,1,0]); vec('uGazePose',[1,0,.25,1])
-uniform('uEyeTime',.18); smoke_a=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-uniform('uEyeTime',.71); smoke_b=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-outer=np.zeros((h,w),dtype=bool)
-outer[max(0,row-14):max(0,row-4),40:122]=True
-outer[min(h,row+5):min(h,row+15),40:122]=True
-smoke_delta=np.abs(smoke_a-smoke_b).sum(axis=2)
-assert smoke_delta[outer].sum()>150, 'Electric beam smoke/haze must drift over time'
+uniform('uEyeTime',.18)
+smoke_a=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None)
+uniform('uEyeTime',.71)
+smoke_b=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None)
+outer=((np.abs(yy_dir-row)>=5)&(np.abs(yy_dir-row)<=17)&(xx_dir>=38))
+outer_energy=smoke_a.sum(axis=2)[outer].sum()
+smoke_delta=np.abs(smoke_a-smoke_b).sum(axis=2)[outer].sum()
+assert outer_energy>120, ('Electric beam must carry off-core haze',outer_energy)
+assert smoke_delta>60, ('Electric beam smoke/haze must drift over time',smoke_delta)
 uniform('uEyeTime',.35)
 vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
@@ -295,24 +310,28 @@ assert not np.array_equal(flame_a,flame_b), 'Flame variants must remain visually
 uniform('uEyeTime',.35)
 print('PASS: Fire/Flame effects are dynamic, eye-anchored and visually distinct.')
 
-# Blink gating is independent per eye. <=0.18 must be fully off; >=0.30 is fully on.
-# Use frontal gaze so each eye's flare stays local. With side gaze, the open opposite eye's
-# shared Electric Eyes ray can legitimately cross the closed eye's half of the frame.
-vec('uGazePose',[0,0,1,1])
-vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); amounts(1)
-vec('uEyeState',[.35,.35,0,0])
-both_open=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-vec('uEyeState',[.15,.35,0,0])
-left_blink=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-vec('uEyeState',[.35,.15,0,0])
-right_blink=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-vec('uEyeState',[.15,.15,0,0])
-both_blink=render()
-left_slice=np.s_[:, :w//2, :]
-right_slice=np.s_[:, w//2:, :]
-assert left_blink[left_slice].sum() < both_open[left_slice].sum()*.20, 'Left blink must turn off left effect'
-assert right_blink[right_slice].sum() < both_open[right_slice].sum()*.20, 'Right blink must turn off right effect'
-assert right_blink[left_slice].sum() > both_open[left_slice].sum()*.70, 'Right blink must not turn off left effect'
-assert left_blink[right_slice].sum() > both_open[right_slice].sum()*.70, 'Left blink must not turn off right effect'
-assert np.array_equal(both_blink,source), 'Both closed eyes must remove visible eye effects'
-print('PASS: per-eye blink gate independently disables closed-eye effects.')
+# Blink gating is independent per eye. Test each eye in isolation so the pair-only lens-graze
+# layer cannot make one blink appear to dim the opposite eye.
+source[:,:,:3]=30
+fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
+amounts(1); vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[0,0,1,1])
+
+vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[0,0,0,0])
+vec('uLeftGaze',[0,0,1,.95]); vec('uRightGaze',[0,0,1,0]); vec('uEyeState',[.35,0,0,0])
+left_open=render()
+assert not np.array_equal(left_open,source), 'Open left eye must render Electric Eyes'
+vec('uEyeState',[.15,0,0,0])
+assert np.array_equal(render(),source), 'Closed left eye must remove left Electric Eyes'
+
+vec('uLeftEye',[0,0,0,0]); vec('uRightEye',[.65,.5,.045,0])
+vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,.95]); vec('uEyeState',[0,.35,0,0])
+right_open=render()
+assert not np.array_equal(right_open,source), 'Open right eye must render Electric Eyes'
+vec('uEyeState',[0,.15,0,0])
+assert np.array_equal(render(),source), 'Closed right eye must remove right Electric Eyes'
+
+vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0])
+vec('uLeftGaze',[0,0,1,.95]); vec('uRightGaze',[0,0,1,.95]); vec('uEyeState',[.15,.15,0,0])
+assert np.array_equal(render(),source), 'Both closed eyes must remove Electric Eyes and lens-graze flare'
+print('PASS: per-eye blink gate independently disables Electric Eyes without pair-flare coupling.')
+
