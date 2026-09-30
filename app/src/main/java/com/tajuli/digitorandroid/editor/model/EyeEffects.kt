@@ -8,7 +8,7 @@ object EyeEffectCatalog {
     // intentionally reserved after removing the old Electric Eyes implementation.
     const val SLOT_COUNT = 27
     private const val REMOVED_ELECTRIC_SLOT = "__removed_electric__"
-    private val slots = listOf("Fire Eyes", "Eye Beam", "Lightning Eyes", "Plasma Eyes",
+    private val slots = listOf("Fire Eyes", "Electric Eyes", "Lightning Eyes", "Plasma Eyes",
         "Ice Eyes", "Galaxy Eyes", "Neon Eyes", "Solar Eyes", "Cyber Eyes",
         "Heart Eyes", "Star Eyes", "Rainbow Eyes",
         REMOVED_ELECTRIC_SLOT, "Flame Eyes", "Flame Eyes 2", "Flaming Horns",
@@ -19,8 +19,10 @@ object EyeEffectCatalog {
     val funnyNames get() = slots.drop(20).filterNot { it.startsWith("__removed_") }
 
     fun index(name: String): Int {
-        // Do not silently remap serialized legacy effects to the new design.
-        if (name.equals("Laser Eyes", true) || name.equals("Electric Eyes", true)) return -1
+        if (name.equals("Laser Eyes", true)) return -1
+        // Eye Beam was the temporary name used while the new real per-eye tracker was being built.
+        // Keep it as a serialization alias, but expose only the new Electric Eyes preset in the UI.
+        if (name.equals("Eye Beam", true)) return 1
         return slots.indexOfFirst { !it.startsWith("__removed_") && it.equals(name, true) }
     }
     fun contains(name: String): Boolean = index(name) >= 0

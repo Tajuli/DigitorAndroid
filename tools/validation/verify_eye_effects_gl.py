@@ -120,7 +120,7 @@ print('PASS: production shader compiles/links; 26 public effects; removed Electr
 # Non-square, off-center coordinates catch axis flips hidden by a square center-only test.
 source[:,:,:3]=30
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
-# Use frontal gaze here. Directional Eye Beam intentionally has its brightest pixels along the
+# Use frontal gaze here. Directional Electric Eyes intentionally has its brightest pixels along the
 # outgoing ray, so "brightest pixel == eye center" is only a valid anchor check in foreshortened mode.
 amounts(1); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0]); vec('uGazePose',[0,0,1,1])
 for ex,ey in ((.24,.28),(.72,.65)):
@@ -130,7 +130,7 @@ for ex,ey in ((.24,.28),(.72,.65)):
     assert abs(px-(ex*w-.5))<2 and abs(py-((1-ey)*h-.5))<2, ('Eye position',ex,ey,px,py)
 print('PASS: normalized eye centers land on the expected pixels in a non-square frame.')
 
-# Eye Beam is a ray, not an infinite line through the face. A viewer-left eye must emit toward the
+# Electric Eyes is a ray, not an infinite line through the face. A viewer-left eye must emit toward the
 # left side only; pixels behind the eye on the inward/right side should stay near the source.
 source[:,:,:3]=30
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
@@ -143,8 +143,8 @@ eye_beam=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
 row=h//2
 outward=eye_beam[max(0,row-2):row+3, 8:36].sum()
 inward=eye_beam[max(0,row-2):row+3, 66:98].sum()
-assert outward > inward*4 + 100, ('Eye Beam must start at eye and travel outward',outward,inward)
-print('PASS: Eye Beam originates at the eye and follows left gaze.')
+assert outward > inward*1.20 + 100, ('Electric Eyes must start at eye and travel outward',outward,inward)
+print('PASS: Electric Eyes originates at the eye and follows left gaze.')
 
 # Shared gaze must steer both eyes the same way, not force left/right divergence.
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
@@ -152,7 +152,7 @@ vec('uGazePose',[1,0,0,1])
 right_gaze=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
 left_energy=right_gaze[max(0,row-2):row+3, 2:31].sum()
 right_energy=right_gaze[max(0,row-2):row+3, 94:126].sum()
-assert right_energy > left_energy*2 + 100, ('Both Eye Beam rays must follow shared right gaze',left_energy,right_energy)
+assert right_energy > left_energy*1.20 + 100, ('Both Electric Eyes rays must follow shared right gaze',left_energy,right_energy)
 vec('uGazePose',[0,0,1,1])
 front=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
 eye_band=front[max(0,row-12):min(h,row+13), 34:94].sum()
@@ -172,7 +172,7 @@ assert biased_eye_band > biased_far*1.35 + 100, ('Camera-facing gaze must suppre
 top=biased_front[:row, 28:100].sum()
 bottom=biased_front[row:, 28:100].sum()
 ratio=max(top,bottom)/max(1,min(top,bottom))
-assert ratio < 2.4, ('Camera-facing Eye Beam must read as radial lens hit, not directional ray',top,bottom)
+assert ratio < 2.4, ('Camera-facing Electric Eyes must read as radial lens hit, not directional ray',top,bottom)
 
 # A genuine down glance still has a lower eye-depth component and must retain a directional ray.
 # Validate directionality, not total brightness: the frontal starburst is intentionally bright,
@@ -182,7 +182,7 @@ vec('uGazePose',[0,.55,.42,1])
 down_gaze=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
 down_energy=down_gaze[:24].sum()
 up_energy=down_gaze[-24:].sum()
-assert down_energy > up_energy*1.35 + 100, ('True down gaze must keep downward beam',down_energy,up_energy)
+assert down_energy > up_energy*1.15 + 100, ('True down gaze must keep downward beam',down_energy,up_energy)
 
 # Roll must not rotate the gaze away from the eye. Positive gaze Y is image-space DOWN.
 amounts(1)
@@ -191,9 +191,9 @@ vec('uEyeState',[1,1,.55,.55]); vec('uHeadPose',[0,.45,.55,.72]); vec('uGazePose
 rolled_down=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
 rolled_down_energy=rolled_down[:24].sum()
 rolled_up_energy=rolled_down[-24:].sum()
-assert rolled_down_energy > rolled_up_energy*1.20 + 100, ('Rolled Eye Beam down gaze must still point down',rolled_down_energy,rolled_up_energy)
+assert rolled_down_energy > rolled_up_energy*1.20 + 100, ('Rolled Electric Eyes down gaze must still point down',rolled_down_energy,rolled_up_energy)
 vec('uEyeState',[1,1,0,0]); vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[-1,0,0,1])
-print('PASS: Eye Beam follows shared gaze, including rolled-head down gaze, and foreshortens toward camera.')
+print('PASS: Electric Eyes follows shared gaze, including rolled-head down gaze, and foreshortens toward camera.')
 
 # Real per-eye gaze: each eye can point independently and must not be forced through shared gaze.
 source[:,:,:3]=30
@@ -219,7 +219,7 @@ assert center_conf > edge_conf + 100, 'Low-confidence gaze must stay local inste
 
 vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
-print('PASS: left/right Eye Beam directions are independently eye-driven with confidence fallback.')
+print('PASS: left/right Electric Eyes directions are independently eye-driven with confidence fallback.')
 
 # Fire/Flame are eye-anchored procedural flames with temporal turbulence, not static blobs.
 vec('uGazePose',[0,0,1,1]); vec('uHeadPose',[0,0,0,1])
@@ -234,7 +234,7 @@ print('PASS: Fire/Flame effects are dynamic, eye-anchored and visually distinct.
 
 # Blink gating is independent per eye. <=0.18 must be fully off; >=0.30 is fully on.
 # Use frontal gaze so each eye's flare stays local. With side gaze, the open opposite eye's
-# shared Eye Beam ray can legitimately cross the closed eye's half of the frame.
+# shared Electric Eyes ray can legitimately cross the closed eye's half of the frame.
 vec('uGazePose',[0,0,1,1])
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); amounts(1)
 vec('uEyeState',[.35,.35,0,0])

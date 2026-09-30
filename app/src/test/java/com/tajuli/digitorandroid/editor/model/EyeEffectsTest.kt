@@ -78,18 +78,20 @@ class EyeEffectsTest {
         assertNull(track(pose(.8f)).at(20_000))
         assertNull(track(pose(), 200_000).at(100_000))
     }
-    @Test fun catalogReplacesLegacyLaserAndElectricWithEyeBeamWithoutShiftingSlots() {
+    @Test fun catalogExposesNewElectricEyesWithoutShiftingLegacySlots() {
+        assertTrue(EyeEffectCatalog.contains("Electric Eyes"))
         assertTrue(EyeEffectCatalog.contains("Eye Beam"))
         assertFalse(EyeEffectCatalog.contains("Laser Eyes"))
-        assertFalse(EyeEffectCatalog.contains("Electric Eyes"))
+        assertEquals(1, EyeEffectCatalog.index("Electric Eyes"))
         assertEquals(1, EyeEffectCatalog.index("Eye Beam"))
         assertEquals(EyeEffectCatalog.SLOT_COUNT, resolveEyeEffects(
-            listOf(NodeEffect(name="Eye Beam", amount=1f)), clip, 100_000).size)
+            listOf(NodeEffect(name="Electric Eyes", amount=1f)), clip, 100_000).size)
+        assertEquals(1f, resolveEyeEffects(
+            listOf(NodeEffect(name="Electric Eyes", amount=1f)), clip, 100_000)[1], 0f)
         assertEquals(1f, resolveEyeEffects(
             listOf(NodeEffect(name="Eye Beam", amount=1f)), clip, 100_000)[1], 0f)
         assertTrue(resolveEyeEffects(
-            listOf(NodeEffect(name="Laser Eyes", amount=1f), NodeEffect(name="Electric Eyes", amount=1f)),
-            clip, 100_000).all { it == 0f })
+            listOf(NodeEffect(name="Laser Eyes", amount=1f)), clip, 100_000).all { it == 0f })
     }
 
     @Test fun timedEffectsRespectDisableZeroTrimAndAmount() {

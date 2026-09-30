@@ -48,7 +48,7 @@ The native tracker records both eyes, eye openness, roll, face bounds and mouth 
 primary face. Current gaze-aware tracks use cache version 14; run Face Tracking again after updating.
 Complete tracks are cached only after analysis succeeds. GPU handoff/cancellation remain intact.
 
-26 public eye/face presets include Fire, the new Eye Beam, two Flame Eyes variants, Flaming Horns,
+26 public eye/face presets include Fire, the new Electric Eyes, two Flame Eyes variants, Flaming Horns,
 reflection, scans and regional face distortions. 31 additional body decorations include wings,
 rings, particles, strokes and clones. These are original procedural variants, not copied CapCut
 assets or exact reproductions.
@@ -104,7 +104,7 @@ instead of a single upper/lower eyelid pair. The left eye uses Face Mesh pairs 1
 160/144 over corners 33/133; the right eye uses 386/374, 385/380 and 387/373 over corners 362/263.
 Each eye has independent hysteresis: it closes at EAR <= 0.18 and does not reopen until EAR >= 0.23.
 While closed, the stored eye openness is exactly zero. A short missing per-frame pose may still
-bridge position, but its eye openness is forced to zero so Fire/Eye Beam cannot shine through an
+bridge position, but its eye openness is forced to zero so Fire/Electric Eyes cannot shine through an
 uncertain/blink frame.
 
 The production eye shader applies a final independent per-eye gate:
@@ -117,10 +117,10 @@ the upgrade.
 
 
 ### 3D gaze tracking
-The legacy Laser Eyes and Electric Eyes presets were removed. Eye Beam uses Face Mesh 3D face orientation plus lightweight pupil refinement, anchors the emission near the pupil, rotates the gaze vector into the same eye-local roll basis as the rendered beam, and uses a white/gold broad-beam look inspired by the supplied reference footage without copying external effect assets. Frontal gaze is rendered with camera-facing foreshortening.
+The legacy Laser Eyes and Electric Eyes presets were removed. Electric Eyes uses Face Mesh 3D face orientation plus lightweight pupil refinement, anchors the emission near the pupil, rotates the gaze vector into the same eye-local roll basis as the rendered beam, and uses a white/gold broad-beam look inspired by the supplied reference footage without copying external effect assets. Frontal gaze is rendered with camera-facing foreshortening.
 
 
 ### Per-eye gaze tracking
-The legacy Laser Eyes and Electric Eyes presets remain removed. Eye Beam now consumes independent left/right gaze measurements rather than forcing both eyes through one shared direction. Each frame densely samples a roll-normalized eye ROI from the decoded source pixels, estimates the dark iris/pupil cluster with a two-pass robust centroid, exposes per-eye gaze/depth/confidence, and anchors the emitter near that measured pupil. High-confidence iris motion drives the beam angle directly; low-confidence or occluded eyes fall back to a short head/shared emitter instead of creating a long fake ray. Frontal gaze is rendered with camera-facing foreshortening.
+The legacy Laser Eyes implementation remains removed. The public Electric Eyes preset now uses the new per-eye gaze pipeline and a completely new procedural renderer. Electric Eyes now consumes independent left/right gaze measurements rather than forcing both eyes through one shared direction. Each frame densely samples a roll-normalized eye ROI from the decoded source pixels, estimates the dark iris/pupil cluster with a two-pass robust centroid, exposes per-eye gaze/depth/confidence, and anchors the emitter near that measured pupil. High-confidence iris motion drives the beam angle directly; low-confidence or occluded eyes fall back to a short head/shared emitter instead of creating a long fake ray. Frontal gaze is rendered with camera-facing foreshortening.
 
 Funny Face effects keep the existing face/mouth/head tracking and deformation path; this per-eye gaze upgrade does not change Funny Face tracking behavior.

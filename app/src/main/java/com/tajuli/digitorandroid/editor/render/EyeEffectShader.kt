@@ -93,8 +93,8 @@ internal const val EYE_EFFECT_SHADER = """
                 gazeConfidence=.12;
             }
 
-            // p is already rotated into the eye-local frame. Rotate this eye's own gaze by the
-            // exact same basis; left/right eyes are never forced to share one direction.
+            // Render in the same eye-local basis used by the pupil tracker. This keeps the emitter
+            // welded to the eye while the beam angle changes naturally with real per-eye gaze.
             vec2 localGaze=vec2(c*gaze.x+s*gaze.y,-s*gaze.x+c*gaze.y);
             float projected=length(localGaze);
             vec2 dir=projected>.025 ? localGaze/projected : vec2(1.0,0.0);
@@ -103,46 +103,68 @@ internal const val EYE_EFFECT_SHADER = """
             float cameraFacing=max(
                 gazeCameraFacing(gazeForward),
                 smoothstep(.86,.97,gazeForward)*(1.0-smoothstep(.28,.58,projected)));
-            float confidenceGate=smoothstep(.10,.52,gazeConfidence);
-            float directional=(1.0-cameraFacing)*mix(.34,1.0,confidenceGate);
+            float confidenceGate=smoothstep(.10,.50,gazeConfidence);
+            float directional=(1.0-cameraFacing)*mix(.28,1.0,confidenceGate);
             float forward=max(along,0.0);
-            float rayGate=smoothstep(-.10,.08,along);
+            float rayGate=smoothstep(-.08,.10,along);
 
-            // Reference-inspired white/gold beam: a broad white-hot body with a warm bloom and a
-            // softly turbulent outer haze. It starts at the pupil/eyelid anchor and follows gaze.
-            float beamWidth=.105+.012*sqrt(forward+0.01);
-            float coreWidth=.042+.005*sqrt(forward+0.01);
-            float hazeWidth=.26+.025*sqrt(forward+0.01);
-            float turbulence=eyeFbm(vec2(forward*.34-across*.15-t*.82,across*2.9+t*.19));
-            float edgeNoise=mix(.86,1.16,turbulence);
-            float reach=mix(.095,.020,confidenceGate);
-            float beamCore=exp(-pow(across/max(coreWidth,.035),2.0))*rayGate*
-                exp(-forward*reach)*directional;
-            float beamBody=exp(-pow(across/max(beamWidth*edgeNoise,.08),2.0))*rayGate*
-                exp(-forward*(reach+.010))*directional;
-            float beamHaze=exp(-pow(across/max(hazeWidth,.18),2.0))*rayGate*
-                exp(-forward*(reach+.022))*directional*(.68+.48*turbulence);
+            // CapCut-reference behavior without copying assets: the beam is not a thin GLSL line.
+            // It starts narrow at the pupil, widens into a blown-out volumetric cone, has a
+            // white-hot center, warm gold bloom and animated ragged/electric plasma at the edges.
+            float coarse=eyeFbm(vec2(forward*.19-t*1.45,across*1.65+t*.17));
+            float fine=eyeFbm(vec2(forward*.47+t*.92,across*4.20-t*.63));
+            float coneWidth=.10+forward*.055;
+            float coreWidth=.032+forward*.010;
+            float hazeWidth=.28+forward*.115;
+            float sway=(coarse-.5)*coneWidth*.30+
+                sin(forward*1.18-t*7.4)*(.012+.003*forward);
+            float shifted=across-sway;
+            float raggedWidth=coneWidth*(.78+.42*fine);
 
-            // The eye itself goes white-hot, close to the supplied reference, so the beam visibly
-            // originates from the eye rather than beginning as a detached line.
-            float lidWhite=exp(-dot(p*vec2(.72,2.55),p*vec2(.72,2.55))*2.0);
-            float emitter=exp(-r*r*2.25);
-            float warmEmitter=exp(-r*r*.72);
+            float beamCore=exp(-pow(shifted/max(coreWidth,.028),2.0));
+            float beamBody=exp(-pow(abs(shifted)/max(raggedWidth,.070),2.55));
+            float beamHaze=exp(-pow(shifted/max(hazeWidth,.20),2.0))*
+                (.62+.58*coarse);
+            float edgeDistance=abs(shifted)-raggedWidth*.78;
+            float electricEdge=exp(-pow(
+                edgeDistance/max(.026+.006*forward,.026),2.0))*(.32+.78*fine);
+            float filamentOffset=
+                sin(forward*2.25-t*14.0)*(.018+.0025*forward)+
+                (fine-.5)*(.020+.002*forward);
+            float filament=exp(-pow(
+                (shifted-filamentOffset)/max(.017+.003*forward,.017),2.0));
 
-            // Straight-at-camera gaze has no useful 2D beam length. Use a bright foreshortened
-            // flare instead of inventing an arbitrary screen direction.
-            float pulse=.94+.06*sin(t*13.0);
-            float lensCore=exp(-r*r*.95);
-            float lensHalo=exp(-r*r*.11)*(1.0-smoothstep(6.0,9.0,r));
-            float lensRing=exp(-pow((r-.92)*5.3,2.0));
-            float lensSpokes=pow(abs(cos(a*4.0)),18.0)*exp(-r*.30);
+            float reach=mix(.115,.008,confidenceGate);
+            float axial=rayGate*directional;
+            beamCore*=axial*exp(-forward*reach);
+            beamBody*=axial*exp(-forward*(reach+.004));
+            beamHaze*=axial*exp(-forward*(reach+.014));
+            electricEdge*=axial*exp(-forward*(reach+.010));
+            filament*=axial*exp(-forward*(reach+.006));
+
+            // Bright eye socket/root flare visually joins the beam to the actual pupil/eyelid.
+            float lidWhite=exp(-dot(p*vec2(.58,2.40),p*vec2(.58,2.40))*1.70);
+            float rootFlash=exp(-r*r*2.75);
+            float socketBloom=exp(-dot(p*vec2(.42,1.15),p*vec2(.42,1.15))*.50);
+
+            // Looking straight into the camera collapses the projected cone into a large soft
+            // lens-facing bloom rather than a fake arbitrary screen-space ray.
+            float pulse=.94+.06*sin(t*10.5);
+            float lensCore=exp(-r*r*.72);
+            float lensHalo=exp(-r*r*.075)*(1.0-smoothstep(7.0,10.5,r));
+            float lensRing=exp(-pow((r-1.05)*4.4,2.0));
             float front=cameraFacing*pulse;
 
             light+=uEyesA.y*(
-                vec3(1.00,.98,.86)*(beamCore*2.15+beamBody*.98+lidWhite*1.55+
-                    emitter*.90+front*(lensCore*3.0+lensSpokes*.62))+
-                vec3(1.00,.68,.20)*(beamHaze*.72+warmEmitter*.28+
-                    front*(lensHalo*.30+lensRing*.52))
+                vec3(1.00,.995,.93)*(
+                    beamCore*2.45+beamBody*1.42+filament*.82+
+                    lidWhite*1.65+rootFlash*1.15+front*lensCore*3.15
+                )+
+                vec3(1.00,.67,.18)*(
+                    beamBody*.40+beamHaze*.98+electricEdge*.64+
+                    socketBloom*.25+front*(lensHalo*.52+lensRing*.42)
+                )+
+                vec3(1.00,.28,.015)*(electricEdge*.16+beamHaze*.10)
             );
         }
         if(uEyesA.z>.001) {
