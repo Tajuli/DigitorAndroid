@@ -81,51 +81,58 @@ internal const val EYE_EFFECT_SHADER = """
             vec2 gaze=uGazePose.xy;
             float gazeForward=uGazePose.z;
             if(uGazePose.w<.5) {
-                float eyeMid=(uLeftEye.z>.0001 && uRightEye.z>.0001)
-                    ? (uLeftEye.x+uRightEye.x)*.5 : .5;
-                float side=sign(eye.x-eyeMid);
-                if(abs(side)<.5) side=1.0;
-                gaze=vec2(side,0.0);
-                gazeForward=0.0;
+                gaze=vec2(uHeadPose.x,uHeadPose.y);
+                gazeForward=uHeadPose.w;
             }
-            float projected=length(gaze);
-            vec2 dir=projected>.025 ? gaze/projected : vec2(1.0,0.0);
+
+            // p is already rotated into the eye-local frame. Rotate gaze by the exact same basis;
+            // otherwise a rolled/tilted head makes the beam slide away from the tracked eye.
+            vec2 localGaze=vec2(c*gaze.x+s*gaze.y,-s*gaze.x+c*gaze.y);
+            float projected=length(localGaze);
+            vec2 dir=projected>.025 ? localGaze/projected : vec2(1.0,0.0);
             float along=dot(p,dir);
             float across=p.x*dir.y-p.y*dir.x;
-            float rayGate=smoothstep(-.03,.11,along);
             float cameraFacing=max(
                 gazeCameraFacing(gazeForward),
-                smoothstep(.84,.96,gazeForward)*(1.0-smoothstep(.34,.64,projected)));
+                smoothstep(.86,.97,gazeForward)*(1.0-smoothstep(.28,.58,projected)));
             float directional=(1.0-cameraFacing);
-            directional*=directional;
+            float forward=max(along,0.0);
+            float rayGate=smoothstep(-.10,.08,along);
 
-            // Thin white-hot optical core + red bloom. The beam begins exactly at the eye and
-            // expands only slightly with distance, so it reads as emitted light instead of a line
-            // pasted across the frame.
-            float coreWidth=.030+.0045*max(along,0.0);
-            float glowWidth=.095+.010*max(along,0.0);
-            float beamCore=exp(-pow(across/max(coreWidth,.025),2.0))*rayGate*
-                exp(-max(along,0.0)*.045)*directional;
-            float beamGlow=exp(-pow(across/max(glowWidth,.07),2.0))*rayGate*
-                exp(-max(along,0.0)*.065)*directional;
-            float eyeEmitter=exp(-r*r*3.6);
+            // Reference-inspired white/gold beam: a broad white-hot body with a warm bloom and a
+            // softly turbulent outer haze. It starts at the pupil/eyelid anchor and follows gaze.
+            float beamWidth=.105+.012*sqrt(forward+0.01);
+            float coreWidth=.042+.005*sqrt(forward+0.01);
+            float hazeWidth=.26+.025*sqrt(forward+0.01);
+            float turbulence=eyeFbm(vec2(forward*.34-across*.15-t*.82,across*2.9+t*.19));
+            float edgeNoise=mix(.86,1.16,turbulence);
+            float beamCore=exp(-pow(across/max(coreWidth,.035),2.0))*rayGate*
+                exp(-forward*.020)*directional;
+            float beamBody=exp(-pow(across/max(beamWidth*edgeNoise,.08),2.0))*rayGate*
+                exp(-forward*.028)*directional;
+            float beamHaze=exp(-pow(across/max(hazeWidth,.18),2.0))*rayGate*
+                exp(-forward*.040)*directional*(.68+.48*turbulence);
 
-            // Looking into the lens has almost zero projected 2D beam length. A compact emitter,
-            // concentric depth rings and radial diffraction spikes create the visual cue that the
-            // laser is travelling out of the screen toward the camera.
-            float pulse=.92+.08*sin(t*18.0);
-            float lensCore=exp(-r*r*1.25);
-            float lensHalo=exp(-r*r*.13)*(1.0-smoothstep(5.0,8.5,r));
-            float lensRing1=exp(-pow((r-.72)*7.5,2.0));
-            float lensRing2=exp(-pow((r-1.48)*4.4,2.0));
-            float lensSpokes=pow(abs(cos(a*4.0)),24.0)*exp(-r*.33);
-            float forwardBurst=cameraFacing*pulse;
+            // The eye itself goes white-hot, close to the supplied reference, so the beam visibly
+            // originates from the eye rather than beginning as a detached line.
+            float lidWhite=exp(-dot(p*vec2(.72,2.55),p*vec2(.72,2.55))*2.0);
+            float emitter=exp(-r*r*2.25);
+            float warmEmitter=exp(-r*r*.72);
+
+            // Straight-at-camera gaze has no useful 2D beam length. Use a bright foreshortened
+            // flare instead of inventing an arbitrary screen direction.
+            float pulse=.94+.06*sin(t*13.0);
+            float lensCore=exp(-r*r*.95);
+            float lensHalo=exp(-r*r*.11)*(1.0-smoothstep(6.0,9.0,r));
+            float lensRing=exp(-pow((r-.92)*5.3,2.0));
+            float lensSpokes=pow(abs(cos(a*4.0)),18.0)*exp(-r*.30);
+            float front=cameraFacing*pulse;
 
             light+=uEyesA.y*(
-                vec3(1.0,.035,.012)*(beamGlow*.95+eyeEmitter*.42+
-                    forwardBurst*(lensHalo*.22+lensRing1*.62+lensRing2*.24))+
-                vec3(1.0,.82,.68)*(beamCore*1.55+eyeEmitter*1.15+
-                    forwardBurst*(lensCore*2.75+lensSpokes*.88))
+                vec3(1.00,.98,.86)*(beamCore*2.15+beamBody*.98+lidWhite*1.55+
+                    emitter*.90+front*(lensCore*3.0+lensSpokes*.62))+
+                vec3(1.00,.68,.20)*(beamHaze*.72+warmEmitter*.28+
+                    front*(lensHalo*.30+lensRing*.52))
             );
         }
         if(uEyesA.z>.001) {
@@ -175,43 +182,7 @@ internal const val EYE_EFFECT_SHADER = """
         if(uEyesC.w>.001) {
             light+=uEyesC.w*eyePalette(a/6.28318+r*.18-t*.15)*(ring+core*.8+halo*.18);
         }
-        if(uEyesD.x>.001) {
-            vec2 gaze=uGazePose.xy;
-            float gazeForward=uGazePose.z;
-            if(uGazePose.w<.5) { gaze=vec2(0.0,-1.0); gazeForward=0.0; }
-            float projected=length(gaze);
-            vec2 dir=projected>.025 ? gaze/projected : vec2(1.0,0.0);
-            float along=dot(p,dir);
-            float across=p.x*dir.y-p.y*dir.x;
-            float cameraFacing=max(
-                gazeCameraFacing(gazeForward),
-                smoothstep(.84,.96,gazeForward)*(1.0-smoothstep(.34,.64,projected)));
-            float directional=(1.0-cameraFacing);
-            directional*=directional;
-            float rayGate=smoothstep(-.04,.12,along);
-            float jitter=.055*sin(along*7.0-t*24.0)+.025*sin(along*17.0+t*31.0);
-            jitter+=.035*(eyeNoise(vec2(along*2.8,t*5.0))-0.5);
-            float bolt=exp(-abs(across-jitter)*34.0)*rayGate*
-                exp(-max(along,0.0)*.07)*directional;
-            float guide=exp(-across*across*52.0)*rayGate*
-                exp(-max(along,0.0)*.09)*directional;
-
-            // Forward electric energy uses broken concentric arcs and a cyan lens burst rather
-            // than a laser line, while sharing the same gaze/camera-facing decision.
-            float rr=r+.035*sin(a*7.0+t*8.0);
-            float ring1=exp(-pow((rr-.72)*10.0,2.0));
-            float ring2=exp(-pow((rr-1.38)*6.0,2.0));
-            float broken=.35+.65*step(.25,eyeNoise(vec2(floor(a*9.0),floor(t*12.0))));
-            float spokes=pow(abs(cos(a*6.0+t*.7)),30.0)*exp(-r*.48);
-            float front=cameraFacing*(.90+.10*sin(t*20.0));
-            float emitter=exp(-r*r*2.9);
-            light+=uEyesD.x*(
-                vec3(.02,.52,1.0)*(bolt*1.25+guide*.30+
-                    front*(ring1*.75+ring2*.35)*broken)+
-                vec3(.66,.96,1.0)*(guide*.85+emitter+
-                    front*(exp(-r*r*1.4)*2.15+spokes*.70))
-            );
-        }
+        // uEyesD.x (slot 12) is reserved after removing the legacy Electric Eyes effect.
         if(uEyesD.y>.001 || uEyesD.z>.001) {
             vec3 flame1=realisticEyeFire(p*vec2(.94,.86),t,1.23,1.18);
             vec3 flame2=realisticEyeFire(p*vec2(1.10,.72),t,2.41,1.38);

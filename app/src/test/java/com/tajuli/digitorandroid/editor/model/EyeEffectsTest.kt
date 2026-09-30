@@ -58,6 +58,20 @@ class EyeEffectsTest {
         assertNull(track(pose(.8f)).at(20_000))
         assertNull(track(pose(), 200_000).at(100_000))
     }
+    @Test fun catalogReplacesLegacyLaserAndElectricWithEyeBeamWithoutShiftingSlots() {
+        assertTrue(EyeEffectCatalog.contains("Eye Beam"))
+        assertFalse(EyeEffectCatalog.contains("Laser Eyes"))
+        assertFalse(EyeEffectCatalog.contains("Electric Eyes"))
+        assertEquals(1, EyeEffectCatalog.index("Eye Beam"))
+        assertEquals(EyeEffectCatalog.SLOT_COUNT, resolveEyeEffects(
+            listOf(NodeEffect(name="Eye Beam", amount=1f)), clip, 100_000).size)
+        assertEquals(1f, resolveEyeEffects(
+            listOf(NodeEffect(name="Eye Beam", amount=1f)), clip, 100_000)[1], 0f)
+        assertTrue(resolveEyeEffects(
+            listOf(NodeEffect(name="Laser Eyes", amount=1f), NodeEffect(name="Electric Eyes", amount=1f)),
+            clip, 100_000).all { it == 0f })
+    }
+
     @Test fun timedEffectsRespectDisableZeroTrimAndAmount() {
         val fire = NodeEffect(name="Fire Eyes", amount=.4f, sourceStartUsV26=200_000, sourceEndUsV26=700_000)
         assertEquals(0f, resolveEyeEffects(listOf(fire), clip, 100_000)[0], 0f)

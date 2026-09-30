@@ -17,7 +17,7 @@ class CreatorEffectV25Test {
         assertEquals(10, CreatorEffectCatalogV25.inCategory("Lens").size)
         assertEquals(10, CreatorEffectCatalogV25.inCategory("Motion").size)
         assertEquals(10, CreatorEffectCatalogV25.inCategory("Body").size)
-        assertEquals(20, CreatorEffectCatalogV25.inCategory("Eyes").size)
+        assertEquals(19, CreatorEffectCatalogV25.inCategory("Eyes").size)
         assertEquals(7, CreatorEffectCatalogV25.inCategory("Funny Faces").size)
         assertEquals(20, CreatorEffectCatalogV25.inCategory("Glowing Lines").size)
         assertEquals(7, CreatorEffectCatalogV25.inCategory("Stroke").size)

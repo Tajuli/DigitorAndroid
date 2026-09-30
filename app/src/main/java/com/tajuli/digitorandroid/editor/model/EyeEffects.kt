@@ -4,14 +4,25 @@ import kotlin.math.abs
 
 /** Stable names are serialized through the existing timed NodeEffect contract. */
 object EyeEffectCatalog {
-    val names = listOf("Fire Eyes", "Laser Eyes", "Lightning Eyes", "Plasma Eyes",
+    // Keep shader slots stable so existing non-Laser eye/funny effects do not shift. Slot 12 is
+    // intentionally reserved after removing the old Electric Eyes implementation.
+    const val SLOT_COUNT = 27
+    private const val REMOVED_ELECTRIC_SLOT = "__removed_electric__"
+    private val slots = listOf("Fire Eyes", "Eye Beam", "Lightning Eyes", "Plasma Eyes",
         "Ice Eyes", "Galaxy Eyes", "Neon Eyes", "Solar Eyes", "Cyber Eyes",
         "Heart Eyes", "Star Eyes", "Rainbow Eyes",
-        "Electric Eyes", "Flame Eyes", "Flame Eyes 2", "Flaming Horns",
+        REMOVED_ELECTRIC_SLOT, "Flame Eyes", "Flame Eyes 2", "Flaming Horns",
         "Outline Scan", "Eye Reflection", "Face Glitch", "Futuristic Lab 2",
         "Cheer", "Embarrassed Face", "Fake Laugh", "Big Head", "Gorilla Face", "Big Mouth", "Bend")
-    val funnyNames get() = names.drop(20)
-    fun index(name: String): Int = names.indexOfFirst { it.equals(name, true) }
+
+    val names = slots.filterNot { it.startsWith("__removed_") }
+    val funnyNames get() = slots.drop(20).filterNot { it.startsWith("__removed_") }
+
+    fun index(name: String): Int {
+        // Do not silently remap serialized legacy effects to the new design.
+        if (name.equals("Laser Eyes", true) || name.equals("Electric Eyes", true)) return -1
+        return slots.indexOfFirst { !it.startsWith("__removed_") && it.equals(name, true) }
+    }
     fun contains(name: String): Boolean = index(name) >= 0
 }
 
@@ -22,7 +33,7 @@ fun TimelineClip.hasEyeEffects(): Boolean = nodeGraph.nodes.any { node ->
 }
 
 fun resolveEyeEffects(effects: List<NodeEffect>, clip: TimelineClip, timeUs: Long): FloatArray {
-    val amounts = FloatArray(EyeEffectCatalog.names.size)
+    val amounts = FloatArray(EyeEffectCatalog.SLOT_COUNT)
     effects.filter { it.activeAtSourceTimeV26(clip, timeUs) }.forEach {
         val index = EyeEffectCatalog.index(it.name)
         if (index >= 0) amounts[index] = (amounts[index] + it.amount).coerceIn(0f, 1f)
