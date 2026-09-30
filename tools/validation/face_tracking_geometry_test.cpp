@@ -59,6 +59,15 @@ int main() {
     assert(turned.yaw > .55f);
     assert(turned.forward > .84f && turned.forward < .88f);
 
+    // With image-space +Y downward, a head-down plane has negative geometric pitch but must expose
+    // positive screen pitch to the gaze shader.
+    const Point3 downTop{0, -1, -.35f}, downBottom{0, 1, .35f};
+    const auto down = FaceOrientationFromPlane(
+        frontLeft, frontRight, downTop, downBottom, 0.f);
+    assert(down.valid);
+    assert(down.pitch < -.35f);
+    assert(face_tracking::ScreenPitchDown(down) > .35f);
+
     // Blink geometry: three lid pairs provide a robust rotation-invariant EAR.
     const Point outer{0, 0}, inner{10, 0};
     const float openEar = EyeAspectRatio(

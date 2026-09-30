@@ -59,8 +59,8 @@ data class EyePose(
     val gazeForward: Float = 1f,
 )
 data class EyeSample(val timeUs: Long, val pose: EyePose?)
-data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 12) {
-    fun covers(clip: TimelineClip): Boolean = version == 12 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
+data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 13) {
+    fun covers(clip: TimelineClip): Boolean = version == 13 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
 
     private fun validAtOrBefore(index: Int): EyeSample? {
         var i = index.coerceAtMost(samples.lastIndex)

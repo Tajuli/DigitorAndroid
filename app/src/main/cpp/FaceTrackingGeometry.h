@@ -44,6 +44,14 @@ inline FaceOrientation FaceOrientationFromPlane(
     return result;
 }
 
+// FaceOrientationFromPlane uses the face-plane normal in a Cartesian-like local basis. The video
+// pipeline and eye shader use image coordinates where +Y means DOWN. A real head-down pose therefore
+// arrives as a negative geometric pitch and must be inverted once at this boundary.
+inline float ScreenPitchDown(const FaceOrientation& orientation) {
+    if (!orientation.valid || !std::isfinite(orientation.pitch)) return 0.f;
+    return std::clamp(-orientation.pitch, -1.f, 1.f);
+}
+
 struct Roi {
     float cx = 0.f;
     float cy = 0.f;

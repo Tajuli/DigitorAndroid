@@ -516,7 +516,9 @@ bool RunMesh(
     const FaceOrientation orientation = face_tracking::FaceOrientationFromPlane(
         points3[234], points3[454], points3[10], points3[152], stableRoll);
     const float headYaw = orientation.valid ? orientation.yaw : 0.f;
-    const float headPitch = orientation.valid ? orientation.pitch : 0.f;
+    // Shader/source coordinates use +Y downward. The 3D face-plane normal reports the opposite
+    // pitch sign, so convert it here once; this fixes the observed "look down -> beam goes up" bug.
+    const float headPitch = face_tracking::ScreenPitchDown(orientation);
     const float headForward = orientation.valid ? orientation.forward : 1.f;
 
     const Point leftCenter{(lOuter.x + lInner.x) * .5f, (lOuter.y + lInner.y) * .5f};
@@ -532,12 +534,35 @@ bool RunMesh(
         face_tracking::Distance(points[385], points[380]) +
         face_tracking::Distance(points[387], points[373])) / 3.f;
 
+    const float leftPupilHalfWidth = leftWidth * .46f;
+    const float rightPupilHalfWidth = rightWidth * .46f;
+    const float leftPupilHalfHeight = std::max(1.2f, leftHeight * .58f);
+    const float rightPupilHalfHeight = std::max(1.2f, rightHeight * .58f);
     const PupilEstimate leftPupil = EstimatePupil(
         pixels, width, height, leftCenter, stableRoll,
-        leftWidth * .46f, std::max(1.2f, leftHeight * .58f), leftOpen);
+        leftPupilHalfWidth, leftPupilHalfHeight, leftOpen);
     const PupilEstimate rightPupil = EstimatePupil(
         pixels, width, height, rightCenter, stableRoll,
-        rightWidth * .46f, std::max(1.2f, rightHeight * .58f), rightOpen);
+        rightPupilHalfWidth, rightPupilHalfHeight, rightOpen);
+
+    // Anchor eye-origin effects closer to the actual pupil, not just the corner midpoint. Confidence
+    // blending avoids jitter when the iris is too small/dark to estimate reliably.
+    auto refineOrigin = [&](const Point& center, const PupilEstimate& pupil,
+                            float halfWidth, float halfHeight) {
+        const float weight = Clamp((pupil.confidence - .10f) / .28f, 0.f, 1.f) * .72f;
+        const float lx = pupil.x * halfWidth * weight;
+        const float ly = pupil.y * halfHeight * weight;
+        const float c = std::cos(stableRoll), s = std::sin(stableRoll);
+        return Point{center.x + c * lx - s * ly, center.y + s * lx + c * ly};
+    };
+    const Point leftOrigin = refineOrigin(
+        leftCenter, leftPupil, leftPupilHalfWidth, leftPupilHalfHeight);
+    const Point rightOrigin = refineOrigin(
+        rightCenter, rightPupil, rightPupilHalfWidth, rightPupilHalfHeight);
+    output[0] = leftOrigin.x / width;
+    output[1] = leftOrigin.y / height;
+    output[5] = rightOrigin.x / width;
+    output[6] = rightOrigin.y / height;
 
     const float pupilWeight = leftPupil.confidence + rightPupil.confidence;
     float pupilX = 0.f, pupilY = 0.f;
