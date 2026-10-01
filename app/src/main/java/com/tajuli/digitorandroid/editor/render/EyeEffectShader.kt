@@ -84,11 +84,29 @@ internal const val EYE_EFFECT_SHADER = """
         if(uGazePose.w>=.5) return vec4(uGazePose.xyz,confidence);
         return vec4(uHeadPose.xy,uHeadPose.w,confidence);
     }
-    vec2 electricScreenDir(vec4 gaze) {
+    vec2 electricLensDirection(vec4 eye) {
+        // Source-space position of the virtual camera/lens center. This is the same transform used
+        // later by the frame-space lens-hit test, kept here so exact frontal faces never fall back
+        // to an arbitrary screen-up beam.
+        vec2 p=-uEyeTranslation;
+        vec2 lensUv=vec2(
+            uEyeTransform.x*p.x+uEyeTransform.y*p.y,
+            -uEyeTransform.y*p.x+uEyeTransform.x*p.y
+        )/uEyeTransform.zw*.5+.5;
+        vec2 toLens=(lensUv-eye.xy)*vec2(1.0,uTexelSize.x/uTexelSize.y);
+        return length(toLens)>.0001 ? normalize(toLens) : vec2(0.0,-1.0);
+    }
+    vec2 electricScreenDir(vec4 gaze,vec4 eye) {
         vec4 resolved=electricResolvedGaze(gaze);
-        // Near-zero projected gaze is visually ambiguous. CapCut keeps a long visible beam instead
-        // of collapsing it into a tiny flare, so use screen-up as the stable stylized fallback.
-        return length(resolved.xy)>.045 ? normalize(resolved.xy) : vec2(0.0,-1.0);
+        float projected=length(resolved.xy);
+        vec2 lensDir=electricLensDirection(eye);
+        vec2 faceDir=projected>.045 ? normalize(resolved.xy) : lensDir;
+        // When the model turns directly toward the camera, rotate the visible beam toward the
+        // virtual lens as well. Off-axis poses keep the fused face-direction vector unchanged.
+        float frontAmount=smoothstep(.84,.96,uHeadPose.w)*
+            smoothstep(.82,.96,resolved.z)*
+            (1.0-smoothstep(.08,.30,projected));
+        return normalize(mix(faceDir,lensDir,frontAmount));
     }
     vec3 eyeLight(vec2 uv, vec4 eye, float openness, float roll, vec4 eyeGaze) {
         // Most eye effects remain blink-aware, but Electric Eyes is intentionally continuous:
@@ -116,7 +134,7 @@ internal const val EYE_EFFECT_SHADER = """
             // Each beam remains welded to its own pupil and paired eyes share one stable base
             // gaze. CapCut-style geometry is not perfectly parallel: add only a tiny outward
             // bias along the tracked eye-pair axis so beam separation grows gradually with reach.
-            vec2 screenDir=electricScreenDir(renderGaze);
+            vec2 screenDir=electricScreenDir(renderGaze,eye);
             vec2 localGaze=vec2(
                 c*screenDir.x+s*screenDir.y,
                 -s*screenDir.x+c*screenDir.y);
@@ -136,7 +154,7 @@ internal const val EYE_EFFECT_SHADER = """
                     outwardLocal=normalize(pairLocal)*eyeSide;
                     // Keep the roots nearly parallel. Most separation is added progressively
                     // farther down the beam so the tips drift outward without a strong V-angle.
-                    dir=normalize(dir+outwardLocal*.020);
+                    dir=normalize(dir+outwardLocal*.034);
                 }
             }
             float along=dot(p,dir);
@@ -159,7 +177,7 @@ internal const val EYE_EFFECT_SHADER = """
                 c*frontScreenDir.x+s*frontScreenDir.y,
                 -s*frontScreenDir.x+c*frontScreenDir.y);
             if(pairedBeams && length(outwardLocal)>.001) {
-                grazeDir=normalize(grazeDir+outwardLocal*.018);
+                grazeDir=normalize(grazeDir+outwardLocal*.028);
             }
             float grazeAlong=dot(p,grazeDir);
             float grazeForward=max(grazeAlong,0.0);
@@ -201,8 +219,8 @@ internal const val EYE_EFFECT_SHADER = """
             if(pairedBeams && length(outwardLocal)>.001) {
                 vec2 beamNormal=vec2(dir.y,-dir.x);
                 float outwardSign=dot(outwardLocal,beamNormal);
-                float spreadProgress=smoothstep(.65,7.0,forward);
-                progressiveSpread=outwardSign*forward*(.038*spreadProgress);
+                float spreadProgress=smoothstep(.40,6.6,forward);
+                progressiveSpread=outwardSign*forward*(.060*spreadProgress);
             }
             float shifted=across-sway-progressiveSpread;
             float raggedWidth=coneWidth*(.72+.36*coarse+.18*fine);
@@ -254,24 +272,34 @@ internal const val EYE_EFFECT_SHADER = """
             float localFrontHalo=exp(-r*r*.14)*(1.0-smoothstep(5.8,8.6,r));
             float front=cameraFacing*pulse;
 
-            // Do not "burn" the eye when the light is aimed at the lens. The local emitter stays
-            // visible, but most frontal energy moves into the two graze tubes and the frame-space
-            // lens flare added below.
+            // Three nested beam colors: narrow blue ray in the center, yellow energy around it,
+            // then a red turbulent outer ray/haze. Subtract the inner masks from the wider layers
+            // so the bands remain visibly distinct instead of simply adding to white.
+            float blueRay=beamCore;
+            float yellowRay=beamBody*
+                pow(max(0.0,1.0-clamp(beamCore,0.0,1.0)),.55);
+            float redRay=(beamHaze+edgeGlow*.55)*
+                pow(max(0.0,1.0-clamp(beamBody,0.0,1.0)),.65)*
+                pow(max(0.0,1.0-clamp(beamCore,0.0,1.0)),.30);
+            float frontBlue=frontTubeCore;
+            float frontYellow=frontTubeBody*
+                pow(max(0.0,1.0-clamp(frontTubeCore,0.0,1.0)),.55);
             float localEmitterScale=.88+.12*(1.0-cameraFacing);
             electricLight+=uEyesA.y*(
-                vec3(1.00,.998,.95)*(
-                    beamCore*4.20+beamBody*2.55+
-                    (lidWhite*1.72+rootFlash*1.16)*localEmitterScale+
-                    frontTubeCore*.62+frontTubeBody*.26
+                vec3(.16,.48,1.00)*(
+                    blueRay*4.65+frontBlue*.86+
+                    rootFlash*.78*localEmitterScale
                 )+
-                vec3(1.00,.70,.20)*(
-                    beamBody*.82+beamHaze*1.18+edgeGlow*.72+
-                    socketBloom*.30*localEmitterScale+
-                    frontTubeBody*.20+localFrontHalo*.035*front+
-                    smoke*.32+frontSmoke*.08
+                vec3(1.00,.84,.10)*(
+                    yellowRay*3.10+frontYellow*.92+
+                    lidWhite*.36*localEmitterScale+
+                    socketBloom*.18*localEmitterScale
                 )+
-                vec3(.78,.72,.63)*(smoke*.18+frontSmoke*.055)+
-                vec3(1.00,.31,.012)*(edgeGlow*.18+beamHaze*.10)
+                vec3(1.00,.075,.025)*(
+                    redRay*2.35+edgeGlow*.42+
+                    localFrontHalo*.055*front+
+                    smoke*.42+frontSmoke*.12
+                )
             );
         }
         if(uEyesA.z>.001) {
@@ -357,7 +385,7 @@ internal const val EYE_EFFECT_SHADER = """
         vec4 resolved=electricResolvedGaze(renderGaze);
         float projected=length(resolved.xy);
         float front3d=smoothstep(.84,.96,uHeadPose.w)*smoothstep(.82,.96,resolved.z);
-        if(front3d<.001 || projected<.045) return 0.0;
+        if(front3d<.001) return 0.0;
 
         // Use exactly the same visible screen ray as the beam renderer. Never invent a lens hit
         // from "front-facing" metadata when the drawn beam is clearly travelling elsewhere.
@@ -365,7 +393,7 @@ internal const val EYE_EFFECT_SHADER = """
         vec2 toLens=(lensUv-eye.xy)*faceMetricScale();
         float lensDistance=length(toLens);
         if(lensDistance<.0001) return front3d;
-        vec2 aim=electricScreenDir(resolved);
+        vec2 aim=electricScreenDir(resolved,eye);
         float along=dot(toLens,aim);
         float miss=abs(toLens.x*aim.y-toLens.y*aim.x);
         float rayForward=smoothstep(-.008,.045,along);
@@ -447,9 +475,9 @@ internal const val EYE_EFFECT_SHADER = """
         float lensMist=exp(-dot(lensP*vec2(.82,1.02),lensP*vec2(.82,1.02))*5.6)*
             smoothstep(.34,.76,lensNoise);
         light+=pairFront*(
-            vec3(1.00,.995,.92)*(lensBurn*.72+lensStreak*.18)+
-            vec3(1.00,.67,.20)*(lensHalo*.16+lensMist*.09)+
-            vec3(.72,.69,.64)*lensMist*.05
+            vec3(.16,.48,1.00)*(lensBurn*.68)+
+            vec3(1.00,.84,.10)*(lensStreak*.18+lensHalo*.12)+
+            vec3(1.00,.075,.025)*(lensHalo*.07+lensMist*.10)
         );
         if(uFaceRegion.z>.001 && uFaceRegion.w>.001) {
             vec2 p=(uv-uFaceRegion.xy)/uFaceRegion.zw;
