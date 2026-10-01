@@ -140,7 +140,13 @@ internal const val EYE_EFFECT_SHADER = """
                 -s*screenDir.x+c*screenDir.y);
             float projected=length(gaze);
             vec2 dir=normalize(localGaze);
-            bool pairedBeams=uLeftEye.z>.0001 && uRightEye.z>.0001;
+            // V-divergence is a screen-space cue for off-axis beams. When the fused 3D pose is
+            // aimed straight into the camera the two rays converge on the lens, so running the
+            // paired outward math is both physically wrong and can collapse the frontal fixture.
+            float exactCameraFront=gazeCameraFacing(gazeForward)*
+                (1.0-smoothstep(.08,.20,projected));
+            bool pairedBeams=uLeftEye.z>.0001 && uRightEye.z>.0001 &&
+                exactCameraFront<.92;
             vec2 outwardLocal=vec2(0.0);
             if(pairedBeams) {
                 vec2 pairMetric=(uRightEye.xy-uLeftEye.xy)*
