@@ -141,3 +141,11 @@ filament was removed because it could read as two extra mini-beams. Turbulence a
 slower, lower-amplitude motion, and several extra FBM evaluations were replaced with reused/cheap
 noise so preview rendering is lighter. The two-eye frontal lens-graze remains, but its flare is
 narrower and substantially softer, with a stricter strong-frontal gate.
+
+
+### Parallel paired beams
+When both eyes are visible and open, Electric Eyes now resolves one confidence-weighted binocular
+render direction and applies it to both emitters. The two origins remain the independently tracked
+pupils, so beam separation naturally matches eye separation instead of converging or diverging.
+Opposing/noisy eye estimates cannot split the pair: both beams use the same selected direction.
+Procedural sway, shimmer, smoke drift and lens-noise movement are slower again for a calmer result.

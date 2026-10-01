@@ -157,9 +157,12 @@ inward=eye_beam[max(0,row-2):row+3, 66:98].sum()
 assert outward > inward*1.20 + 100, ('Electric Eyes must start at eye and travel outward',outward,inward)
 print('PASS: Electric Eyes originates at the eye and follows left gaze.')
 
-# Production Electric Eyes is per-eye driven. Test steering by rendering the same isolated eye
-# with opposite high-confidence gazes and comparing emitted-energy centroids. This cancels the
-# symmetric eye-socket bloom/haze and measures the moving beam itself.
+# Isolated eyes still follow measured gaze. With both eyes present, the shader resolves one shared
+# binocular render direction, so separate pupil origins stay parallel at the original eye spacing.
+shader_contract=Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/EyeEffectShader.kt').read_text()
+assert 'electricRenderGaze' in shader_contract, 'Electric Eyes paired gaze resolver missing'
+assert 'eyeSide=sign' not in shader_contract, 'Electric Eyes must not add eye-side beam divergence'
+# Test isolated steering with opposite high-confidence gazes.
 vec('uHeadPose',[0,0,0,.72]); vec('uGazePose',[0,0,.30,1])
 yy_dir,xx_dir=np.mgrid[:h,:w]
 
@@ -263,7 +266,7 @@ assert high_far > low_far + 120, (
 
 vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
-print('PASS: left/right Electric Eyes steering is independently eye-driven with confidence fallback.')
+print('PASS: isolated Electric Eyes steering stays gaze-driven; paired beams share one render direction.')
 
 # Both camera-facing eyes must illuminate the virtual lens/inter-eye region. Do not compare
 # against a sideways-gaze frame: a real directional beam can legitimately cross that same region.
