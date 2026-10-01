@@ -269,7 +269,8 @@ assert pair_front.sum()>100, ('Two frontal Electric Eyes must render visible pai
 
 shader_contract=Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/EyeEffectShader.kt').read_text()
 assert 'electricLensHitScore' in shader_contract, 'Geometric lens-hit gate missing'
-assert 'float pairFront=lensHit*lensHit*.10' in shader_contract, 'Subtle lens-hit flare strength missing'
+assert 'float pairFront=max(lensHit*lensHit*.10,fusedFront*fusedFront*.10);' in shader_contract, (
+    'Subtle lens-hit flare must retain the exact-frontal fused front floor')
 assert 'rayHit=1.0-smoothstep(.010,.045,miss)' in shader_contract, 'Lens miss rejection missing'
 assert 'if(front3d<.001) return 0.0' in shader_contract, (
     'Only non-frontal faces should reject the lens-facing hit')
