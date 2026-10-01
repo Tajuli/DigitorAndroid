@@ -102,7 +102,10 @@ for index in active_indices:
     assert np.max(np.abs(out[:,:,:3].astype(int)-source[:,:,:3].astype(int)))>2, ('Invisible',index)
     assert np.array_equal(out[:,:,3],source[:,:,3]),('Alpha',index)
     vec('uEyeState',[0,0,0,0]);
-    if index<16 or index==17: assert np.array_equal(render(),source),('Blink',index)
+    if (index<16 or index==17) and index!=1:
+        assert np.array_equal(render(),source),('Blink',index)
+    if index==1:
+        assert not np.array_equal(render(),source),('Electric Eyes must stay on through blink',index)
     vec('uEyeState',[1,1,0,0]); vec('uLeftEye',[0,0,0,0]); vec('uRightEye',[0,0,0,0])
     vec('uFaceRegion',[0,0,0,0]);vec('uMouthRegion',[0,0,0,0])
     assert np.array_equal(render(),source),('Missing face',index)
@@ -114,7 +117,7 @@ amounts(12); assert np.array_equal(render(),source),'Removed Electric slot must 
 # Movement and head tilt must alter the actual rendered pixels.
 amounts(1); before=render(); vec('uLeftEye',[.42,.4,.055,0]); vec('uEyeState',[1,1,.6,0])
 assert not np.array_equal(before,render()),'Tracking uniforms ignored'
-print('PASS: production shader compiles/links; 26 public effects; removed Electric slot inert; blink/missing-face checks pass.')
+print('PASS: production shader compiles/links; 26 public effects; Electric Eyes ignores blink while other blink-aware effects and missing-face checks pass.')
 
 
 # Non-square, off-center coordinates catch axis flips hidden by a square center-only test.
@@ -287,6 +290,12 @@ assert 'if(front3d<.001 || projected<.045) return 0.0' in shader_contract, (
     'Ambiguous frontal gaze must not invent a lens hit')
 assert 'renderLeft=electricRenderGaze(effectiveLeft)' in shader_contract, (
     'Lens flare must use the same resolved direction as the visible beam')
+assert 'return electricLight + light*blinkGate' in shader_contract, (
+    'Electric Eyes must bypass the per-eye blink multiplier')
+assert 'bool paired=uLeftEye.z>.0001 && uRightEye.z>.0001;' in shader_contract, (
+    'Electric paired direction must not depend on eyelid openness')
+assert "forward*.115-t*.080" in shader_contract and "t*.280" in shader_contract, (
+    'Electric plasma movement must use the slowed temporal rates')
 assert 'lensBurn' in shader_contract and 'lensHalo' in shader_contract, 'Lens-graze components missing'
 assert 'lensBurn*.72' in shader_contract, 'Lens flare should remain intentionally softened'
 
@@ -320,8 +329,8 @@ assert not np.array_equal(flame_a,flame_b), 'Flame variants must remain visually
 uniform('uEyeTime',.35)
 print('PASS: Fire/Flame effects are dynamic, eye-anchored and visually distinct.')
 
-# Blink gating is independent per eye. Test each eye in isolation so the pair-only lens-graze
-# layer cannot make one blink appear to dim the opposite eye.
+# Electric Eyes intentionally stays continuous through eyelid closure. Blink state must not
+# switch off either isolated beam, change the paired direction, or pop the subtle lens response.
 source[:,:,:3]=30
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
 amounts(1); vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[0,0,1,1])
@@ -331,17 +340,23 @@ vec('uLeftGaze',[0,0,1,.95]); vec('uRightGaze',[0,0,1,0]); vec('uEyeState',[.35,
 left_open=render()
 assert not np.array_equal(left_open,source), 'Open left eye must render Electric Eyes'
 vec('uEyeState',[.15,0,0,0])
-assert np.array_equal(render(),source), 'Closed left eye must remove left Electric Eyes'
+left_blink=render()
+assert np.array_equal(left_blink,left_open), 'Left blink must not alter Electric Eyes'
 
 vec('uLeftEye',[0,0,0,0]); vec('uRightEye',[.65,.5,.045,0])
 vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,.95]); vec('uEyeState',[0,.35,0,0])
 right_open=render()
 assert not np.array_equal(right_open,source), 'Open right eye must render Electric Eyes'
 vec('uEyeState',[0,.15,0,0])
-assert np.array_equal(render(),source), 'Closed right eye must remove right Electric Eyes'
+right_blink=render()
+assert np.array_equal(right_blink,right_open), 'Right blink must not alter Electric Eyes'
 
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0])
-vec('uLeftGaze',[0,0,1,.95]); vec('uRightGaze',[0,0,1,.95]); vec('uEyeState',[.15,.15,0,0])
-assert np.array_equal(render(),source), 'Both closed eyes must remove Electric Eyes and lens-graze flare'
-print('PASS: per-eye blink gate independently disables Electric Eyes without pair-flare coupling.')
+vec('uLeftGaze',[0,0,1,.95]); vec('uRightGaze',[0,0,1,.95]); vec('uEyeState',[.35,.35,0,0])
+pair_open=render()
+vec('uEyeState',[.15,.15,0,0])
+pair_blink=render()
+assert np.array_equal(pair_blink,pair_open), (
+    'Both-eye blink must not alter Electric Eyes or its lens response')
+print('PASS: Electric Eyes remains continuous through left, right, and both-eye blinks.')
 
