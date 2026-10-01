@@ -524,27 +524,46 @@ bool RunMesh(
     const float leftOpen = face_tracking::BlinkOpenness(leftEar, &engine->leftEyeClosed);
     const float rightOpen = face_tracking::BlinkOpenness(rightEar, &engine->rightEyeClosed);
 
-    auto fillEye = [&](int offset, const Point& outer, const Point& inner, float openness) {
+    // Effect source points use the full eye contour, then pupil sampling refines the origin below.
+    // This keeps the beam welded to the eye even while eyelids deform or one corner jitters.
+    const Point leftCenter = face_tracking::EyeContourCenter(
+        points[33], points[133],
+        points[159], points[145],
+        points[158], points[153],
+        points[160], points[144]);
+    const Point rightCenter = face_tracking::EyeContourCenter(
+        points[362], points[263],
+        points[386], points[374],
+        points[385], points[380],
+        points[387], points[373]);
+
+    auto fillEye = [&](int offset, const Point& outer, const Point& inner,
+                       const Point& center, float openness) {
         const float eyeWidth = std::max(3.f, face_tracking::Distance(outer, inner));
-        output[offset + 0] = ((outer.x + inner.x) * 0.5f) / width;
-        output[offset + 1] = ((outer.y + inner.y) * 0.5f) / height;
+        output[offset + 0] = center.x / width;
+        output[offset + 1] = center.y / height;
         output[offset + 2] = (eyeWidth * 0.5f) / width;
         output[offset + 3] = stableRoll;
         output[offset + 4] = openness;
     };
-    fillEye(0, lOuter, lInner, leftOpen);
-    fillEye(5, rOuter, rInner, rightOpen);
+    fillEye(0, lOuter, lInner, leftCenter, leftOpen);
+    fillEye(5, rOuter, rInner, rightCenter, rightOpen);
 
-    const FaceOrientation orientation = face_tracking::FaceOrientationFromPlane(
-        points3[234], points3[454], points3[10], points3[152], stableRoll);
+    // Long beam direction comes from broad face geometry, not pupil motion:
+    // ear/side-face + forehead/chin, cheeks + nose bridge/mouth, and mouth + nose tip/chin.
+    const FaceOrientation orientation = face_tracking::EffectDirectionFromLandmarks(
+        points3[127], points3[356],
+        points3[234], points3[454],
+        points3[61], points3[291],
+        points3[10], points3[6], points3[1],
+        points3[13], points3[14], points3[152],
+        stableRoll);
     const float headYaw = orientation.valid ? orientation.yaw : 0.f;
     // Shader/source coordinates use +Y downward. The 3D face-plane normal reports the opposite
     // pitch sign, so convert it here once; this fixes the observed "look down -> beam goes up" bug.
     const float headPitch = face_tracking::ScreenPitchDown(orientation);
     const float headForward = orientation.valid ? orientation.forward : 1.f;
 
-    const Point leftCenter{(lOuter.x + lInner.x) * .5f, (lOuter.y + lInner.y) * .5f};
-    const Point rightCenter{(rOuter.x + rInner.x) * .5f, (rOuter.y + rInner.y) * .5f};
     const float leftWidth = std::max(3.f, face_tracking::Distance(lOuter, lInner));
     const float rightWidth = std::max(3.f, face_tracking::Distance(rOuter, rInner));
     const float leftHeight = (
@@ -593,16 +612,11 @@ bool RunMesh(
         headYaw, headPitch, headForward,
         rightPupil.x, rightPupil.y, rightPupil.confidence, rightOpen);
 
-    const float gazeWeight = leftGaze.confidence + rightGaze.confidence;
-    float gazeX = headYaw, gazeY = headPitch, gazeForward = headForward;
-    if (gazeWeight > .08f) {
-        gazeX = Clamp((leftGaze.x * leftGaze.confidence +
-            rightGaze.x * rightGaze.confidence) / gazeWeight, -1.f, 1.f);
-        gazeY = Clamp((leftGaze.y * leftGaze.confidence +
-            rightGaze.y * rightGaze.confidence) / gazeWeight, -1.f, 1.f);
-        gazeForward = Clamp((leftGaze.forward * leftGaze.confidence +
-            rightGaze.forward * rightGaze.confidence) / gazeWeight, 0.f, 1.f);
-    }
+    // Shared effect direction is face-driven by design. Keep independent pupil gaze metadata
+    // available for effects that explicitly need eye gaze, but do not let it steer long beams.
+    const float gazeX = headYaw;
+    const float gazeY = headPitch;
+    const float gazeForward = headForward;
 
     output[18] = headYaw;
     output[19] = headPitch;
