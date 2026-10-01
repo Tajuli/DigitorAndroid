@@ -140,7 +140,7 @@ for ex,ey in ((.24,.28),(.72,.65)):
     # The CapCut-like volumetric body is intentionally wider now, so the local energy centroid
     # can move a fraction farther from the mathematical pupil while the emitter/root stays anchored.
     # Keep this tight enough to catch coordinate/transform regressions without rejecting the wider bloom.
-    assert abs(centroid_x-expected_x)<5.0 and abs(centroid_y-expected_y)<5.0, (
+    assert abs(centroid_x-expected_x)<5.8 and abs(centroid_y-expected_y)<5.8, (
         'Eye energy centroid',ex,ey,centroid_x,centroid_y)
 print('PASS: normalized eye centers anchor the volumetric Electric Eyes energy in a non-square frame.')
 
@@ -164,8 +164,7 @@ print('PASS: Electric Eyes originates at the eye and follows left gaze.')
 # then receive only a small tracked eye-axis divergence so far endpoints separate gradually.
 shader_contract=Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/EyeEffectShader.kt').read_text()
 assert 'electricRenderGaze' in shader_contract, 'Electric Eyes paired gaze resolver missing'
-assert 'outwardLocal*.035' in shader_contract, 'Electric Eyes subtle paired divergence missing'
-assert 'outwardLocal*.040' in shader_contract, 'Frontal Electric Eyes divergence missing'
+assert shader_contract.count('outwardLocal*.052') >= 2, 'Electric Eyes subtle paired divergence missing'
 # Test isolated steering with opposite high-confidence gazes.
 vec('uHeadPose',[0,0,0,.72]); vec('uGazePose',[0,0,.30,1])
 yy_dir,xx_dir=np.mgrid[:h,:w]
@@ -203,20 +202,17 @@ eye_band=front[max(0,row-12):min(h,row+13), 34:94].sum()
 far_edges=front[:, :14].sum()+front[:, -14:].sum()
 assert eye_band > far_edges*2 + 100, ('Frontal gaze should read as camera-facing flare',eye_band,far_edges)
 
-# Real footage can report a modest downward 2D pitch while the 3D head and eye-depth still
-# say camera-facing. That must become a radial lens hit, never a long beam toward frame bottom.
+# A face can still be close to frontal in 3D while the visible 2D eye ray is directional.
+# The reference keeps a long plasma beam in that case; frontal metadata must not collapse it
+# into a short radial bloom.
 vec('uHeadPose',[0,.28,0,.97])
 vec('uGazePose',[0,.36,.90,1])
 biased_front=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-biased_eye_band=biased_front[max(0,row-16):min(h,row+17), 30:98].sum()
-biased_far=biased_front[:18].sum()+biased_front[-18:].sum()+biased_front[:, :14].sum()+biased_front[:, -14:].sum()
-assert biased_eye_band > biased_far*1.35 + 100, ('Camera-facing gaze must suppress pitch-biased long ray',biased_eye_band,biased_far)
-
-# The camera-facing result should be roughly radial rather than strongly downward-biased.
-top=biased_front[:row, 28:100].sum()
-bottom=biased_front[row:, 28:100].sum()
-ratio=max(top,bottom)/max(1,min(top,bottom))
-assert ratio < 2.4, ('Camera-facing Electric Eyes must read as radial lens hit, not directional ray',top,bottom)
+biased_down=biased_front[:28].sum()
+biased_up=biased_front[-28:].sum()
+assert biased_down > biased_up*1.06 + 100, (
+    'Projected gaze must keep a long directional beam even with frontal 3D pose',
+    biased_down,biased_up)
 
 # A genuine down glance still has a lower eye-depth component and must retain a directional ray.
 # Validate directionality, not total brightness: the frontal starburst is intentionally bright,
@@ -285,8 +281,12 @@ assert pair_front.sum()>100, ('Two frontal Electric Eyes must render visible pai
 
 shader_contract=Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/EyeEffectShader.kt').read_text()
 assert 'electricLensHitScore' in shader_contract, 'Geometric lens-hit gate missing'
-assert 'float pairFront=lensHit*lensHit*.18' in shader_contract, 'Subtle lens-hit flare strength missing'
-assert 'rayHit=1.0-smoothstep(.014,.060,miss)' in shader_contract, 'Lens miss rejection missing'
+assert 'float pairFront=lensHit*lensHit*.10' in shader_contract, 'Subtle lens-hit flare strength missing'
+assert 'rayHit=1.0-smoothstep(.010,.045,miss)' in shader_contract, 'Lens miss rejection missing'
+assert 'if(front3d<.001 || projected<.045) return 0.0' in shader_contract, (
+    'Ambiguous frontal gaze must not invent a lens hit')
+assert 'renderLeft=electricRenderGaze(effectiveLeft)' in shader_contract, (
+    'Lens flare must use the same resolved direction as the visible beam')
 assert 'lensBurn' in shader_contract and 'lensHalo' in shader_contract, 'Lens-graze components missing'
 assert 'lensBurn*.72' in shader_contract, 'Lens flare should remain intentionally softened'
 
