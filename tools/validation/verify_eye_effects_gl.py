@@ -279,8 +279,10 @@ assert 'renderLeft=electricRenderGaze(effectiveLeft)' in shader_contract, (
     'Lens flare must use the same resolved direction as the visible beam')
 assert 'return electricLight + light*blinkGate' in shader_contract, (
     'Electric Eyes must bypass the per-eye blink multiplier')
-assert 'bool pairedBeams=uLeftEye.z>.0001 && uRightEye.z>.0001;' in shader_contract, (
-    'Electric paired beam geometry must depend on tracked eyes, not eyelid openness')
+assert 'float exactCameraFront=gazeCameraFacing(gazeForward)*' in shader_contract, (
+    'Camera-facing Electric Eyes must detect zero-projection frontal pose')
+assert 'bool pairedBeams=uLeftEye.z>.0001 && uRightEye.z>.0001 &&' in shader_contract and 'exactCameraFront<.92;' in shader_contract, (
+    'Paired V-divergence must be disabled only when both rays aim into the camera')
 assert "forward*.115-t*.080" in shader_contract and "t*.280" in shader_contract, (
     'Electric plasma movement must use the slowed temporal rates')
 assert 'lensBurn' in shader_contract and 'lensHalo' in shader_contract, 'Lens-graze components missing'
