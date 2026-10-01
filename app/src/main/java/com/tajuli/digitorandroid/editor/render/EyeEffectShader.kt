@@ -284,21 +284,29 @@ internal const val EYE_EFFECT_SHADER = """
             float frontBlue=frontTubeCore;
             float frontYellow=frontTubeBody*
                 pow(max(0.0,1.0-clamp(frontTubeCore,0.0,1.0)),.55);
+            // A beam aimed straight into the camera has almost no 2D projected length. Preserve
+            // that physical camera-facing interpretation with a layered pupil/socket emitter
+            // instead of allowing the effect to disappear when the projected ray collapses.
+            float frontalEmitter=cameraFacing*exp(-r*r*1.65);
+            float frontalRing=cameraFacing*exp(-pow((r-.72)*3.2,2.0));
             float localEmitterScale=.88+.12*(1.0-cameraFacing);
             electricLight+=uEyesA.y*(
                 vec3(.16,.48,1.00)*(
                     blueRay*4.65+frontBlue*.86+
-                    rootFlash*.78*localEmitterScale
+                    rootFlash*.78*localEmitterScale+
+                    frontalEmitter*2.35
                 )+
                 vec3(1.00,.84,.10)*(
                     yellowRay*3.10+frontYellow*.92+
                     lidWhite*.36*localEmitterScale+
-                    socketBloom*.18*localEmitterScale
+                    socketBloom*.18*localEmitterScale+
+                    frontalEmitter*.72+frontalRing*.28
                 )+
                 vec3(1.00,.075,.025)*(
                     redRay*2.35+edgeGlow*.42+
                     localFrontHalo*.055*front+
-                    smoke*.42+frontSmoke*.12
+                    smoke*.42+frontSmoke*.12+
+                    frontalRing*.42
                 )
             );
         }
@@ -466,7 +474,10 @@ internal const val EYE_EFFECT_SHADER = """
         float leftHit=electricLensHitScore(uLeftEye,renderLeft);
         float rightHit=electricLensHitScore(uRightEye,renderRight);
         float lensHit=.5*(leftHit+rightHit)*uEyesA.y;
-        float pairFront=lensHit*lensHit*.10;
+        // Exact frontal gaze can have negligible screen-space ray length even though both eyes are
+        // physically aimed at the camera. Use the fused 3D front score as a floor for lens energy.
+        float fusedFront=min(electricFrontScore(renderLeft),electricFrontScore(renderRight))*uEyesA.y;
+        float pairFront=max(lensHit*lensHit*.10,fusedFront*fusedFront*.10);
         vec2 lensP=vec2(frameUv.x-.5,(frameUv.y-.5)*(uTexelSize.x/uTexelSize.y));
         float lensNoise=eyeNoise(lensP*2.5+vec2(-uEyeTime*.018,uEyeTime*.010));
         float lensBurn=exp(-dot(lensP*vec2(.96,1.16),lensP*vec2(.96,1.16))*10.5);
