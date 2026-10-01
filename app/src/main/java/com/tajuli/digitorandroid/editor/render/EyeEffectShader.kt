@@ -478,6 +478,28 @@ internal const val EYE_EFFECT_SHADER = """
         // physically aimed at the camera. Use the fused 3D front score as a floor for lens energy.
         float fusedFront=min(electricFrontScore(renderLeft),electricFrontScore(renderRight))*uEyesA.y;
         float pairFront=max(lensHit*lensHit*.10,fusedFront*fusedFront*.10);
+
+        // Exact camera-facing rays can collapse to almost zero screen-space length. Render a
+        // tracked-eye emitter directly in source space so the effect remains visible at both
+        // pupils while the frame-space lens flare represents the beam travelling toward camera.
+        vec2 sourcePoint=vec2(uv.x,1.0-uv.y);
+        vec2 metric=faceMetricScale();
+        float leftFrontR=uLeftEye.z>.0001 ?
+            length((sourcePoint-uLeftEye.xy)*metric)/max(uLeftEye.z,.0001) : 99.0;
+        float rightFrontR=uRightEye.z>.0001 ?
+            length((sourcePoint-uRightEye.xy)*metric)/max(uRightEye.z,.0001) : 99.0;
+        float frontR=min(leftFrontR,rightFrontR);
+        float frontBlueEye=exp(-frontR*frontR*3.10);
+        float frontYellowEye=exp(-pow((frontR-.58)*2.65,2.0))*
+            (1.0-smoothstep(.0,.42,frontBlueEye));
+        float frontRedEye=exp(-pow((frontR-.96)*1.90,2.0))*
+            (1.0-smoothstep(.0,.38,frontYellowEye));
+        light+=fusedFront*(
+            vec3(.16,.48,1.00)*frontBlueEye*2.10+
+            vec3(1.00,.84,.10)*frontYellowEye*.82+
+            vec3(1.00,.075,.025)*frontRedEye*.54
+        );
+
         vec2 lensP=vec2(frameUv.x-.5,(frameUv.y-.5)*(uTexelSize.x/uTexelSize.y));
         float lensNoise=eyeNoise(lensP*2.5+vec2(-uEyeTime*.018,uEyeTime*.010));
         float lensBurn=exp(-dot(lensP*vec2(.96,1.16),lensP*vec2(.96,1.16))*10.5);
