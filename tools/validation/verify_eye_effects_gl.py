@@ -137,7 +137,10 @@ for ex,ey in ((.24,.28),(.72,.65)):
     assert total>100, ('Eye anchor emitted no local energy',ex,ey,total)
     centroid_x=(local*xx).sum()/total
     centroid_y=(local*yy).sum()/total
-    assert abs(centroid_x-expected_x)<4.5 and abs(centroid_y-expected_y)<4.5, (
+    # The CapCut-like volumetric body is intentionally wider now, so the local energy centroid
+    # can move a fraction farther from the mathematical pupil while the emitter/root stays anchored.
+    # Keep this tight enough to catch coordinate/transform regressions without rejecting the wider bloom.
+    assert abs(centroid_x-expected_x)<5.0 and abs(centroid_y-expected_y)<5.0, (
         'Eye energy centroid',ex,ey,centroid_x,centroid_y)
 print('PASS: normalized eye centers anchor the volumetric Electric Eyes energy in a non-square frame.')
 
