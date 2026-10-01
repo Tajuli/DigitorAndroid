@@ -296,6 +296,12 @@ assert 'float fusedFront=min(electricFrontScore(renderLeft),electricFrontScore(r
     'Camera-facing lens flare must have a fused 3D front-score floor')
 assert 'float pairFront=max(lensHit*lensHit*.10,fusedFront*fusedFront*.10);' in shader_contract, (
     'Exact frontal projection must not make Electric Eyes disappear')
+assert 'float frontBlueEye=exp(-frontR*frontR*3.10);' in shader_contract, (
+    'Camera-facing Electric Eyes must render a tracked-pupil blue core')
+assert 'vec3(1.00,.84,.10)*frontYellowEye*.82' in shader_contract, (
+    'Camera-facing Electric Eyes must keep the yellow middle band')
+assert 'vec3(1.00,.075,.025)*frontRedEye*.54' in shader_contract, (
+    'Camera-facing Electric Eyes must keep the red outer band')
 
 # Electric-beam haze should exist outside the hot core and animate over time. Use broad masks and
 # qualitative temporal change so harmless shader tuning cannot make this regression flaky.
