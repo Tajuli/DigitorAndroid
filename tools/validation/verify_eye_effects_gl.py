@@ -157,11 +157,12 @@ inward=eye_beam[max(0,row-2):row+3, 66:98].sum()
 assert outward > inward*1.20 + 100, ('Electric Eyes must start at eye and travel outward',outward,inward)
 print('PASS: Electric Eyes originates at the eye and follows left gaze.')
 
-# Isolated eyes still follow measured gaze. With both eyes present, the shader resolves one shared
-# binocular render direction, so separate pupil origins stay parallel at the original eye spacing.
+# Isolated eyes still follow measured gaze. Paired eyes share one stable binocular base direction,
+# then receive only a small tracked eye-axis divergence so far endpoints separate gradually.
 shader_contract=Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/EyeEffectShader.kt').read_text()
 assert 'electricRenderGaze' in shader_contract, 'Electric Eyes paired gaze resolver missing'
-assert 'eyeSide=sign' not in shader_contract, 'Electric Eyes must not add eye-side beam divergence'
+assert 'outwardLocal*.035' in shader_contract, 'Electric Eyes subtle paired divergence missing'
+assert 'outwardLocal*.040' in shader_contract, 'Frontal Electric Eyes divergence missing'
 # Test isolated steering with opposite high-confidence gazes.
 vec('uHeadPose',[0,0,0,.72]); vec('uGazePose',[0,0,.30,1])
 yy_dir,xx_dir=np.mgrid[:h,:w]
@@ -266,7 +267,7 @@ assert high_far > low_far + 120, (
 
 vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
-print('PASS: isolated Electric Eyes steering stays gaze-driven; paired beams share one render direction.')
+print('PASS: isolated Electric Eyes steering stays gaze-driven; paired beams share a base direction with subtle divergence.')
 
 # Frontal lens-graze is intentionally subtle now. Validate the production contract and confirm
 # the paired frontal effect renders, but do not force a minimum 8-bit lens brightness: small natural
@@ -280,7 +281,9 @@ pair_front=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,Non
 assert pair_front.sum()>100, ('Two frontal Electric Eyes must render visible paired energy',pair_front.sum())
 
 shader_contract=Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/EyeEffectShader.kt').read_text()
-assert 'pairFront=pairFront*pairFront*.52' in shader_contract, 'Natural frontal lens gate missing'
+assert 'electricLensHitScore' in shader_contract, 'Geometric lens-hit gate missing'
+assert 'float pairFront=lensHit*lensHit*.18' in shader_contract, 'Subtle lens-hit flare strength missing'
+assert 'rayHit=1.0-smoothstep(.014,.060,miss)' in shader_contract, 'Lens miss rejection missing'
 assert 'lensBurn' in shader_contract and 'lensHalo' in shader_contract, 'Lens-graze components missing'
 assert 'lensBurn*.72' in shader_contract, 'Lens flare should remain intentionally softened'
 
