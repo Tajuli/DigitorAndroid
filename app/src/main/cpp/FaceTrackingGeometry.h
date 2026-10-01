@@ -52,6 +52,75 @@ inline float ScreenPitchDown(const FaceOrientation& orientation) {
     return std::clamp(-orientation.pitch, -1.f, 1.f);
 }
 
+// Stable source center for eye-origin effects. Corners alone can wobble as the eyelids deform;
+// average the full tracked lid contour, then let image-space pupil sampling refine this center.
+inline Point EyeContourCenter(
+        const Point& outer,
+        const Point& inner,
+        const Point& upper1,
+        const Point& lower1,
+        const Point& upper2,
+        const Point& lower2,
+        const Point& upper3,
+        const Point& lower3) {
+    return Point{
+        (outer.x + inner.x + upper1.x + lower1.x +
+         upper2.x + lower2.x + upper3.x + lower3.x) / 8.f,
+        (outer.y + inner.y + upper1.y + lower1.y +
+         upper2.y + lower2.y + upper3.y + lower3.y) / 8.f,
+    };
+}
+
+// Beam/effect direction is deliberately independent from pupil motion. Fuse several broad 3D face
+// planes so one noisy landmark group cannot swing a long Electric/Laser-style beam. The planes use
+// lateral face/ear-adjacent anchors, cheeks, nose bridge/tip, mouth, forehead and chin.
+inline FaceOrientation EffectDirectionFromLandmarks(
+        const Point3& leftEar,
+        const Point3& rightEar,
+        const Point3& leftCheek,
+        const Point3& rightCheek,
+        const Point3& leftMouth,
+        const Point3& rightMouth,
+        const Point3& forehead,
+        const Point3& noseBridge,
+        const Point3& noseTip,
+        const Point3& mouthTop,
+        const Point3& mouthBottom,
+        const Point3& chin,
+        float roll) {
+    const Point3 mouthMid{
+        (mouthTop.x + mouthBottom.x) * .5f,
+        (mouthTop.y + mouthBottom.y) * .5f,
+        (mouthTop.z + mouthBottom.z) * .5f,
+    };
+    const FaceOrientation outer = FaceOrientationFromPlane(
+        leftEar, rightEar, forehead, chin, roll);
+    const FaceOrientation middle = FaceOrientationFromPlane(
+        leftCheek, rightCheek, noseBridge, mouthMid, roll);
+    const FaceOrientation lower = FaceOrientationFromPlane(
+        leftMouth, rightMouth, noseTip, chin, roll);
+
+    FaceOrientation result;
+    float weight = 0.f;
+    auto add = [&](const FaceOrientation& value, float w) {
+        if (!value.valid) return;
+        result.yaw += value.yaw * w;
+        result.pitch += value.pitch * w;
+        result.forward += value.forward * w;
+        weight += w;
+    };
+    add(outer, .48f);
+    add(middle, .34f);
+    add(lower, .18f);
+    if (weight <= 0.f) return FaceOrientation{};
+    result.yaw = std::clamp(result.yaw / weight, -1.f, 1.f);
+    result.pitch = std::clamp(result.pitch / weight, -1.f, 1.f);
+    result.forward = std::clamp(result.forward / weight, 0.f, 1.f);
+    result.valid = std::isfinite(result.yaw) && std::isfinite(result.pitch) &&
+        std::isfinite(result.forward);
+    return result;
+}
+
 struct EyeGaze {
     float x = 0.f;
     float y = 0.f;
