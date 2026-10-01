@@ -172,7 +172,16 @@ assert 'if(uGazePose.w>=.5) return vec4(uGazePose.xyz,confidence);' in shader_co
     'Electric Eyes must use fused face direction while retaining only per-eye confidence')
 assert 'float confidence=max(ownGaze.w,.08);' in shader_contract, (
     'Per-eye gaze uniforms must remain active without using pupil X/Y/Z for beam direction')
-assert shader_contract.count('outwardLocal*.052') >= 2, 'Electric Eyes subtle paired divergence missing'
+assert 'dir=normalize(dir+outwardLocal*.020);' in shader_contract, (
+    'Electric Eyes near-eye paired angle must stay subtle')
+assert 'grazeDir=normalize(grazeDir+outwardLocal*.018);' in shader_contract, (
+    'Frontal paired angle must stay subtle')
+assert 'float spreadProgress=smoothstep(.65,7.0,forward);' in shader_contract, (
+    'Electric Eyes distance-based divergence ramp missing')
+assert 'progressiveSpread=outwardSign*forward*(.038*spreadProgress);' in shader_contract, (
+    'Electric Eyes far-tip outward separation missing')
+assert 'float shifted=across-sway-progressiveSpread;' in shader_contract, (
+    'Progressive separation must move the beam body, not only metadata')
 assert 'EffectDirectionFromLandmarks' in tracker_contract, (
     'Face/nose/ear/mouth fused direction tracking missing')
 assert tracker_contract.count('EyeContourCenter') >= 2, (
