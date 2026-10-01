@@ -101,6 +101,10 @@ inline FaceOrientation EffectDirectionFromLandmarks(
         leftMouth, rightMouth, noseTip, chin, roll);
 
     FaceOrientation result;
+    result.yaw = 0.f;
+    result.pitch = 0.f;
+    result.forward = 0.f;
+    result.valid = false;
     float weight = 0.f;
     auto add = [&](const FaceOrientation& value, float w) {
         if (!value.valid) return;
