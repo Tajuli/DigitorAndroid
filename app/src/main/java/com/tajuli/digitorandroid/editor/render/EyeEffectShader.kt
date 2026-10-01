@@ -118,11 +118,27 @@ internal const val EYE_EFFECT_SHADER = """
             vec2 gaze=renderGaze.xy;
             float gazeForward=renderGaze.z;
 
-            // Each beam remains welded to its own pupil, but paired eyes share one render gaze.
-            // Parallel axes preserve the original eye-to-eye spacing along the visible beams.
+            // Each beam remains welded to its own pupil and paired eyes share one stable base
+            // gaze. CapCut-style geometry is not perfectly parallel: add only a tiny outward
+            // bias along the tracked eye-pair axis so beam separation grows gradually with reach.
             vec2 localGaze=vec2(c*gaze.x+s*gaze.y,-s*gaze.x+c*gaze.y);
             float projected=length(localGaze);
             vec2 dir=projected>.025 ? localGaze/projected : vec2(1.0,0.0);
+            bool pairedBeams=uLeftEye.z>.0001 && uRightEye.z>.0001;
+            vec2 outwardLocal=vec2(0.0);
+            if(pairedBeams) {
+                vec2 pairMetric=(uRightEye.xy-uLeftEye.xy)*
+                    vec2(1.0,uTexelSize.x/uTexelSize.y);
+                float pairLength=length(pairMetric);
+                if(pairLength>.0001) {
+                    vec2 pairLocal=vec2(
+                        c*pairMetric.x+s*pairMetric.y,
+                        -s*pairMetric.x+c*pairMetric.y);
+                    float eyeSide=eye.x<(uLeftEye.x+uRightEye.x)*.5 ? -1.0 : 1.0;
+                    outwardLocal=normalize(pairLocal)*eyeSide;
+                    dir=normalize(dir+outwardLocal*.035);
+                }
+            }
             float along=dot(p,dir);
             float across=p.x*dir.y-p.y*dir.x;
             float cameraFacing=max(
@@ -133,20 +149,24 @@ internal const val EYE_EFFECT_SHADER = """
             float forward=max(along,0.0);
             float rayGate=smoothstep(-.08,.10,along);
 
-            // Straight-at-lens gaze keeps two short parallel tubes. No eye-side offset is
-            // applied: the independent pupil origins alone define the distance between beams.
+            // Straight-at-lens gaze keeps two short tubes, with the same very small outward
+            // separation used by the long ray so the far endpoints do not look mechanically
+            // parallel. The origins remain exactly on the tracked pupils.
             vec2 frontScreenDir=length(gaze)>.025 ? normalize(gaze) : vec2(0.0,-1.0);
             vec2 grazeDir=vec2(
                 c*frontScreenDir.x+s*frontScreenDir.y,
                 -s*frontScreenDir.x+c*frontScreenDir.y);
+            if(pairedBeams && length(outwardLocal)>.001) {
+                grazeDir=normalize(grazeDir+outwardLocal*.040);
+            }
             float grazeAlong=dot(p,grazeDir);
             float grazeForward=max(grazeAlong,0.0);
             float grazeAcross=p.x*grazeDir.y-p.y*grazeDir.x;
             float grazeWindow=smoothstep(-.08,.08,grazeAlong)*
                 (1.0-smoothstep(5.2,8.2,grazeForward));
-            float grazeWidth=.085+.062*grazeForward;
+            float grazeWidth=.108+.074*grazeForward;
             float frontTubeCore=exp(-pow(
-                grazeAcross/max(.030+.010*grazeForward,.030),2.0))*
+                grazeAcross/max(.039+.012*grazeForward,.039),2.0))*
                 grazeWindow*cameraFacing;
             float frontTubeBody=exp(-pow(
                 grazeAcross/max(grazeWidth,.075),2.25))*
@@ -160,17 +180,17 @@ internal const val EYE_EFFECT_SHADER = """
             // two real eye beams, so it is intentionally removed.
             float coarse=eyeFbm(vec2(forward*.16-t*.16,across*1.42+t*.018));
             float fine=eyeNoise(vec2(forward*.34+t*.07,across*3.15-t*.045));
-            float coneWidth=.10+forward*.052;
-            float coreWidth=.033+forward*.009;
-            float hazeWidth=.27+forward*.105;
+            float coneWidth=.135+forward*.064;
+            float coreWidth=.043+forward*.011;
+            float hazeWidth=.315+forward*.118;
             float sway=(coarse-.5)*coneWidth*.055+
                 sin(forward*.92-t*.75)*(.0020+.00055*forward);
             float shifted=across-sway;
             float raggedWidth=coneWidth*(.88+.20*fine);
 
-            float beamCore=exp(-pow(shifted/max(coreWidth,.029),2.0));
-            float beamBody=exp(-pow(abs(shifted)/max(raggedWidth,.072),2.45));
-            float beamHaze=exp(-pow(shifted/max(hazeWidth,.20),2.0))*
+            float beamCore=exp(-pow(shifted/max(coreWidth,.037),2.0));
+            float beamBody=exp(-pow(abs(shifted)/max(raggedWidth,.090),2.45));
+            float beamHaze=exp(-pow(shifted/max(hazeWidth,.235),2.0))*
                 (.68+.32*coarse);
             // Broad edge glow keeps an electric/plasma contour without becoming another line.
             float edgeGlow=max(beamHaze-beamBody*.58,0.0)*(.32+.28*fine);
@@ -308,6 +328,27 @@ internal const val EYE_EFFECT_SHADER = """
     vec2 faceMetricScale() {
         return vec2(1.0,uTexelSize.x/uTexelSize.y);
     }
+    float electricLensHitScore(vec4 eye,vec4 gaze) {
+        if(eye.z<.0001 || gaze.w<.055) return 0.0;
+        vec4 resolved=electricResolvedGaze(gaze);
+        float projected=length(resolved.xy);
+        float front3d=smoothstep(.84,.96,uHeadPose.w)*smoothstep(.82,.96,resolved.z);
+        if(front3d<.001) return 0.0;
+
+        // A lens flare is allowed only when the actual eye ray passes through the virtual camera
+        // lens. This prevents a fake full-frame flare while both beams visibly point elsewhere.
+        vec2 lensUv=eyeSourceUv(vec2(.5,.5));
+        vec2 toLens=(lensUv-eye.xy)*faceMetricScale();
+        float lensDistance=length(toLens);
+        if(lensDistance<.0001) return front3d;
+        vec2 aim=projected>.035 ? normalize(resolved.xy) : toLens/lensDistance;
+        float along=dot(toLens,aim);
+        float miss=abs(toLens.x*aim.y-toLens.y*aim.x);
+        float rayForward=smoothstep(-.01,.05,along);
+        float rayHit=1.0-smoothstep(.014,.060,miss);
+        float nearFront=1.0-smoothstep(.20,.52,projected);
+        return front3d*nearFront*rayForward*rayHit;
+    }
     vec2 faceToLocal(vec2 d) {
         vec2 q=d*faceMetricScale();
         float c=cos(uHeadPose.z),s=sin(uHeadPose.z);
@@ -362,16 +403,17 @@ internal const val EYE_EFFECT_SHADER = """
         vec3 light=eyeLight(uv,uLeftEye,uEyeState.x,uEyeState.z,uLeftGaze)
                   +eyeLight(uv,uRightEye,uEyeState.y,uEyeState.w,uRightGaze);
 
-        // When both eyes look into the camera, move the strongest overexposure to the virtual lens
-        // rather than the eye sockets. The two local front tubes remain separate; this broad
-        // frame-space flare is the "lens scorching" cue seen when they skim close to the viewer.
+        // The frame-space flare is now geometric, not just "face looks forward". Each eye ray
+        // must actually intersect the virtual camera lens. A single hit gives only a very faint
+        // response; two aligned hits produce the still-subtle CapCut-like lens graze.
         vec4 effectiveLeft=uLeftGaze.w<.055 ? vec4(uGazePose.xyz,.12) : uLeftGaze;
         vec4 effectiveRight=uRightGaze.w<.055 ? vec4(uGazePose.xyz,.12) : uRightGaze;
-        float pairFront=min(electricFrontScore(effectiveLeft),electricFrontScore(effectiveRight));
-        pairFront*=smoothstep(.18,.32,uEyeState.x)*smoothstep(.18,.32,uEyeState.y)*uEyesA.y;
-        // Require a strong two-eye frontal match and keep the lens response natural instead of
-        // blowing out the whole frame. Squaring also makes near-frontal transitions smoother.
-        pairFront=pairFront*pairFront*.52;
+        float leftHit=electricLensHitScore(uLeftEye,effectiveLeft)*
+            smoothstep(.18,.32,uEyeState.x);
+        float rightHit=electricLensHitScore(uRightEye,effectiveRight)*
+            smoothstep(.18,.32,uEyeState.y);
+        float lensHit=.5*(leftHit+rightHit)*uEyesA.y;
+        float pairFront=lensHit*lensHit*.18;
         vec2 lensP=vec2(frameUv.x-.5,(frameUv.y-.5)*(uTexelSize.x/uTexelSize.y));
         float lensNoise=eyeNoise(lensP*2.5+vec2(-uEyeTime*.018,uEyeTime*.010));
         float lensBurn=exp(-dot(lensP*vec2(.96,1.16),lensP*vec2(.96,1.16))*10.5);
