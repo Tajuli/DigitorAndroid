@@ -134,7 +134,9 @@ internal const val EYE_EFFECT_SHADER = """
                         -s*pairMetric.x+c*pairMetric.y);
                     float eyeSide=eye.x<(uLeftEye.x+uRightEye.x)*.5 ? -1.0 : 1.0;
                     outwardLocal=normalize(pairLocal)*eyeSide;
-                    dir=normalize(dir+outwardLocal*.052);
+                    // Keep the roots nearly parallel. Most separation is added progressively
+                    // farther down the beam so the tips drift outward without a strong V-angle.
+                    dir=normalize(dir+outwardLocal*.020);
                 }
             }
             float along=dot(p,dir);
@@ -157,7 +159,7 @@ internal const val EYE_EFFECT_SHADER = """
                 c*frontScreenDir.x+s*frontScreenDir.y,
                 -s*frontScreenDir.x+c*frontScreenDir.y);
             if(pairedBeams && length(outwardLocal)>.001) {
-                grazeDir=normalize(grazeDir+outwardLocal*.052);
+                grazeDir=normalize(grazeDir+outwardLocal*.018);
             }
             float grazeAlong=dot(p,grazeDir);
             float grazeForward=max(grazeAlong,0.0);
@@ -191,7 +193,18 @@ internal const val EYE_EFFECT_SHADER = """
             float hazeWidth=.74+forward*.175;
             float sway=(coarse-.5)*(.070+.018*forward)+
                 sin(forward*.58-t*.280)*(.007+.0014*forward);
-            float shifted=across-sway;
+
+            // Progressive binocular separation: almost parallel at the pupils, then a small
+            // outward drift that grows with beam length. Left tip moves left, right tip moves
+            // right, while the far-angle remains subtle rather than becoming a wide V.
+            float progressiveSpread=0.0;
+            if(pairedBeams && length(outwardLocal)>.001) {
+                vec2 beamNormal=vec2(dir.y,-dir.x);
+                float outwardSign=dot(outwardLocal,beamNormal);
+                float spreadProgress=smoothstep(.65,7.0,forward);
+                progressiveSpread=outwardSign*forward*(.038*spreadProgress);
+            }
+            float shifted=across-sway-progressiveSpread;
             float raggedWidth=coneWidth*(.72+.36*coarse+.18*fine);
             raggedWidth*=mix(.86,1.18,smoothstep(.30,.76,torn));
 
