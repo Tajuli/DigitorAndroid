@@ -76,11 +76,13 @@ internal const val EYE_EFFECT_SHADER = """
         return vec4(uHeadPose.xy,uHeadPose.w,.12);
     }
     vec4 electricRenderGaze(vec4 ownGaze) {
-        // Origin and direction are intentionally separate. Per-eye/pupil gaze may refine where the
-        // beam starts, but it must never swing a long beam. uGazePose is produced by the fused
-        // ear/face + cheek/nose + mouth/chin 3D tracker; both eyes therefore share one stable axis.
-        if(uGazePose.w>=.5) return vec4(uGazePose.xyz,1.0);
-        return vec4(uHeadPose.xy,uHeadPose.w,1.0);
+        // Origin and direction are intentionally separate. Per-eye/pupil X/Y/Z never steer the
+        // beam; uGazePose is produced by fused face/nose/ear/mouth 3D tracking. Keep only the
+        // per-eye confidence metadata so the uniforms remain part of the runtime GL contract and
+        // confidence can soften energy/reach without changing the beam angle.
+        float confidence=max(ownGaze.w,.08);
+        if(uGazePose.w>=.5) return vec4(uGazePose.xyz,confidence);
+        return vec4(uHeadPose.xy,uHeadPose.w,confidence);
     }
     vec2 electricScreenDir(vec4 gaze) {
         vec4 resolved=electricResolvedGaze(gaze);
