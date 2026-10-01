@@ -10,6 +10,8 @@ using face_tracking::LandmarkRoi;
 using face_tracking::FaceOrientationFromPlane;
 using face_tracking::EyeAspectRatio;
 using face_tracking::BlinkOpenness;
+using face_tracking::EyeContourCenter;
+using face_tracking::EffectDirectionFromLandmarks;
 
 static void near(float actual, float expected) {
     assert(std::fabs(actual - expected) < .001f);
@@ -68,7 +70,43 @@ int main() {
     assert(down.pitch < -.35f);
     assert(face_tracking::ScreenPitchDown(down) > .35f);
 
-    // Independent pupil motion drives each eye independently. Positive pupil Y means look down.
+    // Eye-origin center uses the complete eyelid contour rather than only the two eye corners.
+    const auto contourCenter = EyeContourCenter(
+        Point{0, 0}, Point{8, 0},
+        Point{2, -1}, Point{2, 1},
+        Point{4, -1}, Point{4, 1},
+        Point{6, -1}, Point{6, 1});
+    near(contourCenter.x, 4.f); near(contourCenter.y, 0.f);
+
+    // Long-effect direction fuses ear/side-face, cheek/nose, and mouth/nose/chin planes.
+    const auto fusedFront = EffectDirectionFromLandmarks(
+        Point3{-2, 0, 0}, Point3{2, 0, 0},
+        Point3{-1.5f, .2f, 0}, Point3{1.5f, .2f, 0},
+        Point3{-.7f, 1.f, 0}, Point3{.7f, 1.f, 0},
+        Point3{0, -2, 0}, Point3{0, -.5f, 0}, Point3{0, 0, 0},
+        Point3{0, .7f, 0}, Point3{0, 1.1f, 0}, Point3{0, 2, 0},
+        0.f);
+    assert(fusedFront.valid);
+    near(fusedFront.yaw, 0.f); near(fusedFront.pitch, 0.f); near(fusedFront.forward, 1.f);
+
+    const float fusedYawAngle = .5235987756f;
+    const float fcy = std::cos(fusedYawAngle), fsy = std::sin(fusedYawAngle);
+    auto yawPoint = [&](Point3 p) {
+        return Point3{p.x * fcy, p.y, -p.x * fsy + p.z};
+    };
+    const auto fusedTurn = EffectDirectionFromLandmarks(
+        yawPoint(Point3{-2, 0, 0}), yawPoint(Point3{2, 0, 0}),
+        yawPoint(Point3{-1.5f, .2f, 0}), yawPoint(Point3{1.5f, .2f, 0}),
+        yawPoint(Point3{-.7f, 1.f, 0}), yawPoint(Point3{.7f, 1.f, 0}),
+        yawPoint(Point3{0, -2, 0}), yawPoint(Point3{0, -.5f, 0}), yawPoint(Point3{0, 0, 0}),
+        yawPoint(Point3{0, .7f, 0}), yawPoint(Point3{0, 1.1f, 0}), yawPoint(Point3{0, 2, 0}),
+        0.f);
+    assert(fusedTurn.valid);
+    assert(std::fabs(fusedTurn.yaw) > .5f);
+    assert(fusedTurn.forward > .80f && fusedTurn.forward < .92f);
+
+    // Independent pupil motion remains available as metadata, but long-beam direction no longer
+    // consumes it; pupil tracking is reserved for the source point.
     const auto eyeDown = face_tracking::EyeDrivenGaze(0.f, 0.f, 1.f, 0.f, .48f, .9f, 1.f);
     const auto eyeUp = face_tracking::EyeDrivenGaze(0.f, 0.f, 1.f, 0.f, -.48f, .9f, 1.f);
     assert(eyeDown.y > .65f && eyeDown.confidence > .8f);
@@ -99,5 +137,5 @@ int main() {
     assert(BlinkOpenness(.20f, &closedState) == 0.f && closedState);
     assert(BlinkOpenness(.24f, &closedState) > .5f && !closedState);
 
-    std::cout << "PASS: crop geometry, 3D face orientation, and multi-landmark EAR blink hysteresis\n";
+    std::cout << "PASS: crop geometry, pupil/eye source center, fused face direction, and blink geometry\n";
 }
