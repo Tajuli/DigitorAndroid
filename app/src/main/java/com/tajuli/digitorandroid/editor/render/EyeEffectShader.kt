@@ -77,8 +77,9 @@ internal const val EYE_EFFECT_SHADER = """
     }
     vec4 electricRenderGaze(vec4 ownGaze) {
         vec4 own=electricResolvedGaze(ownGaze);
-        bool paired=uLeftEye.z>.0001 && uRightEye.z>.0001 &&
-            uEyeState.x>.18 && uEyeState.y>.18;
+        // Electric Eyes stays continuous through blinks. Pairing depends on tracked eye origins,
+        // not eyelid openness; otherwise a blink changes the shared beam direction for one frame.
+        bool paired=uLeftEye.z>.0001 && uRightEye.z>.0001;
         if(!paired) return own;
 
         // Treat both eyes as one binocular emitter: two separate pupil origins, one render axis.
@@ -103,10 +104,10 @@ internal const val EYE_EFFECT_SHADER = """
         return length(resolved.xy)>.045 ? normalize(resolved.xy) : vec2(0.0,-1.0);
     }
     vec3 eyeLight(vec2 uv, vec4 eye, float openness, float roll, vec4 eyeGaze) {
-        // Blink gate is per eye. Closed eyelids remove that eye's effect completely; the short
-        // transition avoids a hard pop while still following the per-frame openness signal.
+        // Most eye effects remain blink-aware, but Electric Eyes is intentionally continuous:
+        // eyelid closure must not switch the electric beam off or change its direction.
         float blinkGate=smoothstep(.18,.30,openness);
-        if (eye.z < .0001 || blinkGate < .001) return vec3(0);
+        if (eye.z < .0001) return vec3(0);
         vec2 d=(vec2(uv.x,1.0-uv.y)-eye.xy)*vec2(1.0,uTexelSize.x/uTexelSize.y);
         float c=cos(roll),s=sin(roll);
         vec2 p=vec2(c*d.x+s*d.y,-s*d.x+c*d.y)/eye.z;
@@ -115,6 +116,7 @@ internal const val EYE_EFFECT_SHADER = """
         float halo=exp(-r*r*.75);
         float ring=exp(-pow((r-.8)*12.0,2.0));
         vec3 light=vec3(0);
+        vec3 electricLight=vec3(0);
         if(uEyesA.x>.001) {
             light+=uEyesA.x*realisticEyeFire(p,t,.37,1.00);
         }
@@ -189,17 +191,19 @@ internal const val EYE_EFFECT_SHADER = """
             // Calm procedural motion: one low-frequency FBM layer plus one cheap detail noise.
             // The previous fast secondary filament created occasional "extra two lines" beside the
             // two real eye beams, so it is intentionally removed.
-            float coarse=eyeFbm(vec2(forward*.115-t*.22,across*.78+t*.026));
-            float fine=eyeNoise(vec2(forward*.42-t*.31,across*3.65+t*.060));
-            float torn=eyeNoise(vec2(forward*.255+t*.17,across*1.92-t*.085));
+            // Slow, heavy plasma motion. The previous time rates made the beam jitter/flow too
+            // quickly compared with the reference, so all temporal advection is deliberately low.
+            float coarse=eyeFbm(vec2(forward*.115-t*.080,across*.78+t*.010));
+            float fine=eyeNoise(vec2(forward*.42-t*.110,across*3.65+t*.021));
+            float torn=eyeNoise(vec2(forward*.255+t*.055,across*1.92-t*.027));
 
             // Reference-matched scale: a bright ~eye-width root rapidly grows into a much wider,
             // blown-out beam. Digitor's previous values were still a thin laser line.
             float coneWidth=.34+forward*.095;
             float coreWidth=.105+forward*.026;
             float hazeWidth=.74+forward*.175;
-            float sway=(coarse-.5)*(.085+.022*forward)+
-                sin(forward*.58-t*.92)*(.010+.0021*forward);
+            float sway=(coarse-.5)*(.070+.018*forward)+
+                sin(forward*.58-t*.280)*(.007+.0014*forward);
             float shifted=across-sway;
             float raggedWidth=coneWidth*(.72+.36*coarse+.18*fine);
             raggedWidth*=mix(.86,1.18,smoothstep(.30,.76,torn));
@@ -225,7 +229,7 @@ internal const val EYE_EFFECT_SHADER = """
             // Reuse the already-computed slow noise instead of two extra FBM evaluations. This
             // keeps the smoke subtle, slower than the beam edge, and materially lowers GPU cost.
             float smokeNoise=mix(coarse,eyeNoise(vec2(
-                forward*.082-t*.038,shifted*.48+t*.014)),.42);
+                forward*.082-t*.014,shifted*.48+t*.005)),.42);
             float smokeEnvelope=exp(-pow(
                 shifted/max(hazeWidth*1.72,.88),2.0))*rayGate*directional*
                 exp(-forward*(reach+.018));
@@ -246,7 +250,7 @@ internal const val EYE_EFFECT_SHADER = """
 
             // Looking straight into the camera collapses the projected cone into a large soft
             // lens-facing bloom rather than a fake arbitrary screen-space ray.
-            float pulse=.994+.006*sin(t*1.1);
+            float pulse=.996+.004*sin(t*.40);
             float localFrontHalo=exp(-r*r*.14)*(1.0-smoothstep(5.8,8.6,r));
             float front=cameraFacing*pulse;
 
@@ -254,7 +258,7 @@ internal const val EYE_EFFECT_SHADER = """
             // visible, but most frontal energy moves into the two graze tubes and the frame-space
             // lens flare added below.
             float localEmitterScale=.88+.12*(1.0-cameraFacing);
-            light+=uEyesA.y*(
+            electricLight+=uEyesA.y*(
                 vec3(1.00,.998,.95)*(
                     beamCore*4.20+beamBody*2.55+
                     (lidWhite*1.72+rootFlash*1.16)*localEmitterScale+
@@ -335,7 +339,7 @@ internal const val EYE_EFFECT_SHADER = """
             float flare=exp(-p.y*p.y*160.0)*exp(-abs(p.x)*.45);
             light+=uEyesE.y*(vec3(1,.05,.7)*(core+halo*.4)+vec3(1,.7,.95)*flare);
         }
-        return light*blinkGate;
+        return electricLight + light*blinkGate;
     }
     vec2 eyeSourceUv(vec2 uv) {
         vec2 p=uv*2.0-1.0-uEyeTranslation;
@@ -429,10 +433,10 @@ internal const val EYE_EFFECT_SHADER = """
         vec4 effectiveRight=uRightGaze.w<.055 ? vec4(uGazePose.xyz,.12) : uRightGaze;
         vec4 renderLeft=electricRenderGaze(effectiveLeft);
         vec4 renderRight=electricRenderGaze(effectiveRight);
-        float leftHit=electricLensHitScore(uLeftEye,renderLeft)*
-            smoothstep(.18,.32,uEyeState.x);
-        float rightHit=electricLensHitScore(uRightEye,renderRight)*
-            smoothstep(.18,.32,uEyeState.y);
+        // Lens-hit energy follows tracked rays, not eyelid openness. Electric Eyes remains on
+        // through a blink, so its subtle lens response must not pop off either.
+        float leftHit=electricLensHitScore(uLeftEye,renderLeft);
+        float rightHit=electricLensHitScore(uRightEye,renderRight);
         float lensHit=.5*(leftHit+rightHit)*uEyesA.y;
         float pairFront=lensHit*lensHit*.10;
         vec2 lensP=vec2(frameUv.x-.5,(frameUv.y-.5)*(uTexelSize.x/uTexelSize.y));
