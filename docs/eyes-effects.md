@@ -133,3 +133,11 @@ frame-space lens flare/halation is composited around the virtual camera lens so 
 appears to happen at the viewer/lens rather than inside the eyes. Directional beams retain the
 per-eye gaze angle and now carry low-frequency animated ionized haze/smoke outside the white-hot
 core. Funny Face tracking remains unchanged.
+
+
+### Electric Eyes natural-motion refinement
+The Electric Eyes renderer now uses one dominant beam core/body per eye. The former secondary bright
+filament was removed because it could read as two extra mini-beams. Turbulence and smoke drift use
+slower, lower-amplitude motion, and several extra FBM evaluations were replaced with reused/cheap
+noise so preview rendering is lighter. The two-eye frontal lens-graze remains, but its flare is
+narrower and substantially softer, with a stricter strong-frontal gate.

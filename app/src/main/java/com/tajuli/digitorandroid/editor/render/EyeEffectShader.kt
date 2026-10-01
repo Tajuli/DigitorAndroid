@@ -139,57 +139,49 @@ internal const val EYE_EFFECT_SHADER = """
             // CapCut-reference behavior without copying assets: the beam is not a thin GLSL line.
             // It starts narrow at the pupil, widens into a blown-out volumetric cone, has a
             // white-hot center, warm gold bloom and animated ragged/electric plasma at the edges.
-            float coarse=eyeFbm(vec2(forward*.19-t*1.45,across*1.65+t*.17));
-            float fine=eyeFbm(vec2(forward*.47+t*.92,across*4.20-t*.63));
-            float coneWidth=.10+forward*.055;
-            float coreWidth=.032+forward*.010;
-            float hazeWidth=.28+forward*.115;
-            float sway=(coarse-.5)*coneWidth*.30+
-                sin(forward*1.18-t*7.4)*(.012+.003*forward);
+            // Calm procedural motion: one low-frequency FBM layer plus one cheap detail noise.
+            // The previous fast secondary filament created occasional "extra two lines" beside the
+            // two real eye beams, so it is intentionally removed.
+            float coarse=eyeFbm(vec2(forward*.16-t*.36,across*1.42+t*.045));
+            float fine=eyeNoise(vec2(forward*.34+t*.18,across*3.15-t*.12));
+            float coneWidth=.10+forward*.052;
+            float coreWidth=.033+forward*.009;
+            float hazeWidth=.27+forward*.105;
+            float sway=(coarse-.5)*coneWidth*.11+
+                sin(forward*.92-t*2.15)*(.0045+.0012*forward);
             float shifted=across-sway;
-            float raggedWidth=coneWidth*(.78+.42*fine);
+            float raggedWidth=coneWidth*(.88+.20*fine);
 
-            float beamCore=exp(-pow(shifted/max(coreWidth,.028),2.0));
-            float beamBody=exp(-pow(abs(shifted)/max(raggedWidth,.070),2.55));
+            float beamCore=exp(-pow(shifted/max(coreWidth,.029),2.0));
+            float beamBody=exp(-pow(abs(shifted)/max(raggedWidth,.072),2.45));
             float beamHaze=exp(-pow(shifted/max(hazeWidth,.20),2.0))*
-                (.62+.58*coarse);
-            float edgeDistance=abs(shifted)-raggedWidth*.78;
-            float electricEdge=exp(-pow(
-                edgeDistance/max(.026+.006*forward,.026),2.0))*(.32+.78*fine);
-            float filamentOffset=
-                sin(forward*2.25-t*14.0)*(.018+.0025*forward)+
-                (fine-.5)*(.020+.002*forward);
-            float filament=exp(-pow(
-                (shifted-filamentOffset)/max(.017+.003*forward,.017),2.0));
+                (.68+.32*coarse);
+            // Broad edge glow keeps an electric/plasma contour without becoming another line.
+            float edgeGlow=max(beamHaze-beamBody*.58,0.0)*(.32+.28*fine);
 
             float reach=mix(.115,.008,confidenceGate);
             float axial=rayGate*directional;
             beamCore*=axial*exp(-forward*reach);
             beamBody*=axial*exp(-forward*(reach+.004));
             beamHaze*=axial*exp(-forward*(reach+.014));
-            electricEdge*=axial*exp(-forward*(reach+.010));
-            filament*=axial*exp(-forward*(reach+.006));
+            edgeGlow*=axial*exp(-forward*(reach+.012));
 
-            // Subtle ionized smoke/haze sits outside the hot core. It drifts more slowly than the
-            // plasma edge and changes shape over time, which keeps the effect from reading as a
-            // clean computer-drawn tube.
-            float smokeNoise=eyeFbm(vec2(
-                forward*.115-t*.34,
-                shifted*.72+t*.095));
+            // Reuse the already-computed slow noise instead of two extra FBM evaluations. This
+            // keeps the smoke subtle, slower than the beam edge, and materially lowers GPU cost.
+            float smokeNoise=mix(coarse,eyeNoise(vec2(
+                forward*.10-t*.075,shifted*.62+t*.028)),.38);
             float smokeEnvelope=exp(-pow(
-                shifted/max(hazeWidth*1.72,.30),2.0))*rayGate*directional*
-                exp(-forward*(reach+.026));
+                shifted/max(hazeWidth*1.65,.29),2.0))*rayGate*directional*
+                exp(-forward*(reach+.027));
             float smoke=smokeEnvelope*
-                smoothstep(.24,.78,smokeNoise)*
-                (1.0-.42*clamp(beamBody,0.0,1.0));
+                smoothstep(.30,.72,smokeNoise)*
+                (1.0-.48*clamp(beamBody,0.0,1.0));
 
-            float frontSmokeNoise=eyeFbm(vec2(
-                grazeForward*.16-t*.29,
-                grazeAcross*.82+t*.12));
+            float frontSmokeNoise=mix(coarse,fine,.42);
             float frontSmoke=exp(-pow(
-                grazeAcross/max(.30+.10*grazeForward,.30),2.0))*
+                grazeAcross/max(.28+.085*grazeForward,.28),2.0))*
                 grazeWindow*cameraFacing*
-                smoothstep(.25,.76,frontSmokeNoise);
+                smoothstep(.32,.72,frontSmokeNoise);
 
             // Bright eye socket/root flare visually joins the beam to the actual pupil/eyelid.
             float lidWhite=exp(-dot(p*vec2(.58,2.40),p*vec2(.58,2.40))*1.70);
@@ -198,8 +190,8 @@ internal const val EYE_EFFECT_SHADER = """
 
             // Looking straight into the camera collapses the projected cone into a large soft
             // lens-facing bloom rather than a fake arbitrary screen-space ray.
-            float pulse=.94+.06*sin(t*10.5);
-            float localFrontHalo=exp(-r*r*.105)*(1.0-smoothstep(6.5,9.5,r));
+            float pulse=.985+.015*sin(t*2.6);
+            float localFrontHalo=exp(-r*r*.14)*(1.0-smoothstep(5.8,8.6,r));
             float front=cameraFacing*pulse;
 
             // Do not "burn" the eye when the light is aimed at the lens. The local emitter stays
@@ -208,18 +200,18 @@ internal const val EYE_EFFECT_SHADER = """
             float localEmitterScale=1.0-.68*cameraFacing;
             light+=uEyesA.y*(
                 vec3(1.00,.995,.93)*(
-                    beamCore*2.45+beamBody*1.42+filament*.82+
-                    (lidWhite*1.30+rootFlash*.88)*localEmitterScale+
-                    frontTubeCore*2.65+frontTubeBody*1.05
+                    beamCore*2.35+beamBody*1.30+
+                    (lidWhite*1.22+rootFlash*.82)*localEmitterScale+
+                    frontTubeCore*2.05+frontTubeBody*.78
                 )+
                 vec3(1.00,.67,.18)*(
-                    beamBody*.40+beamHaze*.98+electricEdge*.64+
-                    socketBloom*.20*localEmitterScale+
-                    frontTubeBody*.58+localFrontHalo*.14*front+
-                    smoke*.26+frontSmoke*.28
+                    beamBody*.34+beamHaze*.80+edgeGlow*.34+
+                    socketBloom*.17*localEmitterScale+
+                    frontTubeBody*.42+localFrontHalo*.09*front+
+                    smoke*.20+frontSmoke*.19
                 )+
-                vec3(.72,.68,.61)*(smoke*.18+frontSmoke*.20)+
-                vec3(1.00,.28,.015)*(electricEdge*.16+beamHaze*.10)
+                vec3(.72,.68,.61)*(smoke*.13+frontSmoke*.12)+
+                vec3(1.00,.28,.015)*(edgeGlow*.08+beamHaze*.07)
             );
         }
         if(uEyesA.z>.001) {
@@ -361,17 +353,20 @@ internal const val EYE_EFFECT_SHADER = """
         vec4 effectiveRight=uRightGaze.w<.055 ? vec4(uGazePose.xyz,.12) : uRightGaze;
         float pairFront=min(electricFrontScore(effectiveLeft),electricFrontScore(effectiveRight));
         pairFront*=smoothstep(.18,.32,uEyeState.x)*smoothstep(.18,.32,uEyeState.y)*uEyesA.y;
+        // Require a strong two-eye frontal match and keep the lens response natural instead of
+        // blowing out the whole frame. Squaring also makes near-frontal transitions smoother.
+        pairFront=pairFront*pairFront*.52;
         vec2 lensP=vec2(frameUv.x-.5,(frameUv.y-.5)*(uTexelSize.x/uTexelSize.y));
-        float lensNoise=eyeFbm(lensP*3.1+vec2(-uEyeTime*.18,uEyeTime*.11));
-        float lensBurn=exp(-dot(lensP*vec2(.88,1.06),lensP*vec2(.88,1.06))*7.5);
-        float lensHalo=exp(-dot(lensP,lensP)*2.6)*(.76+.28*lensNoise);
-        float lensStreak=exp(-lensP.y*lensP.y*115.0)*exp(-abs(lensP.x)*2.1);
-        float lensMist=exp(-dot(lensP*vec2(.72,.92),lensP*vec2(.72,.92))*3.8)*
-            smoothstep(.22,.76,lensNoise);
+        float lensNoise=eyeNoise(lensP*2.5+vec2(-uEyeTime*.045,uEyeTime*.025));
+        float lensBurn=exp(-dot(lensP*vec2(.96,1.16),lensP*vec2(.96,1.16))*10.5);
+        float lensHalo=exp(-dot(lensP,lensP)*4.4)*(.84+.16*lensNoise);
+        float lensStreak=exp(-lensP.y*lensP.y*145.0)*exp(-abs(lensP.x)*2.8);
+        float lensMist=exp(-dot(lensP*vec2(.82,1.02),lensP*vec2(.82,1.02))*5.6)*
+            smoothstep(.34,.76,lensNoise);
         light+=pairFront*(
-            vec3(1.00,.995,.92)*(lensBurn*1.28+lensStreak*.48)+
-            vec3(1.00,.67,.20)*(lensHalo*.34+lensMist*.20)+
-            vec3(.72,.69,.64)*lensMist*.12
+            vec3(1.00,.995,.92)*(lensBurn*.72+lensStreak*.18)+
+            vec3(1.00,.67,.20)*(lensHalo*.16+lensMist*.09)+
+            vec3(.72,.69,.64)*lensMist*.05
         );
         if(uFaceRegion.z>.001 && uFaceRegion.w>.001) {
             vec2 p=(uv-uFaceRegion.xy)/uFaceRegion.zw;
