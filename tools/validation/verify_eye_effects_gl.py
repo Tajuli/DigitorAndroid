@@ -172,14 +172,22 @@ assert 'if(uGazePose.w>=.5) return vec4(uGazePose.xyz,confidence);' in shader_co
     'Electric Eyes must use fused face direction while retaining only per-eye confidence')
 assert 'float confidence=max(ownGaze.w,.08);' in shader_contract, (
     'Per-eye gaze uniforms must remain active without using pupil X/Y/Z for beam direction')
-assert 'dir=normalize(dir+outwardLocal*.020);' in shader_contract, (
-    'Electric Eyes near-eye paired angle must stay subtle')
-assert 'grazeDir=normalize(grazeDir+outwardLocal*.018);' in shader_contract, (
-    'Frontal paired angle must stay subtle')
-assert 'float spreadProgress=smoothstep(.65,7.0,forward);' in shader_contract, (
-    'Electric Eyes distance-based divergence ramp missing')
-assert 'progressiveSpread=outwardSign*forward*(.038*spreadProgress);' in shader_contract, (
-    'Electric Eyes far-tip outward separation missing')
+assert 'dir=normalize(dir+outwardLocal*.034);' in shader_contract, (
+    'Electric Eyes stronger paired V-angle missing')
+assert 'grazeDir=normalize(grazeDir+outwardLocal*.028);' in shader_contract, (
+    'Frontal paired V-angle increase missing')
+assert 'float spreadProgress=smoothstep(.40,6.6,forward);' in shader_contract, (
+    'Electric Eyes stronger distance-based divergence ramp missing')
+assert 'progressiveSpread=outwardSign*forward*(.060*spreadProgress);' in shader_contract, (
+    'Electric Eyes stronger far-tip outward separation missing')
+assert 'vec2 electricScreenDir(vec4 gaze,vec4 eye)' in shader_contract, (
+    'Electric Eyes camera-facing lens direction resolver missing')
+assert 'return normalize(mix(faceDir,lensDir,frontAmount));' in shader_contract, (
+    'Camera-facing Electric Eyes must turn toward the virtual lens')
+assert 'float blueRay=beamCore;' in shader_contract and 'float yellowRay=beamBody*' in shader_contract, (
+    'Electric Eyes blue core and yellow middle layers missing')
+assert 'float redRay=(beamHaze+edgeGlow*.55)*' in shader_contract, (
+    'Electric Eyes red outer layer missing')
 assert 'float shifted=across-sway-progressiveSpread;' in shader_contract, (
     'Progressive separation must move the beam body, not only metadata')
 assert 'EffectDirectionFromLandmarks' in tracker_contract, (
@@ -263,8 +271,10 @@ shader_contract=Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/
 assert 'electricLensHitScore' in shader_contract, 'Geometric lens-hit gate missing'
 assert 'float pairFront=lensHit*lensHit*.10' in shader_contract, 'Subtle lens-hit flare strength missing'
 assert 'rayHit=1.0-smoothstep(.010,.045,miss)' in shader_contract, 'Lens miss rejection missing'
-assert 'if(front3d<.001 || projected<.045) return 0.0' in shader_contract, (
-    'Ambiguous frontal gaze must not invent a lens hit')
+assert 'if(front3d<.001) return 0.0' in shader_contract, (
+    'Only non-frontal faces should reject the lens-facing hit')
+assert 'electricScreenDir(resolved,eye)' in shader_contract, (
+    'Lens hit must use the same camera-facing direction as the visible beam')
 assert 'renderLeft=electricRenderGaze(effectiveLeft)' in shader_contract, (
     'Lens flare must use the same resolved direction as the visible beam')
 assert 'return electricLight + light*blinkGate' in shader_contract, (
@@ -274,7 +284,12 @@ assert 'bool pairedBeams=uLeftEye.z>.0001 && uRightEye.z>.0001;' in shader_contr
 assert "forward*.115-t*.080" in shader_contract and "t*.280" in shader_contract, (
     'Electric plasma movement must use the slowed temporal rates')
 assert 'lensBurn' in shader_contract and 'lensHalo' in shader_contract, 'Lens-graze components missing'
-assert 'lensBurn*.72' in shader_contract, 'Lens flare should remain intentionally softened'
+assert 'vec3(.16,.48,1.00)*(lensBurn*.68)' in shader_contract, (
+    'Camera-facing lens center must use the blue inner ray color')
+assert 'vec3(1.00,.84,.10)*(lensStreak*.18+lensHalo*.12)' in shader_contract, (
+    'Camera-facing lens middle must use yellow')
+assert 'vec3(1.00,.075,.025)*(lensHalo*.07+lensMist*.10)' in shader_contract, (
+    'Camera-facing lens outer energy must use red')
 
 # Electric-beam haze should exist outside the hot core and animate over time. Use broad masks and
 # qualitative temporal change so harmless shader tuning cannot make this regression flaky.
