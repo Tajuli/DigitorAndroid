@@ -76,26 +76,11 @@ internal const val EYE_EFFECT_SHADER = """
         return vec4(uHeadPose.xy,uHeadPose.w,.12);
     }
     vec4 electricRenderGaze(vec4 ownGaze) {
-        vec4 own=electricResolvedGaze(ownGaze);
-        // Electric Eyes stays continuous through blinks. Pairing depends on tracked eye origins,
-        // not eyelid openness; otherwise a blink changes the shared beam direction for one frame.
-        bool paired=uLeftEye.z>.0001 && uRightEye.z>.0001;
-        if(!paired) return own;
-
-        // Treat both eyes as one binocular emitter: two separate pupil origins, one render axis.
-        vec4 left=electricResolvedGaze(uLeftGaze);
-        vec4 right=electricResolvedGaze(uRightGaze);
-        float lw=max(left.w,.08), rw=max(right.w,.08);
-        vec2 shared=(left.xy*lw+right.xy*rw)/(lw+rw);
-        float sharedForward=(left.z*lw+right.z*rw)/(lw+rw);
-
-        // Opposing noisy eye estimates must never split the visual beams in two directions.
-        if(length(shared)<.06 && max(length(left.xy),length(right.xy))>.16) {
-            bool useLeft=left.w>=right.w;
-            shared=useLeft ? left.xy : right.xy;
-            sharedForward=useLeft ? left.z : right.z;
-        }
-        return vec4(shared,sharedForward,max(left.w,right.w));
+        // Origin and direction are intentionally separate. Per-eye/pupil gaze may refine where the
+        // beam starts, but it must never swing a long beam. uGazePose is produced by the fused
+        // ear/face + cheek/nose + mouth/chin 3D tracker; both eyes therefore share one stable axis.
+        if(uGazePose.w>=.5) return vec4(uGazePose.xyz,1.0);
+        return vec4(uHeadPose.xy,uHeadPose.w,1.0);
     }
     vec2 electricScreenDir(vec4 gaze) {
         vec4 resolved=electricResolvedGaze(gaze);
