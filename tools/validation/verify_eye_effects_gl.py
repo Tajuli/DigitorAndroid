@@ -163,113 +163,79 @@ inward=eye_beam[max(0,row-2):row+3, 66:98].sum()
 assert outward > inward*1.20 + 100, ('Electric Eyes must start at eye and travel outward',outward,inward)
 print('PASS: Electric Eyes originates at the eye and follows left gaze.')
 
-# Isolated eyes still follow measured gaze. Paired eyes share one stable binocular base direction,
-# then receive only a small tracked eye-axis divergence so far endpoints separate gradually.
+# Electric/Laser-style beam architecture: pupils/eye contour own the SOURCE point, while
+# face/nose/ear/mouth tracking owns DIRECTION. Per-eye pupil gaze must not steer the long beam.
 shader_contract=Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/EyeEffectShader.kt').read_text()
-assert 'electricRenderGaze' in shader_contract, 'Electric Eyes paired gaze resolver missing'
+tracker_contract=Path('app/src/main/cpp/FaceTrackingNcnnVulkanJni.cpp').read_text()
+assert 'electricRenderGaze' in shader_contract, 'Electric Eyes face direction resolver missing'
+assert 'if(uGazePose.w>=.5) return vec4(uGazePose.xyz,1.0);' in shader_contract, (
+    'Electric Eyes must use the fused face direction pose')
 assert shader_contract.count('outwardLocal*.052') >= 2, 'Electric Eyes subtle paired divergence missing'
-# Test isolated steering with opposite high-confidence gazes.
-vec('uHeadPose',[0,0,0,.72]); vec('uGazePose',[0,0,.30,1])
+assert 'EffectDirectionFromLandmarks' in tracker_contract, (
+    'Face/nose/ear/mouth fused direction tracking missing')
+assert tracker_contract.count('EyeContourCenter') >= 2, (
+    'Multi-point eye contour source tracking missing')
+assert 'const float gazeX = headYaw;' in tracker_contract and 'const float gazeY = headPitch;' in tracker_contract, (
+    'Shared effect direction must be independent from pupil gaze')
+
 yy_dir,xx_dir=np.mgrid[:h,:w]
 
-def gaze_centroid(eye_name, eye_x, gaze_x, gaze_y):
+def direction_centroid(eye_name, eye_x, face_x, face_y):
     if eye_name=='left':
         vec('uLeftEye',[eye_x,.5,.045,0]); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0])
-        vec('uLeftGaze',[gaze_x,gaze_y,.30,.95]); vec('uRightGaze',[0,0,1,0])
     else:
         vec('uLeftEye',[0,0,0,0]); vec('uRightEye',[eye_x,.5,.045,0]); vec('uEyeState',[0,1,0,0])
-        vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[gaze_x,gaze_y,.30,.95])
+    vec('uHeadPose',[face_x,face_y,0,.72])
+    vec('uGazePose',[face_x,face_y,.72,1])
+    # Deliberately contradictory pupil-gaze metadata: renderer direction must ignore it.
+    vec('uLeftGaze',[-face_x,-face_y,.25,.95])
+    vec('uRightGaze',[-face_x,-face_y,.25,.95])
     delta=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None).sum(axis=2)
     eye_px=eye_x*w-.5
     eye_py=.5*h-.5
-    # Ignore the symmetric socket/emitter. Only off-eye volumetric energy is allowed to decide
-    # steering direction, making this independent of bloom width and haze strength.
     far=((xx_dir-eye_px)**2+(yy_dir-eye_py)**2)>(7.8**2)
     energy=delta*far
     total=energy.sum()
     assert total>120, ('Directional Electric Eyes emitted too little off-eye energy',
-        eye_name,gaze_x,gaze_y,total)
+        eye_name,face_x,face_y,total)
     return (energy*xx_dir).sum()/total, (energy*yy_dir).sum()/total
 
+# Horizontal and vertical beam steering follow only fused face direction.
 for eye_name,eye_x in (('left',.35),('right',.65)):
-    cx_left,_=gaze_centroid(eye_name,eye_x,-1,0)
-    cx_right,_=gaze_centroid(eye_name,eye_x,1,0)
+    cx_left,_=direction_centroid(eye_name,eye_x,-1,0)
+    cx_right,_=direction_centroid(eye_name,eye_x,1,0)
     assert cx_right > cx_left + 2.0, (
-        'Electric Eyes gaze must steer beam horizontally',eye_name,cx_left,cx_right)
+        'Fused face direction must steer Electric Eyes horizontally',
+        eye_name,cx_left,cx_right)
 
-vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[0,0,1,1])
-vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
+    _,cy_up=direction_centroid(eye_name,eye_x,0,-.82)
+    _,cy_down=direction_centroid(eye_name,eye_x,0,.82)
+    assert cy_down < cy_up - 2.0, (
+        'Fused face direction must steer Electric Eyes vertically',
+        eye_name,cy_up,cy_down)
+
+# With a fixed fused face direction, even opposite high-confidence pupil gaze must produce the
+# same Electric Eyes pixels. Pupil/iris movement is a SOURCE refinement only.
+vec('uHeadPose',[.72,.18,0,.68]); vec('uGazePose',[.72,.18,.68,1])
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
-front=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-eye_band=front[max(0,row-12):min(h,row+13), 34:94].sum()
-far_edges=front[:, :14].sum()+front[:, -14:].sum()
-assert eye_band > far_edges*2 + 100, ('Frontal gaze should read as camera-facing flare',eye_band,far_edges)
+vec('uLeftGaze',[-1,-.8,.20,.95]); vec('uRightGaze',[-1,-.8,.20,.95])
+pupil_left=render()
+vec('uLeftGaze',[1,.8,.20,.95]); vec('uRightGaze',[1,.8,.20,.95])
+pupil_right=render()
+assert np.array_equal(pupil_left,pupil_right), (
+    'Pupil gaze must not steer Electric Eyes; only fused face direction may steer it')
 
-# A face can still be close to frontal in 3D while the visible 2D eye ray is directional.
-# The reference keeps a long plasma beam in that case; frontal metadata must not collapse it
-# into a short radial bloom.
-vec('uHeadPose',[0,.28,0,.97])
-vec('uGazePose',[0,.36,.90,1])
-biased_front=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-biased_down=biased_front[:28].sum()
-biased_up=biased_front[-28:].sum()
-assert biased_down > biased_up*1.06 + 100, (
-    'Projected gaze must keep a long directional beam even with frontal 3D pose',
-    biased_down,biased_up)
-
-# A genuine down glance still has a lower eye-depth component and must retain a directional ray.
-# Validate directionality, not total brightness: the frontal starburst is intentionally bright,
-# so comparing absolute energy against it can falsely fail even when the down ray is correct.
-vec('uHeadPose',[0,.28,0,.97])
-vec('uGazePose',[0,.55,.42,1])
-down_gaze=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
-down_energy=down_gaze[:24].sum()
-up_energy=down_gaze[-24:].sum()
-assert down_energy > up_energy*1.15 + 100, ('True down gaze must keep downward beam',down_energy,up_energy)
-
-# Roll must not rotate the gaze away from the eye. Positive gaze Y is image-space DOWN.
-amounts(1)
-vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0])
+# Roll must rotate the face-driven beam coherently around the tracked pupil origins.
 vec('uEyeState',[1,1,.55,.55]); vec('uHeadPose',[0,.45,.55,.72]); vec('uGazePose',[0,.70,.38,1])
 rolled_down=render()[:,:,:3].astype(int)-source[:,:,:3].astype(int)
 rolled_down_energy=rolled_down[:24].sum()
 rolled_up_energy=rolled_down[-24:].sum()
-assert rolled_down_energy > rolled_up_energy*1.20 + 100, ('Rolled Electric Eyes down gaze must still point down',rolled_down_energy,rolled_up_energy)
-vec('uEyeState',[1,1,0,0]); vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[-1,0,0,1])
-print('PASS: Electric Eyes follows shared gaze, including rolled-head down gaze, and foreshortens toward camera.')
-
-# Real per-eye gaze: validate vertical steering by rendering opposite gazes for the same isolated
-# eye. glReadPixels returns the bottom row first, so image-space DOWN moves the energy centroid
-# toward a smaller numpy row index.
-source[:,:,:3]=30
-fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
-amounts(1); vec('uGazePose',[0,0,.30,1]); vec('uHeadPose',[0,0,0,.72])
-for eye_name,eye_x in (('left',.35),('right',.65)):
-    _,cy_up=gaze_centroid(eye_name,eye_x,0,-.82)
-    _,cy_down=gaze_centroid(eye_name,eye_x,0,.82)
-    assert cy_down < cy_up - 2.0, (
-        'Electric Eyes gaze must steer beam vertically',eye_name,cy_up,cy_down)
-
-# Low-confidence pupil data should fall back to the frontal/local emitter instead of honoring a
-# requested long side ray. Compare it with the same eye at high confidence.
-vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[0,0,1,1])
-vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[0,0,0,0]); vec('uEyeState',[1,0,0,0])
-vec('uRightGaze',[0,0,1,0]); vec('uLeftGaze',[1,0,.20,.01])
-low_conf=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None)
-vec('uLeftGaze',[1,0,.20,.95])
-high_conf=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None)
-eye_px=.35*w-.5; eye_py=.5*h-.5
-far_right=(xx_dir>eye_px+14)&(np.abs(yy_dir-eye_py)<14)
-low_far=low_conf.sum(axis=2)[far_right].sum()
-high_far=high_conf.sum(axis=2)[far_right].sum()
-local_mask=((xx_dir-eye_px)**2+(yy_dir-eye_py)**2)<(11**2)
-assert low_conf.sum(axis=2)[local_mask].sum()>100, 'Low-confidence gaze must retain a local eye emitter'
-assert high_far > low_far + 120, (
-    'High-confidence gaze must extend farther than low-confidence fallback',low_far,high_far)
-
+assert rolled_down_energy > rolled_up_energy*1.12 + 100, (
+    'Rolled fused face direction must keep the beam on the intended side',
+    rolled_down_energy,rolled_up_energy)
+vec('uEyeState',[1,1,0,0]); vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[0,0,1,1])
 vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
-vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
-print('PASS: isolated Electric Eyes steering stays gaze-driven; paired beams share a base direction with subtle divergence.')
+print('PASS: pupil/eye contour controls source; fused face/nose/ear/mouth pose controls Electric Eyes direction.')
 
 # Frontal lens-graze is intentionally subtle now. Validate the production contract and confirm
 # the paired frontal effect renders, but do not force a minimum 8-bit lens brightness: small natural
