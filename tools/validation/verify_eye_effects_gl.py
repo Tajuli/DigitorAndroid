@@ -168,8 +168,10 @@ print('PASS: Electric Eyes originates at the eye and follows left gaze.')
 shader_contract=Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/EyeEffectShader.kt').read_text()
 tracker_contract=Path('app/src/main/cpp/FaceTrackingNcnnVulkanJni.cpp').read_text()
 assert 'electricRenderGaze' in shader_contract, 'Electric Eyes face direction resolver missing'
-assert 'if(uGazePose.w>=.5) return vec4(uGazePose.xyz,1.0);' in shader_contract, (
-    'Electric Eyes must use the fused face direction pose')
+assert 'if(uGazePose.w>=.5) return vec4(uGazePose.xyz,confidence);' in shader_contract, (
+    'Electric Eyes must use fused face direction while retaining only per-eye confidence')
+assert 'float confidence=max(ownGaze.w,.08);' in shader_contract, (
+    'Per-eye gaze uniforms must remain active without using pupil X/Y/Z for beam direction')
 assert shader_contract.count('outwardLocal*.052') >= 2, 'Electric Eyes subtle paired divergence missing'
 assert 'EffectDirectionFromLandmarks' in tracker_contract, (
     'Face/nose/ear/mouth fused direction tracking missing')
