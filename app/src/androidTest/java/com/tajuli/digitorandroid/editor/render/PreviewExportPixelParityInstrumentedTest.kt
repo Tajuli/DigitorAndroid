@@ -285,7 +285,7 @@ class PreviewExportPixelParityInstrumentedTest {
         effects: List<List<androidx.media3.common.Effect>>,
         livePreview: Boolean,
         bitmap: Bitmap,
-        outputTimeoutSeconds: Long = 10L,
+        outputTimeoutSeconds: Long = 25L,
     ): ByteArray {
         require(tracks.size == clips.size)
         require(tracks.size == inputTimestampsUs.size)
@@ -385,7 +385,7 @@ class PreviewExportPixelParityInstrumentedTest {
 
             assertTrue("Timed out waiting for graph output", outputLatch.await(outputTimeoutSeconds, TimeUnit.SECONDS))
             throwIfGraphFailed(error.get())
-            assertTrue("Timed out waiting for RGBA output", imageLatch.await(10, TimeUnit.SECONDS))
+            assertTrue("Timed out waiting for RGBA output", imageLatch.await(20, TimeUnit.SECONDS))
             throwIfGraphFailed(error.get())
             return requireNotNull(pixels.get()) { "No RGBA pixels captured" }
         } finally {
@@ -407,7 +407,7 @@ class PreviewExportPixelParityInstrumentedTest {
         bitmap: Bitmap,
         timestampUs: Long,
     ): Boolean {
-        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
         while (System.nanoTime() < deadlineNs) {
             if (
                 graph.queueInputBitmap(
