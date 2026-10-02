@@ -70,8 +70,17 @@ internal class CreatorEffectGraphV25 private constructor(
     ) {
         private val plan = SpatialNodeGraphPlan.compile(clip.nodeGraph)
         private val nodeProgram: GlProgram
+        private val eyeOnlyProgram: GlProgram
         private val mixProgram: GlProgram
         private val copyProgram: GlProgram
+        private val exportHasTrackedEyeEffects = !preview && clip.nodeGraph.nodes.any { node ->
+            node.visibleEffects().any { EyeEffectCatalog.contains(it.name) }
+        }
+        private val exportEyeTrack = if (exportHasTrackedEyeEffects) {
+            EyeTrackStore.load(context, clip)
+        } else {
+            null
+        }
         private var inputWidth = 1
         private var inputHeight = 1
         private var scratchTextures = IntArray(0)
@@ -80,6 +89,7 @@ internal class CreatorEffectGraphV25 private constructor(
         init {
             try {
                 nodeProgram = newProgram(NODE_FRAGMENT_SHADER)
+                eyeOnlyProgram = newProgram(EYE_ONLY_FRAGMENT_SHADER)
                 mixProgram = newProgram(MIX_FRAGMENT_SHADER)
                 copyProgram = newProgram(COPY_FRAGMENT_SHADER)
             } catch (error: GlUtil.GlException) {
@@ -117,7 +127,19 @@ internal class CreatorEffectGraphV25 private constructor(
                 val media3OutputFbo = outputFboHolder[0]
                 val currentClip = if (preview) PreviewProjectRegistry.clip(clip.id) ?: clip else clip
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
-                val eyePose = if (currentClip.nodeGraph.nodes.any { node -> node.visibleEffects().any { EyeEffectCatalog.contains(it.name) } }) EyeTrackStore.load(context, currentClip)?.at(sourceUs) else null
+                val hasTrackedEyeEffects = if (preview) {
+                    currentClip.nodeGraph.nodes.any { node ->
+                        node.visibleEffects().any { EyeEffectCatalog.contains(it.name) }
+                    }
+                } else {
+                    exportHasTrackedEyeEffects
+                }
+                val eyeTrack = when {
+                    !hasTrackedEyeEffects -> null
+                    preview -> EyeTrackStore.load(context, currentClip)
+                    else -> exportEyeTrack
+                }
+                val eyePose = eyeTrack?.at(sourceUs)
                 val slotTextures = IntArray(plan.operations.size) { inputTexId }
                 var scratchCursor = 0
 
@@ -162,12 +184,37 @@ internal class CreatorEffectGraphV25 private constructor(
                             }
                             val vector = resolveTimedCreatorEffectsV26(effectsWithTiming, currentClip, sourceUs)
                             val eyes = resolveEyeEffects(effectsWithTiming, currentClip, sourceUs)
-                            if (vector.isIdentity && (eyePose == null || eyes.all { it == 0f })) {
+                            val hasActiveEyes = eyePose != null && eyes.any { it != 0f }
+                            if (vector.isIdentity && !hasActiveEyes) {
                                 slotTextures[operation.slot] = input
                             } else {
                                 val (texture, fbo) = nextScratch()
                                 focus(fbo)
-                                renderNode(nodeProgram, input, vector, evaluated.id, sourceUs, eyes, eyePose, currentClip)
+                                if (vector.isIdentity && hasActiveEyes) {
+                                    // Fast path: eye/funny-only nodes do not need the creator shader's
+                                    // 9-tap blur/denoise neighborhood, grain, RGB split, lens, zoom,
+                                    // ghost or other inactive work. Keep identical eye/funny math with
+                                    // one source texture sample.
+                                    renderEyeOnlyNode(
+                                        eyeOnlyProgram,
+                                        input,
+                                        sourceUs,
+                                        eyes,
+                                        eyePose,
+                                        currentClip,
+                                    )
+                                } else {
+                                    renderNode(
+                                        nodeProgram,
+                                        input,
+                                        vector,
+                                        evaluated.id,
+                                        sourceUs,
+                                        eyes,
+                                        eyePose,
+                                        currentClip,
+                                    )
+                                }
                                 slotTextures[operation.slot] = texture
                             }
                         }
@@ -230,6 +277,141 @@ internal class CreatorEffectGraphV25 private constructor(
             GLES20.glDisable(GLES20.GL_BLEND)
         }
 
+        private fun bindEyeUniforms(
+            program: GlProgram,
+            sourceUs: Long,
+            eyes: FloatArray,
+            pose: EyePose?,
+            currentClip: TimelineClip,
+        ) {
+            program.setFloatsUniform(
+                "uTexelSize",
+                floatArrayOf(1f / inputWidth.toFloat(), 1f / inputHeight.toFloat()),
+            )
+            val transform = if (transformedInput) {
+                currentClip.evaluatedDisplayTransformV1(
+                    (sourceUs - currentClip.sourceInUs).coerceAtLeast(0L),
+                )
+            } else {
+                null
+            }
+            val radians = Math.toRadians((transform?.rotationDegrees ?: 0f).toDouble())
+            fun safeScale(value: Float) =
+                if (kotlin.math.abs(value) < .0001f) .0001f else value
+            program.setFloatsUniform(
+                "uEyeTransform",
+                floatArrayOf(
+                    kotlin.math.cos(radians).toFloat(),
+                    kotlin.math.sin(radians).toFloat(),
+                    safeScale(transform?.scaleX ?: 1f),
+                    safeScale(transform?.scaleY ?: 1f),
+                ),
+            )
+            program.setFloatsUniform(
+                "uEyeTranslation",
+                floatArrayOf(
+                    transform?.positionX ?: 0f,
+                    -(transform?.positionY ?: 0f),
+                ),
+            )
+            program.setFloatsUniform("uEyesA", eyes.copyOfRange(0, 4))
+            program.setFloatsUniform("uEyesB", eyes.copyOfRange(4, 8))
+            program.setFloatsUniform("uEyesC", eyes.copyOfRange(8, 12))
+            program.setFloatsUniform("uEyesD", eyes.copyOfRange(12, 16))
+            program.setFloatsUniform("uEyesE", eyes.copyOfRange(16, 20))
+            program.setFloatsUniform("uFunnyA", eyes.copyOfRange(20, 24))
+            program.setFloatsUniform(
+                "uFunnyB",
+                floatArrayOf(eyes[24], eyes[25], eyes[26], 0f),
+            )
+
+            fun region(r: BeautyRectV28?) =
+                if (r == null) {
+                    floatArrayOf(0f, 0f, 0f, 0f)
+                } else {
+                    floatArrayOf(
+                        (r.left + r.right) * .5f,
+                        1f - (r.top + r.bottom) * .5f,
+                        (r.right - r.left) * .5f,
+                        (r.bottom - r.top) * .5f,
+                    )
+                }
+            program.setFloatsUniform("uFaceRegion", region(pose?.face))
+            program.setFloatsUniform("uMouthRegion", region(pose?.mouth))
+
+            fun eyeUniform(eye: TrackedEye?) =
+                if (eye == null) {
+                    floatArrayOf(0f, 0f, 0f, 0f)
+                } else {
+                    floatArrayOf(eye.x, eye.y, eye.radius, 0f)
+                }
+            program.setFloatsUniform("uLeftEye", eyeUniform(pose?.left))
+            program.setFloatsUniform("uRightEye", eyeUniform(pose?.right))
+            program.setFloatsUniform(
+                "uEyeState",
+                floatArrayOf(
+                    pose?.left?.open ?: 0f,
+                    pose?.right?.open ?: 0f,
+                    pose?.left?.roll ?: 0f,
+                    pose?.right?.roll ?: 0f,
+                ),
+            )
+            val faceRoll =
+                if (pose == null) 0f else (pose.left.roll + pose.right.roll) * .5f
+            program.setFloatsUniform(
+                "uHeadPose",
+                floatArrayOf(
+                    pose?.headYaw ?: 0f,
+                    pose?.headPitch ?: 0f,
+                    faceRoll,
+                    pose?.headForward ?: 1f,
+                ),
+            )
+            program.setFloatsUniform(
+                "uGazePose",
+                floatArrayOf(
+                    pose?.gazeX ?: 0f,
+                    pose?.gazeY ?: 0f,
+                    pose?.gazeForward ?: 1f,
+                    if (pose == null) 0f else 1f,
+                ),
+            )
+            program.setFloatsUniform(
+                "uLeftGaze",
+                floatArrayOf(
+                    pose?.leftGazeX ?: 0f,
+                    pose?.leftGazeY ?: 0f,
+                    pose?.leftGazeForward ?: 1f,
+                    pose?.leftGazeConfidence ?: 0f,
+                ),
+            )
+            program.setFloatsUniform(
+                "uRightGaze",
+                floatArrayOf(
+                    pose?.rightGazeX ?: 0f,
+                    pose?.rightGazeY ?: 0f,
+                    pose?.rightGazeForward ?: 1f,
+                    pose?.rightGazeConfidence ?: 0f,
+                ),
+            )
+            program.setFloatUniform("uEyeTime", sourceUs.toFloat() / 1_000_000f)
+        }
+
+        private fun renderEyeOnlyNode(
+            program: GlProgram,
+            inputTexture: Int,
+            sourceUs: Long,
+            eyes: FloatArray,
+            pose: EyePose?,
+            currentClip: TimelineClip,
+        ) {
+            program.use()
+            program.setSamplerTexIdUniform("uTexSampler", inputTexture, 0)
+            bindEyeUniforms(program, sourceUs, eyes, pose, currentClip)
+            program.bindAttributesAndUniforms()
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
+
         private fun renderNode(
             program: GlProgram,
             inputTexture: Int,
@@ -242,60 +424,7 @@ internal class CreatorEffectGraphV25 private constructor(
         ) {
             program.use()
             program.setSamplerTexIdUniform("uTexSampler", inputTexture, 0)
-            program.setFloatsUniform(
-                "uTexelSize",
-                floatArrayOf(1f / inputWidth.toFloat(), 1f / inputHeight.toFloat()),
-            )
-            val transform = if (transformedInput) currentClip.evaluatedDisplayTransformV1(
-                (sourceUs-currentClip.sourceInUs).coerceAtLeast(0L)) else null
-            val radians = Math.toRadians((transform?.rotationDegrees ?: 0f).toDouble())
-            fun safeScale(value: Float) = if (kotlin.math.abs(value) < .0001f) .0001f else value
-            program.setFloatsUniform("uEyeTransform", floatArrayOf(kotlin.math.cos(radians).toFloat(),
-                kotlin.math.sin(radians).toFloat(), safeScale(transform?.scaleX ?: 1f), safeScale(transform?.scaleY ?: 1f)))
-            program.setFloatsUniform("uEyeTranslation", floatArrayOf(transform?.positionX ?: 0f, -(transform?.positionY ?: 0f)))
-            program.setFloatsUniform("uEyesA", eyes.copyOfRange(0, 4))
-            program.setFloatsUniform("uEyesB", eyes.copyOfRange(4, 8))
-            program.setFloatsUniform("uEyesC", eyes.copyOfRange(8, 12))
-            program.setFloatsUniform("uEyesD", eyes.copyOfRange(12,16))
-            program.setFloatsUniform("uEyesE", eyes.copyOfRange(16,20))
-            program.setFloatsUniform("uFunnyA", eyes.copyOfRange(20,24))
-            program.setFloatsUniform("uFunnyB", floatArrayOf(eyes[24],eyes[25],eyes[26],0f))
-            fun region(r: BeautyRectV28?) = if(r==null) floatArrayOf(0f,0f,0f,0f) else
-                floatArrayOf((r.left+r.right)*.5f,1f-(r.top+r.bottom)*.5f,(r.right-r.left)*.5f,(r.bottom-r.top)*.5f)
-            program.setFloatsUniform("uFaceRegion", region(pose?.face))
-            program.setFloatsUniform("uMouthRegion", region(pose?.mouth))
-            fun eyeUniform(eye: TrackedEye?) = if (eye == null) floatArrayOf(0f,0f,0f,0f)
-                else floatArrayOf(eye.x, eye.y, eye.radius, 0f)
-            program.setFloatsUniform("uLeftEye", eyeUniform(pose?.left))
-            program.setFloatsUniform("uRightEye", eyeUniform(pose?.right))
-            program.setFloatsUniform("uEyeState", floatArrayOf(pose?.left?.open ?: 0f,
-                pose?.right?.open ?: 0f, pose?.left?.roll ?: 0f, pose?.right?.roll ?: 0f))
-            val faceRoll = if (pose == null) 0f else (pose.left.roll + pose.right.roll) * .5f
-            program.setFloatsUniform("uHeadPose", floatArrayOf(
-                pose?.headYaw ?: 0f,
-                pose?.headPitch ?: 0f,
-                faceRoll,
-                pose?.headForward ?: 1f,
-            ))
-            program.setFloatsUniform("uGazePose", floatArrayOf(
-                pose?.gazeX ?: 0f,
-                pose?.gazeY ?: 0f,
-                pose?.gazeForward ?: 1f,
-                if (pose == null) 0f else 1f,
-            ))
-            program.setFloatsUniform("uLeftGaze", floatArrayOf(
-                pose?.leftGazeX ?: 0f,
-                pose?.leftGazeY ?: 0f,
-                pose?.leftGazeForward ?: 1f,
-                pose?.leftGazeConfidence ?: 0f,
-            ))
-            program.setFloatsUniform("uRightGaze", floatArrayOf(
-                pose?.rightGazeX ?: 0f,
-                pose?.rightGazeY ?: 0f,
-                pose?.rightGazeForward ?: 1f,
-                pose?.rightGazeConfidence ?: 0f,
-            ))
-            program.setFloatUniform("uEyeTime", sourceUs.toFloat() / 1_000_000f)
+            bindEyeUniforms(program, sourceUs, eyes, pose, currentClip)
             program.setFloatUniform("uBlur", v.blur)
             program.setFloatUniform("uSharpen", v.sharpen)
             program.setFloatUniform("uGlow", v.glow)
@@ -311,8 +440,14 @@ internal class CreatorEffectGraphV25 private constructor(
             program.setFloatUniform("uFlicker", v.flicker)
             program.setFloatUniform("uWarm", v.warm)
             program.setFloatUniform("uDenoise", v.denoise)
-            program.setFloatUniform("uTime", (sourceUs % 10_000_000L).toFloat() / 1_000_000f)
-            program.setFloatUniform("uSeed", ((nodeId.hashCode() ushr 1) % 10_000).toFloat() / 10_000f)
+            program.setFloatUniform(
+                "uTime",
+                (sourceUs % 10_000_000L).toFloat() / 1_000_000f,
+            )
+            program.setFloatUniform(
+                "uSeed",
+                ((nodeId.hashCode() ushr 1) % 10_000).toFloat() / 10_000f,
+            )
             program.bindAttributesAndUniforms()
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
@@ -360,6 +495,7 @@ internal class CreatorEffectGraphV25 private constructor(
             try {
                 releaseScratch()
                 nodeProgram.delete()
+                eyeOnlyProgram.delete()
                 mixProgram.delete()
                 copyProgram.delete()
             } catch (error: GlUtil.GlException) {
@@ -374,6 +510,21 @@ internal class CreatorEffectGraphV25 private constructor(
                 void main() {
                     gl_Position = aFramePosition;
                     vTexCoord = aFramePosition.xy * 0.5 + 0.5;
+                }
+            """
+
+            private val EYE_ONLY_FRAGMENT_SHADER = """
+                precision highp float;
+                uniform sampler2D uTexSampler;
+                uniform vec2 uTexelSize;
+                $EYE_EFFECT_SHADER
+                varying vec2 vTexCoord;
+
+                void main() {
+                    vec2 uv = funnyUv(vTexCoord);
+                    vec4 center = texture2D(uTexSampler, uv);
+                    vec3 rgb = applyEyeEffects(center.rgb, uv);
+                    gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), center.a);
                 }
             """
 
