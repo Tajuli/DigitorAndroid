@@ -204,6 +204,15 @@ assert 'float spreadAmount=forward*(.060*spreadProgress);' in shader_contract, (
     'Electric Eyes far-tip separation must grow with beam length')
 assert 'progressiveSpread=outwardSign*spreadAmount;' in shader_contract, (
     'Electric Eyes V spread must keep a stable outward sign')
+assert 'float sourceOpen=smoothstep(.0,1.55,forward);' in shader_contract, (
+    'Electric Eyes must keep an iris-sized root before widening')
+assert 'float coreFloor=mix(.040,.090,sourceOpen);' in shader_contract and (
+    'float bodyFloor=mix(.095,.22,sourceOpen);' in shader_contract
+), 'Electric Eyes narrow-root width floors missing'
+assert 'const float irisRadiusScale=.42;' in shader_contract, (
+    'Camera-facing Electric Eyes source must use iris-scale radius')
+assert 'float rootFlash=exp(-r*r*7.50);' in shader_contract, (
+    'Electric Eyes root flash must stay concentrated on the iris')
 assert 'float blueRay=beamCore;' in shader_contract and 'float yellowRay=beamBody*' in shader_contract, (
     'Electric Eyes blue core and yellow middle layers missing')
 assert 'float redRay=(beamHaze+edgeGlow*.55)*' in shader_contract, (
@@ -212,6 +221,8 @@ assert 'float shifted=across-sway-progressiveSpread;' in shader_contract, (
     'Progressive separation must move the beam body, not only metadata')
 assert 'EffectDirectionFromLandmarks' in tracker_contract, (
     'Face/nose/ear/mouth fused direction tracking missing')
+assert 'ScreenYawRight(orientation)' in tracker_contract, (
+    'Camera-space face yaw must be converted to screen-left/right before beam rendering')
 assert 'const float weight = confidenceWeight * .86f;' in tracker_contract, (
     'Eye-effect source must weight a confident sampled pupil more strongly')
 assert 'halfWidth * .82f' in tracker_contract and 'halfHeight * .72f' in tracker_contract, (
