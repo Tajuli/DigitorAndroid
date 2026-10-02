@@ -59,6 +59,7 @@ int main() {
         yawLeft, yawRight, frontTop, frontBottom, 0.f);
     assert(turned.valid);
     assert(turned.yaw > .55f);
+    assert(face_tracking::ScreenYawRight(turned) < -.55f);
     assert(turned.forward > .84f && turned.forward < .88f);
 
     // With image-space +Y downward, a head-down plane has negative geometric pitch but must expose
