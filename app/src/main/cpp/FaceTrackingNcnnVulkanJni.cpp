@@ -558,7 +558,9 @@ bool RunMesh(
         points3[10], points3[6], points3[1],
         points3[13], points3[14], points3[152],
         stableRoll);
-    const float headYaw = orientation.valid ? orientation.yaw : 0.f;
+    // Shader/source coordinates use image-space axes. Camera-space face-normal X is horizontally
+    // opposite to the observed screen turn, so convert it once here (same boundary as pitch).
+    const float headYaw = face_tracking::ScreenYawRight(orientation);
     // Shader/source coordinates use +Y downward. The 3D face-plane normal reports the opposite
     // pitch sign, so convert it here once; this fixes the observed "look down -> beam goes up" bug.
     const float headPitch = face_tracking::ScreenPitchDown(orientation);
