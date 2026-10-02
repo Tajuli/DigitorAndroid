@@ -176,14 +176,18 @@ assert 'dir=normalize(dir+outwardLocal*.034);' in shader_contract, (
     'Electric Eyes stronger paired V-angle missing')
 assert 'grazeDir=normalize(grazeDir+outwardLocal*.028);' in shader_contract, (
     'Frontal paired V-angle increase missing')
-assert 'float spreadProgress=smoothstep(.40,6.6,forward);' in shader_contract, (
-    'Electric Eyes stronger distance-based divergence ramp missing')
-assert 'progressiveSpread=outwardSign*forward*(.060*spreadProgress);' in shader_contract, (
-    'Electric Eyes stronger far-tip outward separation missing')
-assert 'vec2 electricScreenDir(vec4 gaze,vec4 eye)' in shader_contract, (
-    'Electric Eyes camera-facing lens direction resolver missing')
-assert 'return normalize(mix(faceDir,lensDir,frontAmount));' in shader_contract, (
-    'Camera-facing Electric Eyes must turn toward the virtual lens')
+assert 'vec2 electricBeamScreenDir(vec4 gaze)' in shader_contract, (
+    'Visible long beams must share one fused face direction')
+assert 'vec2 electricLensAim(vec4 gaze,vec4 eye)' in shader_contract, (
+    'Camera-facing lens aim must stay separate from the visible long-beam direction')
+assert 'vec2 screenDir=electricBeamScreenDir(renderGaze);' in shader_contract, (
+    'Per-eye lens aim must never steer the visible long beams inward')
+assert 'float spreadProgress=smoothstep(.35,6.2,forward);' in shader_contract, (
+    'Electric Eyes monotonic distance-based divergence ramp missing')
+assert 'float spreadAmount=forward*(.060*spreadProgress);' in shader_contract, (
+    'Electric Eyes far-tip separation must grow with beam length')
+assert 'progressiveSpread=outwardSign*spreadAmount;' in shader_contract, (
+    'Electric Eyes V spread must keep a stable outward sign')
 assert 'float blueRay=beamCore;' in shader_contract and 'float yellowRay=beamBody*' in shader_contract, (
     'Electric Eyes blue core and yellow middle layers missing')
 assert 'float redRay=(beamHaze+edgeGlow*.55)*' in shader_contract, (
@@ -192,6 +196,10 @@ assert 'float shifted=across-sway-progressiveSpread;' in shader_contract, (
     'Progressive separation must move the beam body, not only metadata')
 assert 'EffectDirectionFromLandmarks' in tracker_contract, (
     'Face/nose/ear/mouth fused direction tracking missing')
+assert 'const float weight = confidenceWeight * .86f;' in tracker_contract, (
+    'Eye-effect source must weight a confident sampled pupil more strongly')
+assert 'halfWidth * .82f' in tracker_contract and 'halfHeight * .72f' in tracker_contract, (
+    'Pupil-refined source must remain clamped inside the eye ROI')
 assert tracker_contract.count('EyeContourCenter') >= 2, (
     'Multi-point eye contour source tracking missing')
 assert 'const float gazeX = headYaw;' in tracker_contract and 'const float gazeY = headPitch;' in tracker_contract, (
