@@ -113,14 +113,10 @@ internal object FilterEffectThumbnailRendererV98 {
                 installBodyThumbnailMatteV102(appContext, clip, base.width, base.height)
             }
             if (com.tajuli.digitorandroid.editor.model.EyeEffectCatalog.contains(preset.name)) {
-                val imageFile = java.io.File(appContext.cacheDir, "eye-effect-thumbnail-source.png")
-                if (!imageFile.exists()) {
-                    imageFile.outputStream().use {
-                        base.compress(Bitmap.CompressFormat.PNG, 100, it)
-                    }
-                }
+                // BITMAP-input thumbnail rendering does not need a decodable media URI. Keep a
+                // private stable URI only as the EyeTrackStore key; no temporary PNG or decoder.
                 val imageClip = clip.copy(
-                    uri = android.net.Uri.fromFile(imageFile).toString(),
+                    uri = "content://digitor/eye-effect-thumbnail-source-v103",
                     visualMediaV21 = com.tajuli.digitorandroid.editor.model.TimelineVisualMediaV21.IMAGE,
                 )
                 installEyeThumbnailTrackV103(appContext, imageClip)
