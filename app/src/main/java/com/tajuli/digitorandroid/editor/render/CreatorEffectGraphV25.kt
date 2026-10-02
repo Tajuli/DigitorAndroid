@@ -169,18 +169,30 @@ internal class CreatorEffectGraphV25 private constructor(
                             } else {
                                 operation.node
                             }
-                            val evaluated = currentClip.nodeAnimations.evaluateNode(currentNode, sourceUs)
-                            val animatedById = evaluated.visibleEffects().associateBy { it.id }
-                            // Base membership is authoritative: deleting an effect must not let an old
-                            // effect-keyframe snapshot resurrect it. Keyframes only animate amount/enabled;
-                            // timing always comes from the current effect instance.
-                            val effectsWithTiming = currentNode.visibleEffects().map { base ->
-                                val animated = animatedById[base.id] ?: base
-                                animated.copy(
-                                    name = base.name,
-                                    sourceStartUsV26 = base.sourceStartUsV26,
-                                    sourceEndUsV26 = base.sourceEndUsV26,
-                                )
+                            val hasEffectAnimation = currentClip.nodeAnimations.hasAnimation(
+                                currentNode.id,
+                                NodeAnimationDomain.EFFECTS,
+                            )
+                            val evaluated = if (hasEffectAnimation) {
+                                currentClip.nodeAnimations.evaluateNode(currentNode, sourceUs)
+                            } else {
+                                currentNode
+                            }
+                            // Static nodes are the common export case (including Electric Eyes).
+                            // Avoid building an id map and copying every NodeEffect on every frame
+                            // unless an effects keyframe actually exists.
+                            val effectsWithTiming = if (hasEffectAnimation) {
+                                val animatedById = evaluated.visibleEffects().associateBy { it.id }
+                                currentNode.visibleEffects().map { base ->
+                                    val animated = animatedById[base.id] ?: base
+                                    animated.copy(
+                                        name = base.name,
+                                        sourceStartUsV26 = base.sourceStartUsV26,
+                                        sourceEndUsV26 = base.sourceEndUsV26,
+                                    )
+                                }
+                            } else {
+                                currentNode.visibleEffects()
                             }
                             val vector = resolveTimedCreatorEffectsV26(effectsWithTiming, currentClip, sourceUs)
                             val eyes = resolveEyeEffects(effectsWithTiming, currentClip, sourceUs)
