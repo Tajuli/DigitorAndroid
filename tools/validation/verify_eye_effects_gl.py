@@ -41,10 +41,10 @@ def compile_one(source, kind):
     assert status.value, log.value.decode()
     return shader
 
-def program_for(path):
+def program_for(path, fragment_name='NODE_FRAGMENT_SHADER'):
     text = Path(path).read_text()
     vertex = re.search(r'VERTEX_SHADER = """(.*?)"""', text, re.S).group(1)
-    fragment = re.search(r'NODE_FRAGMENT_SHADER = """(.*?)"""', text, re.S).group(1)
+    fragment = re.search(rf'{fragment_name} = """(.*?)"""', text, re.S).group(1)
     eye = Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/EyeEffectShader.kt').read_text().split('"""')[1]
     fragment = fragment.replace('$EYE_EFFECT_SHADER', eye)
     program = fn(gl, 'glCreateProgram', U)()
@@ -58,6 +58,9 @@ def program_for(path):
 
 base = 'app/src/main/java/com/tajuli/digitorandroid/editor/render/'
 program = program_for(base + 'CreatorEffectGraphV25.kt')
+# Compile/link the dedicated eye/funny-only fast path too. Rendering checks below still use the
+# full shader so visual parity expectations stay unchanged.
+eye_fast_program = program_for(base + 'CreatorEffectGraphV25.kt', 'EYE_ONLY_FRAGMENT_SHADER')
 fn(gl, 'glUseProgram', None, U)(program)
 location = fn(gl, 'glGetUniformLocation', I, U, c.c_char_p)
 def vec(name, values):
@@ -167,6 +170,15 @@ print('PASS: Electric Eyes originates at the eye and follows left gaze.')
 # face/nose/ear/mouth tracking owns DIRECTION. Per-eye pupil gaze must not steer the long beam.
 shader_contract=Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/EyeEffectShader.kt').read_text()
 tracker_contract=Path('app/src/main/cpp/FaceTrackingNcnnVulkanJni.cpp').read_text()
+creator_contract=Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/CreatorEffectGraphV25.kt').read_text()
+assert 'private val EYE_ONLY_FRAGMENT_SHADER' in creator_contract, (
+    'Dedicated eye/funny-only GPU shader missing')
+assert 'if (vector.isIdentity && hasActiveEyes)' in creator_contract, (
+    'Eye-only nodes must bypass the full creator shader')
+assert 'renderEyeOnlyNode(' in creator_contract, (
+    'Eye-only render dispatch missing')
+assert 'private val exportEyeTrack' in creator_contract, (
+    'Export must cache the eye track instead of loading it every frame')
 assert 'electricRenderGaze' in shader_contract, 'Electric Eyes face direction resolver missing'
 assert 'if(uGazePose.w>=.5) return vec4(uGazePose.xyz,confidence);' in shader_contract, (
     'Electric Eyes must use fused face direction while retaining only per-eye confidence')
