@@ -69,7 +69,7 @@ internal object FilterEffectThumbnailRendererV98 {
     const val FULL_PREVIEW_AMOUNT = 1f
 
     private const val CLIP_DURATION_US = 1_000_000L
-    private const val CACHE_VERSION = "v2"
+    private const val CACHE_VERSION = "v3"
     private const val TAG = "DigitorFxThumb"
     private const val CACHE_KB = 12 * 1024
 
@@ -135,11 +135,14 @@ internal object FilterEffectThumbnailRendererV98 {
                 .load(context, clip)?.covers(clip) == true
         ) return
 
+        // Measured against filter_effect_preview_base.webp. The previous .405 Y sat below the
+        // pupils, so eye effects bloomed across the nose/upper cheeks in the thumbnail even though
+        // real-video tracking was correct. X was already aligned; only lift the synthetic sources.
         val left = com.tajuli.digitorandroid.editor.model.TrackedEye(
-            x = .455f, y = .405f, radius = .034f, roll = 0f, open = 1f,
+            x = .455f, y = .350f, radius = .034f, roll = 0f, open = 1f,
         )
         val right = com.tajuli.digitorandroid.editor.model.TrackedEye(
-            x = .545f, y = .405f, radius = .034f, roll = 0f, open = 1f,
+            x = .545f, y = .350f, radius = .034f, roll = 0f, open = 1f,
         )
         val pose = com.tajuli.digitorandroid.editor.model.EyePose(
             left = left,
