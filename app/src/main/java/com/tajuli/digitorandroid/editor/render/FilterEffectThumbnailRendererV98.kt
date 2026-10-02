@@ -12,6 +12,7 @@ import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Build
 import android.util.Log
 import android.util.LruCache
 import androidx.media3.common.C
@@ -72,6 +73,8 @@ internal object FilterEffectThumbnailRendererV98 {
     private const val CACHE_VERSION = "v3"
     private const val TAG = "DigitorFxThumb"
     private const val CACHE_KB = 12 * 1024
+    private const val DEVICE_GRAPH_TIMEOUT_SECONDS = 10L
+    private const val EMULATOR_GRAPH_TIMEOUT_SECONDS = 25L
 
     private val renderMutex = Mutex()
     private val cache = object : LruCache<String, Bitmap>(CACHE_KB) {
@@ -448,11 +451,12 @@ internal object FilterEffectThumbnailRendererV98 {
             }
             graph.signalEndOfInput(0)
 
-            check(outputLatch.await(10, TimeUnit.SECONDS)) {
+            val graphTimeoutSeconds = thumbnailGraphTimeoutSeconds()
+            check(outputLatch.await(graphTimeoutSeconds, TimeUnit.SECONDS)) {
                 "Timed out waiting for thumbnail graph output"
             }
             error.get()?.let { throw it }
-            check(imageLatch.await(10, TimeUnit.SECONDS)) {
+            check(imageLatch.await(graphTimeoutSeconds, TimeUnit.SECONDS)) {
                 "Timed out waiting for thumbnail RGBA frame"
             }
             error.get()?.let { throw it }
@@ -466,12 +470,21 @@ internal object FilterEffectThumbnailRendererV98 {
         }
     }
 
+    private fun thumbnailGraphTimeoutSeconds(): Long =
+        if (
+            Build.FINGERPRINT.contains("generic", ignoreCase = true) ||
+            Build.MODEL.contains("emulator", ignoreCase = true) ||
+            Build.HARDWARE.contains("ranchu", ignoreCase = true) ||
+            Build.HARDWARE.contains("goldfish", ignoreCase = true)
+        ) EMULATOR_GRAPH_TIMEOUT_SECONDS else DEVICE_GRAPH_TIMEOUT_SECONDS
+
     private fun queueBitmapWhenReady(
         graph: MultipleInputVideoGraph,
         bitmap: Bitmap,
         timestampUs: Long,
     ): Boolean {
-        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        val queueSeconds = if (thumbnailGraphTimeoutSeconds() > DEVICE_GRAPH_TIMEOUT_SECONDS) 10L else 5L
+        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(queueSeconds)
         while (System.nanoTime() < deadlineNs) {
             if (
                 graph.queueInputBitmap(
