@@ -63,6 +63,21 @@ object EyeTrackStore {
             temp.delete()
         }
     }
+
+    /**
+     * Installs a complete process-local track without touching disk.
+     *
+     * Thumbnail fixtures use this to exercise the production eye/funny-face shader without
+     * starting ncnn/MediaCodec analysis after the user's real analysis has just released those
+     * resources. The synthetic thumbnail URI is private to the thumbnail renderer, so it cannot
+     * shadow a user's analyzed clip.
+     */
+    fun installEphemeral(clip: TimelineClip, track: EyeTrack) {
+        require(track.covers(clip))
+        val key = key(clip)
+        cache[key] = track
+        checked += key
+    }
 }
 
 /**
