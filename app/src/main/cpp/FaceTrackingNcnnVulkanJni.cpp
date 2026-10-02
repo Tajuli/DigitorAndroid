@@ -586,13 +586,19 @@ bool RunMesh(
         pixels, width, height, rightCenter, stableRoll,
         rightPupilHalfWidth, rightPupilHalfHeight, rightOpen);
 
-    // Anchor eye-origin effects closer to the actual pupil, not just the corner midpoint. Confidence
-    // blending avoids jitter when the iris is too small/dark to estimate reliably.
+    // Source-point accuracy: keep the stable 8-point contour center as the fallback, but move a
+    // confident estimate farther toward the sampled pupil. Clamp the local displacement inside the
+    // eye ROI so eyelashes/eyebrows or a dark frame edge cannot drag the emitter out of the eye.
+    // This is deliberately per-frame (no temporal EMA) so source tracking does not lag fast motion.
     auto refineOrigin = [&](const Point& center, const PupilEstimate& pupil,
                             float halfWidth, float halfHeight) {
-        const float weight = Clamp((pupil.confidence - .10f) / .28f, 0.f, 1.f) * .72f;
-        const float lx = pupil.x * halfWidth * weight;
-        const float ly = pupil.y * halfHeight * weight;
+        const float confidenceWeight =
+            Clamp((pupil.confidence - .06f) / .24f, 0.f, 1.f);
+        const float weight = confidenceWeight * .86f;
+        const float lx = Clamp(
+            pupil.x * halfWidth * weight, -halfWidth * .82f, halfWidth * .82f);
+        const float ly = Clamp(
+            pupil.y * halfHeight * weight, -halfHeight * .72f, halfHeight * .72f);
         const float c = std::cos(stableRoll), s = std::sin(stableRoll);
         return Point{center.x + c * lx - s * ly, center.y + s * lx + c * ly};
     };
