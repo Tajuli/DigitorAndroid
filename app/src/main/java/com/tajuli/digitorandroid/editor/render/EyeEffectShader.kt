@@ -217,11 +217,16 @@ internal const val EYE_EFFECT_SHADER = """
             float fine=eyeNoise(vec2(forward*.42-t*.110,across*3.65+t*.021));
             float torn=eyeNoise(vec2(forward*.255+t*.055,across*1.92-t*.027));
 
-            // Reference-matched scale: a bright ~eye-width root rapidly grows into a much wider,
-            // blown-out beam. Digitor's previous values were still a thin laser line.
-            float coneWidth=.34+forward*.095;
-            float coreWidth=.105+forward*.026;
-            float hazeWidth=.74+forward*.175;
+            // Iris-sized source: keep the first ~1.5 eye-radius units narrow, then open smoothly
+            // into the existing volumetric beam. This makes the ray visibly originate from the
+            // pupil/iris instead of looking like the whole eye socket emits light.
+            float sourceOpen=smoothstep(.0,1.55,forward);
+            float coneWidth=mix(.135,.34,sourceOpen)+forward*.095;
+            float coreWidth=mix(.048,.105,sourceOpen)+forward*.026;
+            float hazeWidth=mix(.24,.74,sourceOpen)+forward*.175;
+            float coreFloor=mix(.040,.090,sourceOpen);
+            float bodyFloor=mix(.095,.22,sourceOpen);
+            float hazeFloor=mix(.18,.52,sourceOpen);
             float sway=(coarse-.5)*(.070+.018*forward)+
                 sin(forward*.58-t*.280)*(.007+.0014*forward);
 
@@ -243,10 +248,10 @@ internal const val EYE_EFFECT_SHADER = """
             float raggedWidth=coneWidth*(.72+.36*coarse+.18*fine);
             raggedWidth*=mix(.86,1.18,smoothstep(.30,.76,torn));
 
-            float beamCore=exp(-pow(shifted/max(coreWidth,.090),2.0));
-            float beamBody=exp(-pow(abs(shifted)/max(raggedWidth,.22),2.05))*
+            float beamCore=exp(-pow(shifted/max(coreWidth,coreFloor),2.0));
+            float beamBody=exp(-pow(abs(shifted)/max(raggedWidth,bodyFloor),2.05))*
                 (.84+.34*fine);
-            float beamHaze=exp(-pow(shifted/max(hazeWidth,.52),2.0))*
+            float beamHaze=exp(-pow(shifted/max(hazeWidth,hazeFloor),2.0))*
                 (.62+.45*coarse);
             // Ragged hot rim and soft smoke create the torn plasma edge visible in the reference
             // without adding separate fake filament lines.
@@ -278,10 +283,11 @@ internal const val EYE_EFFECT_SHADER = """
                 grazeWindow*cameraFacing*
                 smoothstep(.32,.72,frontSmokeNoise);
 
-            // Bright eye socket/root flare visually joins the beam to the actual pupil/eyelid.
-            float lidWhite=exp(-dot(p*vec2(.58,2.40),p*vec2(.58,2.40))*1.70);
-            float rootFlash=exp(-r*r*2.75);
-            float socketBloom=exp(-dot(p*vec2(.42,1.15),p*vec2(.42,1.15))*.50);
+            // Keep the emitter on the iris. A small hot pupil root joins the beam without washing
+            // the whole eyelid/socket, which previously made the starting point look displaced/wide.
+            float lidWhite=exp(-dot(p*vec2(.82,3.10),p*vec2(.82,3.10))*2.20);
+            float rootFlash=exp(-r*r*7.50);
+            float socketBloom=exp(-dot(p*vec2(.72,1.85),p*vec2(.72,1.85))*1.20);
 
             // Looking straight into the camera collapses the projected cone into a large soft
             // lens-facing bloom rather than a fake arbitrary screen-space ray.
@@ -304,8 +310,8 @@ internal const val EYE_EFFECT_SHADER = """
             // A beam aimed straight into the camera has almost no 2D projected length. Preserve
             // that physical camera-facing interpretation with a layered pupil/socket emitter
             // instead of allowing the effect to disappear when the projected ray collapses.
-            float frontalEmitter=cameraFacing*exp(-r*r*1.65);
-            float frontalRing=cameraFacing*exp(-pow((r-.72)*3.2,2.0));
+            float frontalEmitter=cameraFacing*exp(-r*r*6.40);
+            float frontalRing=cameraFacing*exp(-pow((r-.38)*5.2,2.0));
             float localEmitterScale=.88+.12*(1.0-cameraFacing);
             electricLight+=uEyesA.y*(
                 vec3(.16,.48,1.00)*(
@@ -501,10 +507,13 @@ internal const val EYE_EFFECT_SHADER = """
         // pupils while the frame-space lens flare represents the beam travelling toward camera.
         vec2 sourcePoint=vec2(uv.x,1.0-uv.y);
         vec2 metric=faceMetricScale();
+        const float irisRadiusScale=.42;
         float leftFrontR=uLeftEye.z>.0001 ?
-            length((sourcePoint-uLeftEye.xy)*metric)/max(uLeftEye.z,.0001) : 99.0;
+            length((sourcePoint-uLeftEye.xy)*metric)/
+                max(uLeftEye.z*irisRadiusScale,.0001) : 99.0;
         float rightFrontR=uRightEye.z>.0001 ?
-            length((sourcePoint-uRightEye.xy)*metric)/max(uRightEye.z,.0001) : 99.0;
+            length((sourcePoint-uRightEye.xy)*metric)/
+                max(uRightEye.z*irisRadiusScale,.0001) : 99.0;
         float frontR=min(leftFrontR,rightFrontR);
         float frontBlueEye=exp(-frontR*frontR*3.10);
         float frontYellowEye=exp(-pow((frontR-.58)*2.65,2.0))*
