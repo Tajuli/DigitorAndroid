@@ -44,6 +44,14 @@ inline FaceOrientation FaceOrientationFromPlane(
     return result;
 }
 
+// FaceOrientationFromPlane reports camera-space normal X. In the decoded image, the observed head
+// turn is horizontally opposite to that camera-space normal (verified against real tracked clips).
+// Convert once at the native boundary so +X consistently means screen-right for every consumer.
+inline float ScreenYawRight(const FaceOrientation& orientation) {
+    if (!orientation.valid || !std::isfinite(orientation.yaw)) return 0.f;
+    return std::clamp(-orientation.yaw, -1.f, 1.f);
+}
+
 // FaceOrientationFromPlane uses the face-plane normal in a Cartesian-like local basis. The video
 // pipeline and eye shader use image coordinates where +Y means DOWN. A real head-down pose therefore
 // arrives as a negative geometric pitch and must be inverted once at this boundary.
