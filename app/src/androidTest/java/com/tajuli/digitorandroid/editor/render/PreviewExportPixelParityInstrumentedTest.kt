@@ -166,6 +166,9 @@ class PreviewExportPixelParityInstrumentedTest {
             effects = listOf(SharedVideoPipeline.compositedExactPreviewEffectsFor(clip)),
             livePreview = true,
             bitmap = bitmap,
+            // This is the first full creator-graph render in the emulator suite. SwiftShader cold
+            // compiles the resident V25 shader here; later tests reuse that compiled program.
+            outputTimeoutSeconds = 60L,
         )
 
         val sentinelClip = clip.copy(
@@ -193,6 +196,9 @@ class PreviewExportPixelParityInstrumentedTest {
             ),
             livePreview = false,
             bitmap = bitmap,
+            // Keep preview/export under the same bounded cold-start budget. This is test-only and
+            // does not change any phone rendering timeout.
+            outputTimeoutSeconds = 60L,
         )
 
         if (!bitmap.isRecycled) bitmap.recycle()
