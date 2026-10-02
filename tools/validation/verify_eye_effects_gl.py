@@ -264,12 +264,11 @@ fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401
 amounts(1); vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[0,0,1,1])
 vec('uLeftEye',[.35,.5,.045,0]); vec('uRightEye',[.65,.5,.045,0]); vec('uEyeState',[1,1,0,0])
 vec('uLeftGaze',[0,0,1,.95]); vec('uRightGaze',[0,0,1,.95])
-pair_front=np.clip(render()[:,:,:3].astype(int)-source[:,:,:3].astype(int),0,None).sum(axis=2)
 # Mesa's tiny 8-bit headless target can quantize the intentionally subtle lens-facing pair flare
 # to zero. The single-eye frontal anchor test above already proves that camera-facing Electric Eyes
-# emit at the tracked pupil. Do not turn this into a flaky brightness threshold; validate the
-# paired camera-facing geometry and flare path structurally below.
-assert pair_front.sum()>=0
+# emit at the tracked pupil. Render the paired case to catch GL errors, but validate the paired
+# camera-facing geometry and flare path structurally below instead of imposing a brightness floor.
+render()
 
 shader_contract=Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/EyeEffectShader.kt').read_text()
 assert 'electricLensHitScore' in shader_contract, 'Geometric lens-hit gate missing'
