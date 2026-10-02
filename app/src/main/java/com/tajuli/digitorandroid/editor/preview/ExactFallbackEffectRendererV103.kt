@@ -7,6 +7,7 @@ import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Build
 import androidx.media3.common.C
 import androidx.media3.common.ColorInfo
 import androidx.media3.common.DebugViewProvider
@@ -43,7 +44,8 @@ import java.util.concurrent.atomic.AtomicReference
  */
 @UnstableApi
 internal object ExactFallbackEffectRendererV103 {
-    private const val GRAPH_TIMEOUT_SECONDS = 8L
+    private const val DEVICE_GRAPH_TIMEOUT_SECONDS = 8L
+    private const val EMULATOR_GRAPH_TIMEOUT_SECONDS = 20L
 
     fun render(
         context: Context,
@@ -151,9 +153,10 @@ internal object ExactFallbackEffectRendererV103 {
             if (!queueBitmapWhenReady(graph, ownedInput, presentationTimeUs)) return null
             graph.signalEndOfInput(0)
 
-            if (!outputLatch.await(GRAPH_TIMEOUT_SECONDS, TimeUnit.SECONDS)) return null
+            val graphTimeoutSeconds = graphTimeoutSeconds()
+            if (!outputLatch.await(graphTimeoutSeconds, TimeUnit.SECONDS)) return null
             error.get()?.let { throw it }
-            if (!imageLatch.await(GRAPH_TIMEOUT_SECONDS, TimeUnit.SECONDS)) return null
+            if (!imageLatch.await(graphTimeoutSeconds, TimeUnit.SECONDS)) return null
             error.get()?.let { throw it }
             return result.get()
         } catch (_: Throwable) {
@@ -166,12 +169,21 @@ internal object ExactFallbackEffectRendererV103 {
         }
     }
 
+    private fun graphTimeoutSeconds(): Long =
+        if (
+            Build.FINGERPRINT.contains("generic", ignoreCase = true) ||
+            Build.MODEL.contains("emulator", ignoreCase = true) ||
+            Build.HARDWARE.contains("ranchu", ignoreCase = true) ||
+            Build.HARDWARE.contains("goldfish", ignoreCase = true)
+        ) EMULATOR_GRAPH_TIMEOUT_SECONDS else DEVICE_GRAPH_TIMEOUT_SECONDS
+
     private fun queueBitmapWhenReady(
         graph: MultipleInputVideoGraph,
         bitmap: Bitmap,
         timestampUs: Long,
     ): Boolean {
-        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
+        val queueSeconds = if (graphTimeoutSeconds() > DEVICE_GRAPH_TIMEOUT_SECONDS) 10L else 4L
+        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(queueSeconds)
         while (System.nanoTime() < deadlineNs) {
             if (graph.queueInputBitmap(0, bitmap, OneTimestampIterator(timestampUs))) {
                 return true
