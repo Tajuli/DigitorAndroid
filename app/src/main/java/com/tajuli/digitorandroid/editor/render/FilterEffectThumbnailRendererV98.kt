@@ -114,13 +114,74 @@ internal object FilterEffectThumbnailRendererV98 {
             }
             if (com.tajuli.digitorandroid.editor.model.EyeEffectCatalog.contains(preset.name)) {
                 val imageFile = java.io.File(appContext.cacheDir, "eye-effect-thumbnail-source.png")
-                if (!imageFile.exists()) imageFile.outputStream().use { base.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                val imageClip = clip.copy(uri = android.net.Uri.fromFile(imageFile).toString(),
-                    visualMediaV21 = com.tajuli.digitorandroid.editor.model.TimelineVisualMediaV21.IMAGE)
-                com.tajuli.digitorandroid.editor.processing.EyeTrackingAnalyzer(appContext).analyze(imageClip)
+                if (!imageFile.exists()) {
+                    imageFile.outputStream().use {
+                        base.compress(Bitmap.CompressFormat.PNG, 100, it)
+                    }
+                }
+                val imageClip = clip.copy(
+                    uri = android.net.Uri.fromFile(imageFile).toString(),
+                    visualMediaV21 = com.tajuli.digitorandroid.editor.model.TimelineVisualMediaV21.IMAGE,
+                )
+                installEyeThumbnailTrackV103(appContext, imageClip)
                 renderProductionFrame(appContext, imageClip, base)
             } else renderProductionFrame(appContext, clip, base)
         }
+
+    private fun installEyeThumbnailTrackV103(
+        context: Context,
+        clip: TimelineClip,
+    ) {
+        // The neutral thumbnail asset is fixed, so a stable synthetic pose is better than launching
+        // another ncnn/decoder analysis the instant the user's real analysis completes. That old
+        // nested analysis caused back-to-back preview GPU suspend/resume on low/mid-range devices.
+        if (com.tajuli.digitorandroid.editor.processing.EyeTrackStore
+                .load(context, clip)?.covers(clip) == true
+        ) return
+
+        val left = com.tajuli.digitorandroid.editor.model.TrackedEye(
+            x = .455f, y = .405f, radius = .034f, roll = 0f, open = 1f,
+        )
+        val right = com.tajuli.digitorandroid.editor.model.TrackedEye(
+            x = .545f, y = .405f, radius = .034f, roll = 0f, open = 1f,
+        )
+        val pose = com.tajuli.digitorandroid.editor.model.EyePose(
+            left = left,
+            right = right,
+            identity = 1,
+            face = com.tajuli.digitorandroid.editor.model.BeautyRectV28(
+                .34f, .13f, .66f, .79f,
+            ),
+            mouth = com.tajuli.digitorandroid.editor.model.BeautyRectV28(
+                .445f, .49f, .555f, .585f,
+            ),
+            headYaw = 0f,
+            headPitch = -.58f,
+            headForward = .74f,
+            gazeX = 0f,
+            gazeY = -.58f,
+            gazeForward = .74f,
+            leftGazeX = 0f,
+            leftGazeY = -.58f,
+            leftGazeForward = .74f,
+            leftGazeConfidence = .95f,
+            rightGazeX = 0f,
+            rightGazeY = -.58f,
+            rightGazeForward = .74f,
+            rightGazeConfidence = .95f,
+        )
+        val track = com.tajuli.digitorandroid.editor.model.EyeTrack(
+            uri = clip.uri,
+            startUs = clip.sourceInUs,
+            endUs = clip.sourceOutUs,
+            samples = listOf(
+                com.tajuli.digitorandroid.editor.model.EyeSample(clip.sourceInUs, pose),
+                com.tajuli.digitorandroid.editor.model.EyeSample(PREVIEW_TIME_US, pose),
+                com.tajuli.digitorandroid.editor.model.EyeSample(clip.sourceOutUs, pose),
+            ),
+        )
+        com.tajuli.digitorandroid.editor.processing.EyeTrackStore.installEphemeral(clip, track)
+    }
 
     suspend fun renderPortraitLensBlur(context: Context): Bitmap =
         renderCached(context.applicationContext, "portrait-lens-blur::" + CACHE_VERSION) { _, base ->
