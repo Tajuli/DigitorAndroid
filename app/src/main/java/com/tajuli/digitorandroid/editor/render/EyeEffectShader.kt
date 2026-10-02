@@ -96,13 +96,20 @@ internal const val EYE_EFFECT_SHADER = """
         vec2 toLens=(lensUv-eye.xy)*vec2(1.0,uTexelSize.x/uTexelSize.y);
         return length(toLens)>.0001 ? normalize(toLens) : vec2(0.0,-1.0);
     }
-    vec2 electricScreenDir(vec4 gaze,vec4 eye) {
+    vec2 electricBeamScreenDir(vec4 gaze) {
+        vec4 resolved=electricResolvedGaze(gaze);
+        float projected=length(resolved.xy);
+        // Both visible long beams MUST share the same fused face projection. Never aim each eye
+        // independently at the lens center: that makes the left ray point inward/right and the
+        // right ray inward/left, producing the crossed-X seen in real footage. Exact frontal pose
+        // has no meaningful 2D long-ray projection; its camera-facing energy is rendered separately.
+        return projected>.045 ? normalize(resolved.xy) : vec2(0.0,-1.0);
+    }
+    vec2 electricLensAim(vec4 gaze,vec4 eye) {
         vec4 resolved=electricResolvedGaze(gaze);
         float projected=length(resolved.xy);
         vec2 lensDir=electricLensDirection(eye);
         vec2 faceDir=projected>.045 ? normalize(resolved.xy) : lensDir;
-        // When the model turns directly toward the camera, rotate the visible beam toward the
-        // virtual lens as well. Off-axis poses keep the fused face-direction vector unchanged.
         float frontAmount=smoothstep(.84,.96,uHeadPose.w)*
             smoothstep(.82,.96,resolved.z)*
             (1.0-smoothstep(.08,.30,projected));
@@ -134,7 +141,7 @@ internal const val EYE_EFFECT_SHADER = """
             // Each beam remains welded to its own pupil and paired eyes share one stable base
             // gaze. CapCut-style geometry is not perfectly parallel: add only a tiny outward
             // bias along the tracked eye-pair axis so beam separation grows gradually with reach.
-            vec2 screenDir=electricScreenDir(renderGaze,eye);
+            vec2 screenDir=electricBeamScreenDir(renderGaze);
             vec2 localGaze=vec2(
                 c*screenDir.x+s*screenDir.y,
                 -s*screenDir.x+c*screenDir.y);
@@ -218,15 +225,19 @@ internal const val EYE_EFFECT_SHADER = """
             float sway=(coarse-.5)*(.070+.018*forward)+
                 sin(forward*.58-t*.280)*(.007+.0014*forward);
 
-            // Progressive binocular separation: almost parallel at the pupils, then a small
-            // outward drift that grows with beam length. Left tip moves left, right tip moves
-            // right, while the far-angle remains subtle rather than becoming a wide V.
+            // Progressive true-V separation. Since both eyes now share the same fused base ray,
+            // outwardLocal is guaranteed to point away from the pair midpoint. Project that
+            // OUTWARD vector onto the beam-normal once, keep only its sign, and grow separation
+            // monotonically with forward distance. The two centerlines can no longer converge or
+            // cross as they get longer.
             float progressiveSpread=0.0;
             if(pairedBeams && length(outwardLocal)>.001) {
                 vec2 beamNormal=vec2(dir.y,-dir.x);
-                float outwardSign=dot(outwardLocal,beamNormal);
-                float spreadProgress=smoothstep(.40,6.6,forward);
-                progressiveSpread=outwardSign*forward*(.060*spreadProgress);
+                float outwardAcross=dot(outwardLocal,beamNormal);
+                float outwardSign=outwardAcross<0.0 ? -1.0 : 1.0;
+                float spreadProgress=smoothstep(.35,6.2,forward);
+                float spreadAmount=forward*(.060*spreadProgress);
+                progressiveSpread=outwardSign*spreadAmount;
             }
             float shifted=across-sway-progressiveSpread;
             float raggedWidth=coneWidth*(.72+.36*coarse+.18*fine);
@@ -407,7 +418,7 @@ internal const val EYE_EFFECT_SHADER = """
         vec2 toLens=(lensUv-eye.xy)*faceMetricScale();
         float lensDistance=length(toLens);
         if(lensDistance<.0001) return front3d;
-        vec2 aim=electricScreenDir(resolved,eye);
+        vec2 aim=electricLensAim(resolved,eye);
         float along=dot(toLens,aim);
         float miss=abs(toLens.x*aim.y-toLens.y*aim.x);
         float rayForward=smoothstep(-.008,.045,along);
