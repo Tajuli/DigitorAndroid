@@ -179,6 +179,10 @@ assert 'renderEyeOnlyNode(' in creator_contract, (
     'Eye-only render dispatch missing')
 assert 'private val exportEyeTrack' in creator_contract, (
     'Export must cache the eye track instead of loading it every frame')
+assert 'val hasEffectAnimation = currentClip.nodeAnimations.hasAnimation(' in creator_contract, (
+    'Static export nodes must bypass per-frame effect animation allocations')
+assert 'else {\n                                currentNode.visibleEffects()' in creator_contract, (
+    'Static effect lists must be reused instead of copied every frame')
 assert 'electricRenderGaze' in shader_contract, 'Electric Eyes face direction resolver missing'
 assert 'if(uGazePose.w>=.5) return vec4(uGazePose.xyz,confidence);' in shader_contract, (
     'Electric Eyes must use fused face direction while retaining only per-eye confidence')
