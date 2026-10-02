@@ -333,8 +333,8 @@ assert 'vec3(1.00,.84,.10)*(lensStreak*.18+lensHalo*.12)' in shader_contract, (
     'Camera-facing lens middle must use yellow')
 assert 'vec3(1.00,.075,.025)*(lensHalo*.07+lensMist*.10)' in shader_contract, (
     'Camera-facing lens outer energy must use red')
-assert 'float frontalEmitter=cameraFacing*exp(-r*r*1.65);' in shader_contract, (
-    'Exact camera-facing Electric Eyes must keep a visible pupil/socket emitter')
+assert 'float frontalEmitter=cameraFacing*exp(-r*r*6.40);' in shader_contract, (
+    'Exact camera-facing Electric Eyes must keep a narrow iris-centered emitter')
 assert 'float fusedFront=min(electricFrontScore(renderLeft),electricFrontScore(renderRight))*uEyesA.y;' in shader_contract, (
     'Camera-facing lens flare must have a fused 3D front-score floor')
 assert 'float pairFront=max(lensHit*lensHit*.10,fusedFront*fusedFront*.10);' in shader_contract, (
