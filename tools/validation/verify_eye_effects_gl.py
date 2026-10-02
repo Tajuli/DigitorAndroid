@@ -285,8 +285,8 @@ assert 'float pairFront=max(lensHit*lensHit*.10,fusedFront*fusedFront*.10);' in 
 assert 'rayHit=1.0-smoothstep(.010,.045,miss)' in shader_contract, 'Lens miss rejection missing'
 assert 'if(front3d<.001) return 0.0' in shader_contract, (
     'Only non-frontal faces should reject the lens-facing hit')
-assert 'electricScreenDir(resolved,eye)' in shader_contract, (
-    'Lens hit must use the same camera-facing direction as the visible beam')
+assert 'electricLensAim(resolved,eye)' in shader_contract, (
+    'Lens hit must use the dedicated camera-facing lens aim, not steer the visible long beam')
 assert 'renderLeft=electricRenderGaze(effectiveLeft)' in shader_contract, (
     'Lens flare must use the same resolved direction as the visible beam')
 assert 'return electricLight + light*blinkGate' in shader_contract, (
