@@ -106,6 +106,31 @@ int main() {
     assert(std::fabs(fusedTurn.yaw) > .5f);
     assert(fusedTurn.forward > .80f && fusedTurn.forward < .92f);
 
+    // Pupil source stabilization works in local eye coordinates: face/contour motion remains
+    // immediate while uncertain samples, blinks and one-frame jumps are damped.
+    const Point previousOffset{.22f, -.10f};
+    const auto heldLow = face_tracking::StabilizePupilOffset(
+        previousOffset, true, Point{-.45f, .38f}, .04f, 1.f);
+    near(heldLow.x, previousOffset.x); near(heldLow.y, previousOffset.y);
+
+    const auto lowJump = face_tracking::StabilizePupilOffset(
+        previousOffset, true, Point{-.45f, .38f}, .25f, 1.f);
+    const auto highJump = face_tracking::StabilizePupilOffset(
+        previousOffset, true, Point{-.45f, .38f}, .92f, 1.f);
+    assert(face_tracking::Distance(lowJump, previousOffset) <
+           face_tracking::Distance(highJump, previousOffset));
+
+    const auto openMove = face_tracking::StabilizePupilOffset(
+        previousOffset, true, Point{.42f, .18f}, .72f, 1.f);
+    const auto blinkMove = face_tracking::StabilizePupilOffset(
+        previousOffset, true, Point{.42f, .18f}, .72f, .12f);
+    assert(face_tracking::Distance(blinkMove, previousOffset) <
+           face_tracking::Distance(openMove, previousOffset));
+
+    const auto uncertainSeed = face_tracking::StabilizePupilOffset(
+        Point{}, false, Point{.5f, -.4f}, .05f, 1.f);
+    near(uncertainSeed.x, 0.f); near(uncertainSeed.y, 0.f);
+
     // Independent pupil motion remains available as metadata, but long-beam direction no longer
     // consumes it; pupil tracking is reserved for the source point.
     const auto eyeDown = face_tracking::EyeDrivenGaze(0.f, 0.f, 1.f, 0.f, .48f, .9f, 1.f);
