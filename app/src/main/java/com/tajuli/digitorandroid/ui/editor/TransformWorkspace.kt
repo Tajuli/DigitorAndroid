@@ -58,6 +58,7 @@ fun EditWorkspace(
     selectedClipIds: Set<String>,
     selectedClip: TimelineClip?,
     cursorUs: Long,
+    busyOperation: String?,
     vm: EditorViewModel,
     onSeek: (Long) -> Unit,
     onSelectTrack: (String) -> Unit,
@@ -165,7 +166,13 @@ fun EditWorkspace(
 
             EditPageV5.RETIME -> {
                 if (selectedClip != null && canEditVideo) {
-                    RetimeWorkspaceV5(selectedClip, cursorUs, vm, Modifier.fillMaxSize())
+                    RetimeWorkspaceV5(
+                        clip = selectedClip,
+                        cursorUs = cursorUs,
+                        busyOperation = busyOperation,
+                        vm = vm,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 }
             }
 
@@ -182,6 +189,7 @@ fun EditWorkspace(
 private fun RetimeWorkspaceV5(
     clip: TimelineClip,
     cursorUs: Long,
+    busyOperation: String?,
     vm: EditorViewModel,
     modifier: Modifier,
 ) {
@@ -190,23 +198,11 @@ private fun RetimeWorkspaceV5(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text("Retime · ${clip.label}", fontSize = 10.sp, color = Color.White)
-        Text("Speed", fontSize = 8.sp, color = X5Muted)
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            listOf(.5f, .75f, 1.25f, 1.5f, 2f, 3f).forEach { speed ->
-                Text(
-                    "${speed}x",
-                    fontSize = 9.sp,
-                    color = Color.White,
-                    modifier = Modifier
-                        .background(X5Raised, RoundedCornerShape(6.dp))
-                        .clickable { vm.bakeSelectedSpeed(speed) }
-                        .padding(horizontal = 13.dp, vertical = 8.dp),
-                )
-            }
-        }
+        SpeedCurveWorkspace(
+            clip = clip,
+            busyOperation = busyOperation,
+            vm = vm,
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 "Reverse",
