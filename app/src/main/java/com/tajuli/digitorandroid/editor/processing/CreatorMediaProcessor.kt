@@ -151,7 +151,7 @@ class CreatorMediaProcessor(context: Context) {
         sourceHasAudio: Boolean,
         audioOnly: Boolean,
     ) {
-        val provider = CurveSpeedProvider(schedule, clip.sourceInUs)
+        val provider = CurveSpeedProvider(schedule)
         val mediaItem = MediaItem.Builder()
             .setUri(clip.uri)
             .setClippingConfiguration(
@@ -433,31 +433,19 @@ class CreatorMediaProcessor(context: Context) {
         return if (safe % 2 == 0) safe else safe - 1
     }
 
+    /**
+     * Media3 evaluates SpeedProvider against the clipped item's own 0-based media clock. Keep the
+     * schedule in that same domain so a trim beginning at a non-zero source timestamp receives the
+     * exact same velocity shape as an untrimmed clip.
+     */
     private class CurveSpeedProvider(
         private val schedule: SpeedCurveSchedule,
-        private val sourceOffsetUs: Long,
     ) : SpeedProvider {
-        private var absoluteClock: Boolean? = null
-
         override fun getSpeed(timeUs: Long): Float =
-            schedule.speedAtSourceTime(relativeTime(timeUs))
+            schedule.speedAtSourceTime(timeUs.coerceIn(0L, schedule.durationUs))
 
-        override fun getNextSpeedChangeTimeUs(timeUs: Long): Long {
-            val relative = relativeTime(timeUs)
-            val next = schedule.nextChangeAfter(relative) ?: return C.TIME_UNSET
-            return if (absoluteClock == true) sourceOffsetUs + next else next
-        }
-
-        private fun relativeTime(timeUs: Long): Long {
-            if (absoluteClock == null) {
-                absoluteClock = sourceOffsetUs > 0L && timeUs >= sourceOffsetUs
-            }
-            return if (absoluteClock == true) {
-                (timeUs - sourceOffsetUs).coerceIn(0L, schedule.durationUs)
-            } else {
-                timeUs.coerceIn(0L, schedule.durationUs)
-            }
-        }
+        override fun getNextSpeedChangeTimeUs(timeUs: Long): Long =
+            schedule.nextChangeAfter(timeUs.coerceIn(0L, schedule.durationUs)) ?: C.TIME_UNSET
     }
 
     private companion object {
