@@ -121,6 +121,9 @@ class DavinciFramePreviewEngine(
     private val appContext = context.applicationContext
     private val closed = AtomicBoolean(false)
     private val exportSuspended = AtomicBoolean(false)
+    private val externalSuspendReleaseComplete = AtomicBoolean(false)
+    private val externalSuspendLatch = AtomicReference<CountDownLatch?>(null)
+    private val resumeAfterPendingSuspend = AtomicBoolean(false)
     private val revision = AtomicLong(0L)
     private val pendingRequest = AtomicReference<Request?>(null)
     private val mutableFrame = MutableStateFlow<Frame?>(null)
@@ -157,7 +160,11 @@ class DavinciFramePreviewEngine(
             if (closed.get() || exportSuspended.get()) return
             val request = pendingRequest.getAndSet(null) ?: return
             runCatching { handleRequest(request) }
-                .onFailure { failPreview("request", it) }
+                .onFailure { error ->
+                    if (error !is PreviewSuspendRequested) {
+                        failPreview("request", error)
+                    }
+                }
             if (pendingRequest.get() != null && !closed.get() && !exportSuspended.get()) {
                 handler.post(this)
             }
@@ -223,44 +230,75 @@ class DavinciFramePreviewEngine(
      * starts. Export must not start until the release action has actually finished.
      */
     internal fun suspendForExternalGpuWork(): Boolean {
-        if (closed.get()) return false
-        if (!exportSuspended.compareAndSet(false, true)) return true
+        // A closed engine already owns no decoder/GL resources, so it must not block analysis.
+        if (closed.get()) return true
 
-        pendingRequest.set(null)
-        legacyPlaying.set(false)
-        handler.removeCallbacks(requestDrain)
-        handler.removeCallbacks(playbackPump)
-        handler.removeCallbacks(legacyPauseWatchdog)
+        val newRequest = exportSuspended.compareAndSet(false, true)
+        if (newRequest) {
+            externalSuspendReleaseComplete.set(false)
+            resumeAfterPendingSuspend.set(false)
 
-        val latch = CountDownLatch(1)
-        val releaseAction = Runnable {
-            try {
-                lastProjectRef?.let(resumeProject::set)
-                if (lastRequestedTimelineUs != Long.MIN_VALUE) {
-                    resumeTimelineUs.set(lastRequestedTimelineUs.coerceAtLeast(0L))
+            pendingRequest.set(null)
+            legacyPlaying.set(false)
+            handler.removeCallbacks(requestDrain)
+            handler.removeCallbacks(playbackPump)
+            handler.removeCallbacks(legacyPauseWatchdog)
+
+            val latch = CountDownLatch(1)
+            externalSuspendLatch.set(latch)
+            val releaseAction = Runnable {
+                try {
+                    lastProjectRef?.let(resumeProject::set)
+                    if (lastRequestedTimelineUs != Long.MIN_VALUE) {
+                        resumeTimelineUs.set(lastRequestedTimelineUs.coerceAtLeast(0L))
+                    }
+                    stopPlayback()
+                    // Detach the viewer surface before releasing MediaCodec/Media3. On slower vendor
+                    // stacks this prevents the final GL present from holding the graph release path.
+                    runCatching { session?.core?.setOutputSurface(null) }
+                    replaceSession(null)
+                    lastProjectRef = null
+                    lastRequestedTimelineUs = Long.MIN_VALUE
+                } finally {
+                    externalSuspendReleaseComplete.set(true)
+                    latch.countDown()
+                    if (resumeAfterPendingSuspend.getAndSet(false)) {
+                        // A lease acquisition may have timed out while this release was still
+                        // running. Complete the release first, then rebuild preview; never race the
+                        // queued teardown with a new decoder/GL session.
+                        resumeAfterExternalGpuWork()
+                    }
                 }
-                stopPlayback()
-                replaceSession(null)
-                lastProjectRef = null
-                lastRequestedTimelineUs = Long.MIN_VALUE
-            } finally {
-                latch.countDown()
+            }
+
+            if (Looper.myLooper() == renderThread.looper) {
+                releaseAction.run()
+            } else {
+                // Preempt queued preview work. A currently running decode/build cooperatively sees
+                // exportSuspended and exits at the nearest safe point.
+                handler.postAtFrontOfQueue(releaseAction)
             }
         }
 
-        return if (Looper.myLooper() == renderThread.looper) {
-            releaseAction.run()
-            true
-        } else {
-            handler.post(releaseAction)
-            runCatching {
-                latch.await(EXPORT_RELEASE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            }.getOrDefault(false)
-        }
+        if (externalSuspendReleaseComplete.get()) return true
+        val latch = externalSuspendLatch.get() ?: return false
+        return runCatching {
+            latch.await(EXPORT_RELEASE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        }.getOrDefault(false)
     }
 
     internal fun resumeAfterExternalGpuWork() {
-        if (closed.get() || !exportSuspended.compareAndSet(true, false)) return
+        if (closed.get() || !exportSuspended.get()) return
+        if (!externalSuspendReleaseComplete.get()) {
+            resumeAfterPendingSuspend.set(true)
+            return
+        }
+        if (!exportSuspended.compareAndSet(true, false)) return
+
+        resumeAfterPendingSuspend.set(false)
+        externalSuspendReleaseComplete.set(false)
+        externalSuspendLatch.set(null)
+
         val project = resumeProject.get() ?: legacyProject.get() ?: return
         val safeTimelineUs = resumeTimelineUs.get()
             .coerceIn(0L, project.durationUs.coerceAtLeast(0L))
@@ -317,6 +355,19 @@ class DavinciFramePreviewEngine(
         handler.post(requestDrain)
     }
 
+    // Tracking is data arrival, not a transport command. Playback consumes the new cache on
+    // its next frame; only a paused viewer needs a new decode. Coalesce simultaneous results.
+    private val trackedFrameRefresh = Runnable {
+        if (closed.get() || exportSuspended.get() || playing || pendingRequest.get() != null) return@Runnable
+        val project = resumeProject.get() ?: return@Runnable
+        submit(project.copy(), resumeTimelineUs.get(), false)
+    }
+
+    internal fun refreshTrackedFrame() {
+        handler.removeCallbacks(trackedFrameRefresh)
+        handler.post(trackedFrameRefresh)
+    }
+
     private fun handleRequest(request: Request) {
         if (exportSuspended.get()) return
         latestRequestStartedNs = request.startedNs
@@ -332,8 +383,15 @@ class DavinciFramePreviewEngine(
         val wantedKey = sessionKey(request.project, layers)
         val sessionChanged = session?.key != wantedKey
         if (sessionChanged) {
-            replaceSession(buildSession(request.project, layers, wantedKey))
+            throwIfExternalSuspendRequested()
+            val built = buildSession(request.project, layers, wantedKey)
+            if (exportSuspended.get()) {
+                runCatching { built.close() }
+                throw PreviewSuspendRequested()
+            }
+            replaceSession(built)
         }
+        throwIfExternalSuspendRequested()
         val active = session ?: return
 
         val timelineChanged = request.timelineUs != lastRequestedTimelineUs
@@ -351,6 +409,7 @@ class DavinciFramePreviewEngine(
             playAnchorNs = System.nanoTime()
 
             if (!wasPlaying || sessionChanged || transportDriftUs > HARD_RESYNC_US) {
+                throwIfExternalSuspendRequested()
                 active.resetForPlayback(request.timelineUs)
             }
             playing = true
@@ -360,16 +419,26 @@ class DavinciFramePreviewEngine(
             val wasPlaying = playing
             stopPlayback()
             when {
-                sessionChanged || wasPlaying || timelineChanged -> active.seekAndRender(request.timelineUs)
+                sessionChanged || wasPlaying || timelineChanged -> {
+                    throwIfExternalSuspendRequested()
+                    active.seekAndRender(request.timelineUs)
+                }
                 // MultipleInputVideoGraph.redraw() re-presents its already-processed output frame;
                 // it does not run a changed LUT/spatial shader over the held decoder texture again.
                 // Re-submit the same playhead frame so paused slider/effect changes are visible now.
-                projectChanged -> active.seekAndRender(request.timelineUs)
+                projectChanged -> {
+                    throwIfExternalSuspendRequested()
+                    active.seekAndRender(request.timelineUs)
+                }
             }
         }
 
         lastRequestedTimelineUs = request.timelineUs
         lastProjectRef = request.project
+    }
+
+    private fun throwIfExternalSuspendRequested() {
+        if (exportSuspended.get()) throw PreviewSuspendRequested()
     }
 
     private fun currentPlaybackTimelineUs(): Long {
@@ -390,7 +459,12 @@ class DavinciFramePreviewEngine(
         val prepared = mutableListOf<PreparedLayer>()
         var core: DigitorRenderCore? = null
         try {
-            layers.forEach { layer -> prepared += prepareLayer(layer) }
+            throwIfExternalSuspendRequested()
+            layers.forEach { layer ->
+                throwIfExternalSuspendRequested()
+                prepared += prepareLayer(layer)
+            }
+            throwIfExternalSuspendRequested()
             val generation = ++sessionGeneration
             core = DigitorRenderCore(
                 context = appContext,
@@ -420,9 +494,12 @@ class DavinciFramePreviewEngine(
                     }
                 },
             )
+            throwIfExternalSuspendRequested()
             previewSurface?.takeIf { it.isValid }?.let(core::setOutputSurface)
+            throwIfExternalSuspendRequested()
 
             val sources = prepared.mapIndexed { index, item ->
+                throwIfExternalSuspendRequested()
                 val codec = createConfiguredPreviewDecoder(
                     mime = item.mime,
                     format = item.platformFormat,
@@ -606,12 +683,17 @@ class DavinciFramePreviewEngine(
         }
 
         fun seekAndRender(timelineUs: Long) {
+            if (exportSuspended.get()) return
             clearPausedOutputs()
             core.flush()
-            sources.forEach { source -> source.resetToTimeline(timelineUs) }
+            sources.forEach { source ->
+                if (exportSuspended.get()) return
+                source.resetToTimeline(timelineUs)
+            }
 
             sources.forEachIndexed { index, source ->
-                val around = source.decodeAroundTarget()
+                if (exportSuspended.get()) return
+                val around = source.decodeAroundTarget { exportSuspended.get() }
                 val before = around.atOrBefore
                 val after = around.after
                 when {
@@ -674,6 +756,7 @@ class DavinciFramePreviewEngine(
 
         override fun close() {
             clearPausedOutputs()
+            runCatching { core.setOutputSurface(null) }
             sources.forEach { source -> runCatching { source.close() } }
             runCatching { core.close() }
         }
@@ -801,12 +884,17 @@ class DavinciFramePreviewEngine(
             }
         }
 
-        fun decodeAroundTarget(): AroundTarget {
+        fun decodeAroundTarget(shouldAbort: () -> Boolean = { false }): AroundTarget {
             val targetSourceUs = playbackFloorSourceUs
             var candidate: HeldOutput? = null
             var future: HeldOutput? = null
 
             for (step in 0 until MAX_SCRUB_STEPS) {
+                if (shouldAbort()) {
+                    candidate?.let(::releaseWithoutRendering)
+                    future?.let(::releaseWithoutRendering)
+                    return AroundTarget(null, null)
+                }
                 feedInput(2)
                 val outputIndex = codec.dequeueOutputBuffer(bufferInfo, SCRUB_DEQUEUE_TIMEOUT_US)
                 when {
@@ -856,6 +944,8 @@ class DavinciFramePreviewEngine(
         }
     }
 
+    private class PreviewSuspendRequested : RuntimeException()
+
     private companion object {
         const val TAG = "DigitorSharedPreview"
         const val PLAYBACK_PUMP_MS = 4L
@@ -868,7 +958,7 @@ class DavinciFramePreviewEngine(
         const val MAX_SCRUB_STEPS = 280
         const val SCRUB_DEQUEUE_TIMEOUT_US = 1_000L
         const val LEGACY_IDLE_PAUSE_MS = 180L
-        const val EXPORT_RELEASE_TIMEOUT_MS = 5_000L
+        const val EXPORT_RELEASE_TIMEOUT_MS = 15_000L
     }
 }
 
@@ -946,7 +1036,7 @@ private fun sessionKey(
     },
 )
 
-private fun staticSpatialHash(clip: TimelineClip): Int {
+internal fun staticSpatialHash(clip: TimelineClip): Int {
     var result = clip.nodeGraph.edges.hashCode()
     result = 31 * result + clip.transition.hashCode()
     clip.nodeGraph.nodes.forEach { node ->
@@ -959,25 +1049,9 @@ private fun staticSpatialHash(clip: TimelineClip): Int {
             .map { key -> key.sourceTimeUs to key.node.advancedColor.qualifier }
             .hashCode()
 
-        // Some vendor GL/Media3 stacks can keep an already-processed paused frame after a
-        // live effect mutation. Rebuild the graph when creator-effect structure changes, while
-        // deliberately excluding amount so slider edits stay zero-latency through the resident
-        // PreviewProjectRegistry-backed shader.
-        val creatorEffectStructure = node.visibleEffects()
-            .filter { effect ->
-                CreatorEffectCatalogV25.find(effect.name) != null ||
-                    BodyEffectCatalogV102.isBodyEffect(effect.name)
-            }
-            .map { effect ->
-                listOf(
-                    effect.id,
-                    effect.name.lowercase(),
-                    effect.enabled.toString(),
-                    effect.sourceStartUsV26?.toString().orEmpty(),
-                    effect.sourceEndUsV26?.toString().orEmpty(),
-                )
-            }
-        result = 31 * result + creatorEffectStructure.hashCode()
+        // Creator/body shaders are resident and read the live registry. Changing presets,
+        // enable flags or time spans needs a frame resubmit, not decoder/model reconstruction.
+
     }
     return result
 }

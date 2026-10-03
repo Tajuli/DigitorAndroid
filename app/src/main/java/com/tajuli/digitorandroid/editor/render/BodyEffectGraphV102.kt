@@ -79,6 +79,8 @@ internal class BodyEffectGraphV102 private constructor(
         private val copyProgram: GlProgram
         private var scratchTextures = IntArray(0)
         private var scratchFbos = IntArray(0)
+        private var boundsA = floatArrayOf(0f,0f,0f,0f)
+        private var boundsB = floatArrayOf(0f,0f,0f,0f)
         private var inputWidth = 1
         private var inputHeight = 1
 
@@ -136,8 +138,17 @@ internal class BodyEffectGraphV102 private constructor(
                 val sourceUs = ParityRenderContract.sourceTimeUs(currentClip, presentationTimeUs)
                 val matteSettings = currentClip.resolvedCutoutV43()
                 val bracket = personBracket(currentClip, sourceUs)
-                val hasMaskA = bindMask(maskTextureA, bracket.a?.file?.absolutePath, true)
-                val hasMaskB = bindMask(maskTextureB, bracket.b?.file?.absolutePath, false)
+                var hasMaskA = bindMask(maskTextureA, bracket.a?.file?.absolutePath, true)
+                var hasMaskB = bindMask(maskTextureB, bracket.b?.file?.absolutePath, false)
+                if (preview && !hasMaskA && !hasMaskB) {
+                    com.tajuli.digitorandroid.editor.processing.LiveSemanticFrames.mask(currentClip,sourceUs)?.let { mask ->
+                        try {
+                            uploadMaskBitmap(maskTextureA,mask)
+                            boundsA = bounds(mask); loadedPathA = null
+                            hasMaskA = true
+                        } finally { mask.recycle() }
+                    }
+                }
                 val hasBodyMatte = hasMaskA || hasMaskB
 
                 val slotTextures = IntArray(plan.operations.size) { inputTexId }
@@ -290,6 +301,11 @@ internal class BodyEffectGraphV102 private constructor(
             nodeProgram.setFloatUniform("uCloneTriple", vector.cloneTriple)
             nodeProgram.setFloatUniform("uCloneEcho", vector.cloneEcho)
             nodeProgram.setFloatUniform("uCloneMirror", vector.cloneMirror)
+            for(group in 0..7) nodeProgram.setFloatsUniform("uDecor$group",
+                FloatArray(4) { vector.decorations[group*4+it] ?: 0f })
+            val bb = if(hasMaskA && hasMaskB) FloatArray(4) { boundsA[it]+(boundsB[it]-boundsA[it])*temporalMix }
+                else if(hasMaskA) boundsA else boundsB
+            nodeProgram.setFloatsUniform("uBodyBounds", bb)
             nodeProgram.setFloatUniform("uTime", (sourceUs % 10_000_000L).toFloat() / 1_000_000f)
             nodeProgram.bindAttributesAndUniforms()
             GLES20.glDisable(GLES20.GL_BLEND)
@@ -374,6 +390,20 @@ internal class BodyEffectGraphV102 private constructor(
             return MaskBracket(left, right, mix)
         }
 
+        private fun bounds(bitmap: Bitmap): FloatArray {
+            val pixels = IntArray(bitmap.width*bitmap.height)
+            bitmap.getPixels(pixels,0,bitmap.width,0,0,bitmap.width,bitmap.height)
+            var l=bitmap.width;var r=-1;var t=bitmap.height;var b=-1
+            for(y in 0 until bitmap.height step 2) for(x in 0 until bitmap.width step 2) {
+                if(((pixels[y*bitmap.width+x] ushr 16) and 255)>128) {
+                    l=minOf(l,x);r=maxOf(r,x);t=minOf(t,y);b=maxOf(b,y)
+                }
+            }
+            return if(r<=l || b<=t) floatArrayOf(0f,0f,0f,0f) else floatArrayOf(
+                (l+r)*.5f/bitmap.width,1f-(t+b)*.5f/bitmap.height,
+                (r-l)*.5f/bitmap.width,(b-t)*.5f/bitmap.height)
+        }
+
         private fun bindMask(texture: Int, path: String?, slotA: Boolean): Boolean {
             val loaded = if (slotA) loadedPathA else loadedPathB
             if (path == null) {
@@ -387,6 +417,7 @@ internal class BodyEffectGraphV102 private constructor(
             val bitmap = BitmapFactory.decodeFile(path) ?: return false
             try {
                 uploadMaskBitmap(texture, bitmap)
+                if(slotA) boundsA = bounds(bitmap) else boundsB = bounds(bitmap)
                 if (slotA) loadedPathA = path else loadedPathB = path
             } finally {
                 bitmap.recycle()
@@ -499,7 +530,7 @@ internal class BodyEffectGraphV102 private constructor(
                 }
             """
 
-            const val NODE_FRAGMENT_SHADER = """
+            val NODE_FRAGMENT_SHADER = """
                 precision highp float;
                 uniform sampler2D uTexSampler;
                 uniform sampler2D uMaskA;
@@ -613,6 +644,7 @@ internal class BodyEffectGraphV102 private constructor(
                     return mix(base, cloneSample.rgb, alpha);
                 }
 
+                $BODY_DECORATION_SHADER
                 void main() {
                     vec4 source = texture2D(uTexSampler, vTexCoord);
                     if (uHasMaskA < 0.5 && uHasMaskB < 0.5) {
@@ -693,6 +725,7 @@ internal class BodyEffectGraphV102 private constructor(
 
                     // A subtle inner response avoids a detached sticker look while keeping skin/clothes.
                     rgb += neon * body * clamp(uGlow, 0.0, 1.5) * 0.035 * pulse;
+                    rgb = decorateBody(rgb, vTexCoord, body, boundary);
                     gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), source.a);
                 }
             """

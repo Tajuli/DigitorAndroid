@@ -82,12 +82,14 @@ fun CreatorEffectsWorkspace(
         ?.effectId
     var category by remember { mutableStateOf("Basic") }
     var bodySettingsExpanded by remember(clip.id) { mutableStateOf(false) }
+    var faceTrackingReady by remember(clip.id, clip.uri, clip.sourceInUs, clip.sourceOutUs) {
+        mutableStateOf(false)
+    }
+    val faceTrackingCategory = category == "Eyes" || category == "Funny Faces"
     val categoryPresets = remember(category) { CreatorEffectCatalogV25.inCategory(category) }
     val nodeEffects = node.visibleEffects()
     val selectedEffect = nodeEffects.firstOrNull { it.id == selectedEffectId }
     val selectedEffectName = selectedEffect?.name
-    val appContext = LocalContext.current.applicationContext
-    val bodyMatteReady = category != "Body" || hasPersonCutoutCoverageV43(appContext, clip)
 
     fun selectEffect(effectId: String) {
         TimelineTextSelectionBusV10.clear()
@@ -123,6 +125,12 @@ fun CreatorEffectsWorkspace(
             }
         }
 
+        if (faceTrackingCategory) {
+            EyeAnalysisControls(clip) { ready ->
+                faceTrackingReady = ready
+            }
+        }
+
         if (category == "Portrait") {
             PortraitLensBlurControlsV99(clip, vm, Modifier.weight(1f))
             return@Column
@@ -134,93 +142,13 @@ fun CreatorEffectsWorkspace(
                 .weight(1f)
                 .verticalScroll(rememberScrollState()),
         ) {
-            if (category == "Body") {
-                val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
-                val matteReady = bodyMatteReady
-                val analyzingThisClip = analysisRuntime.busy && analysisRuntime.clipId == clip.id
-                val expectedFrames = analysisRuntime.expectedFrames.coerceAtLeast(0)
-                val processedFrames = analysisRuntime.savedFrames.coerceAtLeast(0)
-                val progress = if (expectedFrames > 0) {
-                    (processedFrames.toFloat() / expectedFrames.toFloat()).coerceIn(0f, 1f)
-                } else {
-                    0f
-                }
-                val progressPercent = if (matteReady) 100 else (progress * 100f).toInt().coerceIn(0, 100)
-
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .background(Fx25Raised)
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        when {
-                            matteReady ->
-                                "Body analysis is complete. Body effects are ready to apply."
-                            analyzingThisClip ->
-                                "Body analysis is in progress. Effects will become available when the analysis is complete."
-                            else ->
-                                "Body analysis must be completed before Body effects can be applied. Review the analysis settings if required, then select Analyze Body."
-                        },
-                        fontSize = 8.sp,
-                        color = if (matteReady) Fx25Accent else Color.White.copy(alpha = .88f),
-                    )
-
-                    if (analyzingThisClip) {
-                        Text(
-                            if (expectedFrames > 0) progressPercent.toString() + "%" else "0%",
-                            fontSize = 8.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Fx25Accent,
-                        )
-                        if (expectedFrames > 0) {
-                            LinearProgressIndicator(
-                                progress = { progress },
-                                modifier = Modifier.fillMaxWidth().height(3.dp),
-                            )
-                        } else {
-                            LinearProgressIndicator(
-                                modifier = Modifier.fillMaxWidth().height(3.dp),
-                            )
-                        }
-                    } else if (matteReady) {
-                        Text(
-                            "Body matte · Ready · 100%",
-                            fontSize = 7.sp,
-                            color = Fx25Muted,
-                        )
-                    }
-
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        OutlinedButton(
-                            onClick = { bodySettingsExpanded = !bodySettingsExpanded },
-                            enabled = !analysisRuntime.busy,
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Text(
-                                "Settings",
-                                fontSize = 8.sp,
-                            )
-                        }
-                        FilledTonalButton(
-                            onClick = {
-                                bodySettingsExpanded = false
-                                vm.analyzeSelectedPersonCutoutV43()
-                            },
-                            enabled = !analysisRuntime.busy,
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Text("Analyze Body", fontSize = 8.sp)
-                        }
-                    }
-                }
+            if (category in listOf("Body", "Glowing Lines", "Stroke", "Clone")) {
+                Text("Tap to apply · automatic body preview · full-quality tracking prepared for export",
+                    color = Color.White, fontSize = 9.sp, modifier = Modifier.padding(10.dp))
+                TextButton(onClick = { bodySettingsExpanded = !bodySettingsExpanded }) { Text("Quality settings") }
             }
 
-            if (category == "Body" && bodySettingsExpanded) {
+            if (category in listOf("Body", "Glowing Lines", "Stroke", "Clone") && bodySettingsExpanded) {
                 val analysisRuntime by CutoutAnalysisRuntimeV66.state.collectAsState()
                 val settings = clip.resolvedCutoutV43()
                 val analysisBusy = analysisRuntime.busy && analysisRuntime.clipId == clip.id
@@ -354,7 +282,7 @@ fun CreatorEffectsWorkspace(
                 HorizontalDivider(color = Fx25Divider)
             }
 
-            if (bodyMatteReady) {
+            if (!faceTrackingCategory || faceTrackingReady) {
                 LazyRow(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),

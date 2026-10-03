@@ -126,6 +126,19 @@ class FilterEffectThumbnailRendererV98InstrumentedTest {
     }
 
     @Test
+    fun eyeEffectThumbnail_usesSyntheticTrackWithoutFallback() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        FilterEffectThumbnailRendererV98.clearMemoryCacheForTest()
+        FilterEffectThumbnailRendererV98.resetStatsForTest()
+
+        val base = FilterEffectThumbnailRendererV98.baseThumbnailForTest(context)
+        val electric = FilterEffectThumbnailRendererV98.renderEffect(context, "Electric Eyes")
+
+        assertEquals(0, FilterEffectThumbnailRendererV98.fallbackCountForTest())
+        assertFalse(pixels(base).contentEquals(pixels(electric)))
+    }
+
+    @Test
     fun bodyEffectThumbnail_runsSemanticProductionGraph() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         FilterEffectThumbnailRendererV98.clearMemoryCacheForTest()

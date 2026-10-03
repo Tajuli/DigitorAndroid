@@ -12,6 +12,7 @@ import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Build
 import android.util.Log
 import android.util.LruCache
 import androidx.media3.common.C
@@ -69,9 +70,11 @@ internal object FilterEffectThumbnailRendererV98 {
     const val FULL_PREVIEW_AMOUNT = 1f
 
     private const val CLIP_DURATION_US = 1_000_000L
-    private const val CACHE_VERSION = "v2"
+    private const val CACHE_VERSION = "v3"
     private const val TAG = "DigitorFxThumb"
     private const val CACHE_KB = 12 * 1024
+    private const val DEVICE_GRAPH_TIMEOUT_SECONDS = 10L
+    private const val EMULATOR_GRAPH_TIMEOUT_SECONDS = 25L
 
     private val renderMutex = Mutex()
     private val cache = object : LruCache<String, Bitmap>(CACHE_KB) {
@@ -109,11 +112,78 @@ internal object FilterEffectThumbnailRendererV98 {
                 id = "thumb-effect-" + effectName.lowercase().replace(' ', '-'),
                 effect = NodeEffect(name = preset.name, amount = FULL_PREVIEW_AMOUNT),
             )
-            if (preset.category == "Body") {
+            if (com.tajuli.digitorandroid.editor.model.BodyEffectCatalogV102.isBodyEffect(preset.name)) {
                 installBodyThumbnailMatteV102(appContext, clip, base.width, base.height)
             }
-            renderProductionFrame(appContext, clip, base)
+            if (com.tajuli.digitorandroid.editor.model.EyeEffectCatalog.contains(preset.name)) {
+                // BITMAP-input thumbnail rendering does not need a decodable media URI. Keep a
+                // private stable URI only as the EyeTrackStore key; no temporary PNG or decoder.
+                val imageClip = clip.copy(
+                    uri = "content://digitor/eye-effect-thumbnail-source-v103",
+                    visualMediaV21 = com.tajuli.digitorandroid.editor.model.TimelineVisualMediaV21.IMAGE,
+                )
+                installEyeThumbnailTrackV103(appContext, imageClip)
+                renderProductionFrame(appContext, imageClip, base)
+            } else renderProductionFrame(appContext, clip, base)
         }
+
+    private fun installEyeThumbnailTrackV103(
+        context: Context,
+        clip: TimelineClip,
+    ) {
+        // The neutral thumbnail asset is fixed, so a stable synthetic pose is better than launching
+        // another ncnn/decoder analysis the instant the user's real analysis completes. That old
+        // nested analysis caused back-to-back preview GPU suspend/resume on low/mid-range devices.
+        if (com.tajuli.digitorandroid.editor.processing.EyeTrackStore
+                .load(context, clip)?.covers(clip) == true
+        ) return
+
+        // Measured against filter_effect_preview_base.webp. The previous .405 Y sat below the
+        // pupils, so eye effects bloomed across the nose/upper cheeks in the thumbnail even though
+        // real-video tracking was correct. X was already aligned; only lift the synthetic sources.
+        val left = com.tajuli.digitorandroid.editor.model.TrackedEye(
+            x = .455f, y = .350f, radius = .034f, roll = 0f, open = 1f,
+        )
+        val right = com.tajuli.digitorandroid.editor.model.TrackedEye(
+            x = .545f, y = .350f, radius = .034f, roll = 0f, open = 1f,
+        )
+        val pose = com.tajuli.digitorandroid.editor.model.EyePose(
+            left = left,
+            right = right,
+            identity = 1,
+            face = com.tajuli.digitorandroid.editor.model.BeautyRectV28(
+                .34f, .13f, .66f, .79f,
+            ),
+            mouth = com.tajuli.digitorandroid.editor.model.BeautyRectV28(
+                .445f, .49f, .555f, .585f,
+            ),
+            headYaw = 0f,
+            headPitch = -.58f,
+            headForward = .74f,
+            gazeX = 0f,
+            gazeY = -.58f,
+            gazeForward = .74f,
+            leftGazeX = 0f,
+            leftGazeY = -.58f,
+            leftGazeForward = .74f,
+            leftGazeConfidence = .95f,
+            rightGazeX = 0f,
+            rightGazeY = -.58f,
+            rightGazeForward = .74f,
+            rightGazeConfidence = .95f,
+        )
+        val track = com.tajuli.digitorandroid.editor.model.EyeTrack(
+            uri = clip.uri,
+            startUs = clip.sourceInUs,
+            endUs = clip.sourceOutUs,
+            samples = listOf(
+                com.tajuli.digitorandroid.editor.model.EyeSample(clip.sourceInUs, pose),
+                com.tajuli.digitorandroid.editor.model.EyeSample(PREVIEW_TIME_US, pose),
+                com.tajuli.digitorandroid.editor.model.EyeSample(clip.sourceOutUs, pose),
+            ),
+        )
+        com.tajuli.digitorandroid.editor.processing.EyeTrackStore.installEphemeral(clip, track)
+    }
 
     suspend fun renderPortraitLensBlur(context: Context): Bitmap =
         renderCached(context.applicationContext, "portrait-lens-blur::" + CACHE_VERSION) { _, base ->
@@ -191,7 +261,7 @@ internal object FilterEffectThumbnailRendererV98 {
     private suspend fun renderCached(
         context: Context,
         key: String,
-        producer: (Context, Bitmap) -> Bitmap,
+        producer: suspend (Context, Bitmap) -> Bitmap,
     ): Bitmap {
         cache.get(key)?.let { return it }
         return withContext(Dispatchers.Default) {
@@ -381,11 +451,12 @@ internal object FilterEffectThumbnailRendererV98 {
             }
             graph.signalEndOfInput(0)
 
-            check(outputLatch.await(10, TimeUnit.SECONDS)) {
+            val graphTimeoutSeconds = thumbnailGraphTimeoutSeconds()
+            check(outputLatch.await(graphTimeoutSeconds, TimeUnit.SECONDS)) {
                 "Timed out waiting for thumbnail graph output"
             }
             error.get()?.let { throw it }
-            check(imageLatch.await(10, TimeUnit.SECONDS)) {
+            check(imageLatch.await(graphTimeoutSeconds, TimeUnit.SECONDS)) {
                 "Timed out waiting for thumbnail RGBA frame"
             }
             error.get()?.let { throw it }
@@ -399,12 +470,21 @@ internal object FilterEffectThumbnailRendererV98 {
         }
     }
 
+    private fun thumbnailGraphTimeoutSeconds(): Long =
+        if (
+            Build.FINGERPRINT.contains("generic", ignoreCase = true) ||
+            Build.MODEL.contains("emulator", ignoreCase = true) ||
+            Build.HARDWARE.contains("ranchu", ignoreCase = true) ||
+            Build.HARDWARE.contains("goldfish", ignoreCase = true)
+        ) EMULATOR_GRAPH_TIMEOUT_SECONDS else DEVICE_GRAPH_TIMEOUT_SECONDS
+
     private fun queueBitmapWhenReady(
         graph: MultipleInputVideoGraph,
         bitmap: Bitmap,
         timestampUs: Long,
     ): Boolean {
-        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        val queueSeconds = if (thumbnailGraphTimeoutSeconds() > DEVICE_GRAPH_TIMEOUT_SECONDS) 10L else 5L
+        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(queueSeconds)
         while (System.nanoTime() < deadlineNs) {
             if (
                 graph.queueInputBitmap(

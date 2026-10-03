@@ -36,3 +36,13 @@
 # Gson, protobuf-lite and Kotlin generic/reflection metadata used by persisted collections/runtime.
 -keepattributes Signature
 -keepattributes RuntimeVisibleAnnotations,RuntimeInvisibleAnnotations,AnnotationDefault,InnerClasses,EnclosingMethod
+
+# ML Kit discovers these registrars by manifest name and calls their public no-arg constructors
+# reflectively through Firebase ComponentDiscovery. AGP/R8 full mode retained getComponents() but
+# removed all three constructors in the phone APK, leaving FaceDetection.getClient() with a null
+# internal factory. Keep the class identity AND constructor, not merely the class name.
+-keep class com.google.mlkit.** implements com.google.firebase.components.ComponentRegistrar {
+    public <init>();
+}
+
+-keep class com.tajuli.digitorandroid.editor.processing.NcnnVulkanFaceTrackingNativeV103 { *; }

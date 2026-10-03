@@ -166,6 +166,9 @@ class PreviewExportPixelParityInstrumentedTest {
             effects = listOf(SharedVideoPipeline.compositedExactPreviewEffectsFor(clip)),
             livePreview = true,
             bitmap = bitmap,
+            // This is the first full creator-graph render in the emulator suite. SwiftShader cold
+            // compiles the resident V25 shader here; later tests reuse that compiled program.
+            outputTimeoutSeconds = 60L,
         )
 
         val sentinelClip = clip.copy(
@@ -193,6 +196,9 @@ class PreviewExportPixelParityInstrumentedTest {
             ),
             livePreview = false,
             bitmap = bitmap,
+            // Keep preview/export under the same bounded cold-start budget. This is test-only and
+            // does not change any phone rendering timeout.
+            outputTimeoutSeconds = 60L,
         )
 
         if (!bitmap.isRecycled) bitmap.recycle()
@@ -285,7 +291,7 @@ class PreviewExportPixelParityInstrumentedTest {
         effects: List<List<androidx.media3.common.Effect>>,
         livePreview: Boolean,
         bitmap: Bitmap,
-        outputTimeoutSeconds: Long = 10L,
+        outputTimeoutSeconds: Long = 25L,
     ): ByteArray {
         require(tracks.size == clips.size)
         require(tracks.size == inputTimestampsUs.size)
@@ -385,7 +391,7 @@ class PreviewExportPixelParityInstrumentedTest {
 
             assertTrue("Timed out waiting for graph output", outputLatch.await(outputTimeoutSeconds, TimeUnit.SECONDS))
             throwIfGraphFailed(error.get())
-            assertTrue("Timed out waiting for RGBA output", imageLatch.await(10, TimeUnit.SECONDS))
+            assertTrue("Timed out waiting for RGBA output", imageLatch.await(20, TimeUnit.SECONDS))
             throwIfGraphFailed(error.get())
             return requireNotNull(pixels.get()) { "No RGBA pixels captured" }
         } finally {
@@ -407,7 +413,7 @@ class PreviewExportPixelParityInstrumentedTest {
         bitmap: Bitmap,
         timestampUs: Long,
     ): Boolean {
-        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        val deadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
         while (System.nanoTime() < deadlineNs) {
             if (
                 graph.queueInputBitmap(
