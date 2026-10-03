@@ -44,6 +44,10 @@ struct FaceEngine {
     Roi roi;
     bool leftEyeClosed = false;
     bool rightEyeClosed = false;
+    Point leftPupilOffset;
+    Point rightPupilOffset;
+    bool leftPupilOffsetValid = false;
+    bool rightPupilOffsetValid = false;
     int frameCounter = 0;
     double lastInferenceMs = -1.0;
 
@@ -588,26 +592,34 @@ bool RunMesh(
         pixels, width, height, rightCenter, stableRoll,
         rightPupilHalfWidth, rightPupilHalfHeight, rightOpen);
 
-    // Source-point accuracy: keep the stable 8-point contour center as the fallback, but move a
-    // confident estimate farther toward the sampled pupil. Clamp the local displacement inside the
-    // eye ROI so eyelashes/eyebrows or a dark frame edge cannot drag the emitter out of the eye.
-    // This is deliberately per-frame (no temporal EMA) so source tracking does not lag fast motion.
+    // Stabilize the pupil/iris OFFSET relative to the current 8-point eye contour. This avoids
+    // absolute-position EMA lag: head translation/rotation follows the mesh immediately, while
+    // occasional pupil-sampling jitter, eyelashes and blink-darkness are damped locally.
     auto refineOrigin = [&](const Point& center, const PupilEstimate& pupil,
-                            float halfWidth, float halfHeight) {
-        const float confidenceWeight =
-            Clamp((pupil.confidence - .06f) / .24f, 0.f, 1.f);
-        const float weight = confidenceWeight * .86f;
-        const float lx = Clamp(
-            pupil.x * halfWidth * weight, -halfWidth * .82f, halfWidth * .82f);
-        const float ly = Clamp(
-            pupil.y * halfHeight * weight, -halfHeight * .72f, halfHeight * .72f);
+                            float halfWidth, float halfHeight, float openness,
+                            Point* previousOffset, bool* offsetValid) {
+        const Point rawOffset{
+            Clamp(pupil.x, -.58f, .58f),
+            Clamp(pupil.y, -.46f, .46f),
+        };
+        const Point stableOffset = face_tracking::StabilizePupilOffset(
+            *previousOffset, *offsetValid, rawOffset, pupil.confidence, openness);
+        if (*offsetValid || pupil.confidence >= .12f) {
+            *previousOffset = stableOffset;
+            *offsetValid = true;
+        }
+
+        const float lx = stableOffset.x * halfWidth;
+        const float ly = stableOffset.y * halfHeight;
         const float c = std::cos(stableRoll), s = std::sin(stableRoll);
         return Point{center.x + c * lx - s * ly, center.y + s * lx + c * ly};
     };
     const Point leftOrigin = refineOrigin(
-        leftCenter, leftPupil, leftPupilHalfWidth, leftPupilHalfHeight);
+        leftCenter, leftPupil, leftPupilHalfWidth, leftPupilHalfHeight, leftOpen,
+        &engine->leftPupilOffset, &engine->leftPupilOffsetValid);
     const Point rightOrigin = refineOrigin(
-        rightCenter, rightPupil, rightPupilHalfWidth, rightPupilHalfHeight);
+        rightCenter, rightPupil, rightPupilHalfWidth, rightPupilHalfHeight, rightOpen,
+        &engine->rightPupilOffset, &engine->rightPupilOffsetValid);
     output[0] = leftOrigin.x / width;
     output[1] = leftOrigin.y / height;
     output[5] = rightOrigin.x / width;
@@ -748,6 +760,10 @@ void WarmUp(FaceEngine* engine) {
     engine->roi = Roi{}; // Warm-up pixels must never seed the first real frame.
     engine->leftEyeClosed = false;
     engine->rightEyeClosed = false;
+    engine->leftPupilOffset = Point{};
+    engine->rightPupilOffset = Point{};
+    engine->leftPupilOffsetValid = false;
+    engine->rightPupilOffsetValid = false;
     engine->frameCounter = 0;
     engine->lastInferenceMs = -1.0;
 }
@@ -863,6 +879,10 @@ Java_com_tajuli_digitorandroid_editor_processing_NcnnVulkanFaceTrackingNativeV10
 
     if (!ok) {
         engine->roi.valid = false;
+        // A mesh loss/reacquire can jump to a materially different crop. Do not carry a stale
+        // iris offset across that discontinuity; the first confident reacquired pupil seeds fresh.
+        engine->leftPupilOffsetValid = false;
+        engine->rightPupilOffsetValid = false;
         Roi acquired;
         if (RunDetector(engine, pixels, width, height, &acquired)) {
             engine->roi = acquired;
