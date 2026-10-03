@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -217,6 +218,6 @@ private fun SpeedCurveGraph(points: List<SpeedCurvePoint>) {
             end = Offset(size.width, size.height - (1f / maxSpeed) * size.height),
             strokeWidth = 1f,
         )
-        drawPath(path, color = SpeedCurveAccent)
+        drawPath(path, color = SpeedCurveAccent, style = Stroke(width = 3f))
     }
 }
