@@ -14,12 +14,17 @@ import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
+import com.tajuli.digitorandroid.editor.model.SpeedCurveSchedule
+import com.tajuli.digitorandroid.editor.model.SpeedCurveSpec
 import com.tajuli.digitorandroid.editor.model.TimelineClip
+import com.tajuli.digitorandroid.editor.preview.PreviewExportCoordinator
 import java.io.File
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.ceil
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
@@ -31,19 +36,118 @@ class CreatorMediaProcessor(context: Context) {
         val uri: String,
         val durationUs: Long,
         val hasAudio: Boolean,
+        val smoothInterpolated: Boolean = false,
     )
 
     private val appContext = context.applicationContext
     private val outputDir = File(appContext.filesDir, "derived_media").apply { mkdirs() }
 
-    suspend fun bakeSpeed(clip: TimelineClip, speed: Float, frameRate: Int): DerivedMedia {
-        val safeSpeed = speed.coerceIn(.25f, 4f)
-        val output = nextFile("speed")
+    suspend fun bakeSpeed(clip: TimelineClip, speed: Float, frameRate: Int): DerivedMedia =
+        bakeSpeedCurve(
+            clip = clip,
+            curve = SpeedCurveSpec.constant(speed.coerceIn(.25f, 4f), smoothSlowMotion = false),
+            frameRate = frameRate,
+        )
+
+    /**
+     * Bakes a creator velocity curve into an ordinary MP4.
+     *
+     * Media3 owns the variable-speed audio clock so pitch/time handling stays synchronized with the
+     * video timing. When Smooth Slow Motion is enabled and the curve enters a sub-1x section, video
+     * is rendered directly from the original decoded frames at the project cadence. The source
+     * timestamps are mapped through the exact sampled schedule used by Media3; missing output
+     * instants are filled with intermediate frames rather than simple frame repeats.
+     */
+    suspend fun bakeSpeedCurve(
+        clip: TimelineClip,
+        curve: SpeedCurveSpec,
+        frameRate: Int,
+    ): DerivedMedia {
+        val normalized = curve.normalized()
+        val schedule = normalized.sampledSchedule(clip.durationUs)
         val sourceHasAudio = hasAudio(clip.uri)
-        val provider = object : SpeedProvider {
-            override fun getSpeed(timeUs: Long): Float = safeSpeed
-            override fun getNextSpeedChangeTimeUs(timeUs: Long): Long = C.TIME_UNSET
+        val smooth = normalized.smoothSlowMotion && normalized.hasSlowMotion
+
+        if (!smooth) {
+            val output = nextFile("speed_curve")
+            runCurveTransformer(
+                clip = clip,
+                schedule = schedule,
+                frameRate = frameRate,
+                output = output,
+                sourceHasAudio = sourceHasAudio,
+                audioOnly = false,
+            )
+            return DerivedMedia(
+                uri = output.toUriString(),
+                durationUs = schedule.outputDurationUs,
+                hasAudio = sourceHasAudio,
+            )
         }
+
+        val smoothVideo = nextFile("smooth_slowmo_video")
+        var retimedAudio: File? = null
+        var finalOutput: File? = null
+        try {
+            if (sourceHasAudio) {
+                retimedAudio = nextFile("speed_curve_audio")
+                runCurveTransformer(
+                    clip = clip,
+                    schedule = schedule,
+                    frameRate = frameRate,
+                    output = retimedAudio,
+                    sourceHasAudio = true,
+                    audioOnly = true,
+                )
+            }
+
+            renderSmoothCurveVideo(
+                clip = clip,
+                schedule = schedule,
+                frameRate = frameRate,
+                output = smoothVideo,
+            )
+
+            if (!sourceHasAudio) {
+                return DerivedMedia(
+                    uri = smoothVideo.toUriString(),
+                    durationUs = schedule.outputDurationUs,
+                    hasAudio = false,
+                    smoothInterpolated = true,
+                )
+            }
+
+            finalOutput = nextFile("speed_curve_smooth")
+            mergeVideoWithAudio(
+                videoFile = smoothVideo,
+                audioFile = checkNotNull(retimedAudio),
+                output = finalOutput,
+            )
+            smoothVideo.delete()
+            retimedAudio.delete()
+            return DerivedMedia(
+                uri = finalOutput.toUriString(),
+                durationUs = schedule.outputDurationUs,
+                hasAudio = true,
+                smoothInterpolated = true,
+            )
+        } catch (error: Throwable) {
+            smoothVideo.delete()
+            retimedAudio?.delete()
+            finalOutput?.delete()
+            throw error
+        }
+    }
+
+    private suspend fun runCurveTransformer(
+        clip: TimelineClip,
+        schedule: SpeedCurveSchedule,
+        frameRate: Int,
+        output: File,
+        sourceHasAudio: Boolean,
+        audioOnly: Boolean,
+    ) {
+        val provider = CurveSpeedProvider(schedule, clip.sourceInUs)
         val mediaItem = MediaItem.Builder()
             .setUri(clip.uri)
             .setClippingConfiguration(
@@ -53,21 +157,136 @@ class CreatorMediaProcessor(context: Context) {
                     .build(),
             )
             .build()
-        val edited = EditedMediaItem.Builder(mediaItem)
+        val builder = EditedMediaItem.Builder(mediaItem)
             .setSpeed(provider)
-            .setFrameRate(frameRate.coerceAtLeast(1))
-            .build()
-        val trackTypes = if (sourceHasAudio) {
-            setOf(C.TRACK_TYPE_VIDEO, C.TRACK_TYPE_AUDIO)
+        if (audioOnly) {
+            builder.setRemoveVideo(true)
         } else {
-            setOf(C.TRACK_TYPE_VIDEO)
+            builder.setFrameRate(frameRate.coerceAtLeast(1))
+        }
+        val edited = builder.build()
+        val trackTypes = when {
+            audioOnly -> setOf(C.TRACK_TYPE_AUDIO)
+            sourceHasAudio -> setOf(C.TRACK_TYPE_VIDEO, C.TRACK_TYPE_AUDIO)
+            else -> setOf(C.TRACK_TYPE_VIDEO)
         }
         val sequence = EditedMediaItemSequence.Builder(trackTypes).addItem(edited).build()
-        val composition = Composition.Builder(listOf(sequence)).build()
+        runTransformer(Composition.Builder(listOf(sequence)).build(), output)
+    }
 
-        runTransformer(composition, output)
-        val expectedDurationUs = (clip.durationUs.toDouble() / safeSpeed.toDouble()).toLong().coerceAtLeast(1L)
-        return DerivedMedia(output.toUriString(), expectedDurationUs, sourceHasAudio)
+    private suspend fun renderSmoothCurveVideo(
+        clip: TimelineClip,
+        schedule: SpeedCurveSchedule,
+        frameRate: Int,
+        output: File,
+    ) = withContext(Dispatchers.Default) {
+        val fps = frameRate.coerceIn(1, 60)
+        val frameStepUs = (1_000_000L / fps).coerceAtLeast(1L)
+        val coroutineContext = currentCoroutineContext()
+        val lease = PreviewExportCoordinator.acquireAnalysisLease("Smooth Slow Motion")
+        var encoder: CpuAvcEncoder? = null
+        var previousPixels: IntArray? = null
+        var previousOutputUs = 0L
+        var nextOutputUs = 0L
+        var targetWidth = 0
+        var targetHeight = 0
+        var blendScratch: IntArray? = null
+        try {
+            val decoder = GpuSequentialCutoutDecoderV47(
+                context = appContext,
+                analysisLongEdge = SMOOTH_MAX_LONG_EDGE,
+            )
+            decoder.decodeTargets(
+                uri = Uri.parse(clip.uri),
+                startUs = clip.sourceInUs,
+                endUs = clip.sourceOutUs,
+                targetTimesUs = emptyList(),
+                emitEveryFrame = true,
+            ) { sourceTimeUs, bitmap ->
+                coroutineContext.ensureActive()
+                try {
+                    if (encoder == null) {
+                        targetWidth = even(bitmap.width)
+                        targetHeight = even(bitmap.height)
+                        encoder = CpuAvcEncoder(targetWidth, targetHeight, fps, output)
+                        blendScratch = IntArray(targetWidth * targetHeight)
+                    }
+                    val currentPixels = framePixels(bitmap, targetWidth, targetHeight)
+                    val mappedOutputUs = schedule.outputTimeForSourceTime(
+                        (sourceTimeUs - clip.sourceInUs).coerceIn(0L, schedule.durationUs),
+                    )
+                    val previous = previousPixels
+                    if (previous == null) {
+                        while (nextOutputUs <= mappedOutputUs && nextOutputUs < schedule.outputDurationUs) {
+                            encoder?.encodeFrame(currentPixels, nextOutputUs)
+                            nextOutputUs += frameStepUs
+                        }
+                    } else if (mappedOutputUs > previousOutputUs) {
+                        val span = (mappedOutputUs - previousOutputUs).coerceAtLeast(1L)
+                        while (nextOutputUs <= mappedOutputUs && nextOutputUs < schedule.outputDurationUs) {
+                            val amount = ((nextOutputUs - previousOutputUs).toDouble() / span.toDouble())
+                                .toFloat()
+                                .coerceIn(0f, 1f)
+                            val pixels = when {
+                                amount <= .0001f -> previous
+                                amount >= .9999f -> currentPixels
+                                else -> SmoothFrameInterpolator.blendArgb(
+                                    previous,
+                                    currentPixels,
+                                    amount,
+                                    checkNotNull(blendScratch),
+                                )
+                            }
+                            encoder?.encodeFrame(pixels, nextOutputUs)
+                            nextOutputUs += frameStepUs
+                        }
+                    }
+                    previousPixels = currentPixels
+                    previousOutputUs = mappedOutputUs
+                } finally {
+                    if (!bitmap.isRecycled) bitmap.recycle()
+                }
+            }
+
+            val last = previousPixels ?: error("No video frames decoded for Smooth Slow Motion")
+            val liveEncoder = encoder ?: error("Smooth Slow Motion encoder was not created")
+            if (nextOutputUs == 0L) {
+                liveEncoder.encodeFrame(last, 0L)
+                nextOutputUs = frameStepUs
+            }
+            while (nextOutputUs < schedule.outputDurationUs) {
+                coroutineContext.ensureActive()
+                liveEncoder.encodeFrame(last, nextOutputUs)
+                nextOutputUs += frameStepUs
+            }
+            liveEncoder.finish()
+        } catch (error: Throwable) {
+            output.delete()
+            throw error
+        } finally {
+            runCatching { encoder?.close() }
+            lease.close()
+        }
+    }
+
+    private suspend fun mergeVideoWithAudio(
+        videoFile: File,
+        audioFile: File,
+        output: File,
+    ) {
+        val videoItem = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(videoFile)))
+            .setRemoveAudio(true)
+            .build()
+        val audioItem = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(audioFile)))
+            .setRemoveVideo(true)
+            .build()
+        val videoSequence = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
+            .addItem(videoItem)
+            .build()
+        val audioSequence = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
+            .addItem(audioItem)
+            .build()
+        runTransformer(Composition.Builder(listOf(videoSequence, audioSequence)).build(), output)
     }
 
     suspend fun reverseVideo(clip: TimelineClip, frameRate: Int): DerivedMedia = withContext(Dispatchers.Default) {
@@ -208,5 +427,36 @@ class CreatorMediaProcessor(context: Context) {
     private fun even(value: Int): Int {
         val safe = value.coerceAtLeast(2)
         return if (safe % 2 == 0) safe else safe - 1
+    }
+
+    private class CurveSpeedProvider(
+        private val schedule: SpeedCurveSchedule,
+        private val sourceOffsetUs: Long,
+    ) : SpeedProvider {
+        private var absoluteClock: Boolean? = null
+
+        override fun getSpeed(timeUs: Long): Float =
+            schedule.speedAtSourceTime(relativeTime(timeUs))
+
+        override fun getNextSpeedChangeTimeUs(timeUs: Long): Long {
+            val relative = relativeTime(timeUs)
+            val next = schedule.nextChangeAfter(relative) ?: return C.TIME_UNSET
+            return if (absoluteClock == true) sourceOffsetUs + next else next
+        }
+
+        private fun relativeTime(timeUs: Long): Long {
+            if (absoluteClock == null) {
+                absoluteClock = sourceOffsetUs > 0L && timeUs >= sourceOffsetUs
+            }
+            return if (absoluteClock == true) {
+                (timeUs - sourceOffsetUs).coerceIn(0L, schedule.durationUs)
+            } else {
+                timeUs.coerceIn(0L, schedule.durationUs)
+            }
+        }
+    }
+
+    private companion object {
+        const val SMOOTH_MAX_LONG_EDGE = 4_096
     }
 }
