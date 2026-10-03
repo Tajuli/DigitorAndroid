@@ -223,10 +223,16 @@ assert 'EffectDirectionFromLandmarks' in tracker_contract, (
     'Face/nose/ear/mouth fused direction tracking missing')
 assert 'ScreenYawRight(orientation)' in tracker_contract, (
     'Camera-space face yaw must be converted to screen-left/right before beam rendering')
-assert 'const float weight = confidenceWeight * .86f;' in tracker_contract, (
-    'Eye-effect source must weight a confident sampled pupil more strongly')
-assert 'halfWidth * .82f' in tracker_contract and 'halfHeight * .72f' in tracker_contract, (
-    'Pupil-refined source must remain clamped inside the eye ROI')
+assert 'StabilizePupilOffset' in tracker_contract, (
+    'Eye-effect source must stabilize pupil offset in local eye coordinates')
+assert 'Clamp(pupil.x, -.58f, .58f)' in tracker_contract and (
+    'Clamp(pupil.y, -.46f, .46f)' in tracker_contract
+), 'Pupil source must stay inside an iris-safe local eye range'
+assert '&engine->leftPupilOffset' in tracker_contract and '&engine->rightPupilOffset' in tracker_contract, (
+    'Left/right iris offsets must keep independent temporal state')
+assert 'engine->leftPupilOffsetValid = false;' in tracker_contract and (
+    'engine->rightPupilOffsetValid = false;' in tracker_contract
+), 'Mesh reacquire must reset stale iris-offset state'
 assert tracker_contract.count('EyeContourCenter') >= 2, (
     'Multi-point eye contour source tracking missing')
 assert 'const float gazeX = headYaw;' in tracker_contract and 'const float gazeY = headPitch;' in tracker_contract, (
