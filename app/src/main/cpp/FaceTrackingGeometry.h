@@ -190,6 +190,52 @@ inline float Distance(const Point& a, const Point& b) {
     return std::sqrt(dx * dx + dy * dy);
 }
 
+// Stabilize only the pupil offset INSIDE the current eye, never the absolute eye position.
+ // The contour itself follows the face every decoded frame, so head motion remains immediate while
+ // a noisy/dark pupil sample cannot make an effect source wander off the iris.
+inline Point StabilizePupilOffset(
+        const Point& previous,
+        bool hasPrevious,
+        const Point& raw,
+        float confidence,
+        float openness) {
+    const float conf = std::clamp(
+        std::isfinite(confidence) ? confidence : 0.f, 0.f, 1.f);
+    const float open = std::clamp(
+        std::isfinite(openness) ? openness : 0.f, 0.f, 1.f);
+    const Point bounded{
+        std::clamp(std::isfinite(raw.x) ? raw.x : 0.f, -.58f, .58f),
+        std::clamp(std::isfinite(raw.y) ? raw.y : 0.f, -.46f, .46f),
+    };
+
+    if (!hasPrevious) {
+        // Do not seed a persistent offset from an uncertain first sample.
+        return conf >= .12f ? bounded : Point{};
+    }
+    if (conf < .075f) return previous;
+
+    const float trust = std::clamp((conf - .10f) / .62f, 0.f, 1.f);
+    float alpha = .18f + .64f * trust; // responsive at high confidence, steady otherwise.
+
+    // During a blink/very narrow eye, dark eyelashes can win the pupil sampler. Keep the previous
+    // local iris offset and let the current contour carry it with the moving face.
+    if (open < .35f) alpha *= .28f;
+
+    const float dx = bounded.x - previous.x;
+    const float dy = bounded.y - previous.y;
+    const float jump = std::sqrt(dx * dx + dy * dy);
+    if (jump > .30f) {
+        // A genuine large eye movement is accepted quickly only when the image evidence is strong.
+        const float highConfidence = std::clamp((conf - .62f) / .25f, 0.f, 1.f);
+        alpha *= .24f + .62f * highConfidence;
+    }
+
+    return Point{
+        std::clamp(previous.x + dx * alpha, -.58f, .58f),
+        std::clamp(previous.y + dy * alpha, -.46f, .46f),
+    };
+}
+
 inline float EyeAspectRatio(
         const Point& outer,
         const Point& inner,
