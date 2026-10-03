@@ -163,8 +163,16 @@ data class SpeedCurveSchedule(
         return speeds[lo].coerceIn(MIN_SPEED_CURVE_SPEED, MAX_SPEED_CURVE_SPEED)
     }
 
-    fun nextChangeAfter(relativeSourceUs: Long): Long? =
-        startTimesUs.firstOrNull { it > relativeSourceUs }
+    fun nextChangeAfter(relativeSourceUs: Long): Long? {
+        val time = relativeSourceUs.coerceIn(0L, durationUs)
+        var lo = 0
+        var hi = startTimesUs.size
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            if (startTimesUs[mid] <= time) lo = mid + 1 else hi = mid
+        }
+        return startTimesUs.getOrNull(lo)
+    }
 
     fun outputTimeForSourceTime(relativeSourceUs: Long): Long {
         val target = relativeSourceUs.coerceIn(0L, durationUs)
