@@ -149,6 +149,43 @@ class NodeAnimations {
         if (keys.size < 2) return false
         return keys.map { it.node.advancedColor.qualifier }.distinct().size > 1
     }
+
+
+    /**
+     * Preserve node-domain animation when the selected trim is baked into a new 0-based source.
+     * Keys outside the visible trim are discarded because they do not exist in the derived media.
+     */
+    fun retimedForBakedClip(
+        sourceInUs: Long,
+        sourceOutUs: Long,
+        schedule: SpeedCurveSchedule,
+    ): NodeAnimations {
+        val result = NodeAnimations()
+        tracks.forEach { (trackKey, track) ->
+            val mapped = track.keyframes
+                .asSequence()
+                .filter { it.sourceTimeUs in sourceInUs..sourceOutUs }
+                .map { keyframe ->
+                    val localUs = (keyframe.sourceTimeUs - sourceInUs).coerceIn(0L, schedule.durationUs)
+                    keyframe.copy(
+                        sourceTimeUs = schedule.outputTimeForSourceTime(localUs),
+                        node = keyframe.node.retimedEffectTimingV26(sourceInUs, sourceOutUs, schedule),
+                    )
+                }
+                .sortedBy { it.sourceTimeUs }
+                .fold(mutableListOf<NodeSnapshotKeyframe>()) { out, keyframe ->
+                    if (out.lastOrNull()?.sourceTimeUs == keyframe.sourceTimeUs) {
+                        out[out.lastIndex] = keyframe
+                    } else {
+                        out += keyframe
+                    }
+                    out
+                }
+            if (mapped.isNotEmpty()) result.tracks[trackKey] = NodeAnimationTrack(mapped)
+        }
+        if (result.tracks.isNotEmpty()) result.revisionCounter.set(revisionCounter.get() + 1L)
+        return result
+    }
 }
 
 private fun applyDomain(base: ColorNode, source: ColorNode, domain: NodeAnimationDomain): ColorNode = when (domain) {
