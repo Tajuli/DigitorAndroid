@@ -3,12 +3,13 @@ package com.tajuli.digitorandroid.editor.model
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 class SpeedCurveTest {
     @Test
     fun constantCurveHasExpectedDuration() {
         val schedule = SpeedCurveSpec.constant(.5f).sampledSchedule(2_000_000L)
-        assertEquals(4_000_000L, schedule.outputDurationUs, 30_000L)
+        assertTrue(abs(schedule.outputDurationUs - 4_000_000L) <= 30_000L)
         assertEquals(.5f, schedule.speedAtSourceTime(1_000_000L), .01f)
     }
 
