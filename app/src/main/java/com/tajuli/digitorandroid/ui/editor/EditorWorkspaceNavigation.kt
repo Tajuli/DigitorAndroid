@@ -77,6 +77,7 @@ internal fun EditorWorkspaceContent(
                 selectedClipIds = state.selectedClipIds,
                 selectedClip = selectedClip,
                 cursorUs = cursorUs,
+                busyOperation = state.busyOperation,
                 vm = vm,
                 onSeek = onSeek,
                 onSelectTrack = vm::selectTrack,

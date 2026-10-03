@@ -25,6 +25,9 @@ import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.NodePosition
 import com.tajuli.digitorandroid.editor.model.ProjectStore
 import com.tajuli.digitorandroid.editor.model.RgbCurves
+import com.tajuli.digitorandroid.editor.model.SpeedCurveSpec
+import com.tajuli.digitorandroid.editor.model.retimedBy
+import com.tajuli.digitorandroid.editor.model.retimedEffectTimingV26
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
@@ -685,12 +688,45 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         publish(state.copy(busyOperation = "Speed ${safeSpeed}x", status = "Baking speed…"))
         viewModelScope.launch {
             runCatching { creatorMedia.bakeSpeed(selected, safeSpeed, state.project.frameRate) }
-                .onSuccess { derived -> applyDerivedSpeed(selected, derived, safeSpeed) }
+                .onSuccess { derived -> applyDerivedSpeed(selected, derived, "${safeSpeed}x") }
                 .onFailure { error -> publish(_state.value.copy(busyOperation = null, status = error.message ?: "Speed failed")) }
         }
     }
 
-    private fun applyDerivedSpeed(original: TimelineClip, derived: CreatorMediaProcessor.DerivedMedia, speed: Float) {
+    fun bakeSelectedSpeedCurve(curve: SpeedCurveSpec) {
+        val state = _state.value
+        val selected = state.project.clip(state.selectedClipId) ?: return
+        if (state.project.trackContaining(selected.id)?.kind != TrackKind.VIDEO || state.busyOperation != null) return
+        val normalized = curve.normalized()
+        val label = normalized.preset.label
+        publish(
+            state.copy(
+                busyOperation = "Velocity Curve",
+                status = if (normalized.smoothSlowMotion) {
+                    "Baking ${label} velocity + Smooth Slow Motion…"
+                } else {
+                    "Baking ${label} velocity…"
+                },
+            ),
+        )
+        viewModelScope.launch {
+            runCatching { creatorMedia.bakeSpeedCurve(selected, normalized, state.project.frameRate) }
+                .onSuccess { derived ->
+                    val suffix = if (derived.smoothInterpolated) " · Smooth" else ""
+                    applyDerivedSpeed(selected, derived, "${label} velocity${suffix}")
+                }
+                .onFailure { error ->
+                    publish(
+                        _state.value.copy(
+                            busyOperation = null,
+                            status = error.message ?: "Velocity curve failed",
+                        ),
+                    )
+                }
+        }
+    }
+
+    private fun applyDerivedSpeed(original: TimelineClip, derived: CreatorMediaProcessor.DerivedMedia, label: String) {
         val state = _state.value
         val project = state.project
         val liveOriginal = project.clip(original.id) ?: run { publish(state.copy(busyOperation = null)); return }
@@ -701,6 +737,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val linkedIds = project.linkedClipIds(liveOriginal.id)
         val linkGroup = if (derived.hasAudio) liveOriginal.linkGroupId else null
         val timeRatio = newDuration.toDouble() / oldDuration.toDouble()
+        val retimeSchedule = derived.retimeSchedule
         checkpoint("speed-bake")
         val tracks = project.tracks.map { track ->
             val rebuilt = mutableListOf<TimelineClip>()
@@ -711,8 +748,25 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         sourceInUs = 0L,
                         sourceOutUs = newDuration,
                         linkGroupId = linkGroup,
-                        transform = clip.transform.retimed(timeRatio),
-                        nodeAnimations = NodeAnimations(),
+                        nodeGraph = retimeSchedule?.let { schedule ->
+                            clip.nodeGraph.retimedEffectTimingV26(
+                                clip.sourceInUs,
+                                clip.sourceOutUs,
+                                schedule,
+                            )
+                        } ?: clip.nodeGraph,
+                        transform = retimeSchedule?.let { schedule ->
+                            clip.transform.retimedBy { localUs ->
+                                schedule.outputTimeForSourceTime(localUs.coerceIn(0L, schedule.durationUs))
+                            }
+                        } ?: clip.transform.retimed(timeRatio),
+                        nodeAnimations = retimeSchedule?.let { schedule ->
+                            clip.nodeAnimations.retimedForBakedClip(
+                                clip.sourceInUs,
+                                clip.sourceOutUs,
+                                schedule,
+                            )
+                        } ?: NodeAnimations(),
                         virtualCameraStabilizationV1 = null,
                     )
                     clip.id in linkedIds && track.kind == TrackKind.AUDIO && derived.hasAudio -> rebuilt += clip.copy(
@@ -735,7 +789,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             if (overlay.timelineStartUs >= oldEnd) overlay.copy(timelineStartUs = overlay.timelineStartUs + delta, timelineEndUs = overlay.timelineEndUs + delta) else overlay
         }
         val next = project.copy(tracks = tracks, textOverlays = overlays, visualOverlaysV19 = visualOverlays)
-        publish(state.copy(project = next, busyOperation = null, status = "Speed ${speed}x baked"))
+        publish(state.copy(project = next, busyOperation = null, status = "${label} baked"))
     }
 
     fun reverseSelectedVideo() {
