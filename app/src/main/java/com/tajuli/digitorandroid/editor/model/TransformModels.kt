@@ -228,3 +228,23 @@ data class ClipTransform(
             min(max(0L, timelineUs - clipStartUs), max(0L, clipDurationUs))
     }
 }
+
+
+/** Remap clip-local transform keyframes through an arbitrary monotonic retime map. */
+fun ClipTransform.retimedBy(mapTimeUs: (Long) -> Long): ClipTransform = copy(
+    positionX = positionX.retimedBy(mapTimeUs),
+    positionY = positionY.retimedBy(mapTimeUs),
+    scaleX = scaleX.retimedBy(mapTimeUs),
+    scaleY = scaleY.retimedBy(mapTimeUs),
+    rotationDegrees = rotationDegrees.retimedBy(mapTimeUs),
+)
+
+private fun AnimatedFloat.retimedBy(mapTimeUs: (Long) -> Long): AnimatedFloat = copy(
+    keyframes = keyframes
+        .map { key -> key.copy(timeUs = mapTimeUs(key.timeUs.coerceAtLeast(0L)).coerceAtLeast(0L)) }
+        .sortedBy { it.timeUs }
+        .fold(mutableListOf()) { out, key ->
+            if (out.lastOrNull()?.timeUs == key.timeUs) out[out.lastIndex] = key else out += key
+            out
+        },
+)
