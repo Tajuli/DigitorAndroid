@@ -159,23 +159,15 @@ fun CreatorMediaWorkspace(
                 }
             }
 
-            SectionCardV8("Speed / Reverse / Freeze") {
+            SectionCardV8("Speed / Velocity / Freeze") {
                 if (!selectedIsVideo) {
                     Text("Select a video clip", fontSize = 8.sp, color = C8Muted)
                 } else {
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                    ) {
-                        listOf(.5f, .75f, 1.25f, 1.5f, 2f, 3f).forEach { speed ->
-                            FilledTonalButton(
-                                enabled = busyOperation == null,
-                                onClick = { vm.bakeSelectedSpeed(speed) },
-                            ) {
-                                Text("${speed}x", fontSize = 8.sp)
-                            }
-                        }
-                    }
+                    SpeedCurveWorkspace(
+                        clip = selectedClip!!,
+                        busyOperation = busyOperation,
+                        vm = vm,
+                    )
                     Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                         Button(enabled = busyOperation == null, onClick = vm::reverseSelectedVideo) {
                             Text("Reverse", fontSize = 8.sp)
