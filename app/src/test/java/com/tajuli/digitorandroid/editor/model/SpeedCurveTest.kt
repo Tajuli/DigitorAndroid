@@ -42,4 +42,46 @@ class SpeedCurveTest {
         assertEquals(1f, curve.points.last().position, 0f)
         assertTrue(curve.points.zipWithNext().all { (a, b) -> b.position > a.position })
     }
+
+    @Test
+    fun transformKeyframesUseExactCurveMap() {
+        val schedule = SpeedCurveSpec.constant(.5f).sampledSchedule(4_000_000L)
+        val transform = ClipTransform(
+            positionX = AnimatedFloat(
+                baseValue = 0f,
+                keyframes = listOf(FloatKeyframe(timeUs = 1_000_000L, value = .75f)),
+            ),
+        )
+        val mapped = transform.retimedBy(schedule::outputTimeForSourceTime)
+        assertTrue(abs(mapped.positionX.keyframes.single().timeUs - 2_000_000L) <= 30_000L)
+        assertEquals(.75f, mapped.positionX.keyframes.single().value, 0f)
+    }
+
+    @Test
+    fun timedEffectBoundsAndNodeKeysMoveToBakedSource() {
+        val sourceInUs = 1_000_000L
+        val sourceOutUs = 5_000_000L
+        val schedule = SpeedCurveSpec.constant(.5f).sampledSchedule(sourceOutUs - sourceInUs)
+        val effect = NodeEffect(
+            name = "Glow",
+            sourceStartUsV26 = 2_000_000L,
+            sourceEndUsV26 = 3_000_000L,
+        )
+        val mappedEffect = effect.retimedForBakedClipV26(sourceInUs, sourceOutUs, schedule)
+        assertTrue(abs(checkNotNull(mappedEffect.sourceStartUsV26) - 2_000_000L) <= 30_000L)
+        assertTrue(abs(checkNotNull(mappedEffect.sourceEndUsV26) - 4_000_000L) <= 30_000L)
+
+        val node = ColorNode(
+            kind = NodeKind.SERIAL,
+            label = "01",
+            position = NodePosition(0f, 0f),
+        )
+        val animations = NodeAnimations().apply {
+            toggle(node, NodeAnimationDomain.CORRECTION, 2_000_000L)
+        }
+        val mappedAnimations = animations.retimedForBakedClip(sourceInUs, sourceOutUs, schedule)
+        val mappedTime = mappedAnimations.keyframeTimes(node.id, NodeAnimationDomain.CORRECTION).single()
+        assertTrue(abs(mappedTime - 2_000_000L) <= 30_000L)
+    }
+
 }
