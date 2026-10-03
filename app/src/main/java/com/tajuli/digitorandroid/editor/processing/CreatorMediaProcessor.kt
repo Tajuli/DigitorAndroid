@@ -37,6 +37,7 @@ class CreatorMediaProcessor(context: Context) {
         val durationUs: Long,
         val hasAudio: Boolean,
         val smoothInterpolated: Boolean = false,
+        val retimeSchedule: SpeedCurveSchedule? = null,
     )
 
     private val appContext = context.applicationContext
@@ -82,6 +83,7 @@ class CreatorMediaProcessor(context: Context) {
                 uri = output.toUriString(),
                 durationUs = schedule.outputDurationUs,
                 hasAudio = sourceHasAudio,
+                retimeSchedule = schedule,
             )
         }
 
@@ -114,6 +116,7 @@ class CreatorMediaProcessor(context: Context) {
                     durationUs = schedule.outputDurationUs,
                     hasAudio = false,
                     smoothInterpolated = true,
+                    retimeSchedule = schedule,
                 )
             }
 
@@ -130,6 +133,7 @@ class CreatorMediaProcessor(context: Context) {
                 durationUs = schedule.outputDurationUs,
                 hasAudio = true,
                 smoothInterpolated = true,
+                retimeSchedule = schedule,
             )
         } catch (error: Throwable) {
             smoothVideo.delete()
