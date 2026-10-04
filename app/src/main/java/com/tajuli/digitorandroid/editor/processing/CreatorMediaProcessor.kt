@@ -2,6 +2,8 @@ package com.tajuli.digitorandroid.editor.processing
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.media3.common.C
@@ -43,11 +45,12 @@ class CreatorMediaProcessor(context: Context) {
     private val appContext = context.applicationContext
     private val outputDir = File(appContext.filesDir, "derived_media").apply { mkdirs() }
 
-    suspend fun bakeSpeed(clip: TimelineClip, speed: Float, frameRate: Int): DerivedMedia =
+    suspend fun bakeSpeed(clip: TimelineClip, speed: Float, frameRate: Int, linkedAudio: TimelineClip? = null): DerivedMedia =
         bakeSpeedCurve(
             clip = clip,
             curve = SpeedCurveSpec.constant(speed.coerceIn(.25f, 4f), smoothSlowMotion = false),
             frameRate = frameRate,
+            linkedAudio = linkedAudio,
         )
 
     /**
@@ -63,13 +66,28 @@ class CreatorMediaProcessor(context: Context) {
         clip: TimelineClip,
         curve: SpeedCurveSpec,
         frameRate: Int,
+        linkedAudio: TimelineClip? = null,
     ): DerivedMedia {
         val normalized = curve.normalized()
         val schedule = normalized.sampledSchedule(clip.durationUs)
-        val sourceHasAudio = hasAudio(clip.uri)
+        val audioSource = linkedAudio ?: clip
+        val sourceHasAudio = hasAudio(audioSource.uri)
+        check(linkedAudio == null || sourceHasAudio) {
+            "The linked audio source cannot be read. Speed was not applied."
+        }
+        val separateAudio = linkedAudio != null && (
+            audioSource.uri != clip.uri || audioSource.sourceInUs != clip.sourceInUs ||
+                audioSource.sourceOutUs != clip.sourceOutUs
+            )
+        // Linked video/audio normally share a source window. Do not silently stretch a separately
+        // trimmed or offset sound to the full video duration.
+        check(linkedAudio == null || (audioSource.durationUs == clip.durationUs &&
+            audioSource.timelineStartUs == clip.timelineStartUs)) {
+            "Align the linked audio with the video before changing speed."
+        }
         val smooth = normalized.smoothSlowMotion && normalized.hasSlowMotion
 
-        if (!smooth) {
+        if (!smooth && !separateAudio) {
             val output = nextFile("speed_curve")
             runCurveTransformer(
                 clip = clip,
@@ -79,6 +97,7 @@ class CreatorMediaProcessor(context: Context) {
                 sourceHasAudio = sourceHasAudio,
                 audioOnly = false,
             )
+            requireAudioOutput(output, sourceHasAudio)
             return DerivedMedia(
                 uri = output.toUriString(),
                 durationUs = schedule.outputDurationUs,
@@ -94,7 +113,7 @@ class CreatorMediaProcessor(context: Context) {
             if (sourceHasAudio) {
                 retimedAudio = nextFile("speed_curve_audio")
                 runCurveTransformer(
-                    clip = clip,
+                    clip = audioSource,
                     schedule = schedule,
                     frameRate = frameRate,
                     output = retimedAudio,
@@ -103,12 +122,12 @@ class CreatorMediaProcessor(context: Context) {
                 )
             }
 
-            renderSmoothCurveVideo(
-                clip = clip,
-                schedule = schedule,
-                frameRate = frameRate,
-                output = smoothVideo,
-            )
+            if (smooth) {
+                renderSmoothCurveVideo(clip, schedule, frameRate, smoothVideo)
+            } else {
+                runCurveTransformer(clip, schedule, frameRate, smoothVideo,
+                    sourceHasAudio = false, audioOnly = false)
+            }
 
             if (!sourceHasAudio) {
                 return DerivedMedia(
@@ -126,13 +145,14 @@ class CreatorMediaProcessor(context: Context) {
                 audioFile = checkNotNull(retimedAudio),
                 output = finalOutput,
             )
+            requireAudioOutput(finalOutput, expected = true)
             smoothVideo.delete()
             retimedAudio.delete()
             return DerivedMedia(
                 uri = finalOutput.toUriString(),
                 durationUs = schedule.outputDurationUs,
                 hasAudio = true,
-                smoothInterpolated = true,
+                smoothInterpolated = smooth,
                 retimeSchedule = schedule,
             )
         } catch (error: Throwable) {
@@ -162,6 +182,7 @@ class CreatorMediaProcessor(context: Context) {
             )
             .build()
         val builder = EditedMediaItem.Builder(mediaItem)
+            .setRemoveAudio(!sourceHasAudio)
             .setSpeed(provider)
         if (audioOnly) {
             builder.setRemoveVideo(true)
@@ -410,16 +431,29 @@ class CreatorMediaProcessor(context: Context) {
         }
     }
 
+    /** Inspect actual tracks; missing retriever metadata must not mean "delete linked audio". */
     private fun hasAudio(uri: String): Boolean {
-        val retriever = MediaMetadataRetriever()
+        val extractor = MediaExtractor()
         return try {
-            retriever.setDataSource(appContext, Uri.parse(uri))
-            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
-                ?.equals("yes", ignoreCase = true) == true
-        } catch (_: Throwable) {
-            false
+            extractor.setDataSource(appContext, Uri.parse(uri), null)
+            (0 until extractor.trackCount).any { index ->
+                extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)
+                    ?.startsWith("audio/") == true
+            }
         } finally {
-            retriever.release()
+            extractor.release()
+        }
+    }
+
+    private fun requireAudioOutput(output: File, expected: Boolean) {
+        if (!expected) return
+        try {
+            check(hasAudio(output.toUriString())) {
+                "Speed processing produced no audio. The original clip has been kept."
+            }
+        } catch (error: Throwable) {
+            output.delete()
+            throw error
         }
     }
 

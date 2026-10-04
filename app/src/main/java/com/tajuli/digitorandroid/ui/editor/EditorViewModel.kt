@@ -687,7 +687,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val safeSpeed = speed.coerceIn(.25f, 4f)
         publish(state.copy(busyOperation = "Speed ${safeSpeed}x", status = "Baking speed…"))
         viewModelScope.launch {
-            runCatching { creatorMedia.bakeSpeed(selected, safeSpeed, state.project.frameRate) }
+            runCatching { creatorMedia.bakeSpeed(selected, safeSpeed, state.project.frameRate, linkedSpeedAudio(state.project, selected)) }
                 .onSuccess { derived -> applyDerivedSpeed(selected, derived, "${safeSpeed}x") }
                 .onFailure { error -> publish(_state.value.copy(busyOperation = null, status = error.message ?: "Speed failed")) }
         }
@@ -710,7 +710,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             ),
         )
         viewModelScope.launch {
-            runCatching { creatorMedia.bakeSpeedCurve(selected, normalized, state.project.frameRate) }
+            runCatching { creatorMedia.bakeSpeedCurve(selected, normalized, state.project.frameRate, linkedSpeedAudio(state.project, selected)) }
                 .onSuccess { derived ->
                     val suffix = if (derived.smoothInterpolated) " · Smooth" else ""
                     applyDerivedSpeed(selected, derived, "${label} velocity${suffix}")
@@ -726,6 +726,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun linkedSpeedAudio(project: TimelineProject, video: TimelineClip): TimelineClip? {
+        val linkedIds = project.linkedClipIds(video.id)
+        return project.tracks.asSequence().filter { it.kind == TrackKind.AUDIO }
+            .flatMap { it.clips.asSequence() }.firstOrNull { it.id in linkedIds }
+    }
+
     private fun applyDerivedSpeed(original: TimelineClip, derived: CreatorMediaProcessor.DerivedMedia, label: String) {
         val state = _state.value
         val project = state.project
@@ -738,6 +744,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val linkGroup = if (derived.hasAudio) liveOriginal.linkGroupId else null
         val timeRatio = newDuration.toDouble() / oldDuration.toDouble()
         val retimeSchedule = derived.retimeSchedule
+        if (!derived.hasAudio && linkedSpeedAudio(project, liveOriginal) != null) {
+            publish(state.copy(busyOperation = null, status = "Speed output has no linked audio; original clip kept"))
+            return
+        }
         checkpoint("speed-bake")
         val tracks = project.tracks.map { track ->
             val rebuilt = mutableListOf<TimelineClip>()
