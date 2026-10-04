@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.processing
 
+import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
@@ -28,6 +29,61 @@ class SpeedAudioInstrumentedTest {
     @Test fun slowVideoKeepsLinkedAudio() = verify(.5f, false)
     @Test fun fastVideoKeepsLinkedAudio() = verify(2f, false)
     @Test fun smoothVideoKeepsLinkedAudio() = verify(.5f, true)
+
+    /** Container/packet checks pass even for encoded digital silence; decode the actual waveform. */
+    private fun assertAudible(context: android.content.Context, uri: String) {
+        val extractor = MediaExtractor()
+        var decoder: MediaCodec? = null
+        try {
+            extractor.setDataSource(context, Uri.parse(uri), null)
+            val track = (0 until extractor.trackCount).first {
+                extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+            }
+            extractor.selectTrack(track)
+            val format = extractor.getTrackFormat(track)
+            val codec = MediaCodec.createDecoderByType(checkNotNull(format.getString(MediaFormat.KEY_MIME)))
+            decoder = codec
+            format.setInteger(MediaFormat.KEY_PCM_ENCODING, android.media.AudioFormat.ENCODING_PCM_16BIT)
+            codec.configure(format, null, null, 0)
+            codec.start()
+            val info = MediaCodec.BufferInfo()
+            var inputEnded = false
+            var ended = false
+            var peak = 0
+            val deadline = android.os.SystemClock.elapsedRealtime() + 30_000L
+            while (!ended && android.os.SystemClock.elapsedRealtime() < deadline) {
+                if (!inputEnded) {
+                    val inputIndex = codec.dequeueInputBuffer(10_000)
+                    if (inputIndex >= 0) {
+                        val buffer = checkNotNull(codec.getInputBuffer(inputIndex)).apply { clear() }
+                        val count = extractor.readSampleData(buffer, 0)
+                        if (count < 0) {
+                            codec.queueInputBuffer(inputIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputEnded = true
+                        } else {
+                            codec.queueInputBuffer(inputIndex, 0, count, extractor.sampleTime, 0)
+                            extractor.advance()
+                        }
+                    }
+                }
+                val index = codec.dequeueOutputBuffer(info, 10_000)
+                if (index >= 0) {
+                    val pcm = checkNotNull(codec.getOutputBuffer(index)).order(ByteOrder.LITTLE_ENDIAN)
+                    pcm.position(info.offset)
+                    pcm.limit(info.offset + info.size)
+                    while (pcm.remaining() >= 2) peak = maxOf(peak, abs(pcm.short.toInt()))
+                    ended = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                    codec.releaseOutputBuffer(index, false)
+                }
+            }
+            assertTrue("Audio decode timed out", ended)
+            assertTrue("Retimed tone became silence: peak=$peak", peak > 1000)
+        } finally {
+            runCatching { decoder?.stop() }
+            decoder?.release()
+            extractor.release()
+        }
+    }
 
     private fun verify(speed: Float, smooth: Boolean) = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -59,6 +115,7 @@ class SpeedAudioInstrumentedTest {
             }
             result = baked
             assertTrue(baked.hasAudio)
+            assertAudible(context, baked.uri)
             val extractor = MediaExtractor()
             try {
                 extractor.setDataSource(context, Uri.parse(baked.uri), null)

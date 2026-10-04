@@ -8,6 +8,8 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
+import com.tajuli.digitorandroid.editor.model.SpeedCurveSchedule
+import com.tajuli.digitorandroid.editor.model.SpeedCurveTimeMap
 import com.tajuli.digitorandroid.editor.model.ClipAudioDspV78
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
@@ -61,6 +63,7 @@ internal class NativeAudioMixdownV76(
         project: TimelineProject,
         output: File,
         onProgress: (ExportProgress) -> Unit,
+        retimeSchedule: SpeedCurveSchedule? = null,
     ): NativeAudioMixResultV76 {
         val clips = project.tracks
             .filter { it.kind == TrackKind.AUDIO && !it.muted }
@@ -69,6 +72,9 @@ internal class NativeAudioMixdownV76(
         require(clips.isNotEmpty()) { "Native audio mix requested without active audio clips" }
         require(project.durationUs > 0L) { "Native audio mix requires a positive timeline duration" }
 
+        require(retimeSchedule == null || (clips.size == 1 && clips.single().timelineStartUs == 0L))
+        val timeMap = retimeSchedule?.let(::SpeedCurveTimeMap)
+        val durationUs = retimeSchedule?.outputDurationUs ?: project.durationUs
         val sourceChannelCounts = clips
             .map { it.uri }
             .distinct()
@@ -76,7 +82,7 @@ internal class NativeAudioMixdownV76(
         val outputChannelCount = preferredNativeAudioOutputChannelsV77(sourceChannelCounts)
 
         val totalFrames = ceil(
-            project.durationUs.toDouble() * TARGET_SAMPLE_RATE.toDouble() / 1_000_000.0,
+            durationUs.toDouble() * TARGET_SAMPLE_RATE.toDouble() / 1_000_000.0,
         ).toLong().coerceAtLeast(1L)
         val pcmBytes = Math.multiplyExact(totalFrames, TARGET_FRAME_BYTES.toLong())
         val pcmFile = File.createTempFile("digitor-native-mix-", ".pcm", appContext.cacheDir)
@@ -95,6 +101,7 @@ internal class NativeAudioMixdownV76(
                         clip = clip,
                         output = mixFile,
                         totalTargetFrames = totalFrames,
+                        timeMap = timeMap,
                     )
                 }
             }
@@ -139,6 +146,7 @@ internal class NativeAudioMixdownV76(
         clip: TimelineClip,
         output: RandomAccessFile,
         totalTargetFrames: Long,
+        timeMap: SpeedCurveTimeMap? = null,
     ) {
         val extractor = MediaExtractor()
         var decoder: MediaCodec? = null
@@ -245,6 +253,7 @@ internal class NativeAudioMixdownV76(
                                     lastTargetFrameExclusive = lastTargetFrameExclusive,
                                     audioDsp = audioDsp,
                                     audioFrame = audioFrame,
+                                    timeMap = timeMap,
                                 )
                             }
                             if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputEnded = true
@@ -289,6 +298,7 @@ internal class NativeAudioMixdownV76(
         lastTargetFrameExclusive: Long,
         audioDsp: ClipAudioDspV78?,
         audioFrame: FloatArray,
+        timeMap: SpeedCurveTimeMap?,
     ): Long {
         val bytesPerSample = pcmBytesPerSampleV76(pcmEncoding)
         val sourceFrameBytes = bytesPerSample * channelCount
@@ -303,8 +313,10 @@ internal class NativeAudioMixdownV76(
         val usableEndUs = min(bufferEndUs, clip.sourceOutUs)
         if (usableEndUs <= usableStartUs) return lastTargetFrameExclusive
 
-        val timelineStartUs = clip.timelineStartUs + (usableStartUs - clip.sourceInUs)
-        val timelineEndUs = clip.timelineStartUs + (usableEndUs - clip.sourceInUs)
+        val timelineStartUs = clip.timelineStartUs + (timeMap?.outputTimeUs(usableStartUs - clip.sourceInUs)
+            ?: (usableStartUs - clip.sourceInUs))
+        val timelineEndUs = clip.timelineStartUs + (timeMap?.outputTimeUs(usableEndUs - clip.sourceInUs)
+            ?: (usableEndUs - clip.sourceInUs))
         var targetStartFrame = ceil(
             timelineStartUs.toDouble() * TARGET_SAMPLE_RATE.toDouble() / 1_000_000.0,
         ).toLong()
@@ -334,7 +346,8 @@ internal class NativeAudioMixdownV76(
         for (targetOffset in 0 until targetCount) {
             val targetFrame = targetStartFrame + targetOffset
             val timelineUs = targetFrame * 1_000_000L / TARGET_SAMPLE_RATE.toLong()
-            val sourceUs = clip.sourceInUs + (timelineUs - clip.timelineStartUs)
+            val sourceUs = clip.sourceInUs + (timeMap?.sourceTimeUs(timelineUs - clip.timelineStartUs)
+                ?: (timelineUs - clip.timelineStartUs))
             val relativeUs = (sourceUs - bufferStartUs).coerceAtLeast(0L)
             val sourceFrame = floor(
                 relativeUs.toDouble() * sampleRate.toDouble() / 1_000_000.0,
@@ -345,6 +358,16 @@ internal class NativeAudioMixdownV76(
                 left
             } else {
                 readPcmSampleV76(source, frameOffset + bytesPerSample, pcmEncoding)
+            }
+            if (timeMap != null && sourceFrame + 1 < sourceFrameCount) {
+                val fractional = (relativeUs.toDouble() * sampleRate / 1_000_000.0 - sourceFrame)
+                    .toFloat().coerceIn(0f, 1f)
+                val nextOffset = frameOffset + sourceFrameBytes
+                val nextLeft = readPcmSampleV76(source, nextOffset, pcmEncoding)
+                val nextRight = if (channelCount == 1) nextLeft else
+                    readPcmSampleV76(source, nextOffset + bytesPerSample, pcmEncoding)
+                left += (nextLeft - left) * fractional
+                right += (nextRight - right) * fractional
             }
             if (audioDsp != null) {
                 audioFrame[0] = left

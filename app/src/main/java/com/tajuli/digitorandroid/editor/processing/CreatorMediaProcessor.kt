@@ -16,6 +16,10 @@ import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
+import com.tajuli.digitorandroid.editor.model.AudioMix
+import com.tajuli.digitorandroid.editor.model.TimelineProject
+import com.tajuli.digitorandroid.editor.model.TimelineTrack
+import com.tajuli.digitorandroid.editor.model.TrackKind
 import com.tajuli.digitorandroid.editor.model.SpeedCurveSchedule
 import com.tajuli.digitorandroid.editor.model.SpeedCurveSpec
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -56,8 +60,8 @@ class CreatorMediaProcessor(context: Context) {
     /**
      * Bakes a creator velocity curve into an ordinary MP4.
      *
-     * Media3 owns the variable-speed audio clock so pitch/time handling stays synchronized with the
-     * video timing. When Smooth Slow Motion is enabled and the curve enters a sub-1x section, video
+     * Native PCM resampling uses the video's sampled curve clock. Sound slows/speeds with the
+     * picture (including pitch), and its encoded AAC packets are remuxed without a second mix. When Smooth Slow Motion is enabled and the curve enters a sub-1x section, video
      * is rendered directly from the original decoded frames at the project cadence. The source
      * timestamps are mapped through the exact sampled schedule used by Media3; missing output
      * instants are filled with intermediate frames rather than simple frame repeats.
@@ -75,10 +79,6 @@ class CreatorMediaProcessor(context: Context) {
         check(linkedAudio == null || sourceHasAudio) {
             "The linked audio source cannot be read. Speed was not applied."
         }
-        val separateAudio = linkedAudio != null && (
-            audioSource.uri != clip.uri || audioSource.sourceInUs != clip.sourceInUs ||
-                audioSource.sourceOutUs != clip.sourceOutUs
-            )
         // Linked video/audio normally share a source window. Do not silently stretch a separately
         // trimmed or offset sound to the full video duration.
         check(linkedAudio == null || (audioSource.durationUs == clip.durationUs &&
@@ -87,7 +87,7 @@ class CreatorMediaProcessor(context: Context) {
         }
         val smooth = normalized.smoothSlowMotion && normalized.hasSlowMotion
 
-        if (!smooth && !separateAudio) {
+        if (!smooth && !sourceHasAudio) {
             val output = nextFile("speed_curve")
             runCurveTransformer(
                 clip = clip,
@@ -112,14 +112,17 @@ class CreatorMediaProcessor(context: Context) {
         try {
             if (sourceHasAudio) {
                 retimedAudio = nextFile("speed_curve_audio")
-                runCurveTransformer(
-                    clip = audioSource,
-                    schedule = schedule,
-                    frameRate = frameRate,
-                    output = retimedAudio,
-                    sourceHasAudio = true,
-                    audioOnly = true,
-                )
+                withContext(Dispatchers.Default) {
+                    // Decode source PCM and resample against the video's exact curve clock. Do not
+                    // route sound through the previous Transformer speed/mixing path.
+                    // Mix settings stay on the timeline and must not be applied twice.
+                    val audioClip = audioSource.copy(timelineStartUs = 0L, audioMix = AudioMix())
+                    NativeAudioMixdownV76(appContext).encode(
+                        TimelineProject(tracks = listOf(TimelineTrack(
+                            name = "Speed audio", kind = TrackKind.AUDIO, clips = listOf(audioClip)))),
+                        checkNotNull(retimedAudio), {}, retimeSchedule = schedule,
+                    )
+                }
             }
 
             if (smooth) {
@@ -299,19 +302,10 @@ class CreatorMediaProcessor(context: Context) {
         audioFile: File,
         output: File,
     ) {
-        val videoItem = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(videoFile)))
-            .setRemoveAudio(true)
-            .build()
-        val audioItem = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(audioFile)))
-            .setRemoveVideo(true)
-            .build()
-        val videoSequence = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
-            .addItem(videoItem)
-            .build()
-        val audioSequence = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
-            .addItem(audioItem)
-            .build()
-        runTransformer(Composition.Builder(listOf(videoSequence, audioSequence)).build(), output)
+        withContext(Dispatchers.Default) {
+            // Copy the native AAC samples unchanged, without another decoder/mixer/encoder pass.
+            remuxNativeVideoAndAudioV76(videoFile, audioFile, output)
+        }
     }
 
     suspend fun reverseVideo(clip: TimelineClip, frameRate: Int): DerivedMedia = withContext(Dispatchers.Default) {
