@@ -44,7 +44,7 @@ internal class RetimeFrameStream(
             // Explicit stop is not a decode failure.
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
             if (!stopped.get()) failure.set(error)
         } finally {
             finished.set(true)

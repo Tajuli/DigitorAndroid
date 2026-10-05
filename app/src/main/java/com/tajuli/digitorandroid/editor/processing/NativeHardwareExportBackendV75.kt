@@ -499,7 +499,7 @@ internal class NativeHardwareExportBackendV75(
     ) {
         var registered = false
         SmoothRetimeFrameProducer(context).produce(clip, project.frameRate,
-            longEdge = minOf(maxOf(project.width, project.height), 1920),
+            longEdge = minOf(maxOf(project.width, project.height), 4096),
             cancelled = { cancel.get() || graphError.get() != null },
         ) { bitmap, localUs ->
             if (!registered) {

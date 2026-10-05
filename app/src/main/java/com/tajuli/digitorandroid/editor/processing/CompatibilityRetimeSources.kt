@@ -6,6 +6,7 @@ import android.net.Uri
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
+import com.tajuli.digitorandroid.editor.model.isImageV21
 import java.io.Closeable
 import java.io.File
 
@@ -28,7 +29,7 @@ internal class CompatibilityRetimeSources private constructor(
             try {
                 project.tracks.filter { it.kind == TrackKind.VIDEO && !it.muted }
                     .flatMap { it.clips }.filter {
-                        it.retime?.curve?.let { curve -> curve.smoothSlowMotion && curve.hasSlowMotion } == true
+                        !it.isImageV21 && it.retime?.curve?.let { curve -> curve.smoothSlowMotion && curve.hasSlowMotion } == true
                     }.forEach { clip ->
                         val file = File.createTempFile("digitor-compat-retime-", ".mp4", context.cacheDir)
                         files += file
@@ -39,7 +40,7 @@ internal class CompatibilityRetimeSources private constructor(
                         try {
                             onProgress(ExportProgress.Stage("Compatibility: preparing smooth video", 0f))
                             SmoothRetimeFrameProducer(context).produce(clip, project.frameRate,
-                                minOf(maxOf(project.width, project.height), 1920), cancelled) { bitmap, time ->
+                                minOf(maxOf(project.width, project.height), 4096), cancelled) { bitmap, time ->
                                 if (encoder == null) {
                                     width = (bitmap.width + 1) / 2 * 2
                                     height = (bitmap.height + 1) / 2 * 2

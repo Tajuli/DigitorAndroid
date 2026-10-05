@@ -5,6 +5,7 @@ import androidx.media3.common.util.TimestampIterator
 import androidx.media3.common.util.UnstableApi
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.processing.RetimeFrameStream
+import com.tajuli.digitorandroid.editor.processing.retimeFrameIndexAtOrBefore
 import com.tajuli.digitorandroid.editor.render.DigitorRenderCore
 import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
@@ -22,25 +23,33 @@ internal class SmoothPreviewSource(
     private var inFlight: UploadTimestamp? = null
     private var paused = false
     private var submittedPaused = false
+    private var lastSubmittedUs = Long.MIN_VALUE
 
     fun reset(timelineUs: Long, playing: Boolean) {
         stream?.close()
         clip = PreviewProjectRegistry.clip(original.id) ?: original
         val local = (timelineUs - clip.timelineStartUs).coerceIn(0L, (clip.durationUs - 1).coerceAtLeast(0L))
         // Paused requests use the frame at/before the playhead; playback starts at the same cadence.
-        val frameIndex = local * fps / 1_000_000L
+        val frameIndex = retimeFrameIndexAtOrBefore(local, fps)
         val start = frameIndex * 1_000_000L / fps
         val end = if (playing) clip.durationUs else minOf(clip.durationUs, (frameIndex + 1) * 1_000_000L / fps)
         stream = RetimeFrameStream(context, clip, fps, 480, start, end)
         inFlight = null
         paused = !playing
         submittedPaused = false
+        lastSubmittedUs = Long.MIN_VALUE
     }
 
     /** Nonblocking. Returns whether a paused request still needs another pump. */
     fun pump(timelineUs: Long, core: DigitorRenderCore): Boolean {
         val current = PreviewProjectRegistry.clip(original.id) ?: original
-        if (current.retime != clip.retime) reset(timelineUs, playing = !paused)
+        if (current.retime != clip.retime) {
+            // The graph may already contain one frame ahead of the playhead. A live edit must
+            // continue after that timestamp; explicit backward seeks flush the graph in the session.
+            val restartUs = if (lastSubmittedUs == Long.MIN_VALUE) timelineUs else
+                maxOf(timelineUs, lastSubmittedUs + (1_000_000L + fps - 1) / fps)
+            reset(restartUs, playing = !paused)
+        }
         val frames = stream ?: return false
         frames.error()?.let { throw IllegalStateException("Smooth preview decode failed", it) }
         val pending = inFlight
@@ -62,6 +71,7 @@ internal class SmoothPreviewSource(
         check(frames.poll() === next)
         // Media3 owns/recycles accepted bitmap input, including during teardown.
         inFlight = timestamp
+        lastSubmittedUs = presentationUs
         submittedPaused = true
         return true
     }

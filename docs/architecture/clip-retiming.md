@@ -42,8 +42,10 @@ The producer retains two source arrays and a scratch array. Native export queues
 one bitmap at a time; Media3's bitmap pending-frame count is always zero, so the
 single-frame timestamp iterator acknowledges upload before producer recycling.
 This acknowledgement depends on Media3 1.10.1's bitmap texture-manager ordering
-and must be rechecked when updating Media3. Export readback currently caps the
-long edge at 1920 before the project-resolution compositor.
+and must be rechecked when updating Media3. Export readback preserves the requested working size up to a 4096-pixel long
+edge; motion is estimated at 160 pixels and vectors are scaled to that working
+frame. The final compositor retains the selected project resolution. 4K synthesis
+is consequently more expensive than 1080p on CPU and depends on available memory.
 
 ## Realtime preview and CPU fallback
 

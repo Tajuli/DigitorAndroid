@@ -139,9 +139,9 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
     private fun frameFor(clip: TimelineClip, sourceTimeUs: Long, localUs: Long, project: TimelineProject): Bitmap? {
         if (clip.retime?.curve?.let { it.smoothSlowMotion && it.hasSlowMotion } == true) {
             val stream = smoothStreams.getOrPut(clip.id) {
-                val start = (localUs * project.frameRate / 1_000_000L) * 1_000_000L / project.frameRate
+                val start = retimeFrameIndexAtOrBefore(localUs, project.frameRate) * 1_000_000L / project.frameRate
                 RetimeFrameStream(context, clip, project.frameRate,
-                    minOf(maxOf(project.width, project.height), 1920), start)
+                    minOf(maxOf(project.width, project.height), 4096), start)
             }
             val deadline = System.nanoTime() + 15_000_000_000L
             while (!stream.isFinished()) {
