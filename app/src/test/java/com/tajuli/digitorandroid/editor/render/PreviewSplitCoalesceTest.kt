@@ -1,5 +1,7 @@
 package com.tajuli.digitorandroid.editor.render
 
+import com.tajuli.digitorandroid.editor.model.ClipRetime
+import com.tajuli.digitorandroid.editor.model.SpeedCurveSpec
 import com.tajuli.digitorandroid.editor.model.NodeCorrections
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import org.junit.Assert.assertEquals
@@ -54,4 +56,10 @@ class PreviewSplitCoalesceTest {
         val result = coalescePreviewClips(listOf(left, jumped))
         assertEquals(2, result.size)
     }
+    @Test fun differentSpeedOnSplitAudioStaysSeparate() {
+        val (left, right) = splitPair()
+        val retimed = right.copy(retime = ClipRetime(SpeedCurveSpec.constant(.5f), right.sourceInUs, right.sourceOutUs))
+        assertEquals(2, coalescePreviewClips(listOf(left, retimed)).size)
+    }
+
 }

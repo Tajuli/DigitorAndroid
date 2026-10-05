@@ -36,6 +36,7 @@ class SpeedAudioInstrumentedTest {
     @Test fun metadataSmoothExportKeepsAudio() = verify(.5f, true, true)
     @Test fun cpuFallbackKeepsRetimedAudio() = verify(2f, false, true, true)
     @Test fun smoothCpuFallbackKeepsAudio() = verify(.5f, true, true, true)
+    @Test fun media3CompatibilityKeepsSmoothTimingAndAudio() = verify(.5f, true, true, false, true)
 
     @Test fun speedSessionUndoRedoAndCancelRestoreProjectMetadata() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -158,7 +159,7 @@ class SpeedAudioInstrumentedTest {
         }
     }
 
-    private fun verify(speed: Float, smooth: Boolean, metadata: Boolean = false, cpu: Boolean = false) = runBlocking {
+    private fun verify(speed: Float, smooth: Boolean, metadata: Boolean = false, cpu: Boolean = false, compatibility: Boolean = false) = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val dir = File(context.cacheDir, "speed_audio_test").apply { mkdirs() }
         val video = File(dir, "silent.mp4")
@@ -190,9 +191,11 @@ class SpeedAudioInstrumentedTest {
                 )).withClipSpeed(clip.id, curve)
                 val output = File(dir, if (smooth || cpu) "metadata-export.mp4" else "metadata-audio.m4a")
                 if (smooth || cpu) {
-                    if (smooth && !cpu) assertSmoothPreview(context, project)
+                    if (smooth && !cpu && !compatibility) assertSmoothPreview(context, project)
                     withTimeout(120_000) {
-                        if (cpu) CpuExportBackend(context).export(project, output, ExportQuality.LOW, {})
+                        if (compatibility) withContext(Dispatchers.Main) {
+                            GpuExportBackend(context).export(project, output, ExportQuality.LOW, {})
+                        } else if (cpu) CpuExportBackend(context).export(project, output, ExportQuality.LOW, {})
                         else NativeHardwareExportBackendV75(context).export(project, output, ExportQuality.LOW, {})
                     }
                     val frames = MediaExtractor()

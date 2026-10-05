@@ -43,6 +43,7 @@ internal fun coalescePreviewClips(clips: List<TimelineClip>): List<TimelineClip>
             previous.nodeAnimations == clip.nodeAnimations &&
             previous.transition == clip.transition &&
             previous.audioMix == clip.audioMix &&
+            previous.retime == clip.retime &&
             previous.inputColorProfileV1 == clip.inputColorProfileV1 &&
             previous.visualMediaV21 == clip.visualMediaV21 &&
             previous.sourceMimeTypeV21 == clip.sourceMimeTypeV21
@@ -87,6 +88,7 @@ internal fun needsPureTextVideoSourceV18(project: TimelineProject): Boolean =
 @UnstableApi
 class Media3CompositionBuilder(
     private val blankFrameUri: String = BLANK_PNG_DATA_URI,
+    private val retimedVideoInputs: Map<TimelineClip, String> = emptyMap(),
 ) {
     fun build(project: TimelineProject): Composition = buildExport(project)
 
@@ -265,7 +267,7 @@ class Media3CompositionBuilder(
     private fun transitionGhostClipV22(pair: TransitionPairV22): TimelineClip {
         val outgoing = pair.outgoing
         val sourceOutUs = outgoing.sourceOutUs
-        val sourceInUs = (sourceOutUs - pair.durationUs).coerceAtLeast(outgoing.sourceInUs)
+        val sourceInUs = outgoing.sourceTimeForOutput(outgoing.durationUs - pair.durationUs)
         return outgoing.copy(
             id = transitionGhostIdV22(pair),
             label = "${outgoing.label} · transition tail",
@@ -440,7 +442,20 @@ class Media3CompositionBuilder(
         compositorOwnsGeometry: Boolean = false,
         projectFrameRate: Int,
     ): EditedMediaItem {
-        val mediaItem = if (kind == TrackKind.VIDEO && clip.isImageV21) {
+        val retimedInput = if (kind == TrackKind.VIDEO && !forPreview) {
+            retimedVideoInputs.entries.firstOrNull { (original, _) ->
+                original.uri == clip.uri && original.retime == clip.retime &&
+                    original.sourceInUs <= clip.sourceInUs && original.sourceOutUs >= clip.sourceOutUs
+            }
+        } else null
+        val mediaItem = if (retimedInput != null) {
+            val original = retimedInput.key
+            MediaItem.Builder().setUri(retimedInput.value).setClippingConfiguration(
+                MediaItem.ClippingConfiguration.Builder()
+                    .setStartPositionUs(original.outputTimeForSource(clip.sourceInUs))
+                    .setEndPositionUs(original.outputTimeForSource(clip.sourceOutUs)).build()
+            ).build()
+        } else if (kind == TrackKind.VIDEO && clip.isImageV21) {
             val durationMs = ((clip.durationUs + 999L) / 1000L).coerceAtLeast(1L)
             MediaItem.Builder()
                 .setUri(clip.uri)
@@ -459,8 +474,8 @@ class Media3CompositionBuilder(
         }
 
         val builder = EditedMediaItem.Builder(mediaItem)
-            .setDurationUs(clip.sourceOutUs)
-            .apply { if (clip.retime != null) setSpeed(ClipSpeedProvider(clip)) }
+            .setDurationUs(retimedInput?.key?.durationUs ?: clip.sourceOutUs)
+            .apply { if (clip.retime != null && retimedInput == null) setSpeed(ClipSpeedProvider(clip)) }
         if (kind == TrackKind.VIDEO) {
             // Preserve realtime preview cadence for moving-video sources, but apply the selected
             // export FPS to all export video items. Still images always need an explicit frame rate.

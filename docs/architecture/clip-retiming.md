@@ -59,7 +59,13 @@ surfaces. Smooth-mode toggles change the decoder input type; ordinary curve
 metadata updates do not rebuild the whole GPU graph.
 
 CPU export uses the same frame producer and PCM/AAC mixdown, including remuxed
-sound. The Media3 compatibility export still needs interpolation parity.
+sound. If the native export route is unavailable, Media3 compatibility export
+uses `CompatibilityRetimeSources` to materialize raw smooth video in temporary
+files. This is the narrowly scoped export-only exception to the no-bake rule.
+The composition builder substitutes only the video input; original clip metadata
+still supplies source-time effect/tracking lookup, and original A tracks supply
+retimed sound. Video speed is not applied a second time. Temporary files are
+removed on completion, cancellation, or failure. No source/project URI changes.
 
 ## Validation and limits
 
@@ -68,8 +74,6 @@ emulator tests, debug/phone/release compilation, rendered seek checks, native an
 CPU AAC audibility, smooth-export timestamps, and speed-session Undo/Redo/Cancel.
 Subsequent changes must pass the same gates at the final PR head. These tests do
 not establish mid-range physical-device throughput or quality on occlusions,
-rolling shutter, or large motion. Media3-only compatibility exports retain
-retiming/audio but currently use frame holding rather than synthesized motion;
-full P0-1 acceptance remains conditional on resolving that fallback parity and
-physical-device quality/performance qualification. No claim of neural/dense optical flow or universal hardware quality
+rolling shutter, or large motion. The compatibility interpolation path has its own full export/audio regression
+test. Physical-device quality/performance qualification remains necessary. No claim of neural/dense optical flow or universal hardware quality
 is made.
