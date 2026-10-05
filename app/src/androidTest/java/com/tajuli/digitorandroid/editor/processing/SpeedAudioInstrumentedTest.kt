@@ -34,6 +34,7 @@ class SpeedAudioInstrumentedTest {
     @Test fun metadataFastAudioIsAudible() = verify(2f, false, true)
     @Test fun metadataCurveAudioIsAudible() = verify(1f, false, true)
     @Test fun metadataSmoothExportKeepsAudio() = verify(.5f, true, true)
+    @Test fun cpuFallbackKeepsRetimedAudio() = verify(2f, false, true, true)
 
     /** Container/packet checks pass even for encoded digital silence; decode the actual waveform. */
     private fun assertAudible(context: android.content.Context, uri: String) {
@@ -90,7 +91,7 @@ class SpeedAudioInstrumentedTest {
         }
     }
 
-    private fun verify(speed: Float, smooth: Boolean, metadata: Boolean = false) = runBlocking {
+    private fun verify(speed: Float, smooth: Boolean, metadata: Boolean = false, cpu: Boolean = false) = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val dir = File(context.cacheDir, "speed_audio_test").apply { mkdirs() }
         val video = File(dir, "silent.mp4")
@@ -120,10 +121,11 @@ class SpeedAudioInstrumentedTest {
                     TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(clip)),
                     TimelineTrack(name = "A1", kind = TrackKind.AUDIO, clips = listOf(linked)),
                 )).withClipSpeed(clip.id, curve)
-                val output = File(dir, if (smooth) "metadata-smooth.mp4" else "metadata-audio.m4a")
-                if (smooth) {
+                val output = File(dir, if (smooth || cpu) "metadata-export.mp4" else "metadata-audio.m4a")
+                if (smooth || cpu) {
                     withTimeout(120_000) {
-                        NativeHardwareExportBackendV75(context).export(project, output, ExportQuality.LOW, {})
+                        if (cpu) CpuExportBackend(context).export(project, output, ExportQuality.LOW, {})
+                        else NativeHardwareExportBackendV75(context).export(project, output, ExportQuality.LOW, {})
                     }
                     val frames = MediaExtractor()
                     try {

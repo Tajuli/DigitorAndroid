@@ -14,6 +14,8 @@ import java.util.concurrent.Executors
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
 
 /** CPU fallback: no OpenGL. Decode -> transform/color/effects/cutout/composite -> byte-buffer AVC encode. */
 class CpuExportBackend(private val context: Context) : ExportBackend {
@@ -38,18 +40,21 @@ class CpuExportBackend(private val context: Context) : ExportBackend {
 
         val bitrate = quality.videoBitrate(project.width, project.height, project.frameRate)
         val compositor = CpuTimelineCompositor(context)
-        val frameDurationUs = 1_000_000L / project.frameRate
-        val frameCount = ((project.durationUs + frameDurationUs - 1) / frameDurationUs).toInt()
+        val frameCount = ((project.durationUs * project.frameRate + 999_999L) / 1_000_000L).toInt()
+        val hasAudio = project.hasActiveNativeAudioV76()
+        val videoOutput = if (hasAudio) File.createTempFile("digitor-cpu-video-", ".mp4", context.cacheDir) else output
+        val audioOutput = if (hasAudio) File.createTempFile("digitor-cpu-audio-", ".m4a", context.cacheDir) else null
         try {
             CpuAvcEncoder(
                 project.width,
                 project.height,
                 project.frameRate,
-                output,
+                videoOutput,
                 bitrate = bitrate,
             ).use { encoder ->
                 for (frameIndex in 0 until frameCount) {
-                    val timeUs = frameIndex * frameDurationUs
+                    coroutineContext.ensureActive()
+                    val timeUs = frameIndex.toLong() * 1_000_000L / project.frameRate
                     val pixels = compositor.render(project, timeUs)
                     encoder.encodeFrame(pixels, timeUs)
                     if (frameIndex % 4 == 0 || frameIndex == frameCount - 1) {
@@ -63,13 +68,21 @@ class CpuExportBackend(private val context: Context) : ExportBackend {
                 }
                 encoder.finish()
             }
+            if (audioOutput != null) {
+                coroutineContext.ensureActive()
+                NativeAudioMixdownV76(context).encode(project, audioOutput, onProgress)
+                coroutineContext.ensureActive()
+                remuxNativeVideoAndAudioV76(videoOutput, audioOutput, output)
+            }
         } finally {
             compositor.close()
+            if (videoOutput !== output) videoOutput.delete()
+            audioOutput?.delete()
         }
         ExportResult(
             output,
             Backend.CPU,
-            "CPU fallback MP4 complete · ${quality.label} · ${bitrate / 1_000_000f} Mbps target (video-only; CPU audio mixing is not implemented yet).",
+            "CPU fallback MP4 complete · ${quality.label} · ${bitrate / 1_000_000f} Mbps target${if (hasAudio) " · synchronized AAC" else ""}.",
         )
     }
 }
