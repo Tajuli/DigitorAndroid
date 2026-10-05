@@ -6,7 +6,6 @@ import android.net.Uri
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TrackKind
-import com.tajuli.digitorandroid.editor.model.isImageV21
 import java.io.Closeable
 import java.io.File
 
