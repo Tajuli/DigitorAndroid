@@ -77,11 +77,13 @@ class SpeedAudioInstrumentedTest {
             preview.attachSurface(reader.surface)
             for (target in listOf(0L, 300_000L, 100_000L)) {
                 preview.submit(project, target, false)
-                withTimeout(30_000) {
+                val arrived = kotlinx.coroutines.withTimeoutOrNull(30_000) {
                     while (preview.frame.value?.timelineUs?.let { abs(it - target) <= 70_000L } != true) {
                         kotlinx.coroutines.delay(10)
                     }
-                }
+                    true
+                } ?: false
+                assertTrue("Preview $speed x seek to $target failed; last=${preview.frame.value}", arrived)
             }
             val heartbeatDuringRelease = java.util.concurrent.atomic.AtomicBoolean(false)
             withTimeout(120_000) {

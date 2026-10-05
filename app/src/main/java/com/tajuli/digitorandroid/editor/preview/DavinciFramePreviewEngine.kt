@@ -383,9 +383,15 @@ class DavinciFramePreviewEngine(
         }
 
         val wantedKey = sessionKey(request.project, layers)
-        val sessionChanged = session?.key != wantedKey
+        // Media3's MultipleInputVideoGraph.flush only flushes its input processors, not
+        // compositor timestamp queues. Recreate on backward seek to discard future textures.
+        val backwardsSeek = lastRequestedTimelineUs != Long.MIN_VALUE &&
+            request.timelineUs < lastRequestedTimelineUs
+        val sessionChanged = session?.key != wantedKey || backwardsSeek
         if (sessionChanged) {
             throwIfExternalSuspendRequested()
+            // Release the previous hardware decoder before reserving another one on small devices.
+            replaceSession(null)
             val built = buildSession(request.project, layers, wantedKey)
             if (exportSuspended.get()) {
                 runCatching { built.close() }
@@ -518,6 +524,7 @@ class DavinciFramePreviewEngine(
                     clip = item.layer.clip,
                     extractor = item.extractor,
                     codec = codec,
+                    format = item.platformFormat,
                 )
             }
             return PreviewSession(
@@ -782,17 +789,33 @@ class DavinciFramePreviewEngine(
         val clip: TimelineClip,
         val extractor: MediaExtractor,
         val codec: MediaCodec,
+        format: MediaFormat,
     ) : Closeable {
         private val bufferInfo = MediaCodec.BufferInfo()
         private var inputEos = false
         private var outputEos = false
         private var playbackFloorSourceUs = clip.sourceInUs
         private var heldPlaybackOutput: HeldOutput? = null
+        private var hasQueuedInput = false
+        private var receivedOutput = false
+        private val codecConfig = (0..2).mapNotNull { index ->
+            format.getByteBuffer("csd-$index")?.duplicate()?.let { buffer ->
+                ByteArray(buffer.remaining()).also { buffer.get(it) }
+            }
+        }
+        private val pendingConfig = java.util.ArrayDeque<ByteArray>()
 
         fun resetToTimeline(timelineUs: Long) {
             heldPlaybackOutput?.let(::releaseWithoutRendering)
             heldPlaybackOutput = null
-            codec.flush()
+            // start() submits codec configuration asynchronously. Flushing a brand-new
+            // decoder can discard it before its first format/frame, leaving some vendors mute.
+            if (hasQueuedInput) {
+                codec.flush()
+                pendingConfig.clear()
+                if (!receivedOutput) codecConfig.forEach(pendingConfig::addLast)
+            }
+            hasQueuedInput = false
             val targetSourceUs = timelineToSourceUs(clip, timelineUs)
             extractor.seekTo(targetSourceUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             inputEos = false
@@ -810,6 +833,14 @@ class DavinciFramePreviewEngine(
                 val input = codec.getInputBuffer(inputIndex)
                     ?: error("Decoder input buffer unavailable")
                 input.clear()
+                hasQueuedInput = true
+                if (pendingConfig.isNotEmpty()) {
+                    val config = pendingConfig.removeFirst()
+                    input.put(config)
+                    codec.queueInputBuffer(inputIndex, 0, config.size, 0L, MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
+                    didWork = true
+                    continue
+                }
                 val sampleTimeUs = extractor.sampleTime
                 if (sampleTimeUs < 0L || sampleTimeUs >= clip.sourceOutUs) {
                     codec.queueInputBuffer(
@@ -861,6 +892,7 @@ class DavinciFramePreviewEngine(
                 val outputIndex = codec.dequeueOutputBuffer(bufferInfo, 0L)
                 when {
                     outputIndex >= 0 -> {
+                        receivedOutput = true
                         val output = HeldOutput(
                             index = outputIndex,
                             presentationTimeUs = bufferInfo.presentationTimeUs,
@@ -894,7 +926,7 @@ class DavinciFramePreviewEngine(
                     }
 
                     outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> return
-                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
+                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> receivedOutput = true
                 }
             }
         }
@@ -914,6 +946,7 @@ class DavinciFramePreviewEngine(
                 val outputIndex = codec.dequeueOutputBuffer(bufferInfo, SCRUB_DEQUEUE_TIMEOUT_US)
                 when {
                     outputIndex >= 0 -> {
+                        receivedOutput = true
                         val output = HeldOutput(
                             index = outputIndex,
                             presentationTimeUs = bufferInfo.presentationTimeUs,
@@ -933,7 +966,7 @@ class DavinciFramePreviewEngine(
                         if (isEos) outputEos = true
                     }
 
-                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
+                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> receivedOutput = true
                 }
                 if (future != null || (inputEos && outputEos)) break
             }
