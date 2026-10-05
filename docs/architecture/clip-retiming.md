@@ -49,7 +49,9 @@ long edge at 1920 before the project-resolution compositor.
 
 `SmoothPreviewSource` feeds the same per-layer GPU compositor used by ordinary
 preview. A cancellable `RetimeFrameStream` owns a two-frame queue and a sequential
-interpolation worker. Paused seeks decode a short source neighbourhood. Playback
+interpolation worker. Paused seeks decode from the preceding keyframe until the requested sample is
+bracketed; decoding stops immediately when that output window is complete.
+Preroll timestamps are retained so low-frame-rate/VFR neighbours are not lost. Playback
 skips outdated synthesis targets when the worker falls behind; it never moves the
 editor/audio clock backward to catch up. Preview is capped at 480 pixels and
 30 fps to bound CPU warping cost. Ordinary non-smooth preview keeps direct decoder
@@ -59,10 +61,15 @@ metadata updates do not rebuild the whole GPU graph.
 CPU export uses the same frame producer and PCM/AAC mixdown, including remuxed
 sound. The Media3 compatibility export still needs interpolation parity.
 
-## Validation still required
+## Validation and limits
 
-This is an integration checkpoint, not completed P0-1 acceptance. Android
-codec tests and required CI must pass at the final PR head; the pure JVM tests do
-not establish device throughput or quality on occlusions, rolling shutter, or
-large motion. No claim of neural/dense optical flow or universal hardware quality
+The first complete preview integration passed Android CI, including all 36
+emulator tests, debug/phone/release compilation, rendered seek checks, native and
+CPU AAC audibility, smooth-export timestamps, and speed-session Undo/Redo/Cancel.
+Subsequent changes must pass the same gates at the final PR head. These tests do
+not establish mid-range physical-device throughput or quality on occlusions,
+rolling shutter, or large motion. Media3-only compatibility exports retain
+retiming/audio but currently use frame holding rather than synthesized motion;
+full P0-1 acceptance remains conditional on resolving that fallback parity and
+physical-device quality/performance qualification. No claim of neural/dense optical flow or universal hardware quality
 is made.

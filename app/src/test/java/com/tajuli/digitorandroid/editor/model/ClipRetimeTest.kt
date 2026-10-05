@@ -81,12 +81,15 @@ class ClipRetimeTest {
     }
 
     @Test(expected = IllegalArgumentException::class)
-    fun retimeRejectsCollisionWithClipThatStartedBeforeOldEnd() {
+    fun rippleRejectsNewCollisionOnAnotherTrack() {
         val video = clip(1f).copy(id = "video", timelineStartUs = 0L, retime = null)
-        val other = video.copy(id = "other", timelineStartUs = 9_000_000L)
+        val other = video.copy(id = "other", timelineStartUs = 1_000_000L)
+        val following = video.copy(id = "following", timelineStartUs = 12_000_000L)
         val project = TimelineProject(tracks = listOf(
-            TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(video, other))))
-        project.withClipSpeed(video.id, SpeedCurveSpec.constant(.5f))
+            TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(video)),
+            TimelineTrack(name = "V2", kind = TrackKind.VIDEO, clips = listOf(other, following))))
+        assertTrue(project.validate().isEmpty())
+        project.withClipSpeed(video.id, SpeedCurveSpec.constant(2f))
     }
 
     @Test fun separateTracksCanOverlapWhileEachTrackKeepsItsOrder() {

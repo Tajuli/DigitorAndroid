@@ -47,6 +47,7 @@ internal class GpuSequentialCutoutDecoderV47(
         targetTimesUs: List<Long>,
         emitEveryFrame: Boolean = false,
         cancelled: () -> Boolean = { false },
+        includePreroll: Boolean = false,
         onFrame: (sourceTimeUs: Long, bitmap: Bitmap) -> Unit,
     ): Int {
         val targets = targetTimesUs
@@ -126,7 +127,7 @@ internal class GpuSequentialCutoutDecoderV47(
                     outputIndex >= 0 -> {
                         progressed = true
                         val pts = info.presentationTimeUs
-                        val withinTrim = pts >= startUs && pts < endUs
+                        val withinTrim = (pts >= startUs || includePreroll) && pts < endUs
                         val pending = targets.getOrNull(targetIndex)
                         val nearPending = pending != null && pts + FINAL_TARGET_EARLY_TOLERANCE_US_V47 >= pending
                         val isEos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
@@ -138,7 +139,7 @@ internal class GpuSequentialCutoutDecoderV47(
                             var transferred = false
                             try {
                                 onFrame(
-                                    pts.coerceIn(startUs, (endUs - 1L).coerceAtLeast(startUs)),
+                                    if (includePreroll) pts else pts.coerceIn(startUs, (endUs - 1L).coerceAtLeast(startUs)),
                                     bitmap,
                                 )
                                 transferred = true
