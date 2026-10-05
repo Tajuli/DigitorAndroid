@@ -103,4 +103,25 @@ class ClipRetimeTest {
         assertEquals(other, changed.clip(other.id))
     }
 
+    @Test fun smoothToggleAfterSplitPreservesVideoAndAudioAnchors() {
+        val curve = SpeedCurveSpec.preset(SpeedCurvePreset.HERO, smoothSlowMotion = false)
+        val video = clip(1f).copy(id = "split-video", sourceInUs = 5_000_000L, linkGroupId = "pair",
+            retime = ClipRetime(curve, 2_000_000L, 12_000_000L))
+        val audio = video.copy(id = "split-audio", uri = "content://audio", sourceInUs = 3_000_000L,
+            sourceOutUs = 10_000_000L, retime = ClipRetime(curve, 0L, 10_000_000L))
+        val project = TimelineProject(tracks = listOf(
+            TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(video)),
+            TimelineTrack(name = "A1", kind = TrackKind.AUDIO, clips = listOf(audio))))
+        val changed = project.withClipSpeed(video.id, curve.copy(smoothSlowMotion = true))
+        assertEquals(video.durationUs, changed.clip(video.id)!!.durationUs)
+        assertEquals(audio.durationUs, changed.clip(audio.id)!!.durationUs)
+        assertEquals(2_000_000L, changed.clip(video.id)!!.retime!!.sourceStartUs)
+        assertEquals(0L, changed.clip(audio.id)!!.retime!!.sourceStartUs)
+        for (i in 0..100) {
+            val time = video.durationUs * i / 100
+            assertEquals(video.sourceTimeForOutput(time), changed.clip(video.id)!!.sourceTimeForOutput(time))
+            assertEquals(audio.sourceTimeForOutput(time), changed.clip(audio.id)!!.sourceTimeForOutput(time))
+        }
+    }
+
 }
