@@ -28,6 +28,7 @@ data class SpeedCurveSpec(
 ) {
     fun normalized(): SpeedCurveSpec {
         val sanitized = points
+            .filter { it.position.isFinite() && it.speed.isFinite() }
             .map {
                 SpeedCurvePoint(
                     position = it.position.coerceIn(0f, 1f),

@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.ui.editor
 
+import com.tajuli.digitorandroid.editor.model.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -48,7 +49,7 @@ private fun nodeKeyframeSourceTimeUs(clip: TimelineClip, frameRate: Int): Long {
     val frameUs = (1_000_000.0 / frameRate.coerceAtLeast(1)).roundToLong().coerceAtLeast(1L)
     val snappedLocal = ((rawLocal.toDouble() / frameUs).roundToLong() * frameUs)
         .coerceIn(0L, clip.durationUs)
-    return (clip.sourceInUs + snappedLocal).coerceIn(clip.sourceInUs, clip.sourceOutUs)
+    return clip.sourceTimeForOutput(snappedLocal)
 }
 
 @Composable
@@ -158,7 +159,7 @@ private fun NodeKeyframeStripV5(
                 if (keys.isEmpty() || size.width <= 0) return@detectTapGestures
                 val width = size.width.toFloat()
                 val nearest = keys.minByOrNull { sourceUs ->
-                    val local = (sourceUs - clip.sourceInUs).coerceIn(0L, clip.durationUs)
+                    val local = clip.outputTimeForSource(sourceUs)
                     val x = local.toFloat() / clip.durationUs.coerceAtLeast(1L).toFloat() * width
                     abs(x - tap.x)
                 } ?: return@detectTapGestures
@@ -170,7 +171,7 @@ private fun NodeKeyframeStripV5(
     ) {
         drawLine(KFTrack, Offset(0f, size.height * .5f), Offset(size.width, size.height * .5f), strokeWidth = 2f)
         keys.forEach { sourceUs ->
-            val local = (sourceUs - clip.sourceInUs).coerceIn(0L, clip.durationUs)
+            val local = clip.outputTimeForSource(sourceUs)
             val x = local.toFloat() / clip.durationUs.coerceAtLeast(1L).toFloat() * size.width
             val selected = sourceUs == selectedSourceUs
             drawCircle(if (selected) Color.White else KFAccent, radius = if (selected) 5f else 3.2f, center = Offset(x, size.height * .5f))

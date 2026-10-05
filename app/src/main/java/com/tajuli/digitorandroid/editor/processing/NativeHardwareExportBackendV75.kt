@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.processing
 
+import com.tajuli.digitorandroid.editor.model.*
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -15,6 +16,7 @@ import android.os.Build
 import androidx.media3.common.ColorInfo
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.util.TimestampIterator
 import androidx.media3.common.util.ConstantRateTimestampIterator
 import androidx.media3.common.util.UnstableApi
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -474,6 +476,8 @@ internal class NativeHardwareExportBackendV75(
     ) {
         if (clip.isImageV21) {
             feedImageClipV76(inputId, clip, project, core, cancel, graphError, maxTimelineUs)
+        } else if (clip.retime?.curve?.let { it.smoothSlowMotion && it.hasSlowMotion } == true) {
+            feedSmoothRetimeClip(inputId, clip, project, core, cancel, graphError, maxTimelineUs)
         } else {
             feedMovingVideoClipV76(
                 inputId,
@@ -487,6 +491,54 @@ internal class NativeHardwareExportBackendV75(
                 maxTimelineUs,
             )
         }
+    }
+
+    private fun feedSmoothRetimeClip(
+        inputId: Int, clip: TimelineClip, project: TimelineProject, core: NativeExportRenderCoreV75,
+        cancel: AtomicBoolean, graphError: AtomicReference<Throwable?>, maxTimelineUs: AtomicLong,
+    ) {
+        var registered = false
+        SmoothRetimeFrameProducer(context).produce(clip, project.frameRate,
+            longEdge = minOf(maxOf(project.width, project.height), 1920),
+            cancelled = { cancel.get() || graphError.get() != null },
+        ) { bitmap, localUs ->
+            if (!registered) {
+                core.registerBitmapStream(inputId,
+                    Format.Builder().setSampleMimeType(MimeTypes.IMAGE_RAW)
+                        .setWidth(bitmap.width).setHeight(bitmap.height)
+                        .setColorInfo(ColorInfo.SRGB_BT709_FULL).build(),
+                    SharedVideoPipeline.compositedExportEffectsFor(clip), clip.timelineStartUs)
+                registered = true
+            }
+            val iterator = SingleRetimeTimestamp(localUs)
+            val deadline = System.nanoTime() + GRAPH_BACKPRESSURE_TIMEOUT_MS * 1_000_000L
+            while (!core.queueInputBitmap(inputId, bitmap, iterator)) {
+                ensureProducerActiveV76(cancel, graphError)
+                check(System.nanoTime() < deadline) { "Smooth frame queue stalled" }
+                Thread.sleep(1)
+            }
+            // Bitmap inputs always report zero pending frames in Media3. The iterator is
+            // exhausted on the GL thread after upload, so use that acknowledgement.
+            while (!iterator.uploaded.get()) {
+                ensureProducerActiveV76(cancel, graphError)
+                check(System.nanoTime() < deadline) { "Smooth frame upload stalled" }
+                Thread.sleep(1)
+            }
+            maxTimelineUs.accumulateAndGet(clip.timelineStartUs + localUs, ::maxOf)
+        }
+    }
+
+    private class SingleRetimeTimestamp(
+        private val timeUs: Long, val uploaded: AtomicBoolean = AtomicBoolean(false),
+    ) : TimestampIterator {
+        private var consumed = false
+        override fun hasNext(): Boolean {
+            if (consumed) uploaded.set(true)
+            return !consumed
+        }
+        override fun next(): Long { check(!consumed); consumed = true; return timeUs }
+        override fun copyOf(): TimestampIterator = SingleRetimeTimestamp(timeUs, uploaded)
+        override fun getLastTimestampUs() = timeUs
     }
 
     private fun feedImageClipV76(
@@ -685,7 +737,7 @@ internal class NativeHardwareExportBackendV75(
                         outputIndex >= 0 -> {
                             val sourceUs = info.presentationTimeUs
                             val eos = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
-                            val timelineUs = clip.timelineStartUs + (sourceUs - clip.sourceInUs)
+                            val timelineUs = clip.timelineTimeAtSource(sourceUs)
                             val insideClip = sourceUs >= clip.sourceInUs && sourceUs < clip.sourceOutUs
                             val hitsNextOutputSlot = insideClip && timelineUs + 1_000L >= nextOutputTimelineUs
                             if (hitsNextOutputSlot) {
@@ -890,7 +942,7 @@ internal fun nativeHardwareExportPlanV75(project: TimelineProject): NativeHardwa
             track.transitionPairsV22().forEach { pair ->
                 val outgoing = pair.outgoing
                 val sourceOutUs = outgoing.sourceOutUs
-                val sourceInUs = (sourceOutUs - pair.durationUs).coerceAtLeast(outgoing.sourceInUs)
+                val sourceInUs = outgoing.sourceTimeForOutput(outgoing.durationUs - pair.durationUs)
                 val ghost = outgoing.copy(
                     id = "${outgoing.id}__native_transition_${pair.incoming.id}",
                     label = "${outgoing.label} · transition tail",

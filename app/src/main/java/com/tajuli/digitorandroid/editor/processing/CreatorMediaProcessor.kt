@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.processing
 
+import com.tajuli.digitorandroid.editor.model.*
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaExtractor
@@ -357,7 +358,7 @@ class CreatorMediaProcessor(context: Context) {
         val frameStepUs = (1_000_000L / fps).coerceAtLeast(1L)
         val frameCount = ceil(durationUs.toDouble() / frameStepUs.toDouble()).toInt().coerceAtLeast(1)
         val localUs = (timelineUs - clip.timelineStartUs).coerceIn(0L, (clip.durationUs - 1L).coerceAtLeast(0L))
-        val sourceUs = (clip.sourceInUs + localUs)
+        val sourceUs = clip.sourceTimeForOutput(localUs)
             .coerceIn(clip.sourceInUs, (clip.sourceOutUs - 1L).coerceAtLeast(clip.sourceInUs))
         val retriever = MediaMetadataRetriever()
         val output = nextFile("freeze")

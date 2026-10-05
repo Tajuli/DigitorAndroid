@@ -24,6 +24,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tajuli.digitorandroid.editor.model.*
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.delay
 import kotlin.math.log10
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -34,19 +37,33 @@ private fun speedLabel(speed: Float) = "${(speed * 100).roundToInt() / 100f}x"
 
 @Composable
 internal fun SpeedCurveWorkspace(clip: TimelineClip, busyOperation: String?, vm: EditorViewModel) {
-    // A bake replaces the media while retaining the clip ID. Start a fresh draft on that result.
-    var curveMode by remember(clip.id, clip.uri) { mutableStateOf(false) }
-    var normal by remember(clip.id, clip.uri) { mutableStateOf(1f) }
-    var preset by remember(clip.id, clip.uri) { mutableStateOf<SpeedCurvePreset?>(null) }
-    var points by remember(clip.id, clip.uri) { mutableStateOf(SpeedCurveSpec.preset(SpeedCurvePreset.CUSTOM).points) }
-    var smooth by remember(clip.id, clip.uri) { mutableStateOf(false) }
-    var selected by remember(clip.id, clip.uri) { mutableIntStateOf(2) }
+    val editorState by vm.state.collectAsState()
+    val revision = editorState.speedPanelRevision
+    // Draft edits publish metadata only. Closing commits one undo entry; Cancel restores the snapshot.
+    var curveMode by remember(clip.id, clip.uri, revision) { mutableStateOf(clip.retime?.curve?.points?.map { it.speed }?.distinct()?.size?.let { it > 1 } == true) }
+    var normal by remember(clip.id, clip.uri, revision) { mutableStateOf(clip.retime?.curve?.points?.firstOrNull()?.speed ?: 1f) }
+    var preset by remember(clip.id, clip.uri, revision) { mutableStateOf<SpeedCurvePreset?>(clip.retime?.curve?.preset) }
+    var points by remember(clip.id, clip.uri, revision) { mutableStateOf(clip.retime?.curve?.points ?: SpeedCurveSpec.preset(SpeedCurvePreset.CUSTOM).points) }
+    var smooth by remember(clip.id, clip.uri, revision) { mutableStateOf(clip.retime?.curve?.smoothSlowMotion ?: false) }
+    var selected by remember(clip.id, clip.uri, revision) { mutableIntStateOf(0) }
     val enabled = busyOperation == null
-    val spec = remember(curveMode, normal, points, smooth) {
+    val spec = remember(curveMode, normal, points, smooth, preset) {
         if (curveMode) SpeedCurveSpec(points, preset ?: SpeedCurvePreset.CUSTOM, smooth)
         else SpeedCurveSpec.constant(normal, smooth)
     }
-    val outputUs = remember(spec, clip.durationUs) { spec.sampledSchedule(clip.durationUs).outputDurationUs }
+    val outputUs = clip.durationUs
+    val currentSpec by rememberUpdatedState(spec)
+    DisposableEffect(clip.id) {
+        vm.beginSpeedEdit(clip.id)
+        onDispose { vm.finishSpeedEdit(cancel = false, expectedClipId = clip.id) }
+    }
+    LaunchedEffect(clip.id, revision) {
+        snapshotFlow { currentSpec }.drop(1).collectLatest {
+            delay(32)
+            vm.beginSpeedEdit(clip.id)
+            vm.previewSpeed(it)
+        }
+    }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         listOf(false to "Normal", true to "Curve").forEach { (mode, label) ->
             FilterChip(selected = curveMode == mode, enabled = enabled,
@@ -118,7 +135,7 @@ internal fun SpeedCurveWorkspace(clip: TimelineClip, busyOperation: String?, vm:
                 preset = SpeedCurvePreset.CUSTOM
             })
     }
-    Text("Duration  ${"%.2f".format(clip.durationUs / 1_000_000.0)}s → ${"%.2f".format(outputUs / 1_000_000.0)}s",
+    Text("Duration  ${"%.2f".format(clip.sourceDurationUs / 1_000_000.0)}s → ${"%.2f".format(outputUs / 1_000_000.0)}s",
         color = SpeedMuted, fontSize = 12.sp)
     Row(verticalAlignment = Alignment.CenterVertically) {
         Checkbox(checked = smooth, enabled = enabled, onCheckedChange = { smooth = it })
@@ -132,10 +149,13 @@ internal fun SpeedCurveWorkspace(clip: TimelineClip, busyOperation: String?, vm:
             selected = 2
             smooth = false
         }) { Text("Reset") }
-        Button(enabled = enabled && spec.points.any { kotlin.math.abs(it.speed - 1f) > .001f },
-            onClick = { vm.bakeSelectedSpeedCurve(spec.copy(preset = preset ?: SpeedCurvePreset.CUSTOM)) }) {
-            Text(if (enabled) "✓ Apply" else "Processing…")
-        }
+        TextButton(enabled = enabled, onClick = { vm.finishSpeedEdit(cancel = true) }) { Text("Cancel") }
+        Button(enabled = enabled, onClick = {
+            // Pending slider updates are synchronous on Done; no transcode is started.
+            vm.beginSpeedEdit(clip.id)
+            vm.previewSpeed(spec)
+            vm.finishSpeedEdit(cancel = false)
+        }) { Text("Done") }
     }
 }
 

@@ -141,7 +141,7 @@ internal class DigitorRenderCore(
                 index,
                 VideoFrameProcessor.INPUT_TYPE_SURFACE,
                 renderFormats[index],
-                SharedVideoPipeline.compositedPreviewEffectsFor(layer.clip),
+                nativeRetimeEffects(layer.clip, live = true) + SharedVideoPipeline.compositedPreviewEffectsFor(layer.clip),
                 layer.clip.timelineStartUs - layer.clip.sourceInUs,
             )
         }

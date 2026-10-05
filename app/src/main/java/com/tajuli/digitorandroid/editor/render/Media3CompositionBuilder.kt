@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.render
 
+import com.tajuli.digitorandroid.editor.model.*
 import android.os.Build
 import androidx.media3.common.C
 import androidx.media3.common.Effect
@@ -458,7 +459,8 @@ class Media3CompositionBuilder(
         }
 
         val builder = EditedMediaItem.Builder(mediaItem)
-            .setDurationUs(clip.durationUs)
+            .setDurationUs(clip.sourceDurationUs)
+            .apply { if (clip.retime != null) setSpeed(ClipSpeedProvider(clip)) }
         if (kind == TrackKind.VIDEO) {
             // Preserve realtime preview cadence for moving-video sources, but apply the selected
             // export FPS to all export video items. Still images always need an explicit frame rate.

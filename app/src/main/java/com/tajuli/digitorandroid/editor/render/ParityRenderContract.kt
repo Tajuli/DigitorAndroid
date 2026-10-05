@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.render
 
+import com.tajuli.digitorandroid.editor.model.*
 import androidx.media3.common.C
 import androidx.media3.common.ColorInfo
 import androidx.media3.common.Format
@@ -60,7 +61,6 @@ internal object ParityRenderContract {
     fun sourceTimeUs(clip: TimelineClip, presentationTimeUs: Long): Long {
         val minSource = clip.sourceInUs.coerceAtLeast(0L)
         val maxSource = clip.sourceOutUs.coerceAtLeast(minSource)
-        return (clip.sourceInUs + (presentationTimeUs - clip.timelineStartUs))
-            .coerceIn(minSource, maxSource)
+        return clip.sourceTimeAtTimeline(presentationTimeUs).coerceIn(minSource, maxSource)
     }
 }

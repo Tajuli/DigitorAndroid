@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.ui.editor
 
+import com.tajuli.digitorandroid.editor.model.*
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -43,7 +44,7 @@ private fun evaluatedNodeClip(clip: TimelineClip?, frameRate: Int): EvaluatedNod
     val frameUs = (1_000_000.0 / frameRate.coerceAtLeast(1)).roundToLong().coerceAtLeast(1L)
     val localUs = ((rawLocal.toDouble() / frameUs).roundToLong() * frameUs)
         .coerceIn(0L, clip.durationUs)
-    val sourceUs = (clip.sourceInUs + localUs).coerceIn(clip.sourceInUs, clip.sourceOutUs)
+    val sourceUs = clip.sourceTimeForOutput(localUs)
     val evaluatedGraph = clip.nodeAnimations.evaluateGraph(clip.nodeGraph, sourceUs)
     return EvaluatedNodeClip(clip.copy(nodeGraph = evaluatedGraph), sourceUs)
 }

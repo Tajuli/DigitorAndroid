@@ -7,7 +7,7 @@ import android.net.Uri
 import androidx.media3.common.util.UnstableApi
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.tajuli.digitorandroid.editor.model.SpeedCurveSpec
+import com.tajuli.digitorandroid.editor.model.*
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import java.io.File
 import java.nio.ByteBuffer
@@ -29,6 +29,10 @@ class SpeedAudioInstrumentedTest {
     @Test fun slowVideoKeepsLinkedAudio() = verify(.5f, false)
     @Test fun fastVideoKeepsLinkedAudio() = verify(2f, false)
     @Test fun smoothVideoKeepsLinkedAudio() = verify(.5f, true)
+
+    @Test fun metadataSlowAudioIsAudible() = verify(.5f, false, true)
+    @Test fun metadataFastAudioIsAudible() = verify(2f, false, true)
+    @Test fun metadataCurveAudioIsAudible() = verify(1f, false, true)
 
     /** Container/packet checks pass even for encoded digital silence; decode the actual waveform. */
     private fun assertAudible(context: android.content.Context, uri: String) {
@@ -85,7 +89,7 @@ class SpeedAudioInstrumentedTest {
         }
     }
 
-    private fun verify(speed: Float, smooth: Boolean) = runBlocking {
+    private fun verify(speed: Float, smooth: Boolean, metadata: Boolean = false) = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val dir = File(context.cacheDir, "speed_audio_test").apply { mkdirs() }
         val video = File(dir, "silent.mp4")
@@ -107,7 +111,17 @@ class SpeedAudioInstrumentedTest {
         val linked = clip.copy(id = "audio", uri = Uri.fromFile(audio).toString())
         var result: CreatorMediaProcessor.DerivedMedia? = null
         try {
-            val baked = withTimeout(120_000) {
+            val baked = if (metadata) {
+                val curve = if (speed == 1f) SpeedCurveSpec.preset(SpeedCurvePreset.HERO)
+                    else SpeedCurveSpec.constant(speed)
+                val project = TimelineProject(tracks = listOf(
+                    TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(clip)),
+                    TimelineTrack(name = "A1", kind = TrackKind.AUDIO, clips = listOf(linked)),
+                )).withClipSpeed(clip.id, curve)
+                val output = File(dir, "metadata-audio.m4a")
+                NativeAudioMixdownV76(context).encode(project, output, {})
+                CreatorMediaProcessor.DerivedMedia(Uri.fromFile(output).toString(), project.durationUs, true)
+            } else withTimeout(120_000) {
                 withContext(Dispatchers.Main) {
                     CreatorMediaProcessor(context).bakeSpeedCurve(clip,
                         SpeedCurveSpec.constant(speed, smooth), 30, linked)

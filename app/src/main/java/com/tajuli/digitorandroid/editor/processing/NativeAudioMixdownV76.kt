@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.processing
 
+import com.tajuli.digitorandroid.editor.model.*
 import android.content.Context
 import android.media.AudioFormat
 import android.media.MediaCodec
@@ -314,9 +315,9 @@ internal class NativeAudioMixdownV76(
         if (usableEndUs <= usableStartUs) return lastTargetFrameExclusive
 
         val timelineStartUs = clip.timelineStartUs + (timeMap?.outputTimeUs(usableStartUs - clip.sourceInUs)
-            ?: (usableStartUs - clip.sourceInUs))
+            ?: clip.outputTimeForSource(usableStartUs))
         val timelineEndUs = clip.timelineStartUs + (timeMap?.outputTimeUs(usableEndUs - clip.sourceInUs)
-            ?: (usableEndUs - clip.sourceInUs))
+            ?: clip.outputTimeForSource(usableEndUs))
         var targetStartFrame = ceil(
             timelineStartUs.toDouble() * TARGET_SAMPLE_RATE.toDouble() / 1_000_000.0,
         ).toLong()
@@ -347,7 +348,7 @@ internal class NativeAudioMixdownV76(
             val targetFrame = targetStartFrame + targetOffset
             val timelineUs = targetFrame * 1_000_000L / TARGET_SAMPLE_RATE.toLong()
             val sourceUs = clip.sourceInUs + (timeMap?.sourceTimeUs(timelineUs - clip.timelineStartUs)
-                ?: (timelineUs - clip.timelineStartUs))
+                ?: (clip.sourceTimeAtTimeline(timelineUs) - clip.sourceInUs))
             val relativeUs = (sourceUs - bufferStartUs).coerceAtLeast(0L)
             val sourceFrame = floor(
                 relativeUs.toDouble() * sampleRate.toDouble() / 1_000_000.0,
@@ -359,7 +360,7 @@ internal class NativeAudioMixdownV76(
             } else {
                 readPcmSampleV76(source, frameOffset + bytesPerSample, pcmEncoding)
             }
-            if (timeMap != null && sourceFrame + 1 < sourceFrameCount) {
+            if ((timeMap != null || clip.retime != null) && sourceFrame + 1 < sourceFrameCount) {
                 val fractional = (relativeUs.toDouble() * sampleRate / 1_000_000.0 - sourceFrame)
                     .toFloat().coerceIn(0f, 1f)
                 val nextOffset = frameOffset + sourceFrameBytes
@@ -376,7 +377,7 @@ internal class NativeAudioMixdownV76(
                 left = audioFrame[0]
                 right = audioFrame[1]
             }
-            val localUs = (sourceUs - clip.sourceInUs).coerceIn(0L, clip.durationUs)
+            val localUs = (timelineUs - clip.timelineStartUs).coerceIn(0L, clip.durationUs)
             var gain = mix.volume
             if (mix.fadeInUs > 0L) {
                 gain *= (localUs.toDouble() / mix.fadeInUs.toDouble()).toFloat().coerceIn(0f, 1f)

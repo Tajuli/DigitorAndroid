@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.preview
 
+import com.tajuli.digitorandroid.editor.model.*
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Rect
@@ -161,7 +162,7 @@ fun GpuPreviewSurface(
             value = null
             return@produceState
         }
-        val sourceUs = (clip.sourceInUs + fallbackLocalUs)
+        val sourceUs = clip.sourceTimeForOutput(fallbackLocalUs)
             .coerceIn(clip.sourceInUs, clip.sourceOutUs.coerceAtLeast(clip.sourceInUs))
 
         if (value == null) {

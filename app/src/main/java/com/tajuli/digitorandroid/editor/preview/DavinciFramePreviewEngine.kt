@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.preview
 
+import com.tajuli.digitorandroid.editor.model.*
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaCodec
@@ -1004,7 +1005,7 @@ private fun activeLayerSpecsAt(
 private fun previewTransitionGhostClipV22(pair: TransitionPairV22): TimelineClip {
     val outgoing = pair.outgoing
     val sourceOutUs = outgoing.sourceOutUs
-    val sourceInUs = (sourceOutUs - pair.durationUs).coerceAtLeast(outgoing.sourceInUs)
+    val sourceInUs = outgoing.sourceTimeForOutput(outgoing.durationUs - pair.durationUs)
     return outgoing.copy(
         id = transitionGhostIdV22(pair),
         label = "${outgoing.label} · transition tail",
@@ -1057,11 +1058,10 @@ internal fun staticSpatialHash(clip: TimelineClip): Int {
 }
 
 internal fun timelineToSourceUs(clip: TimelineClip, timelineUs: Long): Long =
-    (clip.sourceInUs + (timelineUs - clip.timelineStartUs))
-        .coerceIn(clip.sourceInUs, clip.sourceOutUs.coerceAtLeast(clip.sourceInUs))
+    (PreviewProjectRegistry.clip(clip.id) ?: clip).sourceTimeAtTimeline(timelineUs)
 
 internal fun sourceToTimelineUs(clip: TimelineClip, sourceUs: Long): Long =
-    clip.timelineStartUs + (sourceUs - clip.sourceInUs)
+    (PreviewProjectRegistry.clip(clip.id) ?: clip).timelineTimeAtSource(sourceUs)
 
 private fun MediaFormat.intValue(key: String, fallback: Int): Int =
     if (!containsKey(key)) fallback else runCatching { getInteger(key) }.getOrDefault(fallback)

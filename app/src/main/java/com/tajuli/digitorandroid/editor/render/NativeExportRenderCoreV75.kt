@@ -102,7 +102,7 @@ internal class NativeExportRenderCoreV75(
             inputId,
             VideoFrameProcessor.INPUT_TYPE_SURFACE,
             renderFormat,
-            SharedVideoPipeline.compositedExportEffectsFor(clip),
+            nativeRetimeEffects(clip, live = false) + SharedVideoPipeline.compositedExportEffectsFor(clip),
             clip.timelineStartUs - clip.sourceInUs,
         )
     }

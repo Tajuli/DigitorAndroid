@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.ui.editor
 
+import com.tajuli.digitorandroid.editor.model.*
 import android.app.Application
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -133,10 +134,10 @@ fun EditorViewModel.resizeVideoClipStartV13(clipId: String, requestedStartUs: Lo
             .maxOfOrNull { it.timelineEndUs }
     }.maxOrNull() ?: 0L
     val linkedSourceEarliestUs = linkedAudio.maxOfOrNull { audio ->
-        (audio.timelineStartUs - audio.sourceInUs).coerceAtLeast(0L)
+        (audio.timelineStartUs + audio.outputTimeForSourceUnbounded(0L)).coerceAtLeast(0L)
     } ?: 0L
 
-    val sourceEarliestTimelineUs = (clip.timelineStartUs - clip.sourceInUs).coerceAtLeast(0L)
+    val sourceEarliestTimelineUs = (clip.timelineStartUs + clip.outputTimeForSourceUnbounded(0L)).coerceAtLeast(0L)
     val earliestUs = maxOf(videoPreviousEndUs, linkedAudioPreviousEndUs, sourceEarliestTimelineUs, linkedSourceEarliestUs)
     val latestUs = clip.timelineEndUs - MIN_TRIM_DURATION_US_V13
     if (earliestUs > latestUs) return
@@ -146,7 +147,7 @@ fun EditorViewModel.resizeVideoClipStartV13(clipId: String, requestedStartUs: Lo
     val timelineDeltaUs = newStartUs - clip.timelineStartUs
     val updatedVideo = clip.copy(
         timelineStartUs = newStartUs,
-        sourceInUs = (clip.sourceInUs + timelineDeltaUs).coerceAtLeast(0L),
+        sourceInUs = clip.sourceTimeForOutputUnbounded(timelineDeltaUs).coerceAtLeast(0L),
     )
 
     val tracks = snapshot.project.tracks.map { candidate ->
@@ -156,7 +157,7 @@ fun EditorViewModel.resizeVideoClipStartV13(clipId: String, requestedStartUs: Lo
                 item.id in linkedIds && candidate.kind == TrackKind.AUDIO -> {
                     item.copy(
                         timelineStartUs = newStartUs,
-                        sourceInUs = (item.sourceInUs + timelineDeltaUs).coerceAtLeast(0L),
+                        sourceInUs = item.sourceTimeForOutputUnbounded(timelineDeltaUs).coerceAtLeast(0L),
                     )
                 }
                 else -> item
@@ -187,7 +188,7 @@ fun EditorViewModel.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long) 
 
     val linkedIds = snapshot.project.linkedClipIds(clipId)
     val sourceDurationUs = sourceDurationUsV13(clip)
-    val maxByVideoSourceUs = clip.timelineStartUs + (sourceDurationUs - clip.sourceInUs).coerceAtLeast(1L)
+    val maxByVideoSourceUs = clip.timelineStartUs + clip.outputTimeForSourceUnbounded(sourceDurationUs).coerceAtLeast(1L)
     val nextVideoItemStartUs = buildList<Long> {
         track.clips.filter { it.id !in linkedIds && it.timelineStartUs >= clip.timelineEndUs }
             .forEach { add(it.timelineStartUs) }
@@ -202,7 +203,7 @@ fun EditorViewModel.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long) 
     val linkedAudio = linkedIds.mapNotNull(snapshot.project::clip)
         .filter { snapshot.project.trackContaining(it.id)?.kind == TrackKind.AUDIO }
     val maxByAudioSourceUs = linkedAudio.minOfOrNull { audio ->
-        val availableDurationUs = (sourceDurationUsV13(audio) - audio.sourceInUs).coerceAtLeast(1L)
+        val availableDurationUs = audio.outputTimeForSourceUnbounded(sourceDurationUsV13(audio)).coerceAtLeast(1L)
         audio.timelineStartUs + availableDurationUs
     }
     val nextAudioItemStartUs = linkedAudio.mapNotNull { audio ->
@@ -223,7 +224,7 @@ fun EditorViewModel.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long) 
     if (newEndUs == clip.timelineEndUs) return
 
     val newDurationUs = newEndUs - clip.timelineStartUs
-    val updatedVideo = clip.copy(sourceOutUs = clip.sourceInUs + newDurationUs)
+    val updatedVideo = clip.copy(sourceOutUs = clip.sourceTimeForOutputUnbounded(newDurationUs))
 
     val tracks = snapshot.project.tracks.map { candidate ->
         candidate.copy(clips = candidate.clips.map { item ->
@@ -231,7 +232,7 @@ fun EditorViewModel.resizeVideoClipEndV13(clipId: String, requestedEndUs: Long) 
                 item.id == clipId -> updatedVideo
                 item.id in linkedIds && candidate.kind == TrackKind.AUDIO -> {
                     val audioDuration = sourceDurationUsV13(item)
-                    val requestedSourceOut = item.sourceInUs + newDurationUs
+                    val requestedSourceOut = item.sourceTimeForOutputUnbounded(newDurationUs)
                     item.copy(sourceOutUs = requestedSourceOut.coerceAtMost(audioDuration).coerceAtLeast(item.sourceInUs + 1L))
                 }
                 else -> item

@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.processing
 
+import com.tajuli.digitorandroid.editor.model.*
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
@@ -93,7 +94,7 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
 
         active.forEach { (_, clip) ->
             val clipLocalUs = timeUs - clip.timelineStartUs
-            val sourceUs = clip.sourceInUs + clipLocalUs
+            val sourceUs = clip.sourceTimeForOutput(clipLocalUs)
             val decoded = frameFor(clip, sourceUs) ?: return@forEach
             val personCut = cutout.applyPersonToSource(decoded, clip, sourceUs)
             val source = CpuFabricAwareCutoutRefineV46.refine(personCut, clip)
