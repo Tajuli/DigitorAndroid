@@ -38,7 +38,25 @@ class SpeedAudioInstrumentedTest {
     @Test fun smoothCpuFallbackKeepsAudio() = verify(.5f, true, true, true)
     @Test fun media3CompatibilityKeepsSmoothTimingAndAudio() = verify(.5f, true, true, false, true)
 
-    @Test fun normalSpeedExportReleasesActivePreviewWithoutBlockingMain() = runBlocking {
+    @Test fun normalSpeedExportReleasesActivePreviewWithoutBlockingMain() = verifyActivePreviewExport(1f)
+    @Test fun slowExportReleasesActivePreview() = verifyActivePreviewExport(.5f)
+    @Test fun fastExportReleasesActivePreview() = verifyActivePreviewExport(2f)
+
+    @Test fun nativeRetimeShaderSupportsRepeatedFlush() {
+        val program = com.tajuli.digitorandroid.editor.render.RetimeTimestampProgram { it }
+        var ready = 0
+        var flushed = 0
+        program.setInputListener(object : androidx.media3.effect.GlShaderProgram.InputListener {
+            override fun onReadyToAcceptInputFrame() { ready++ }
+            override fun onFlush() { flushed++ }
+        })
+        repeat(3) { program.flush() }
+        org.junit.Assert.assertEquals(3, flushed)
+        org.junit.Assert.assertEquals(4, ready)
+        program.release()
+    }
+
+    private fun verifyActivePreviewExport(speed: Float) = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val input = File(context.cacheDir, "active-preview-input.mp4")
         val output = File(context.cacheDir, "active-preview-export.mp4")
@@ -50,15 +68,20 @@ class SpeedAudioInstrumentedTest {
             timelineStartUs = 0L, sourceInUs = 0L, sourceOutUs = 1_000_000L)
         val project = TimelineProject(width = 64, height = 64, frameRate = 30, tracks = listOf(
             TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(clip))))
+            .withClipSpeed(clip.id, SpeedCurveSpec.constant(speed))
         val reader = android.media.ImageReader.newInstance(64, 64, android.graphics.PixelFormat.RGBA_8888, 2)
         val main = android.os.Handler(android.os.Looper.getMainLooper())
         reader.setOnImageAvailableListener({ it.acquireLatestImage()?.close() }, main)
         val preview = com.tajuli.digitorandroid.editor.preview.DavinciFramePreviewEngine(context)
         try {
             preview.attachSurface(reader.surface)
-            preview.submit(project, 0L, false)
-            withTimeout(30_000) {
-                while (preview.frame.value == null) kotlinx.coroutines.delay(10)
+            for (target in listOf(0L, 300_000L, 100_000L)) {
+                preview.submit(project, target, false)
+                withTimeout(30_000) {
+                    while (preview.frame.value?.timelineUs?.let { abs(it - target) <= 70_000L } != true) {
+                        kotlinx.coroutines.delay(10)
+                    }
+                }
             }
             val heartbeatDuringRelease = java.util.concurrent.atomic.AtomicBoolean(false)
             withTimeout(120_000) {
