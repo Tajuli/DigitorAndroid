@@ -1,6 +1,9 @@
 package com.tajuli.digitorandroid.editor.render
 
 import android.content.Context
+import android.graphics.Bitmap
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.util.TimestampIterator
 import android.view.Surface
 import androidx.media3.common.ColorInfo
 import androidx.media3.common.DebugViewProvider
@@ -107,6 +110,7 @@ internal class DigitorRenderCore(
     )
 
     private var outputSurface: Surface? = null
+    private val bitmapRegistered = BooleanArray(layers.size)
 
     init {
         graph.initialize()
@@ -137,6 +141,7 @@ internal class DigitorRenderCore(
         // MultipleInputVideoGraph requires all input slots to exist before any frame is rendered.
         layers.indices.forEach { index -> graph.registerInput(index) }
         layers.forEachIndexed { index, layer ->
+            if (layer.clip.retime?.curve?.let { it.smoothSlowMotion && it.hasSlowMotion } == true) return@forEachIndexed
             graph.registerInputStream(
                 index,
                 VideoFrameProcessor.INPUT_TYPE_SURFACE,
@@ -155,6 +160,18 @@ internal class DigitorRenderCore(
                 SurfaceInfo(it, previewOutputWidth, previewOutputHeight)
             },
         )
+    }
+
+    fun queueSmoothBitmap(inputIndex: Int, bitmap: Bitmap, timestamp: TimestampIterator): Boolean {
+        if (!bitmapRegistered[inputIndex]) {
+            graph.registerInputStream(inputIndex, VideoFrameProcessor.INPUT_TYPE_BITMAP,
+                Format.Builder().setSampleMimeType(MimeTypes.IMAGE_RAW)
+                    .setWidth(bitmap.width).setHeight(bitmap.height)
+                    .setColorInfo(ColorInfo.SRGB_BT709_FULL).build(),
+                SharedVideoPipeline.compositedPreviewEffectsFor(layers[inputIndex].clip), 0L)
+            bitmapRegistered[inputIndex] = true
+        }
+        return graph.queueInputBitmap(inputIndex, bitmap, timestamp)
     }
 
     fun inputSurface(inputIndex: Int): Surface = graph.getInputSurface(inputIndex)

@@ -45,11 +45,23 @@ This acknowledgement depends on Media3 1.10.1's bitmap texture-manager ordering
 and must be rechecked when updating Media3. Export readback currently caps the
 long edge at 1920 before the project-resolution compositor.
 
+## Realtime preview and CPU fallback
+
+`SmoothPreviewSource` feeds the same per-layer GPU compositor used by ordinary
+preview. A cancellable `RetimeFrameStream` owns a two-frame queue and a sequential
+interpolation worker. Paused seeks decode a short source neighbourhood. Playback
+skips outdated synthesis targets when the worker falls behind; it never moves the
+editor/audio clock backward to catch up. Preview is capped at 480 pixels and
+30 fps to bound CPU warping cost. Ordinary non-smooth preview keeps direct decoder
+surfaces. Smooth-mode toggles change the decoder input type; ordinary curve
+metadata updates do not rebuild the whole GPU graph.
+
+CPU export uses the same frame producer and PCM/AAC mixdown, including remuxed
+sound. The Media3 compatibility export still needs interpolation parity.
+
 ## Validation still required
 
-This is an integration checkpoint, not completed P0-1 acceptance. Realtime native
-preview currently uses the authoritative map but does not synthesize motion
-frames. CPU/Media3 fallback exports also still need interpolation parity. Android
+This is an integration checkpoint, not completed P0-1 acceptance. Android
 codec tests and required CI must pass at the final PR head; the pure JVM tests do
 not establish device throughput or quality on occlusions, rolling shutter, or
 large motion. No claim of neural/dense optical flow or universal hardware quality

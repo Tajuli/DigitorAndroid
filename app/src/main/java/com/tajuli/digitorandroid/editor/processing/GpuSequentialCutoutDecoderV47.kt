@@ -46,6 +46,7 @@ internal class GpuSequentialCutoutDecoderV47(
         endUs: Long,
         targetTimesUs: List<Long>,
         emitEveryFrame: Boolean = false,
+        cancelled: () -> Boolean = { false },
         onFrame: (sourceTimeUs: Long, bitmap: Bitmap) -> Unit,
     ): Int {
         val targets = targetTimesUs
@@ -95,6 +96,7 @@ internal class GpuSequentialCutoutDecoderV47(
                 (emitEveryFrame || targetIndex < targets.size) &&
                 idleRounds < 2_000
             ) {
+                if (cancelled() || Thread.currentThread().isInterrupted) throw java.util.concurrent.CancellationException()
                 var progressed = false
                 if (!inputDone) {
                     val inputIndex = codec.dequeueInputBuffer(DECODER_TIMEOUT_US_V47)

@@ -35,6 +35,73 @@ class SpeedAudioInstrumentedTest {
     @Test fun metadataCurveAudioIsAudible() = verify(1f, false, true)
     @Test fun metadataSmoothExportKeepsAudio() = verify(.5f, true, true)
     @Test fun cpuFallbackKeepsRetimedAudio() = verify(2f, false, true, true)
+    @Test fun smoothCpuFallbackKeepsAudio() = verify(.5f, true, true, true)
+
+    @Test fun speedSessionUndoRedoAndCancelRestoreProjectMetadata() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.runOnMainSync {
+            val vm = com.tajuli.digitorandroid.ui.editor.EditorViewModel(
+                instrumentation.targetContext.applicationContext as android.app.Application)
+            val store = androidx.lifecycle.ViewModelStore().apply { put("speed-test", vm) }
+            try {
+                val clip = TimelineClip(id = "history", uri = "content://test/source", label = "history",
+                    timelineStartUs = 0L, sourceOutUs = 2_000_000L)
+                val project = TimelineProject(tracks = listOf(
+                    TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(clip))))
+                vm.commitProjectV19("fixture", project)
+                vm.beginSpeedEdit(clip.id)
+                vm.previewSpeed(SpeedCurveSpec.constant(.5f))
+                vm.finishSpeedEdit(false)
+                org.junit.Assert.assertEquals(4_000_000L, vm.state.value.project.durationUs)
+                vm.undo()
+                org.junit.Assert.assertEquals(2_000_000L, vm.state.value.project.durationUs)
+                vm.redo()
+                org.junit.Assert.assertEquals(4_000_000L, vm.state.value.project.durationUs)
+                vm.beginSpeedEdit(clip.id)
+                vm.previewSpeed(SpeedCurveSpec.constant(2f))
+                vm.finishSpeedEdit(true)
+                org.junit.Assert.assertEquals(4_000_000L, vm.state.value.project.durationUs)
+                org.junit.Assert.assertEquals(clip.uri, vm.state.value.project.clip(clip.id)!!.uri)
+            } finally { store.clear() }
+        }
+    }
+
+    private fun assertSmoothPreview(context: android.content.Context, project: TimelineProject) {
+        val reader = android.media.ImageReader.newInstance(64, 64, android.graphics.PixelFormat.RGBA_8888, 2)
+        val thread = android.os.HandlerThread("RetimePreviewTest").apply { start() }
+        val gotPixels = java.util.concurrent.atomic.AtomicBoolean(false)
+        reader.setOnImageAvailableListener({ source ->
+            source.acquireLatestImage()?.use { image ->
+                val plane = image.planes[0]
+                val offset = 32 * plane.rowStride + 32 * plane.pixelStride
+                val bytes = plane.buffer
+                gotPixels.set((bytes.get(offset).toInt() and 255) +
+                    (bytes.get(offset + 1).toInt() and 255) + (bytes.get(offset + 2).toInt() and 255) > 40)
+            }
+        }, android.os.Handler(thread.looper))
+        val preview = com.tajuli.digitorandroid.editor.preview.DavinciFramePreviewEngine(context)
+        try {
+            preview.attachSurface(reader.surface)
+            for (time in listOf(500_000L, 1_000_000L)) {
+                gotPixels.set(false)
+                preview.submit(project, time, false)
+                val deadline = android.os.SystemClock.elapsedRealtime() + 30_000L
+                while (android.os.SystemClock.elapsedRealtime() < deadline &&
+                    (!gotPixels.get() || preview.frame.value?.timelineUs?.let { abs(it - time) <= 34_000L } != true)) {
+                    Thread.sleep(10)
+                }
+                assertTrue("Smooth preview must render nonblack pixels at $time", gotPixels.get())
+                assertTrue("Smooth preview timestamp does not match seek", preview.frame.value?.timelineUs?.let {
+                    abs(it - time) <= 34_000L
+                } == true)
+            }
+        } finally {
+            preview.suspendForExternalGpuWork()
+            preview.close()
+            reader.close()
+            thread.quitSafely()
+        }
+    }
 
     /** Container/packet checks pass even for encoded digital silence; decode the actual waveform. */
     private fun assertAudible(context: android.content.Context, uri: String) {
@@ -123,6 +190,7 @@ class SpeedAudioInstrumentedTest {
                 )).withClipSpeed(clip.id, curve)
                 val output = File(dir, if (smooth || cpu) "metadata-export.mp4" else "metadata-audio.m4a")
                 if (smooth || cpu) {
+                    if (smooth && !cpu) assertSmoothPreview(context, project)
                     withTimeout(120_000) {
                         if (cpu) CpuExportBackend(context).export(project, output, ExportQuality.LOW, {})
                         else NativeHardwareExportBackendV75(context).export(project, output, ExportQuality.LOW, {})

@@ -9,12 +9,15 @@ import java.util.concurrent.CancellationException
 /** Sequential decode, at most two source pixel arrays and one output buffer. No derived media. */
 internal class SmoothRetimeFrameProducer(private val context: Context) {
     fun produce(clip: TimelineClip, fps: Int, longEdge: Int, cancelled: () -> Boolean,
+                startOutputUs: Long = 0L, endOutputUs: Long = clip.durationUs,
+                minimumOutputUs: () -> Long = { 0L },
                 emit: (Bitmap, Long) -> Unit) {
         require(fps > 0)
         val interpolator = MotionFrameInterpolator()
         var previous: IntArray? = null
         var previousUs = clip.sourceInUs
-        var outputIndex = 0L
+        var outputIndex = (startOutputUs.coerceAtLeast(0L) * fps + 999_999L) / 1_000_000L
+        val endUs = endOutputUs.coerceIn(0L, clip.durationUs)
         var width = 0; var height = 0
         var scratch: IntArray? = null
         fun outputTime() = outputIndex * 1_000_000L / fps
@@ -25,7 +28,10 @@ internal class SmoothRetimeFrameProducer(private val context: Context) {
             outputIndex++
         }
         GpuSequentialCutoutDecoderV47(context, longEdge.coerceIn(256, 4096)).decodeTargets(
-            Uri.parse(clip.uri), clip.sourceInUs, clip.sourceOutUs, emptyList(), emitEveryFrame = true,
+            Uri.parse(clip.uri),
+            (clip.sourceTimeForOutput(startOutputUs) - 200_000L).coerceAtLeast(clip.sourceInUs),
+            (clip.sourceTimeForOutput(endUs) + 200_000L).coerceAtMost(clip.sourceOutUs),
+            emptyList(), emitEveryFrame = true, cancelled = cancelled,
         ) { time, bitmap ->
             if (cancelled()) { bitmap.recycle(); throw CancellationException() }
             try {
@@ -38,10 +44,13 @@ internal class SmoothRetimeFrameProducer(private val context: Context) {
                 val current = IntArray(width * height)
                 scaled.getPixels(current, 0, width, 0, 0, width, height)
                 if (scaled !== bitmap) scaled.recycle()
+                outputIndex = maxOf(outputIndex, minimumOutputUs().coerceAtLeast(0L) * fps / 1_000_000L)
                 val before = previous
                 var motion: MotionFrameInterpolator.Pair? = null
                 var motionFailed = false
-                while (outputTime() < clip.durationUs && clip.sourceTimeForOutput(outputTime()) <= time) {
+                while (outputTime() < endUs && clip.sourceTimeForOutput(outputTime()) <= time) {
+                    outputIndex = maxOf(outputIndex, minimumOutputUs().coerceAtLeast(0L) * fps / 1_000_000L)
+                    if (outputTime() >= endUs || clip.sourceTimeForOutput(outputTime()) > time) break
                     val source = clip.sourceTimeForOutput(outputTime())
                     val amount = if (before == null || time <= previousUs) 1f else
                         ((source - previousUs).toDouble() / (time - previousUs)).toFloat().coerceIn(0f, 1f)
@@ -61,6 +70,6 @@ internal class SmoothRetimeFrameProducer(private val context: Context) {
             } finally { if (!bitmap.isRecycled) bitmap.recycle() }
         }
         val tail = checkNotNull(previous) { "No video frame could be decoded for slow motion" }
-        while (outputTime() < clip.durationUs) submit(tail)
+        while (outputTime() < endUs) submit(tail)
     }
 }

@@ -94,6 +94,7 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
     private val cutout = CpuCutoutProcessorV43(context, workerCount)
     private val workers = Executors.newFixedThreadPool(workerCount)
     private val retrievers = mutableMapOf<String, MediaMetadataRetriever>()
+    private val smoothStreams = mutableMapOf<String, RetimeFrameStream>()
 
     fun render(project: TimelineProject, timeUs: Long): IntArray {
         val canvas = IntArray(project.width * project.height) { 0xFF000000.toInt() }
@@ -105,10 +106,12 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
             }
             .sortedByDescending { it.first }
 
+        val activeIds = active.map { it.second.id }.toSet()
+        smoothStreams.keys.filter { it !in activeIds }.forEach { smoothStreams.remove(it)?.close() }
         active.forEach { (_, clip) ->
             val clipLocalUs = timeUs - clip.timelineStartUs
             val sourceUs = clip.sourceTimeForOutput(clipLocalUs)
-            val decoded = frameFor(clip, sourceUs) ?: return@forEach
+            val decoded = frameFor(clip, sourceUs, clipLocalUs, project) ?: return@forEach
             val personCut = cutout.applyPersonToSource(decoded, clip, sourceUs)
             val source = CpuFabricAwareCutoutRefineV46.refine(personCut, clip)
             val transformed = CpuTransformProcessor.render(
@@ -133,7 +136,22 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
         return canvas
     }
 
-    private fun frameFor(clip: TimelineClip, sourceTimeUs: Long): Bitmap? {
+    private fun frameFor(clip: TimelineClip, sourceTimeUs: Long, localUs: Long, project: TimelineProject): Bitmap? {
+        if (clip.retime?.curve?.let { it.smoothSlowMotion && it.hasSlowMotion } == true) {
+            val stream = smoothStreams.getOrPut(clip.id) {
+                val start = (localUs * project.frameRate / 1_000_000L) * 1_000_000L / project.frameRate
+                RetimeFrameStream(context, clip, project.frameRate,
+                    minOf(maxOf(project.width, project.height), 1920), start)
+            }
+            val deadline = System.nanoTime() + 15_000_000_000L
+            while (!stream.isFinished()) {
+                stream.error()?.let { throw IllegalStateException("Smooth CPU export decode failed", it) }
+                stream.poll()?.let { return it.bitmap }
+                check(System.nanoTime() < deadline) { "Smooth CPU export frame timed out" }
+                Thread.sleep(1)
+            }
+            stream.error()?.let { throw IllegalStateException("Smooth CPU export decode failed", it) }
+        }
         val retriever = retrievers.getOrPut(clip.uri) {
             MediaMetadataRetriever().also { it.setDataSource(context, Uri.parse(clip.uri)) }
         }
@@ -175,6 +193,8 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
     }
 
     override fun close() {
+        smoothStreams.values.forEach { it.close() }
+        smoothStreams.clear()
         retrievers.values.forEach { it.release() }
         color.close()
         effects.close()
