@@ -64,8 +64,9 @@ data class SpeedCurveSpec(
         return copy(points = withBounds)
     }
 
-    fun speedAt(position: Float): Float {
-        val normalized = normalized().points
+    fun speedAt(position: Float): Float = interpolateSpeed(normalized().points, position)
+
+    private fun interpolateSpeed(normalized: List<SpeedCurvePoint>, position: Float): Float {
         val p = position.coerceIn(0f, 1f)
         if (p <= normalized.first().position) return normalized.first().speed
         if (p >= normalized.last().position) return normalized.last().speed
@@ -92,11 +93,12 @@ data class SpeedCurveSpec(
         val minStepForBound = ceil(duration.toDouble() / boundedSegments.toDouble()).toLong()
         val stepUs = maxOf(5_000L, preferredStepUs, minStepForBound)
 
+        val normalizedPoints = normalized().points
         val starts = mutableListOf<Long>()
         val speeds = mutableListOf<Float>()
         var cursor = 0L
         while (cursor < duration) {
-            val speed = speedAt(cursor.toFloat() / duration.toFloat())
+            val speed = interpolateSpeed(normalizedPoints, cursor.toFloat() / duration.toFloat())
             if (speeds.isEmpty() || abs(speeds.last() - speed) >= .001f) {
                 starts += cursor
                 speeds += speed
@@ -108,7 +110,7 @@ data class SpeedCurveSpec(
             speeds += 1f
         } else if (starts.first() != 0L) {
             starts.add(0, 0L)
-            speeds.add(0, speedAt(0f))
+            speeds.add(0, normalizedPoints.first().speed)
         }
         return SpeedCurveSchedule(duration, starts, speeds)
     }

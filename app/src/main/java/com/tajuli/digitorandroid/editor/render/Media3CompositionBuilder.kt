@@ -459,7 +459,7 @@ class Media3CompositionBuilder(
         }
 
         val builder = EditedMediaItem.Builder(mediaItem)
-            .setDurationUs(clip.sourceDurationUs)
+            .setDurationUs(clip.sourceOutUs)
             .apply { if (clip.retime != null) setSpeed(ClipSpeedProvider(clip)) }
         if (kind == TrackKind.VIDEO) {
             // Preserve realtime preview cadence for moving-video sources, but apply the selected

@@ -71,4 +71,33 @@ class ClipRetimeTest {
         assertEquals(6_000_000L, fragment.sourceOutUs)
         assertEquals(4_000_000L, fragment.durationUs)
     }
+    @Test fun reopeningSplitCurveWithoutChangesKeepsItsAnchor() {
+        val original = clip(1f).copy(retime = ClipRetime(
+            SpeedCurveSpec.preset(SpeedCurvePreset.HERO), 2_000_000L, 12_000_000L))
+        val fragment = original.copy(sourceInUs = 5_000_000L)
+        val project = TimelineProject(tracks = listOf(
+            TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(fragment))))
+        assertSame(project, project.withClipSpeed(fragment.id, fragment.retime!!.curve))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun retimeRejectsCollisionWithClipThatStartedBeforeOldEnd() {
+        val video = clip(1f).copy(id = "video", timelineStartUs = 0L, retime = null)
+        val other = video.copy(id = "other", timelineStartUs = 9_000_000L)
+        val project = TimelineProject(tracks = listOf(
+            TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(video, other))))
+        project.withClipSpeed(video.id, SpeedCurveSpec.constant(.5f))
+    }
+
+    @Test fun separateTracksCanOverlapWhileEachTrackKeepsItsOrder() {
+        val video = clip(1f).copy(id = "video", timelineStartUs = 0L, retime = null)
+        val other = video.copy(id = "other", timelineStartUs = 1_000_000L)
+        val project = TimelineProject(tracks = listOf(
+            TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(video)),
+            TimelineTrack(name = "V2", kind = TrackKind.VIDEO, clips = listOf(other))))
+        val changed = project.withClipSpeed(video.id, SpeedCurveSpec.constant(.5f))
+        assertEquals(20_000_000L, changed.clip(video.id)!!.durationUs)
+        assertEquals(other, changed.clip(other.id))
+    }
+
 }

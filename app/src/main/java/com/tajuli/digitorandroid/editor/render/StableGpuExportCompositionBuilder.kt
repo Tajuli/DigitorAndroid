@@ -165,7 +165,7 @@ internal class StableGpuExportCompositionBuilder(
     ): EditedMediaItem {
         val mediaItem = clippedMediaItem(videoClip)
         return EditedMediaItem.Builder(mediaItem)
-            .setDurationUs(videoClip.sourceDurationUs)
+            .setDurationUs(videoClip.sourceOutUs)
             .apply { if (videoClip.retime != null) setSpeed(ClipSpeedProvider(videoClip)) }
             .setFrameRate(project.frameRate.coerceIn(1, 120))
             .setEffects(
@@ -182,7 +182,7 @@ internal class StableGpuExportCompositionBuilder(
         val builder = EditedMediaItem.Builder(mediaItem)
             .setFrameRate(project.frameRate.coerceIn(1, 120))
         if (!clip.isImageV21) {
-            builder.setDurationUs(clip.sourceDurationUs)
+            builder.setDurationUs(clip.sourceOutUs)
             .apply { if (clip.retime != null) setSpeed(ClipSpeedProvider(clip)) }
         }
         return builder
@@ -192,7 +192,7 @@ internal class StableGpuExportCompositionBuilder(
 
     private fun audioItem(clip: TimelineClip): EditedMediaItem {
         val mediaItem = clippedMediaItem(clip)
-        val builder = EditedMediaItem.Builder(mediaItem).setDurationUs(clip.sourceDurationUs)
+        val builder = EditedMediaItem.Builder(mediaItem).setDurationUs(clip.sourceOutUs)
             .apply { if (clip.retime != null) setSpeed(ClipSpeedProvider(clip)) }
         val processors = audioProcessorsFor(clip)
         if (processors.isNotEmpty()) {

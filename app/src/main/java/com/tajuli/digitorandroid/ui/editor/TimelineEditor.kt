@@ -1,5 +1,8 @@
 package com.tajuli.digitorandroid.ui.editor
 
+import com.tajuli.digitorandroid.editor.model.outputTimeForSource
+import com.tajuli.digitorandroid.editor.model.sourceTimeForOutput
+import com.tajuli.digitorandroid.editor.model.sourceDurationUs
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -792,8 +795,8 @@ private fun androidx.compose.foundation.layout.BoxScope.EffectBarV26(
     var moveDeltaUs by remember(effect.id) { mutableStateOf(0L) }
     val shownStart = previewStart ?: baseStart
     val shownEnd = previewEnd ?: baseEnd
-    val localStart = (shownStart - clip.sourceInUs).coerceAtLeast(0L)
-    val localEnd = (shownEnd - clip.sourceInUs).coerceAtLeast(localStart + 1L)
+    val localStart = clip.outputTimeForSource(shownStart)
+    val localEnd = clip.outputTimeForSource(shownEnd).coerceAtLeast(localStart + 1L)
     val x = (localStart / US_PER_SECOND.toFloat() * ppsDp).dp
     val barWidth = ((localEnd - localStart) / US_PER_SECOND.toFloat() * ppsDp).coerceAtLeast(5f).dp
 
@@ -839,8 +842,8 @@ private fun androidx.compose.foundation.layout.BoxScope.EffectBarV26(
                     rawMoveX += drag.x
                     val rawUs = rawMoveX / pps.coerceAtLeast(.001f) * US_PER_SECOND
                     val snapped = (rawUs / frameUs).roundToLong() * frameUs
-                    val minDelta = clip.sourceInUs - baseStart
-                    val maxDelta = clip.sourceOutUs - baseEnd
+                    val minDelta = -clip.outputTimeForSource(baseStart)
+                    val maxDelta = clip.durationUs - clip.outputTimeForSource(baseEnd)
                     moveDeltaUs = snapped.coerceIn(minDelta, maxDelta)
                 }
             },
@@ -862,15 +865,15 @@ private fun androidx.compose.foundation.layout.BoxScope.EffectBarV26(
                 onPreview = { deltaPx ->
                     val deltaUs = deltaPx / pps.coerceAtLeast(.001f) * US_PER_SECOND
                     val snapped = (deltaUs / frameUs).roundToLong() * frameUs
-                    val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.durationUs).coerceAtLeast(1L)
-                    previewStart = (baseStart + snapped)
+                    val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.sourceDurationUs).coerceAtLeast(1L)
+                    previewStart = clip.sourceTimeForOutput(clip.outputTimeForSource(baseStart) + snapped)
                         .coerceIn(clip.sourceInUs, (baseEnd - minDuration).coerceAtLeast(clip.sourceInUs))
                 },
                 onCommit = { deltaPx ->
                     val deltaUs = deltaPx / pps.coerceAtLeast(.001f) * US_PER_SECOND
                     val snapped = (deltaUs / frameUs).roundToLong() * frameUs
-                    val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.durationUs).coerceAtLeast(1L)
-                    val target = (baseStart + snapped)
+                    val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.sourceDurationUs).coerceAtLeast(1L)
+                    val target = clip.sourceTimeForOutput(clip.outputTimeForSource(baseStart) + snapped)
                         .coerceIn(clip.sourceInUs, (baseEnd - minDuration).coerceAtLeast(clip.sourceInUs))
                     vm.resizeEffectStartV26(selection, target)
                     previewStart = null
@@ -882,15 +885,15 @@ private fun androidx.compose.foundation.layout.BoxScope.EffectBarV26(
                 onPreview = { deltaPx ->
                     val deltaUs = deltaPx / pps.coerceAtLeast(.001f) * US_PER_SECOND
                     val snapped = (deltaUs / frameUs).roundToLong() * frameUs
-                    val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.durationUs).coerceAtLeast(1L)
-                    previewEnd = (baseEnd + snapped)
+                    val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.sourceDurationUs).coerceAtLeast(1L)
+                    previewEnd = clip.sourceTimeForOutput(clip.outputTimeForSource(baseEnd) + snapped)
                         .coerceIn((baseStart + minDuration).coerceAtMost(clip.sourceOutUs), clip.sourceOutUs)
                 },
                 onCommit = { deltaPx ->
                     val deltaUs = deltaPx / pps.coerceAtLeast(.001f) * US_PER_SECOND
                     val snapped = (deltaUs / frameUs).roundToLong() * frameUs
-                    val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.durationUs).coerceAtLeast(1L)
-                    val target = (baseEnd + snapped)
+                    val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.sourceDurationUs).coerceAtLeast(1L)
+                    val target = clip.sourceTimeForOutput(clip.outputTimeForSource(baseEnd) + snapped)
                         .coerceIn((baseStart + minDuration).coerceAtMost(clip.sourceOutUs), clip.sourceOutUs)
                     vm.resizeEffectEndV26(selection, target)
                     previewEnd = null

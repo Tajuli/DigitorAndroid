@@ -33,6 +33,7 @@ class SpeedAudioInstrumentedTest {
     @Test fun metadataSlowAudioIsAudible() = verify(.5f, false, true)
     @Test fun metadataFastAudioIsAudible() = verify(2f, false, true)
     @Test fun metadataCurveAudioIsAudible() = verify(1f, false, true)
+    @Test fun metadataSmoothExportKeepsAudio() = verify(.5f, true, true)
 
     /** Container/packet checks pass even for encoded digital silence; decode the actual waveform. */
     private fun assertAudible(context: android.content.Context, uri: String) {
@@ -107,19 +108,43 @@ class SpeedAudioInstrumentedTest {
         repeat(samples) { wav.putShort((sin(it * 2.0 * Math.PI * 440 / 48_000) * 12_000).toInt().toShort()) }
         audio.writeBytes(wav.array())
         val clip = TimelineClip(uri = Uri.fromFile(video).toString(), label = "video",
-            timelineStartUs = 0L, sourceOutUs = 2_000_000L, linkGroupId = "pair")
+            timelineStartUs = 0L, sourceInUs = if (metadata) 250_000L else 0L,
+            sourceOutUs = if (metadata) 1_750_000L else 2_000_000L, linkGroupId = "pair")
         val linked = clip.copy(id = "audio", uri = Uri.fromFile(audio).toString())
         var result: CreatorMediaProcessor.DerivedMedia? = null
         try {
             val baked = if (metadata) {
                 val curve = if (speed == 1f) SpeedCurveSpec.preset(SpeedCurvePreset.HERO)
-                    else SpeedCurveSpec.constant(speed)
-                val project = TimelineProject(tracks = listOf(
+                    else SpeedCurveSpec.constant(speed, smooth)
+                val project = TimelineProject(width = 64, height = 64, frameRate = 30, tracks = listOf(
                     TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(clip)),
                     TimelineTrack(name = "A1", kind = TrackKind.AUDIO, clips = listOf(linked)),
                 )).withClipSpeed(clip.id, curve)
-                val output = File(dir, "metadata-audio.m4a")
-                NativeAudioMixdownV76(context).encode(project, output, {})
+                val output = File(dir, if (smooth) "metadata-smooth.mp4" else "metadata-audio.m4a")
+                if (smooth) {
+                    withTimeout(120_000) {
+                        NativeHardwareExportBackendV75(context).export(project, output, ExportQuality.LOW, {})
+                    }
+                    val frames = MediaExtractor()
+                    try {
+                        frames.setDataSource(output.path)
+                        val videoIndex = (0 until frames.trackCount).first {
+                            frames.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true
+                        }
+                        frames.selectTrack(videoIndex)
+                        var count = 0
+                        var last = -1L
+                        do {
+                            val time = frames.sampleTime
+                            if (time < 0) break
+                            assertTrue("Video timestamps must increase", time > last)
+                            last = time
+                            count++
+                        } while (frames.advance())
+                        val expected = (project.durationUs * project.frameRate / 1_000_000L).toInt()
+                        assertTrue("Expected $expected frames, got $count", abs(count - expected) <= 1)
+                    } finally { frames.release() }
+                } else NativeAudioMixdownV76(context).encode(project, output, {})
                 CreatorMediaProcessor.DerivedMedia(Uri.fromFile(output).toString(), project.durationUs, true)
             } else withTimeout(120_000) {
                 withContext(Dispatchers.Main) {

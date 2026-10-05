@@ -326,7 +326,7 @@ class CreatorMediaProcessor(context: Context) {
             first.recycle()
             CpuAvcEncoder(targetWidth, targetHeight, fps, output).use { encoder ->
                 for (index in 0 until frameCount) {
-                    val sourceUs = (clip.sourceOutUs - 1L - index * frameStepUs)
+                    val sourceUs = clip.sourceTimeForOutput((clip.durationUs - 1L - index * frameStepUs).coerceAtLeast(0L))
                         .coerceIn(clip.sourceInUs, (clip.sourceOutUs - 1L).coerceAtLeast(clip.sourceInUs))
                     val frame = retriever.getFrameAtTime(sourceUs, MediaMetadataRetriever.OPTION_CLOSEST)
                         ?: continue

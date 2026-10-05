@@ -864,7 +864,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val tracks = project.tracks.map { track ->
             track.copy(clips = track.clips.mapNotNull { clip ->
                 when {
-                    clip.id == live.id -> clip.copy(uri = derived.uri, sourceInUs = 0L, sourceOutUs = derived.durationUs, linkGroupId = null, nodeAnimations = NodeAnimations(), virtualCameraStabilizationV1 = null)
+                    clip.id == live.id -> clip.copy(uri = derived.uri, sourceInUs = 0L, sourceOutUs = derived.durationUs, retime = null, linkGroupId = null, nodeAnimations = NodeAnimations(), virtualCameraStabilizationV1 = null)
                     clip.id in linkedIds && track.kind == TrackKind.AUDIO -> null
                     else -> clip
                 }
