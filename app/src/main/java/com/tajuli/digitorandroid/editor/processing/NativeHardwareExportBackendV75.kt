@@ -67,9 +67,12 @@ internal class NativeHardwareExportBackendV75(
     ): ExportResult {
         val plan = plan(project) ?: error("Native hardware export cannot schedule this project")
         onProgress(ExportProgress.Stage("Native HW: releasing preview resources", 0.01f))
-        val previewLease = PreviewExportCoordinator.acquireExportLease()
+        var previewLease: PreviewExportCoordinator.ExportLease? = null
         return try {
             withContext(Dispatchers.Default) {
+                // Waiting for codec/GL teardown must never block the UI looper. Assign inside
+                // the worker so cancellation during dispatcher handoff still releases the lease.
+                previewLease = PreviewExportCoordinator.acquireExportLease()
                 output.parentFile?.mkdirs()
                 if (output.exists()) output.delete()
 
@@ -135,7 +138,7 @@ internal class NativeHardwareExportBackendV75(
                 }
             }
         } finally {
-            previewLease.close()
+            previewLease?.close()
         }
     }
 

@@ -38,6 +38,55 @@ class SpeedAudioInstrumentedTest {
     @Test fun smoothCpuFallbackKeepsAudio() = verify(.5f, true, true, true)
     @Test fun media3CompatibilityKeepsSmoothTimingAndAudio() = verify(.5f, true, true, false, true)
 
+    @Test fun normalSpeedExportReleasesActivePreviewWithoutBlockingMain() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val input = File(context.cacheDir, "active-preview-input.mp4")
+        val output = File(context.cacheDir, "active-preview-export.mp4")
+        CpuAvcEncoder(64, 64, 30, input).use { encoder ->
+            repeat(30) { encoder.encodeFrame(IntArray(64 * 64) { 0xff4466aa.toInt() }, it * 1_000_000L / 30) }
+            encoder.finish()
+        }
+        val clip = TimelineClip(uri = Uri.fromFile(input).toString(), label = "normal",
+            timelineStartUs = 0L, sourceInUs = 0L, sourceOutUs = 1_000_000L)
+        val project = TimelineProject(width = 64, height = 64, frameRate = 30, tracks = listOf(
+            TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(clip))))
+        val reader = android.media.ImageReader.newInstance(64, 64, android.graphics.PixelFormat.RGBA_8888, 2)
+        val main = android.os.Handler(android.os.Looper.getMainLooper())
+        reader.setOnImageAvailableListener({ it.acquireLatestImage()?.close() }, main)
+        val preview = com.tajuli.digitorandroid.editor.preview.DavinciFramePreviewEngine(context)
+        try {
+            preview.attachSurface(reader.surface)
+            preview.submit(project, 0L, false)
+            withTimeout(30_000) {
+                while (preview.frame.value == null) kotlinx.coroutines.delay(10)
+            }
+            val heartbeatDuringRelease = java.util.concurrent.atomic.AtomicBoolean(false)
+            withTimeout(120_000) {
+                withContext(Dispatchers.Main) {
+                    NativeHardwareExportBackendV75(context).export(project, output, ExportQuality.LOW) { stage ->
+                        if (stage is ExportProgress.Stage && stage.name.contains("releasing preview")) {
+                            main.post { heartbeatDuringRelease.set(true) }
+                        }
+                    }
+                }
+            }
+            assertTrue("Main looper must remain responsive during export", heartbeatDuringRelease.get())
+            val extractor = MediaExtractor()
+            try {
+                extractor.setDataSource(output.path)
+                assertTrue("1x export must contain video", (0 until extractor.trackCount).any {
+                    extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true
+                })
+            } finally { extractor.release() }
+        } finally {
+            preview.suspendForExternalGpuWork()
+            preview.close()
+            reader.close()
+            input.delete()
+            output.delete()
+        }
+    }
+
     @Test fun speedSessionUndoRedoAndCancelRestoreProjectMetadata() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.runOnMainSync {
