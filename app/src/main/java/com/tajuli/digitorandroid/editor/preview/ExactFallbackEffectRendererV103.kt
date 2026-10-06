@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.preview
 
+import com.tajuli.digitorandroid.editor.model.timelineTimeAtSource
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
@@ -144,10 +145,7 @@ internal object ExactFallbackEffectRendererV103 {
 
             // Effects receive composition timestamps; reconstruct the timeline timestamp that maps
             // back to the requested source frame through ParityRenderContract.sourceTimeUs().
-            val presentationTimeUs = (
-                clip.timelineStartUs +
-                    (sourceTimeUs - clip.sourceInUs)
-                ).coerceAtLeast(0L)
+            val presentationTimeUs = clip.timelineTimeAtSource(sourceTimeUs).coerceAtLeast(0L)
 
             val ownedInput = source.copy(Bitmap.Config.ARGB_8888, false) ?: return null
             if (!queueBitmapWhenReady(graph, ownedInput, presentationTimeUs)) return null

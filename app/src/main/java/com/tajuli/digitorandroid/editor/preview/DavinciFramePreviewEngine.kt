@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.preview
 
+import com.tajuli.digitorandroid.editor.model.*
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaCodec
@@ -92,6 +93,7 @@ class DavinciFramePreviewEngine(
         val sourceInUs: Long,
         val sourceOutUs: Long,
         val staticSpatialHash: Int,
+        val smoothRetime: Boolean = false,
     )
 
     private data class PreparedLayer(
@@ -381,9 +383,15 @@ class DavinciFramePreviewEngine(
         }
 
         val wantedKey = sessionKey(request.project, layers)
-        val sessionChanged = session?.key != wantedKey
+        // Media3's MultipleInputVideoGraph.flush only flushes its input processors, not
+        // compositor timestamp queues. Recreate on backward seek to discard future textures.
+        val backwardsSeek = lastRequestedTimelineUs != Long.MIN_VALUE &&
+            request.timelineUs < lastRequestedTimelineUs
+        val sessionChanged = session?.key != wantedKey || backwardsSeek
         if (sessionChanged) {
             throwIfExternalSuspendRequested()
+            // Release the previous hardware decoder before reserving another one on small devices.
+            replaceSession(null)
             val built = buildSession(request.project, layers, wantedKey)
             if (exportSuspended.get()) {
                 runCatching { built.close() }
@@ -483,7 +491,7 @@ class DavinciFramePreviewEngine(
                         mutableFrame.value = Frame(
                             bitmap = null,
                             timelineUs = timelineUs,
-                            activeLayerCount = session?.sources?.size ?: layers.size,
+                            activeLayerCount = layers.size,
                             renderTimeMs = ((System.nanoTime() - latestRequestStartedNs) / 1_000_000L)
                                 .coerceAtLeast(0L),
                         )
@@ -498,8 +506,14 @@ class DavinciFramePreviewEngine(
             previewSurface?.takeIf { it.isValid }?.let(core::setOutputSurface)
             throwIfExternalSuspendRequested()
 
-            val sources = prepared.mapIndexed { index, item ->
+            val smoothSources = mutableListOf<SmoothPreviewSource>()
+            val sources = prepared.mapIndexedNotNull { index, item ->
                 throwIfExternalSuspendRequested()
+                if (item.layer.clip.retime?.curve?.let { it.smoothSlowMotion && it.hasSlowMotion } == true) {
+                    item.extractor.release()
+                    smoothSources += SmoothPreviewSource(appContext, index, item.layer.clip, project.frameRate.coerceAtMost(30))
+                    return@mapIndexedNotNull null
+                }
                 val codec = createConfiguredPreviewDecoder(
                     mime = item.mime,
                     format = item.platformFormat,
@@ -510,6 +524,7 @@ class DavinciFramePreviewEngine(
                     clip = item.layer.clip,
                     extractor = item.extractor,
                     codec = codec,
+                    format = item.platformFormat,
                 )
             }
             return PreviewSession(
@@ -517,6 +532,7 @@ class DavinciFramePreviewEngine(
                 key = key,
                 core = core,
                 sources = sources,
+                smoothSources = smoothSources,
             )
         } catch (error: Throwable) {
             prepared.forEach { item -> runCatching { item.extractor.release() } }
@@ -659,6 +675,7 @@ class DavinciFramePreviewEngine(
         val key: SessionKey,
         val core: DigitorRenderCore,
         val sources: List<DecoderSource>,
+        val smoothSources: List<SmoothPreviewSource>,
     ) : Closeable {
 
         private val pendingPausedOutputs = mutableListOf<PendingPausedOutput>()
@@ -675,11 +692,13 @@ class DavinciFramePreviewEngine(
             clearPausedOutputs()
             core.flush()
             sources.forEach { source -> source.resetToTimeline(timelineUs) }
+            smoothSources.forEach { it.reset(timelineUs, playing = true) }
         }
 
         fun pumpPlayback(timelineUs: Long) {
             sources.forEach { source -> source.feedInput(MAX_INPUT_PER_PUMP) }
             sources.forEach { source -> source.drainPlayback(timelineUs, core) }
+            smoothSources.forEach { it.pump(timelineUs, core) }
         }
 
         fun seekAndRender(timelineUs: Long) {
@@ -691,6 +710,7 @@ class DavinciFramePreviewEngine(
                 source.resetToTimeline(timelineUs)
             }
 
+            smoothSources.forEach { it.reset(timelineUs, playing = false) }
             sources.forEachIndexed { index, source ->
                 if (exportSuspended.get()) return
                 val around = source.decodeAroundTarget { exportSuspended.get() }
@@ -712,13 +732,13 @@ class DavinciFramePreviewEngine(
         }
 
         fun retryPausedSubmission() {
-            if (pendingPausedOutputs.isEmpty() || playing || pausedRetryPosted) return
+            if ((pendingPausedOutputs.isEmpty() && smoothSources.isEmpty()) || playing || pausedRetryPosted) return
             pausedRetryPosted = true
             handler.post(pausedRetry)
         }
 
         private fun drainPausedOutputs() {
-            if (pendingPausedOutputs.isEmpty()) return
+            if (pendingPausedOutputs.isEmpty() && smoothSources.isEmpty()) return
 
             // A paused target frame must not be consumed before the viewer Surface is attached.
             // Otherwise the graph can process it successfully into a null output and there is no
@@ -736,7 +756,8 @@ class DavinciFramePreviewEngine(
                 }
             }
 
-            if (pendingPausedOutputs.isNotEmpty()) schedulePausedRetry()
+            val smoothPending = smoothSources.map { it.pump(lastRequestedTimelineUs.coerceAtLeast(0L), core) }.any { it }
+            if (pendingPausedOutputs.isNotEmpty() || smoothPending) schedulePausedRetry()
         }
 
         private fun schedulePausedRetry() {
@@ -758,6 +779,7 @@ class DavinciFramePreviewEngine(
             clearPausedOutputs()
             runCatching { core.setOutputSurface(null) }
             sources.forEach { source -> runCatching { source.close() } }
+            smoothSources.forEach { runCatching { it.close() } }
             runCatching { core.close() }
         }
     }
@@ -767,17 +789,33 @@ class DavinciFramePreviewEngine(
         val clip: TimelineClip,
         val extractor: MediaExtractor,
         val codec: MediaCodec,
+        format: MediaFormat,
     ) : Closeable {
         private val bufferInfo = MediaCodec.BufferInfo()
         private var inputEos = false
         private var outputEos = false
         private var playbackFloorSourceUs = clip.sourceInUs
         private var heldPlaybackOutput: HeldOutput? = null
+        private var hasQueuedInput = false
+        private var receivedOutput = false
+        private val codecConfig = (0..2).mapNotNull { index ->
+            format.getByteBuffer("csd-$index")?.duplicate()?.let { buffer ->
+                ByteArray(buffer.remaining()).also { buffer.get(it) }
+            }
+        }
+        private val pendingConfig = java.util.ArrayDeque<ByteArray>()
 
         fun resetToTimeline(timelineUs: Long) {
             heldPlaybackOutput?.let(::releaseWithoutRendering)
             heldPlaybackOutput = null
-            codec.flush()
+            // start() submits codec configuration asynchronously. Flushing a brand-new
+            // decoder can discard it before its first format/frame, leaving some vendors mute.
+            if (hasQueuedInput) {
+                codec.flush()
+                pendingConfig.clear()
+                if (!receivedOutput) codecConfig.forEach(pendingConfig::addLast)
+            }
+            hasQueuedInput = false
             val targetSourceUs = timelineToSourceUs(clip, timelineUs)
             extractor.seekTo(targetSourceUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             inputEos = false
@@ -795,6 +833,14 @@ class DavinciFramePreviewEngine(
                 val input = codec.getInputBuffer(inputIndex)
                     ?: error("Decoder input buffer unavailable")
                 input.clear()
+                hasQueuedInput = true
+                if (pendingConfig.isNotEmpty()) {
+                    val config = pendingConfig.removeFirst()
+                    input.put(config)
+                    codec.queueInputBuffer(inputIndex, 0, config.size, 0L, MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
+                    didWork = true
+                    continue
+                }
                 val sampleTimeUs = extractor.sampleTime
                 if (sampleTimeUs < 0L || sampleTimeUs >= clip.sourceOutUs) {
                     codec.queueInputBuffer(
@@ -846,6 +892,7 @@ class DavinciFramePreviewEngine(
                 val outputIndex = codec.dequeueOutputBuffer(bufferInfo, 0L)
                 when {
                     outputIndex >= 0 -> {
+                        receivedOutput = true
                         val output = HeldOutput(
                             index = outputIndex,
                             presentationTimeUs = bufferInfo.presentationTimeUs,
@@ -879,7 +926,7 @@ class DavinciFramePreviewEngine(
                     }
 
                     outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> return
-                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
+                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> receivedOutput = true
                 }
             }
         }
@@ -899,6 +946,7 @@ class DavinciFramePreviewEngine(
                 val outputIndex = codec.dequeueOutputBuffer(bufferInfo, SCRUB_DEQUEUE_TIMEOUT_US)
                 when {
                     outputIndex >= 0 -> {
+                        receivedOutput = true
                         val output = HeldOutput(
                             index = outputIndex,
                             presentationTimeUs = bufferInfo.presentationTimeUs,
@@ -918,7 +966,7 @@ class DavinciFramePreviewEngine(
                         if (isEos) outputEos = true
                     }
 
-                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
+                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> receivedOutput = true
                 }
                 if (future != null || (inputEos && outputEos)) break
             }
@@ -1004,7 +1052,7 @@ private fun activeLayerSpecsAt(
 private fun previewTransitionGhostClipV22(pair: TransitionPairV22): TimelineClip {
     val outgoing = pair.outgoing
     val sourceOutUs = outgoing.sourceOutUs
-    val sourceInUs = (sourceOutUs - pair.durationUs).coerceAtLeast(outgoing.sourceInUs)
+    val sourceInUs = outgoing.sourceTimeForOutput(outgoing.durationUs - pair.durationUs)
     return outgoing.copy(
         id = transitionGhostIdV22(pair),
         label = "${outgoing.label} · transition tail",
@@ -1031,6 +1079,7 @@ private fun sessionKey(
             timelineStartUs = layer.clip.timelineStartUs,
             sourceInUs = layer.clip.sourceInUs,
             sourceOutUs = layer.clip.sourceOutUs,
+            smoothRetime = layer.clip.retime?.curve?.let { it.smoothSlowMotion && it.hasSlowMotion } == true,
             staticSpatialHash = staticSpatialHash(layer.clip),
         )
     },
@@ -1057,11 +1106,10 @@ internal fun staticSpatialHash(clip: TimelineClip): Int {
 }
 
 internal fun timelineToSourceUs(clip: TimelineClip, timelineUs: Long): Long =
-    (clip.sourceInUs + (timelineUs - clip.timelineStartUs))
-        .coerceIn(clip.sourceInUs, clip.sourceOutUs.coerceAtLeast(clip.sourceInUs))
+    (PreviewProjectRegistry.clip(clip.id) ?: clip).sourceTimeAtTimeline(timelineUs)
 
 internal fun sourceToTimelineUs(clip: TimelineClip, sourceUs: Long): Long =
-    clip.timelineStartUs + (sourceUs - clip.sourceInUs)
+    (PreviewProjectRegistry.clip(clip.id) ?: clip).timelineTimeAtSource(sourceUs)
 
 private fun MediaFormat.intValue(key: String, fallback: Int): Int =
     if (!containsKey(key)) fallback else runCatching { getInteger(key) }.getOrDefault(fallback)

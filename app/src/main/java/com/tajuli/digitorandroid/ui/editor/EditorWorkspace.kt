@@ -102,6 +102,7 @@ internal fun EditorWorkspaceScreen(
     var exportFrameRate by remember { mutableStateOf(ExportFrameRateV72.ORIGINAL) }
     var exportFraction by remember { mutableStateOf<Float?>(null) }
     var exportStatus by remember { mutableStateOf<String?>(null) }
+    var exportError by remember { mutableStateOf<String?>(null) }
 
     val previewClip = state.project.topmostVideoClipAt(cursorUs)
     val activeVideoClips = state.project.activeVideoClips(cursorUs)
@@ -189,6 +190,7 @@ internal fun EditorWorkspaceScreen(
             frameRate = exportFrameRate,
         )
         scope.launch {
+            exportError = null
             stopForEdit()
             runEditorExport(
                 context = context,
@@ -203,6 +205,7 @@ internal fun EditorWorkspaceScreen(
                     exportStatus = status
                 },
                 onPreviewStatus = { playback.previewStatus = it },
+                onError = { exportError = it },
             )
         }
     }
@@ -211,6 +214,10 @@ internal fun EditorWorkspaceScreen(
         ActivityResultContracts.CreateDocument("video/mp4"),
     ) { uri: Uri? ->
         if (uri != null) startExport(uri)
+    }
+
+    exportError?.let { details ->
+        EditorExportErrorDialog(details, onDismiss = { exportError = null })
     }
 
     if (showExportDialog) {

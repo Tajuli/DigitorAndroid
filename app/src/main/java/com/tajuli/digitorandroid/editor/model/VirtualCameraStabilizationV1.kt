@@ -242,7 +242,7 @@ fun TimelineClip.evaluatedDisplayTransformV1(localUs: Long): EvaluatedClipTransf
     val safeLocalUs = localUs.coerceIn(0L, durationUs.coerceAtLeast(0L))
     val manual = transform.evaluate(safeLocalUs)
     val stabilization = virtualCameraStabilizationV1
-        ?.evaluateVirtualCameraV1(sourceInUs + safeLocalUs)
+        ?.evaluateVirtualCameraV1(sourceTimeForOutput(safeLocalUs))
         ?: EvaluatedVirtualCameraV1()
 
     return EvaluatedClipTransform(

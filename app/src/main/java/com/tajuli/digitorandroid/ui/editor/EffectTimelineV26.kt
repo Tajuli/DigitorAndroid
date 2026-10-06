@@ -1,5 +1,9 @@
 package com.tajuli.digitorandroid.ui.editor
 
+import com.tajuli.digitorandroid.editor.model.outputTimeForSource
+import com.tajuli.digitorandroid.editor.model.sourceTimeForOutput
+import com.tajuli.digitorandroid.editor.model.sourceDurationUs
+
 import com.tajuli.digitorandroid.editor.model.EFFECT_MIN_DURATION_US_V26
 import com.tajuli.digitorandroid.editor.model.NodeEffect
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -55,7 +59,7 @@ fun EditorViewModel.moveEffectTimelineV26(selection: EffectTimelineSelectionV26,
         val end = normalized.resolvedSourceEndUsV26(clip)
         val duration = (end - start).coerceAtLeast(1L)
         val maxStart = (clip.sourceOutUs - duration).coerceAtLeast(clip.sourceInUs)
-        val nextStart = (start + deltaUs).coerceIn(clip.sourceInUs, maxStart)
+        val nextStart = clip.sourceTimeForOutput(clip.outputTimeForSource(start) + deltaUs).coerceIn(clip.sourceInUs, maxStart)
         normalized.copy(sourceStartUsV26 = nextStart, sourceEndUsV26 = nextStart + duration)
     }
 }
@@ -65,7 +69,7 @@ fun EditorViewModel.resizeEffectStartV26(selection: EffectTimelineSelectionV26, 
     target.updateEffectTimelineV26(selection, "resize-effect-start", "Effect duration updated", coalesce = true) { clip, effect ->
         val normalized = effect.normalizedForClipV26(clip)
         val end = normalized.resolvedSourceEndUsV26(clip)
-        val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.durationUs).coerceAtLeast(1L)
+        val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.sourceDurationUs).coerceAtLeast(1L)
         val start = targetSourceUs.coerceIn(clip.sourceInUs, (end - minDuration).coerceAtLeast(clip.sourceInUs))
         normalized.copy(sourceStartUsV26 = start, sourceEndUsV26 = end)
     }
@@ -76,7 +80,7 @@ fun EditorViewModel.resizeEffectEndV26(selection: EffectTimelineSelectionV26, ta
     target.updateEffectTimelineV26(selection, "resize-effect-end", "Effect duration updated", coalesce = true) { clip, effect ->
         val normalized = effect.normalizedForClipV26(clip)
         val start = normalized.resolvedSourceStartUsV26(clip)
-        val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.durationUs).coerceAtLeast(1L)
+        val minDuration = minOf(EFFECT_MIN_DURATION_US_V26, clip.sourceDurationUs).coerceAtLeast(1L)
         val end = targetSourceUs.coerceIn((start + minDuration).coerceAtMost(clip.sourceOutUs), clip.sourceOutUs)
         normalized.copy(sourceStartUsV26 = start, sourceEndUsV26 = end)
     }

@@ -52,6 +52,7 @@ internal suspend fun runEditorExport(
     settings: ExportSettingsV72,
     onProgress: (Float?, String?) -> Unit,
     onPreviewStatus: (String) -> Unit,
+    onError: (String) -> Unit,
 ) {
     var latestFraction: Float? = null
     runEditorExport(
@@ -65,6 +66,7 @@ internal suspend fun runEditorExport(
         onFraction = { latestFraction = it },
         onStatus = { status -> onProgress(latestFraction, status) },
         onPreviewStatus = onPreviewStatus,
+        onError = onError,
     )
 }
 
@@ -79,6 +81,7 @@ private suspend fun runEditorExport(
     onFraction: (Float?) -> Unit,
     onStatus: (String) -> Unit,
     onPreviewStatus: (String) -> Unit,
+    onError: (String) -> Unit,
 ) {
     if (project.durationUs <= 0L) {
         onFraction(null)
@@ -124,7 +127,21 @@ private suspend fun runEditorExport(
         throw cancelled
     } catch (error: Throwable) {
         onFraction(null)
-        onStatus(error.message ?: "Export failed")
+        android.util.Log.e("DigitorExport", "Export failed", error)
+        onStatus("Export failed · see details")
+        onError(buildString {
+            appendLine("${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · Android ${android.os.Build.VERSION.RELEASE}")
+            appendLine(settings.description(project))
+            appendLine()
+            append(error.message ?: error.javaClass.simpleName)
+            var cause = error.cause
+            repeat(8) {
+                val current = cause ?: return@repeat
+                append("\n\nCaused by: ").append(current.javaClass.simpleName)
+                current.message?.let { append(": ").append(it) }
+                cause = current.cause.takeUnless { it === current }
+            }
+        })
     } finally {
         temp.delete()
         if (exportHasAudio) {

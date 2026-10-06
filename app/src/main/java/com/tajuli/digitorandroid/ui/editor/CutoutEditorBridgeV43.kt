@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.ui.editor
 
+import com.tajuli.digitorandroid.editor.model.*
 import android.app.Application
 import com.tajuli.digitorandroid.editor.model.ClipCutoutV43
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
@@ -171,7 +172,7 @@ fun EditorViewModel.analyzeSelectedPersonCutoutV43() {
         null
     } else {
         clockLocalUs?.let { localUs ->
-            (clip.sourceInUs + localUs).coerceIn(
+            clip.sourceTimeForOutput(localUs).coerceIn(
                 clip.sourceInUs.coerceAtLeast(0L),
                 (clip.sourceOutUs - 1L).coerceAtLeast(clip.sourceInUs.coerceAtLeast(0L)),
             )

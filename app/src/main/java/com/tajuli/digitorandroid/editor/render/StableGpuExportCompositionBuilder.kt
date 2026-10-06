@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.render
 
+import com.tajuli.digitorandroid.editor.model.*
 import android.os.Build
 import androidx.media3.common.C
 import androidx.media3.common.Effect
@@ -164,7 +165,8 @@ internal class StableGpuExportCompositionBuilder(
     ): EditedMediaItem {
         val mediaItem = clippedMediaItem(videoClip)
         return EditedMediaItem.Builder(mediaItem)
-            .setDurationUs(videoClip.durationUs)
+            .setDurationUs(videoClip.sourceOutUs)
+            .apply { if (videoClip.retime != null) setSpeed(ClipSpeedProvider(videoClip)) }
             .setFrameRate(project.frameRate.coerceIn(1, 120))
             .setEffects(
                 Effects(
@@ -180,7 +182,8 @@ internal class StableGpuExportCompositionBuilder(
         val builder = EditedMediaItem.Builder(mediaItem)
             .setFrameRate(project.frameRate.coerceIn(1, 120))
         if (!clip.isImageV21) {
-            builder.setDurationUs(clip.durationUs)
+            builder.setDurationUs(clip.sourceOutUs)
+            .apply { if (clip.retime != null) setSpeed(ClipSpeedProvider(clip)) }
         }
         return builder
             .setEffects(Effects(emptyList(), SharedVideoPipeline.effectsFor(clip)))
@@ -189,7 +192,8 @@ internal class StableGpuExportCompositionBuilder(
 
     private fun audioItem(clip: TimelineClip): EditedMediaItem {
         val mediaItem = clippedMediaItem(clip)
-        val builder = EditedMediaItem.Builder(mediaItem).setDurationUs(clip.durationUs)
+        val builder = EditedMediaItem.Builder(mediaItem).setDurationUs(clip.sourceOutUs)
+            .apply { if (clip.retime != null) setSpeed(ClipSpeedProvider(clip)) }
         val processors = audioProcessorsFor(clip)
         if (processors.isNotEmpty()) {
             builder.setEffects(Effects(processors, emptyList()))

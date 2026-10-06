@@ -47,8 +47,8 @@ data class VisibleVideoSegment(
         val (segmentTransform, _) = rebasedTransform.splitAt(durationUs)
         return clip.copy(
             timelineStartUs = timelineStartUs,
-            sourceInUs = clip.sourceInUs + sourceOffsetUs,
-            sourceOutUs = clip.sourceInUs + sourceOffsetUs + durationUs,
+            sourceInUs = clip.sourceTimeForOutput(sourceOffsetUs),
+            sourceOutUs = clip.sourceTimeForOutput(sourceOffsetUs + durationUs),
             transform = segmentTransform,
         )
     }

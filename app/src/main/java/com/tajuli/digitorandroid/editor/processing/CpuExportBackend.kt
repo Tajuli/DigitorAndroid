@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.processing
 
+import com.tajuli.digitorandroid.editor.model.*
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
@@ -13,6 +14,8 @@ import java.util.concurrent.Executors
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
 
 /** CPU fallback: no OpenGL. Decode -> transform/color/effects/cutout/composite -> byte-buffer AVC encode. */
 class CpuExportBackend(private val context: Context) : ExportBackend {
@@ -37,18 +40,21 @@ class CpuExportBackend(private val context: Context) : ExportBackend {
 
         val bitrate = quality.videoBitrate(project.width, project.height, project.frameRate)
         val compositor = CpuTimelineCompositor(context)
-        val frameDurationUs = 1_000_000L / project.frameRate
-        val frameCount = ((project.durationUs + frameDurationUs - 1) / frameDurationUs).toInt()
+        val frameCount = ((project.durationUs * project.frameRate + 999_999L) / 1_000_000L).toInt()
+        val hasAudio = project.hasActiveNativeAudioV76()
+        val videoOutput = if (hasAudio) File.createTempFile("digitor-cpu-video-", ".mp4", context.cacheDir) else output
+        val audioOutput = if (hasAudio) File.createTempFile("digitor-cpu-audio-", ".m4a", context.cacheDir) else null
         try {
             CpuAvcEncoder(
                 project.width,
                 project.height,
                 project.frameRate,
-                output,
+                videoOutput,
                 bitrate = bitrate,
             ).use { encoder ->
                 for (frameIndex in 0 until frameCount) {
-                    val timeUs = frameIndex * frameDurationUs
+                    coroutineContext.ensureActive()
+                    val timeUs = frameIndex.toLong() * 1_000_000L / project.frameRate
                     val pixels = compositor.render(project, timeUs)
                     encoder.encodeFrame(pixels, timeUs)
                     if (frameIndex % 4 == 0 || frameIndex == frameCount - 1) {
@@ -62,13 +68,21 @@ class CpuExportBackend(private val context: Context) : ExportBackend {
                 }
                 encoder.finish()
             }
+            if (audioOutput != null) {
+                coroutineContext.ensureActive()
+                NativeAudioMixdownV76(context).encode(project, audioOutput, onProgress)
+                coroutineContext.ensureActive()
+                remuxNativeVideoAndAudioV76(videoOutput, audioOutput, output)
+            }
         } finally {
             compositor.close()
+            if (videoOutput !== output) videoOutput.delete()
+            audioOutput?.delete()
         }
         ExportResult(
             output,
             Backend.CPU,
-            "CPU fallback MP4 complete · ${quality.label} · ${bitrate / 1_000_000f} Mbps target (video-only; CPU audio mixing is not implemented yet).",
+            "CPU fallback MP4 complete · ${quality.label} · ${bitrate / 1_000_000f} Mbps target${if (hasAudio) " · synchronized AAC" else ""}.",
         )
     }
 }
@@ -80,6 +94,7 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
     private val cutout = CpuCutoutProcessorV43(context, workerCount)
     private val workers = Executors.newFixedThreadPool(workerCount)
     private val retrievers = mutableMapOf<String, MediaMetadataRetriever>()
+    private val smoothStreams = mutableMapOf<String, RetimeFrameStream>()
 
     fun render(project: TimelineProject, timeUs: Long): IntArray {
         val canvas = IntArray(project.width * project.height) { 0xFF000000.toInt() }
@@ -91,10 +106,12 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
             }
             .sortedByDescending { it.first }
 
+        val activeIds = active.map { it.second.id }.toSet()
+        smoothStreams.keys.filter { it !in activeIds }.forEach { smoothStreams.remove(it)?.close() }
         active.forEach { (_, clip) ->
             val clipLocalUs = timeUs - clip.timelineStartUs
-            val sourceUs = clip.sourceInUs + clipLocalUs
-            val decoded = frameFor(clip, sourceUs) ?: return@forEach
+            val sourceUs = clip.sourceTimeForOutput(clipLocalUs)
+            val decoded = frameFor(clip, sourceUs, clipLocalUs, project) ?: return@forEach
             val personCut = cutout.applyPersonToSource(decoded, clip, sourceUs)
             val source = CpuFabricAwareCutoutRefineV46.refine(personCut, clip)
             val transformed = CpuTransformProcessor.render(
@@ -119,7 +136,22 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
         return canvas
     }
 
-    private fun frameFor(clip: TimelineClip, sourceTimeUs: Long): Bitmap? {
+    private fun frameFor(clip: TimelineClip, sourceTimeUs: Long, localUs: Long, project: TimelineProject): Bitmap? {
+        if (clip.retime?.curve?.let { it.smoothSlowMotion && it.hasSlowMotion } == true) {
+            val stream = smoothStreams.getOrPut(clip.id) {
+                val start = retimeFrameIndexAtOrBefore(localUs, project.frameRate) * 1_000_000L / project.frameRate
+                RetimeFrameStream(context, clip, project.frameRate,
+                    minOf(maxOf(project.width, project.height), 4096), start)
+            }
+            val deadline = System.nanoTime() + 15_000_000_000L
+            while (!stream.isFinished()) {
+                stream.error()?.let { throw IllegalStateException("Smooth CPU export decode failed", it) }
+                stream.poll()?.let { return it.bitmap }
+                check(System.nanoTime() < deadline) { "Smooth CPU export frame timed out" }
+                Thread.sleep(1)
+            }
+            stream.error()?.let { throw IllegalStateException("Smooth CPU export decode failed", it) }
+        }
         val retriever = retrievers.getOrPut(clip.uri) {
             MediaMetadataRetriever().also { it.setDataSource(context, Uri.parse(clip.uri)) }
         }
@@ -161,6 +193,8 @@ private class CpuTimelineCompositor(private val context: Context) : AutoCloseabl
     }
 
     override fun close() {
+        smoothStreams.values.forEach { it.close() }
+        smoothStreams.clear()
         retrievers.values.forEach { it.release() }
         color.close()
         effects.close()

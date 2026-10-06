@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.ui.editor
 
+import com.tajuli.digitorandroid.editor.model.*
 import android.app.Application
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -25,6 +26,9 @@ import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.NodePosition
 import com.tajuli.digitorandroid.editor.model.ProjectStore
 import com.tajuli.digitorandroid.editor.model.RgbCurves
+import com.tajuli.digitorandroid.editor.model.SpeedCurveSpec
+import com.tajuli.digitorandroid.editor.model.retimedBy
+import com.tajuli.digitorandroid.editor.model.retimedEffectTimingV26
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
@@ -67,6 +71,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val canUndo: Boolean = false,
         val canRedo: Boolean = false,
         val busyOperation: String? = null,
+        val speedPanelRevision: Long = 0L,
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -106,6 +111,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun checkpoint(label: String, coalesce: Boolean = false) {
+        if (label != "speed") finishSpeedEdit(false)
         val now = SystemClock.elapsedRealtime()
         if (coalesce && lastHistoryLabel == label && now - lastHistoryTimeMs < HISTORY_COALESCE_MS) {
             lastHistoryTimeMs = now
@@ -120,30 +126,34 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun undo() {
+        finishSpeedEdit(false)
         if (undoStack.isEmpty() || _state.value.busyOperation != null) return
         val current = runCatching { projectStore.encode(_state.value.project) }.getOrNull() ?: return
         val raw = undoStack.removeLast()
         val project = runCatching { projectStore.decode(raw) }.getOrNull() ?: return
         redoStack.addLast(current)
-        publish(selectionSafeState(_state.value.copy(project = project, status = "Undo")))
+        publish(selectionSafeState(_state.value.copy(project = project, status = "Undo", speedPanelRevision = _state.value.speedPanelRevision + 1)))
     }
 
     fun redo() {
+        finishSpeedEdit(false)
         if (redoStack.isEmpty() || _state.value.busyOperation != null) return
         val current = runCatching { projectStore.encode(_state.value.project) }.getOrNull() ?: return
         val raw = redoStack.removeLast()
         val project = runCatching { projectStore.decode(raw) }.getOrNull() ?: return
         undoStack.addLast(current)
-        publish(selectionSafeState(_state.value.copy(project = project, status = "Redo")))
+        publish(selectionSafeState(_state.value.copy(project = project, status = "Redo", speedPanelRevision = _state.value.speedPanelRevision + 1)))
     }
 
     fun saveProject() {
+        finishSpeedEdit(false)
         runCatching { projectStore.save(_state.value.project) }
             .onSuccess { publish(_state.value.copy(status = "Project saved")) }
             .onFailure { publish(_state.value.copy(status = it.message ?: "Project save failed")) }
     }
 
     fun loadProject() {
+        finishSpeedEdit(true)
         val saved = projectStore.load() ?: run {
             publish(_state.value.copy(status = "No saved project"))
             return
@@ -439,7 +449,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     rebuilt += clip
                 } else {
                     val splitLocalUs = timelineUs - clip.timelineStartUs
-                    val sourceSplit = clip.sourceInUs + splitLocalUs
+                    val sourceSplit = clip.sourceTimeForOutput(splitLocalUs)
                     val (leftTransform, rightTransform) = clip.transform.splitAt(splitLocalUs)
                     rebuilt += clip.copy(sourceOutUs = sourceSplit, linkGroupId = if (clip.linkGroupId == null) null else leftGroup, transform = leftTransform)
                     val right = clip.copy(id = UUID.randomUUID().toString(), timelineStartUs = timelineUs, sourceInUs = sourceSplit, linkGroupId = if (clip.linkGroupId == null) null else rightGroup, transform = rightTransform)
@@ -677,65 +687,38 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun clearStabilizationV1() =
         updatePrimaryClip { clip -> clip.copy(virtualCameraStabilizationV1 = null) }
 
-    fun bakeSelectedSpeed(speed: Float) {
-        val state = _state.value
-        val selected = state.project.clip(state.selectedClipId) ?: return
-        if (state.project.trackContaining(selected.id)?.kind != TrackKind.VIDEO || state.busyOperation != null) return
-        val safeSpeed = speed.coerceIn(.25f, 4f)
-        publish(state.copy(busyOperation = "Speed ${safeSpeed}x", status = "Baking speed…"))
-        viewModelScope.launch {
-            runCatching { creatorMedia.bakeSpeed(selected, safeSpeed, state.project.frameRate) }
-                .onSuccess { derived -> applyDerivedSpeed(selected, derived, safeSpeed) }
-                .onFailure { error -> publish(_state.value.copy(busyOperation = null, status = error.message ?: "Speed failed")) }
-        }
+    private var speedEditBase: TimelineProject? = null
+    private var speedEditClipId: String? = null
+
+    fun beginSpeedEdit(clipId: String) {
+        if (speedEditClipId == clipId) return
+        finishSpeedEdit(false)
+        speedEditBase = _state.value.project
+        speedEditClipId = clipId
     }
 
-    private fun applyDerivedSpeed(original: TimelineClip, derived: CreatorMediaProcessor.DerivedMedia, speed: Float) {
-        val state = _state.value
-        val project = state.project
-        val liveOriginal = project.clip(original.id) ?: run { publish(state.copy(busyOperation = null)); return }
-        val oldDuration = liveOriginal.durationUs
-        val oldEnd = liveOriginal.timelineEndUs
-        val newDuration = derived.durationUs.coerceAtLeast(1L)
-        val delta = newDuration - oldDuration
-        val linkedIds = project.linkedClipIds(liveOriginal.id)
-        val linkGroup = if (derived.hasAudio) liveOriginal.linkGroupId else null
-        val timeRatio = newDuration.toDouble() / oldDuration.toDouble()
-        checkpoint("speed-bake")
-        val tracks = project.tracks.map { track ->
-            val rebuilt = mutableListOf<TimelineClip>()
-            track.clips.forEach { clip ->
-                when {
-                    clip.id == liveOriginal.id -> rebuilt += clip.copy(
-                        uri = derived.uri,
-                        sourceInUs = 0L,
-                        sourceOutUs = newDuration,
-                        linkGroupId = linkGroup,
-                        transform = clip.transform.retimed(timeRatio),
-                        nodeAnimations = NodeAnimations(),
-                        virtualCameraStabilizationV1 = null,
-                    )
-                    clip.id in linkedIds && track.kind == TrackKind.AUDIO && derived.hasAudio -> rebuilt += clip.copy(
-                        uri = derived.uri,
-                        sourceInUs = 0L,
-                        sourceOutUs = newDuration,
-                        linkGroupId = linkGroup,
-                    )
-                    clip.id in linkedIds && track.kind == TrackKind.AUDIO && !derived.hasAudio -> Unit
-                    clip.timelineStartUs >= oldEnd -> rebuilt += clip.copy(timelineStartUs = (clip.timelineStartUs + delta).coerceAtLeast(0L))
-                    else -> rebuilt += clip
-                }
-            }
-            track.copy(clips = rebuilt)
+    fun previewSpeed(curve: SpeedCurveSpec) {
+        val base = speedEditBase ?: return
+        val id = speedEditClipId ?: return
+        if (_state.value.busyOperation != null) return
+        runCatching { base.withClipSpeed(id, curve) }
+            .onSuccess { publish(_state.value.copy(project = it, status = "Speed preview")) }
+            .onFailure { publish(_state.value.copy(status = it.message ?: "Speed edit failed")) }
+    }
+
+    fun finishSpeedEdit(cancel: Boolean, expectedClipId: String? = null) {
+        if (expectedClipId != null && expectedClipId != speedEditClipId) return
+        val base = speedEditBase ?: return
+        val edited = _state.value.project
+        speedEditBase = null
+        speedEditClipId = null
+        if (cancel) {
+            publish(_state.value.copy(project = base, status = "Speed edit cancelled", speedPanelRevision = _state.value.speedPanelRevision + 1))
+        } else if (edited != base) {
+            _state.value = _state.value.copy(project = base)
+            checkpoint("speed")
+            publish(_state.value.copy(project = edited, status = "Speed updated", speedPanelRevision = _state.value.speedPanelRevision + 1))
         }
-        val overlays = project.textOverlays.map { overlay ->
-            if (overlay.timelineStartUs >= oldEnd) overlay.copy(timelineStartUs = overlay.timelineStartUs + delta, timelineEndUs = overlay.timelineEndUs + delta) else overlay
-        }
-        val visualOverlays = project.visualOverlaysV19.orEmpty().map { overlay ->
-            if (overlay.timelineStartUs >= oldEnd) overlay.copy(timelineStartUs = overlay.timelineStartUs + delta, timelineEndUs = overlay.timelineEndUs + delta) else overlay
-        }
-        val next = project.copy(tracks = tracks, textOverlays = overlays, visualOverlaysV19 = visualOverlays)
-        publish(state.copy(project = next, busyOperation = null, status = "Speed ${speed}x baked"))
     }
 
     fun reverseSelectedVideo() {
@@ -759,7 +742,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val tracks = project.tracks.map { track ->
             track.copy(clips = track.clips.mapNotNull { clip ->
                 when {
-                    clip.id == live.id -> clip.copy(uri = derived.uri, sourceInUs = 0L, sourceOutUs = derived.durationUs, linkGroupId = null, nodeAnimations = NodeAnimations(), virtualCameraStabilizationV1 = null)
+                    clip.id == live.id -> clip.copy(uri = derived.uri, sourceInUs = 0L, sourceOutUs = derived.durationUs, retime = null, linkGroupId = null, nodeAnimations = NodeAnimations(), virtualCameraStabilizationV1 = null)
                     clip.id in linkedIds && track.kind == TrackKind.AUDIO -> null
                     else -> clip
                 }
@@ -786,7 +769,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val live = project.clip(original.id) ?: run { publish(state.copy(busyOperation = null)); return }
         val track = project.trackContaining(live.id) ?: return
         val freezeDuration = derived.durationUs.coerceAtLeast(1L)
-        val sourceSplit = live.sourceInUs + (timelineUs - live.timelineStartUs)
+        val sourceSplit = live.sourceTimeAtTimeline(timelineUs)
         val (leftTransform, rightTransform) = live.transform.splitAt(timelineUs - live.timelineStartUs)
         val sourceTime = sourceSplit.coerceIn(live.sourceInUs, live.sourceOutUs)
         val evaluatedGraph = live.nodeAnimations.evaluateGraph(live.nodeGraph, sourceTime)
@@ -1060,7 +1043,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(getApplication<Application>(), Uri.parse(clip.uri))
-            val sourceUs = (clip.sourceInUs + (timelineUs - clip.timelineStartUs)).coerceIn(clip.sourceInUs, clip.sourceOutUs.coerceAtLeast(clip.sourceInUs))
+            val sourceUs = clip.sourceTimeAtTimeline(timelineUs)
             val bitmap = retriever.getFrameAtTime(sourceUs, MediaMetadataRetriever.OPTION_CLOSEST) ?: run { publish(state.copy(status = "Could not sample this frame")); return }
             try {
                 val scale = min(previewWidth / bitmap.width.toFloat(), previewHeight / bitmap.height.toFloat())

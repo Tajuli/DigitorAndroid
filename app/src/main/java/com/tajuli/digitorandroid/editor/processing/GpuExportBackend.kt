@@ -29,6 +29,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+import com.tajuli.digitorandroid.editor.model.TimelineClip
 
 @UnstableApi
 class GpuExportBackend(
@@ -54,17 +59,36 @@ class GpuExportBackend(
         quality: ExportQuality,
         forceSoftwareAvcDecoder: Boolean,
         onProgress: (ExportProgress) -> Unit,
+    ): ExportResult {
+        var lease: PreviewExportCoordinator.ExportLease? = null
+        var retimed: CompatibilityRetimeSources? = null
+        return try {
+            withContext(Dispatchers.Default) {
+                lease = PreviewExportCoordinator.acquireExportLease()
+                val jobContext = currentCoroutineContext()
+                retimed = CompatibilityRetimeSources.prepare(context, project, { !jobContext.isActive }, onProgress)
+            }
+            exportPrepared(project, output, quality, forceSoftwareAvcDecoder, onProgress,
+                checkNotNull(lease), checkNotNull(retimed).videoInputs)
+        } finally {
+            retimed?.close()
+            lease?.close()
+        }
+    }
+
+    private suspend fun exportPrepared(
+        project: TimelineProject,
+        output: File,
+        quality: ExportQuality,
+        forceSoftwareAvcDecoder: Boolean,
+        onProgress: (ExportProgress) -> Unit,
+        previewLease: PreviewExportCoordinator.ExportLease,
+        retimedVideoInputs: Map<TimelineClip, String>,
     ): ExportResult = suspendCancellableCoroutine { continuation ->
         val requestedBitrate = quality.videoBitrate(project.width, project.height, project.frameRate)
         val preferSoftwareAvcDecoder = forceSoftwareAvcDecoder || preferredAvcDecoderIsUnisocV74()
         val decodeLabel = if (preferSoftwareAvcDecoder) "software AVC decode" else "default AVC decode"
         onProgress(ExportProgress.Stage("GPU: releasing preview resources · ${quality.label} · $decodeLabel", 0.01f))
-        val previewLease = runCatching { PreviewExportCoordinator.acquireExportLease() }
-            .getOrElse { error ->
-                if (continuation.isActive) continuation.resumeWithException(error)
-                return@suspendCancellableCoroutine
-            }
-
         // Gallery/Photos providers normally hand the editor content:// URIs. Some vendor DataSource
         // implementations can preview those URIs but fail when Transformer re-opens a still image
         // through ImageAssetLoader during export. Materialize only still-image sources into a short-
@@ -98,10 +122,11 @@ class GpuExportBackend(
                 if (continuation.isActive) continuation.resumeWithException(error)
                 return@suspendCancellableCoroutine
             }
-        val compositionBuilder = StableGpuExportCompositionBuilder(
-            Media3CompositionBuilder(blankFrameUri = blankFrameUri),
-        )
-        val composition = runCatching { compositionBuilder.build(exportProject) }
+        val media3Builder = Media3CompositionBuilder(blankFrameUri, retimedVideoInputs)
+        val composition = runCatching {
+            if (retimedVideoInputs.isEmpty()) StableGpuExportCompositionBuilder(media3Builder).build(exportProject)
+            else media3Builder.build(exportProject)
+        }
             .getOrElse { error ->
                 preparedImages.close()
                 previewLease.close()

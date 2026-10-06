@@ -6,6 +6,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -94,6 +95,7 @@ internal fun EditorPlaybackEffects(
     audioPreviewError: String?,
     controller: EditorPlaybackController,
 ) {
+    val currentProject by rememberUpdatedState(project)
     LaunchedEffect(project, controller.cursorUs, hasVideo, controller.isPlaying) {
         if (hasVideo) {
             previewEngine.submit(project, controller.cursorUs, controller.isPlaying)
@@ -146,7 +148,7 @@ internal fun EditorPlaybackEffects(
 
     LaunchedEffect(controller.isPlaying, audioPreviewReady, hasAudio) {
         while (controller.isPlaying) {
-            val durationUs = project.durationUs.coerceAtLeast(0L)
+            val durationUs = currentProject.durationUs.coerceAtLeast(0L)
             val nextUs = if (hasAudio && audioPreviewReady) {
                 audioPreview.syncFollowers()
                 audioPreview.currentPositionMs().coerceAtLeast(0L) * 1000L
@@ -165,7 +167,7 @@ internal fun EditorPlaybackEffects(
         }
     }
 
-    LaunchedEffect(controller.cursorUs, selectedClip?.id, previewClip?.id) {
+    LaunchedEffect(controller.cursorUs, selectedClip, previewClip) {
         val clockClip = selectedClip?.takeIf { clip ->
             project.trackContaining(clip.id)?.kind == TrackKind.VIDEO &&
                 controller.cursorUs in clip.timelineStartUs until clip.timelineEndUs

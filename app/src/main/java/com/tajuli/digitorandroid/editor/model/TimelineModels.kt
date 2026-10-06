@@ -141,8 +141,9 @@ data class TimelineClip(
     val cutoutV43: ClipCutoutV43? = null,
     /** Fresh virtual-camera stabilizer. Nullable keeps all existing saved projects compatible. */
     val virtualCameraStabilizationV1: VirtualCameraStabilizationV1? = null,
+    val retime: ClipRetime? = null,
 ) {
-    val durationUs: Long get() = (sourceOutUs - sourceInUs).coerceAtLeast(1L)
+    val durationUs: Long get() = outputTimeForSource(sourceOutUs).coerceAtLeast(1L)
     val timelineEndUs: Long get() = timelineStartUs + durationUs
     val isImageV21: Boolean get() = visualMediaV21 == TimelineVisualMediaV21.IMAGE
 }
