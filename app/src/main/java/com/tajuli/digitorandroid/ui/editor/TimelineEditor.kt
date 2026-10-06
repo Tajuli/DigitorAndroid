@@ -173,9 +173,7 @@ fun TimelineEditor(
         }
 
         val effectLanes = remember(project) { project.timelineEffectLanes() }
-        // Both columns use exactly the same padding and row heights, including add-track rows.
-        val rowsHeight = (project.tracks.size + effectLanes.size) * T4_TRACK_HEIGHT + 96f
-        val centeredPadding = ((maxHeight - 64.dp - 24.dp - rowsHeight.dp) / 2).coerceAtLeast(0.dp)
+        // Keep the track stack top-aligned in both the header and content columns.
 
         val lastVideoTrackId = project.tracks.lastOrNull { it.kind == TrackKind.VIDEO }?.id
         val effectIds = effectLanes.map { it.selection }
@@ -190,7 +188,7 @@ fun TimelineEditor(
             withFrameNanos { }
             withFrameNanos { }
             val videos = project.tracks.count { it.kind == TrackKind.VIDEO }
-            val top = with(density) { (centeredPadding + 48.dp + ((videos + index) * T4_TRACK_HEIGHT).dp).toPx() }
+            val top = with(density) { (48.dp + ((videos + index) * T4_TRACK_HEIGHT).dp).toPx() }
             val rowHeight = with(density) { T4_TRACK_HEIGHT.dp.toPx() }
             val viewportHeight = with(density) { (maxHeight - 88.dp).coerceAtLeast(0.dp).toPx() }
             val visibleTop = verticalScroll.value.toFloat()
@@ -259,14 +257,12 @@ fun TimelineEditor(
                 Column(Modifier.width(56.dp)) {
                     Box(Modifier.fillMaxWidth().height(24.dp).background(Color(0xFF111116)))
                     Column(Modifier.fillMaxHeight().verticalScroll(verticalScroll)) {
-                        Spacer(Modifier.height(centeredPadding))
                         TrackAddButton("+V", onAddVideoTrack)
                         project.tracks.forEach { track ->
                             TrackHeaderV4(track, track.id == selectedTrackId, onSelectTrack)
                             if (track.id == lastVideoTrackId) EffectHeaders()
                         }
                         TrackAddButton("+A", onAddAudioTrack)
-                        Spacer(Modifier.height(centeredPadding))
                     }
                 }
 
@@ -292,7 +288,6 @@ fun TimelineEditor(
 
                     Box(Modifier.requiredWidth(contentWidth).weight(1f)) {
                         Column(Modifier.fillMaxSize().verticalScroll(verticalScroll)) {
-                            Spacer(Modifier.height(centeredPadding))
                             Spacer(Modifier.height(48.dp))
                             project.tracks.forEach { track ->
                                 TimelineLaneV4(
@@ -331,7 +326,6 @@ fun TimelineEditor(
                                 if (track.id == lastVideoTrackId) EffectLanes()
                             }
                             Spacer(Modifier.height(48.dp))
-                            Spacer(Modifier.height(centeredPadding))
                         }
                         val cursorXPx = cursorUs / US_PER_SECOND.toFloat() * pps
                         val cursorX = with(density) { cursorXPx.toDp() }
