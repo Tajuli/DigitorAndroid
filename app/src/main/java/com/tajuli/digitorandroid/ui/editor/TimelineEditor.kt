@@ -55,6 +55,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -188,7 +191,7 @@ fun TimelineEditor(
             withFrameNanos { }
             withFrameNanos { }
             val videos = project.tracks.count { it.kind == TrackKind.VIDEO }
-            val top = with(density) { (48.dp + ((videos + index) * T4_TRACK_HEIGHT).dp).toPx() }
+            val top = with(density) { ((videos + index) * T4_TRACK_HEIGHT).dp.toPx() }
             val rowHeight = with(density) { T4_TRACK_HEIGHT.dp.toPx() }
             val viewportHeight = with(density) { (maxHeight - 88.dp).coerceAtLeast(0.dp).toPx() }
             val visibleTop = verticalScroll.value.toFloat()
@@ -255,9 +258,15 @@ fun TimelineEditor(
 
             Row(Modifier.weight(1f)) {
                 Column(Modifier.width(56.dp)) {
-                    Box(Modifier.fillMaxWidth().height(24.dp).background(Color(0xFF111116)))
+                    Box(
+                        Modifier.fillMaxWidth().height(24.dp).background(Color(0xFF111116))
+                            .semantics { contentDescription = "Add video track" }
+                            .clickable(role = Role.Button, onClick = onAddVideoTrack),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("+V", color = T4Accent, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    }
                     Column(Modifier.fillMaxHeight().verticalScroll(verticalScroll)) {
-                        TrackAddButton("+V", onAddVideoTrack)
                         project.tracks.forEach { track ->
                             TrackHeaderV4(track, track.id == selectedTrackId, onSelectTrack)
                             if (track.id == lastVideoTrackId) EffectHeaders()
@@ -288,7 +297,6 @@ fun TimelineEditor(
 
                     Box(Modifier.requiredWidth(contentWidth).weight(1f)) {
                         Column(Modifier.fillMaxSize().verticalScroll(verticalScroll)) {
-                            Spacer(Modifier.height(48.dp))
                             project.tracks.forEach { track ->
                                 TimelineLaneV4(
                                     project = project,
