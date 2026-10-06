@@ -38,6 +38,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.key
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -62,7 +63,6 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.tajuli.digitorandroid.editor.model.EFFECT_MIN_DURATION_US_V26
 import com.tajuli.digitorandroid.editor.model.NodeEffect
-import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.TextOverlayClip
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
@@ -73,7 +73,6 @@ import com.tajuli.digitorandroid.editor.model.resolvedSourceEndUsV26
 import com.tajuli.digitorandroid.editor.model.resolvedSourceStartUsV26
 import com.tajuli.digitorandroid.editor.model.resolvedVisualOverlaysV19
 import com.tajuli.digitorandroid.editor.model.textOverlaysForVideoTrackV3
-import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.model.visualOverlaysForVideoTrackV19
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -172,6 +171,11 @@ fun TimelineEditor(
             )
         }
 
+        val effectLanes = remember(project) { project.timelineEffectLanes() }
+        // Both columns use exactly the same padding and row heights, including add-track rows.
+        val rowsHeight = (project.tracks.size + effectLanes.size) * T4_TRACK_HEIGHT + 96f
+        val centeredPadding = ((maxHeight - 64.dp - 24.dp - rowsHeight.dp) / 2).coerceAtLeast(0.dp)
+
         Column(Modifier.fillMaxSize()) {
             TimelineToolbarV4(
                 selectedClipCount = selectedClipIds.size,
@@ -180,8 +184,6 @@ fun TimelineEditor(
                 effectSelected = effectSelected,
                 zoom = zoom,
                 onZoom = { zoom = it.coerceIn(0f, 1f) },
-                onAddVideoTrack = onAddVideoTrack,
-                onAddAudioTrack = onAddAudioTrack,
                 onSplit = onSplit,
                 onDelete = {
                     when {
@@ -199,7 +201,26 @@ fun TimelineEditor(
                 Column(Modifier.width(56.dp)) {
                     Box(Modifier.fillMaxWidth().height(24.dp).background(Color(0xFF111116)))
                     Column(Modifier.fillMaxHeight().verticalScroll(verticalScroll)) {
+                        Spacer(Modifier.height(centeredPadding))
+                        TrackAddButton("+V", onAddVideoTrack)
                         project.tracks.forEach { track -> TrackHeaderV4(track, track.id == selectedTrackId, onSelectTrack) }
+                        TrackAddButton("+A", onAddAudioTrack)
+                        effectLanes.forEachIndexed { index, lane ->
+                            key(lane.selection) {
+                                Box(Modifier.fillMaxWidth().height(T4_TRACK_HEIGHT.dp)
+                                    .background(T4Effect.copy(alpha = .18f)).border(.5.dp, T4Divider)
+                                    .clickable {
+                                        TimelineTextSelectionBusV10.clear()
+                                        VisualOverlaySelectionBusV19.clear()
+                                        onSelectClip(lane.clip.id)
+                                        (ActiveEditorVmRegistry.current() ?: vm).selectNode(lane.nodeId)
+                                        EffectTimelineSelectionBusV26.select(lane.clip.id, lane.nodeId, lane.effect.id)
+                                    }, contentAlignment = Alignment.Center) {
+                                    Text("FX${index + 1}", color = T4Accent, fontSize = 10.sp)
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(centeredPadding))
                     }
                 }
 
@@ -225,6 +246,8 @@ fun TimelineEditor(
 
                     Box(Modifier.requiredWidth(contentWidth).weight(1f)) {
                         Column(Modifier.fillMaxSize().verticalScroll(verticalScroll)) {
+                            Spacer(Modifier.height(centeredPadding))
+                            Spacer(Modifier.height(48.dp))
                             project.tracks.forEach { track ->
                                 TimelineLaneV4(
                                     project = project,
@@ -260,6 +283,20 @@ fun TimelineEditor(
                                     },
                                 )
                             }
+                            Spacer(Modifier.height(48.dp))
+                            effectLanes.forEach { lane ->
+                                key(lane.selection) {
+                                    Box(Modifier.requiredWidth(contentWidth).height(T4_TRACK_HEIGHT.dp)
+                                        .background(T4Effect.copy(alpha = .08f)).border(.5.dp, T4Divider)) {
+                                        EffectBarV26(
+                                            clip = lane.clip, nodeId = lane.nodeId, effect = lane.effect,
+                                            selected = selectedEffect == lane.selection,
+                                            pps = pps, frameUs = frameUs, vm = vm, onSelectClip = onSelectClip,
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(centeredPadding))
                         }
                         val cursorXPx = cursorUs / US_PER_SECOND.toFloat() * pps
                         val cursorX = with(density) { cursorXPx.toDp() }
@@ -296,8 +333,6 @@ private fun TimelineToolbarV4(
     effectSelected: Boolean,
     zoom: Float,
     onZoom: (Float) -> Unit,
-    onAddVideoTrack: () -> Unit,
-    onAddAudioTrack: () -> Unit,
     onSplit: () -> Unit,
     onDelete: () -> Unit,
     onUnlink: () -> Unit,
@@ -305,8 +340,6 @@ private fun TimelineToolbarV4(
 ) {
     Column(Modifier.fillMaxWidth().background(Color(0xFF0E0E12))) {
         Row(Modifier.fillMaxWidth().height(34.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            TinyActionV4("+V", onAddVideoTrack)
-            TinyActionV4("+A", onAddAudioTrack)
             TinyActionV4("Split", onSplit, selectedClipCount > 0 && !effectSelected, Icons.Rounded.ContentCut)
             TinyActionV4("Delete", onDelete, selectedClipCount > 0 || textSelected || visualSelected || effectSelected, Icons.Rounded.Delete)
             TinyActionV4("Unlink", onUnlink, selectedClipCount > 1 && !effectSelected, Icons.Rounded.LinkOff)
@@ -632,13 +665,6 @@ private fun ClipV4(
     val sourceIndex = compatible.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
     val trackPx = with(density) { T4_TRACK_HEIGHT.dp.toPx() }
     val selectedEffect by EffectTimelineSelectionBusV26.selection.collectAsState()
-    val effectItems = if (track.kind == TrackKind.VIDEO) {
-        clip.nodeGraph.nodes
-            .filter { it.kind == NodeKind.SERIAL || it.kind == NodeKind.PARALLEL }
-            .flatMap { node -> node.visibleEffects().map { effect -> node.id to effect } }
-    } else {
-        emptyList()
-    }
     val effectSelectedOnClip = selectedEffect?.clipId == clip.id
     var rawDragX by remember(clip.id) { mutableFloatStateOf(0f) }
     var dragY by remember(clip.id) { mutableFloatStateOf(0f) }
@@ -712,27 +738,12 @@ private fun ClipV4(
 
         if (width > 24.dp) {
             Row(
-                modifier = Modifier.padding(top = if (effectItems.isNotEmpty()) 11.dp else 0.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(clip.label, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 8.sp, color = Color.White.copy(alpha = .9f), modifier = Modifier.weight(1f))
                 if (magnetActive) Text("SNAP", fontSize = 6.sp, color = T4Magnet)
                 else if (clip.linkGroupId != null) Text("link", fontSize = 6.sp, color = Color.White.copy(alpha = .45f))
             }
-        }
-
-        effectItems.forEachIndexed { index, (nodeId, effect) ->
-            EffectBarV26(
-                clip = clip,
-                nodeId = nodeId,
-                effect = effect,
-                selected = selectedEffect?.clipId == clip.id && selectedEffect?.nodeId == nodeId && selectedEffect?.effectId == effect.id,
-                row = index % 2,
-                pps = pps,
-                frameUs = frameUs,
-                vm = vm,
-                onSelectClip = onSelectClip,
-            )
         }
 
         if (selected && track.kind == TrackKind.VIDEO && !effectSelectedOnClip) {
@@ -778,7 +789,6 @@ private fun androidx.compose.foundation.layout.BoxScope.EffectBarV26(
     nodeId: String,
     effect: NodeEffect,
     selected: Boolean,
-    row: Int,
     pps: Float,
     frameUs: Long,
     vm: EditorViewModel,
@@ -797,21 +807,21 @@ private fun androidx.compose.foundation.layout.BoxScope.EffectBarV26(
     val shownEnd = previewEnd ?: baseEnd
     val localStart = clip.outputTimeForSource(shownStart)
     val localEnd = clip.outputTimeForSource(shownEnd).coerceAtLeast(localStart + 1L)
-    val x = (localStart / US_PER_SECOND.toFloat() * ppsDp).dp
+    val x = ((clip.timelineStartUs + localStart) / US_PER_SECOND.toFloat() * ppsDp).dp
     val barWidth = ((localEnd - localStart) / US_PER_SECOND.toFloat() * ppsDp).coerceAtLeast(5f).dp
 
     fun select() {
         TimelineTextSelectionBusV10.clear()
         VisualOverlaySelectionBusV19.clear()
         onSelectClip(clip.id)
-        vm.selectNode(nodeId)
+        (ActiveEditorVmRegistry.current() ?: vm).selectNode(nodeId)
         EffectTimelineSelectionBusV26.select(clip.id, nodeId, effect.id)
     }
 
     Box(
-        Modifier.offset(x = x, y = (1 + row * 6).dp)
+        Modifier.offset(x = x, y = 3.dp)
             .width(barWidth)
-            .height(7.dp)
+            .height(32.dp)
             .graphicsLayer { translationX = moveDeltaUs / US_PER_SECOND.toFloat() * pps }
             .clip(RoundedCornerShape(2.dp))
             .background(if (selected) T4Accent.copy(alpha = .92f) else T4Effect.copy(alpha = .90f))
@@ -854,7 +864,7 @@ private fun androidx.compose.foundation.layout.BoxScope.EffectBarV26(
                 effect.name,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                fontSize = 5.sp,
+                fontSize = 10.sp,
                 color = if (selected) Color(0xFF061612) else Color.White.copy(alpha = .90f),
                 modifier = Modifier.padding(horizontal = if (selected) 6.dp else 3.dp),
             )
@@ -1070,4 +1080,12 @@ private fun resolveMagneticDelta(
         }
     }
     return T4SnapResult(best.coerceIn(lower, upper), bestDistance != Long.MAX_VALUE && best != frameDelta)
+}
+
+/** The add buttons scroll with the tracks and stay in the fixed left gutter. */
+@Composable
+private fun TrackAddButton(label: String, onClick: () -> Unit) {
+    TextButton(onClick = onClick, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+        Text(label, color = T4Accent, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+    }
 }

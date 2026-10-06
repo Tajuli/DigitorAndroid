@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.ui.editor
 
+import com.tajuli.digitorandroid.editor.model.visibleEffects
 import com.tajuli.digitorandroid.editor.model.outputTimeForSource
 import com.tajuli.digitorandroid.editor.model.sourceTimeForOutput
 import com.tajuli.digitorandroid.editor.model.sourceDurationUs
@@ -130,3 +131,21 @@ fun TimelineProject.effectSelectionExistsV26(selection: EffectTimelineSelectionV
     val node = clip.nodeGraph.nodes.firstOrNull { it.id == selection.nodeId } ?: return false
     return node.effects.any { it.id == selection.effectId }
 }
+
+/** One independently editable lane per applied effect; persisted bounds stay on its source clip. */
+internal data class TimelineEffectLane(
+    val clip: TimelineClip,
+    val nodeId: String,
+    val effect: NodeEffect,
+) {
+    val selection get() = EffectTimelineSelectionV26(clip.id, nodeId, effect.id)
+}
+
+internal fun TimelineProject.timelineEffectLanes(): List<TimelineEffectLane> =
+    tracks.filter { it.kind == com.tajuli.digitorandroid.editor.model.TrackKind.VIDEO }
+        .flatMap { track -> track.clips.flatMap { clip ->
+            clip.nodeGraph.nodes.filter {
+                it.kind == com.tajuli.digitorandroid.editor.model.NodeKind.SERIAL ||
+                    it.kind == com.tajuli.digitorandroid.editor.model.NodeKind.PARALLEL
+            }.flatMap { node -> node.visibleEffects().map { TimelineEffectLane(clip, node.id, it) } }
+        } }
