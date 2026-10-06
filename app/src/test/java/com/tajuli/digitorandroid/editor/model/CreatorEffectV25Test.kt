@@ -18,7 +18,16 @@ class CreatorEffectV25Test {
         assertEquals(10, CreatorEffectCatalogV25.inCategory("Motion").size)
         assertEquals(10, CreatorEffectCatalogV25.inCategory("Body").size)
         assertEquals(19, CreatorEffectCatalogV25.inCategory("Eyes").size)
-        assertEquals(7, CreatorEffectCatalogV25.inCategory("Funny Faces").size)
+        val funnyFaces = CreatorEffectCatalogV25.inCategory("Funny Faces")
+        assertEquals(13, funnyFaces.size)
+        assertEquals(
+            setOf(
+                "Cheer", "Embarrassed Face", "Fake Laugh", "Big Head",
+                "Gorilla Face", "Big Mouth", "Bend", "Fat Face", "Ass Face",
+                "Chipmunk Cheeks", "Tiny Face", "Long Face", "Balloon Head",
+            ),
+            funnyFaces.map { it.name }.toSet(),
+        )
         assertEquals(20, CreatorEffectCatalogV25.inCategory("Glowing Lines").size)
         assertEquals(7, CreatorEffectCatalogV25.inCategory("Stroke").size)
         assertEquals(4, CreatorEffectCatalogV25.inCategory("Clone").size)
