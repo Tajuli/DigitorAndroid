@@ -334,8 +334,10 @@ internal class CreatorEffectGraphV25 private constructor(
             program.setFloatsUniform("uFunnyA", eyes.copyOfRange(20, 24))
             program.setFloatsUniform(
                 "uFunnyB",
-                floatArrayOf(eyes[24], eyes[25], eyes[26], 0f),
+                eyes.copyOfRange(24, 28),
             )
+            program.setFloatsUniform("uFunnyC", eyes.copyOfRange(28, 32))
+            program.setFloatsUniform("uFunnyD", floatArrayOf(eyes[32], 0f, 0f, 0f))
 
             fun region(r: BeautyRectV28?) =
                 if (r == null) {

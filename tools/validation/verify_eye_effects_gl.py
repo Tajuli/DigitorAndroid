@@ -93,11 +93,11 @@ def render():
     assert fn(gl,'glGetError',U)()==0
     return out
 def amounts(index, strength=1):
-    a=[0.]*28
+    a=[0.]*36
     if index>=0: a[index]=strength
-    for name,part in zip(['uEyesA','uEyesB','uEyesC','uEyesD','uEyesE','uFunnyA','uFunnyB'],[a[i:i+4] for i in range(0,28,4)]): vec(name,part)
+    for name,part in zip(['uEyesA','uEyesB','uEyesC','uEyesD','uEyesE','uFunnyA','uFunnyB','uFunnyC','uFunnyD'],[a[i:i+4] for i in range(0,36,4)]): vec(name,part)
 amounts(-1); assert np.array_equal(render(),source),'Zero strength'
-active_indices=[i for i in range(27) if i != 12]
+active_indices=[i for i in range(33) if i != 12]
 results={}
 for index in active_indices:
     amounts(index); vec('uEyeState',[1,1,0,0])
@@ -120,7 +120,49 @@ amounts(12); assert np.array_equal(render(),source),'Removed Electric slot must 
 # Movement and head tilt must alter the actual rendered pixels.
 amounts(1); before=render(); vec('uLeftEye',[.42,.4,.055,0]); vec('uEyeState',[1,1,.6,0])
 assert not np.array_equal(before,render()),'Tracking uniforms ignored'
-print('PASS: production shader compiles/links; 26 public effects; Electric Eyes ignores blink while other blink-aware effects and missing-face checks pass.')
+print('PASS: production shader compiles/links; 32 public effects; Electric Eyes ignores blink while other blink-aware effects and missing-face checks pass.')
+
+
+# Funny Faces must remain local, continuous in strength, and identical on both GPU routes.
+# Reset the eye movement from the preceding test; eyes do not emit light for these presets.
+vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0])
+vec('uEyeState',[1,1,0,0])
+full_program=program
+for index in range(27,33):
+    amounts(index,0); assert np.array_equal(render(),source), ('Comic zero',index)
+    amounts(index,.35); low=render()
+    amounts(index,1); high=render()
+    assert not np.array_equal(low,high), ('Comic strength ignored',index)
+    # The compact deformation must not bend the distant background.
+    assert np.array_equal(high[:,:8],source[:,:8]), ('Comic leaks left',index)
+    assert np.array_equal(high[:,-8:],source[:,-8:]), ('Comic leaks right',index)
+    uniform('uEyeTime',1.8)
+    assert np.array_equal(render(),high), ('Comic adds unwanted temporal wobble',index)
+    uniform('uEyeTime',.35)
+    vec('uHeadPose',[.45,0,.55,.85]); tilted=render()
+    assert not np.array_equal(tilted,high), ('Comic ignores head pose',index)
+    vec('uHeadPose',[0,0,0,1])
+    vec('uMouthRegion',[0,0,0,0]); fallback=render()
+    assert not np.array_equal(fallback,source), ('Comic requires mouth on every frame',index)
+    vec('uMouthRegion',[.5,.35,.08,.045])
+    # Set all shared uniforms on the dedicated fast program, not just compile it.
+    program=eye_fast_program
+    fn(gl,'glUseProgram',None,U)(program)
+    attr=fn(gl,'glGetAttribLocation',I,U,c.c_char_p)(program,b'aFramePosition')
+    fn(gl,'glEnableVertexAttribArray',None,U)(attr)
+    fn(gl,'glVertexAttribPointer',None,U,I,U,U,I,P)(attr,4,0x1406,0,0,vertices.ctypes.data)
+    vec('uEyeTransform',[1,0,1,1]); vec('uEyeTranslation',[0,0])
+    vec('uTexelSize',[1/w,1/h]); uniform('uEyeTime',.35)
+    vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[-1,0,0,1])
+    vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
+    vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0])
+    vec('uEyeState',[1,1,0,0])
+    vec('uFaceRegion',[.5,.5,.25,.35]); vec('uMouthRegion',[.5,.35,.08,.045])
+    amounts(index)
+    assert np.array_equal(render(),high), ('Comic full/fast shader parity',index)
+    program=full_program
+    fn(gl,'glUseProgram',None,U)(program)
+print('PASS: six comic presets preserve background, respond to strength/pose, avoid temporal wobble, and match full/fast GPU routes.')
 
 
 # Non-square, off-center coordinates catch axis flips hidden by a square center-only test.

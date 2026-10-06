@@ -6,14 +6,15 @@ import kotlin.math.abs
 object EyeEffectCatalog {
     // Keep shader slots stable so existing non-Laser eye/funny effects do not shift. Slot 12 is
     // intentionally reserved after removing the old Electric Eyes implementation.
-    const val SLOT_COUNT = 27
+    const val SLOT_COUNT = 33
     private const val REMOVED_ELECTRIC_SLOT = "__removed_electric__"
     private val slots = listOf("Fire Eyes", "Electric Eyes", "Lightning Eyes", "Plasma Eyes",
         "Ice Eyes", "Galaxy Eyes", "Neon Eyes", "Solar Eyes", "Cyber Eyes",
         "Heart Eyes", "Star Eyes", "Rainbow Eyes",
         REMOVED_ELECTRIC_SLOT, "Flame Eyes", "Flame Eyes 2", "Flaming Horns",
         "Outline Scan", "Eye Reflection", "Face Glitch", "Futuristic Lab 2",
-        "Cheer", "Embarrassed Face", "Fake Laugh", "Big Head", "Gorilla Face", "Big Mouth", "Bend")
+        "Cheer", "Embarrassed Face", "Fake Laugh", "Big Head", "Gorilla Face", "Big Mouth", "Bend",
+        "Fat Face", "Ass Face", "Chipmunk Cheeks", "Tiny Face", "Long Face", "Balloon Head")
 
     val names = slots.filterNot { it.startsWith("__removed_") }
     val funnyNames get() = slots.drop(20).filterNot { it.startsWith("__removed_") }
@@ -177,4 +178,3 @@ data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val sam
         )
     }
 }
-
