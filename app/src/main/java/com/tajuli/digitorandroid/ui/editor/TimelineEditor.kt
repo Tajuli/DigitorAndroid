@@ -38,6 +38,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.key
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -176,6 +177,63 @@ fun TimelineEditor(
         val rowsHeight = (project.tracks.size + effectLanes.size) * T4_TRACK_HEIGHT + 96f
         val centeredPadding = ((maxHeight - 64.dp - 24.dp - rowsHeight.dp) / 2).coerceAtLeast(0.dp)
 
+        val lastVideoTrackId = project.tracks.lastOrNull { it.kind == TrackKind.VIDEO }?.id
+        val effectIds = effectLanes.map { it.selection }
+        var previousEffectIds by remember { mutableStateOf(emptyList<EffectTimelineSelectionV26>()) }
+        LaunchedEffect(effectIds, selectedEffect) {
+            val added = effectIds.lastOrNull { it !in previousEffectIds }
+            previousEffectIds = effectIds
+            val target = added ?: selectedEffect ?: return@LaunchedEffect
+            val index = effectIds.indexOf(target)
+            if (index < 0) return@LaunchedEffect
+            // Wait for the new rows to be measured before clamping to the scroll range.
+            withFrameNanos { }
+            withFrameNanos { }
+            val videos = project.tracks.count { it.kind == TrackKind.VIDEO }
+            val top = with(density) { (centeredPadding + 48.dp + ((videos + index) * T4_TRACK_HEIGHT).dp).toPx() }
+            val rowHeight = with(density) { T4_TRACK_HEIGHT.dp.toPx() }
+            val viewportHeight = with(density) { (maxHeight - 88.dp).coerceAtLeast(0.dp).toPx() }
+            val visibleTop = verticalScroll.value.toFloat()
+            if (top < visibleTop || top + rowHeight > visibleTop + viewportHeight) {
+                verticalScroll.animateScrollTo((top - rowHeight).roundToInt().coerceAtLeast(0))
+            }
+        }
+
+        @Composable
+        fun EffectHeaders() {
+            effectLanes.forEachIndexed { index, lane ->
+                key(lane.selection) {
+                    Box(Modifier.fillMaxWidth().height(T4_TRACK_HEIGHT.dp)
+                        .background(T4Effect.copy(alpha = .18f)).border(.5.dp, T4Divider)
+                        .clickable {
+                            TimelineTextSelectionBusV10.clear()
+                            VisualOverlaySelectionBusV19.clear()
+                            onSelectClip(lane.clip.id)
+                            (ActiveEditorVmRegistry.current() ?: vm).selectNode(lane.nodeId)
+                            EffectTimelineSelectionBusV26.select(lane.clip.id, lane.nodeId, lane.effect.id)
+                        }, contentAlignment = Alignment.Center) {
+                        Text("FX${index + 1}", color = T4Accent, fontSize = 10.sp)
+                    }
+                }
+            }
+        }
+
+        @Composable
+        fun EffectLanes() {
+            effectLanes.forEach { lane ->
+                key(lane.selection) {
+                    Box(Modifier.requiredWidth(contentWidth).height(T4_TRACK_HEIGHT.dp)
+                        .background(T4Effect.copy(alpha = .18f)).border(.5.dp, T4Divider)) {
+                        EffectBarV26(
+                            clip = lane.clip, nodeId = lane.nodeId, effect = lane.effect,
+                            selected = selectedEffect == lane.selection,
+                            pps = pps, frameUs = frameUs, vm = vm, onSelectClip = onSelectClip,
+                        )
+                    }
+                }
+            }
+        }
+
         Column(Modifier.fillMaxSize()) {
             TimelineToolbarV4(
                 selectedClipCount = selectedClipIds.size,
@@ -203,23 +261,11 @@ fun TimelineEditor(
                     Column(Modifier.fillMaxHeight().verticalScroll(verticalScroll)) {
                         Spacer(Modifier.height(centeredPadding))
                         TrackAddButton("+V", onAddVideoTrack)
-                        project.tracks.forEach { track -> TrackHeaderV4(track, track.id == selectedTrackId, onSelectTrack) }
-                        TrackAddButton("+A", onAddAudioTrack)
-                        effectLanes.forEachIndexed { index, lane ->
-                            key(lane.selection) {
-                                Box(Modifier.fillMaxWidth().height(T4_TRACK_HEIGHT.dp)
-                                    .background(T4Effect.copy(alpha = .18f)).border(.5.dp, T4Divider)
-                                    .clickable {
-                                        TimelineTextSelectionBusV10.clear()
-                                        VisualOverlaySelectionBusV19.clear()
-                                        onSelectClip(lane.clip.id)
-                                        (ActiveEditorVmRegistry.current() ?: vm).selectNode(lane.nodeId)
-                                        EffectTimelineSelectionBusV26.select(lane.clip.id, lane.nodeId, lane.effect.id)
-                                    }, contentAlignment = Alignment.Center) {
-                                    Text("FX${index + 1}", color = T4Accent, fontSize = 10.sp)
-                                }
-                            }
+                        project.tracks.forEach { track ->
+                            TrackHeaderV4(track, track.id == selectedTrackId, onSelectTrack)
+                            if (track.id == lastVideoTrackId) EffectHeaders()
                         }
+                        TrackAddButton("+A", onAddAudioTrack)
                         Spacer(Modifier.height(centeredPadding))
                     }
                 }
@@ -282,20 +328,9 @@ fun TimelineEditor(
                                         transitionTargetClipId = target.incoming.id
                                     },
                                 )
+                                if (track.id == lastVideoTrackId) EffectLanes()
                             }
                             Spacer(Modifier.height(48.dp))
-                            effectLanes.forEach { lane ->
-                                key(lane.selection) {
-                                    Box(Modifier.requiredWidth(contentWidth).height(T4_TRACK_HEIGHT.dp)
-                                        .background(T4Effect.copy(alpha = .08f)).border(.5.dp, T4Divider)) {
-                                        EffectBarV26(
-                                            clip = lane.clip, nodeId = lane.nodeId, effect = lane.effect,
-                                            selected = selectedEffect == lane.selection,
-                                            pps = pps, frameUs = frameUs, vm = vm, onSelectClip = onSelectClip,
-                                        )
-                                    }
-                                }
-                            }
                             Spacer(Modifier.height(centeredPadding))
                         }
                         val cursorXPx = cursorUs / US_PER_SECOND.toFloat() * pps
