@@ -164,29 +164,32 @@ for index in range(27,33):
     fn(gl,'glUseProgram',None,U)(program)
 print('PASS: six comic presets preserve background, respond to strength/pose, avoid temporal wobble, and match full/fast GPU routes.')
 
-# User video regression: avoid duplicated lips / oversized eyes and UV folds.
+# User clip regression: widening must be concentrated in the cheeks/jaw.
+# Eyelids, the complete lips, forehead and non-face background stay untouched.
 amounts(27,1)
 fat=render()
 forehead = np.s_[int(h*.73):int(h*.82), int(w*.38):int(w*.62)]
-cheeks = np.s_[int(h*.37):int(h*.56), int(w*.66):int(w*.77)]
-jaw = np.s_[int(h*.19):int(h*.32), int(w*.33):int(w*.67)]
+cheeks = np.s_[int(h*.35):int(h*.46), int(w*.69):int(w*.77)]
+jaw = np.s_[int(h*.22):int(h*.31), int(w*.42):int(w*.60)]
 lip_core = np.s_[int(h*.35)-2:int(h*.35)+3, int(w*.5)-4:int(w*.5)+5]
 left_eye_core = np.s_[int(h*.5)-2:int(h*.5)+3, int(w*.35)-3:int(w*.35)+4]
 right_eye_core = np.s_[int(h*.5)-2:int(h*.5)+3, int(w*.65)-3:int(w*.65)+4]
-for name,region in [('forehead',forehead),('cheeks',cheeks),('jaw',jaw)]:
-    assert not np.array_equal(fat[region],source[region]), ('Fat Face must widen',name)
-for name,region in [('lips',lip_core),('left eye',left_eye_core),('right eye',right_eye_core)]:
+assert not np.array_equal(fat[cheeks],source[cheeks]), 'Fat Face cheeks invisible'
+assert not np.array_equal(fat[jaw],source[jaw]), 'Fat Face jaw invisible'
+for name,region in [('forehead',forehead),('lips',lip_core),
+                    ('left eye',left_eye_core),('right eye',right_eye_core)]:
     assert np.array_equal(fat[region],source[region]), ('Fat Face distorts',name)
 for strength in [.35,.65]:
     amounts(27,strength)
     mid=render()
+    assert not np.array_equal(mid[cheeks],source[cheeks]), ('Fat Face strength invisible',strength)
     for name,region in [('lips',lip_core),('left eye',left_eye_core),('right eye',right_eye_core)]:
         assert np.array_equal(mid[region],source[region]), ('Fat Face strength distorts',name,strength)
 amounts(27,1)
 vec('uMouthRegion',[0,0,0,0])
-assert np.array_equal(render()[lip_core],source[lip_core]), 'Fat Face fallback distorts lips'
+assert np.array_equal(render()[lip_core],source[lip_core]), 'Missing-mouth fallback changes lips'
 vec('uMouthRegion',[.5,.35,.08,.045])
-# Pixel ramp detects non-monotonic UV mapping responsible for doubled lips/teeth.
+# Pixel ramp is monotone if the inverse mapping has no fold-overs/doubled teeth.
 saved_source=source.copy()
 source[:,:,:3]=np.arange(w,dtype=np.uint8)[None,:,None]*2
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
@@ -197,7 +200,7 @@ for py in [int(h*.24),int(h*.35),int(h*.5),int(h*.74)]:
 source[:]=saved_source
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
 amounts(-1)
-print('PASS: Fat Face preserves lips/eyes, rounds full face and has no UV folds.')
+print('PASS: Fat Face alters cheeks/jaw but preserves facial features, forehead, and monotone UV.')
 
 
 # Non-square, off-center coordinates catch axis flips hidden by a square center-only test.

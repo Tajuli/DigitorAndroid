@@ -481,44 +481,58 @@ internal const val EYE_EFFECT_SHADER = """
         vec2 left=cheekCenter+vec2(-.43+.07*yaw,0.0);
         vec2 right=cheekCenter+vec2(.43+.07*yaw,0.0);
         vec2 delta=vec2(0.0);
-        // Fat Face: use one bounded, face-relative inverse warp instead of
-        // stacking magnifying lenses. This avoids folded UVs / duplicated lips.
+        // Fat Face: two controlled deformations instead of a generic expanding
+        // face-wide lens. The previous warp moved lips/eyes and stretched headwear.
+        // Widen lower cheek and jaw boundaries, but do not magnify facial features.
         if(uFunnyB.w>.0) {
             float strength=clamp(uFunnyB.w,0.0,1.0);
-            float centeredX=p.x-.055*yaw;
-            // Stable, monotone cheek expansion: zero at the center and outside
-            // the face contour, with no effect leaking onto scarves/background.
-            float cheekWidth=sin(3.14159265*clamp(centeredX/1.25,-1.0,1.0));
-            float faceHeight=1.0-smoothstep(.78,1.25,abs(p.y+.02));
-            // Tracker mouth bounds cover the inner lips, not the complete lip
-            // silhouette or jaw movement. Add enough guard space for speech.
-            vec2 protectedMouth=vec2(.34,.30);
-            if(uMouthRegion.z>.001 && uMouthRegion.w>.001) {
-                protectedMouth=max(protectedMouth,
-                    uMouthRegion.zw*faceMetricScale()/extent*vec2(2.0,3.8));
-            }
-            float keepLips=smoothstep(1.0,2.25,
-                length((p-mouth)/protectedMouth));
-            // Keep both tracked eye/eyelid regions intact, even when blinking.
+            float centeredX=p.x-.03*yaw;
+            float radialX=abs(centeredX);
+
+            // The current tracked eye line, not a fixed normalized screen row,
+            // separates the cheeks from the protected eyes, brows and forehead.
             vec2 leftEye=vec2(-.38,.30);
             vec2 rightEye=vec2(.38,.30);
-            if(uLeftEye.z>.001) {
-                leftEye=faceToLocal(uLeftEye.xy-uFaceRegion.xy)/extent;
+            bool hasLeftEye=uLeftEye.z>.001;
+            bool hasRightEye=uRightEye.z>.001;
+            if(hasLeftEye) leftEye=faceToLocal(uLeftEye.xy-uFaceRegion.xy)/extent;
+            if(hasRightEye) rightEye=faceToLocal(uRightEye.xy-uFaceRegion.xy)/extent;
+            float eyeLine=.30;
+            if(hasLeftEye && hasRightEye) eyeLine=(leftEye.y+rightEye.y)*.5;
+            else if(hasLeftEye) eyeLine=leftEye.y;
+            else if(hasRightEye) eyeLine=rightEye.y;
+
+            // Bounded support limits scarf/hair movement. The side displacement
+            // fades smoothly to zero before it reaches the outer background.
+            float cheekSide=smoothstep(.38,1.00,radialX)*
+                (1.0-smoothstep(1.05,1.38,radialX));
+            float cheekHeight=(1.0-smoothstep(eyeLine-.14,eyeLine+.05,p.y))*
+                (1.0-smoothstep(.86,1.23,-p.y));
+
+            // Mouth ROI is the lip bounding box, not the entire lower face.
+            // Keep the complete lip oval (including speech) but allow the
+            // surrounding cheeks to expand; excessive old padding hid the effect.
+            vec2 lipRadius=vec2(.27,.20);
+            if(uMouthRegion.z>.001 && uMouthRegion.w>.001) {
+                lipRadius=max(lipRadius,
+                    uMouthRegion.zw*faceMetricScale()/extent*vec2(1.22,1.85));
             }
-            if(uRightEye.z>.001) {
-                rightEye=faceToLocal(uRightEye.xy-uFaceRegion.xy)/extent;
-            }
-            float keepLeftEye=smoothstep(1.0,2.0,
-                length((p-leftEye)/vec2(.34,.29)));
-            float keepRightEye=smoothstep(1.0,2.0,
-                length((p-rightEye)/vec2(.34,.29)));
-            float featureGuard=keepLips*keepLeftEye*keepRightEye;
-            float chinWeight=smoothstep(.43,.72,-p.y)*
-                (1.0-smoothstep(.91,1.25,-p.y));
-            float chinWidth=1.0-smoothstep(.68,1.12,abs(centeredX));
+            float lipGuard=smoothstep(1.0,1.62,length((p-mouth)/lipRadius));
+            float leftEyeGuard=smoothstep(1.0,1.70,
+                length((p-leftEye)/vec2(.34,.30)));
+            float rightEyeGuard=smoothstep(1.0,1.70,
+                length((p-rightEye)/vec2(.34,.30)));
+            float featureGuard=lipGuard*leftEyeGuard*rightEyeGuard;
+
+            // The chin fills below the mouth; inverse Y sampling extends it
+            // downward without stretching teeth or moving the mouth opening.
+            float belowMouth=mouth.y-p.y;
+            float chinBand=smoothstep(.32,.61,belowMouth)*
+                (1.0-smoothstep(.76,1.02,belowMouth));
+            float chinWidth=1.0-smoothstep(.42,1.00,radialX);
             vec2 displacement=vec2(
-                -.14*cheekWidth*faceHeight,
-                .060*chinWeight*chinWidth
+                -sign(centeredX)*.17*cheekSide*cheekHeight,
+                .105*chinBand*chinWidth
             );
             delta+=displacement*(featureGuard*strength);
         }

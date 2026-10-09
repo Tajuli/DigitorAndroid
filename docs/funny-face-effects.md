@@ -14,18 +14,23 @@ The renderer uses bounded inverse lenses in aspect-correct, face-roll coordinate
 The tracked mouth anchors cheek position, with a face-relative fallback if mouth
 bounds are unavailable. Head yaw shifts the cheek pair.
 
-**Fat Face** uses a bounded, single-valued displacement field rather than
-stacked magnifying lenses. The forehead/temples, cheeks and jaw appear fuller,
-while the tracked eyes, eyelids, lips and mouth opening preserve their original
-source pixels. All boundaries are feathered, and tracking dropouts use a
-face-relative mouth guard. This avoids the folded texture and doubled teeth
-observed in real video. The existing Fat Face slot (27) is unchanged; no saved
-project migration is necessary. Other Funny Faces still use their original
-math, normalized stacking and tracked poses.
+**Fat Face** now separates cheek/jaw plumping from facial-expression geometry.
+The side warp begins below the tracked eye line and fades out at the headwear
+boundary. Mouth lips/teeth and both eyes are guarded using the actual source
+time tracking anchors, with bounded fallback when landmarks are missing.
+The dynamically sized mouth protection is no longer so broad that it suppresses
+all cheek deformation. Chin fullness is centered below the mouth. The inverse
+field remains a single texture sample with no added frame-to-frame jitter,
+and both full and fast GPU paths share the function.
 
-This is a 2D warp without a facial segmentation mask: it cannot safely push the
-outer face silhouette over a hijab/hair/background. The corrected effect is
-therefore more controlled than the previous extreme broken version.
+The supplied 1920x1080 original and exported video were manually compared
+at seven matching timestamps. Under a tight-fitting hijab, arbitrary inflation
+past the visible skin edge also warps the hijab texture. Until the pipeline
+provides a face/headwear occlusion mask, this shader deliberately keeps the
+contour deformation bounded rather than promising perfect 3D swelling.
+
+Slot 27, the effect name, project serialization, timed FX and exported shader
+routing remain unchanged. No new assets or dependencies are needed.
 
 Both the full creator shader and the dedicated eye/funny fast shader consume the
 same uniforms and deformation function. The fast route still samples the source
