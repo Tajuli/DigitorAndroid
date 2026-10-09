@@ -527,8 +527,10 @@ internal const val EYE_EFFECT_SHADER = """
             // The chin fills below the mouth; inverse Y sampling extends it
             // downward without stretching teeth or moving the mouth opening.
             float belowMouth=mouth.y-p.y;
-            float chinBand=smoothstep(.32,.61,belowMouth)*
-                (1.0-smoothstep(.76,1.02,belowMouth));
+            // Jaw starts just beyond the protected lip oval, so its texture
+            // moves visibly even on small faces, without shifting lips/teeth.
+            float chinBand=smoothstep(.08,.28,belowMouth)*
+                (1.0-smoothstep(.84,1.10,belowMouth));
             float chinWidth=1.0-smoothstep(.42,1.00,radialX);
             vec2 displacement=vec2(
                 -sign(centeredX)*.17*cheekSide*cheekHeight,
