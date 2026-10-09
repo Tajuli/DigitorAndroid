@@ -481,25 +481,46 @@ internal const val EYE_EFFECT_SHADER = """
         vec2 left=cheekCenter+vec2(-.43+.07*yaw,0.0);
         vec2 right=cheekCenter+vec2(.43+.07*yaw,0.0);
         vec2 delta=vec2(0.0);
-        // Fat Face: inflate the whole face silhouette, not just the lower cheeks.
-        // Sample inverse lenses in tracked face/roll space to round the temples,
-        // forehead, cheeks and jaw without drifting with head movement.
+        // Fat Face: use one bounded, face-relative inverse warp instead of
+        // stacking magnifying lenses. This avoids folded UVs / duplicated lips.
         if(uFunnyB.w>.0) {
-            vec2 q=comicLens(p,vec2(mouth.x*.22,-.055),vec2(1.47,1.53),vec2(.70,.37));
-            q=comicLens(q,vec2(-.50+.07*yaw,-.27),vec2(.86,.91),vec2(.54,.13));
-            q=comicLens(q,vec2( .50+.07*yaw,-.27),vec2(.86,.91),vec2(.54,.13));
-            q=comicLens(q,vec2(mouth.x*.25,-.60),vec2(.95,.64),vec2(.27,.28));
-            // Retain the original source UV over the lips; feather the transition
-            // around them instead of stretching the lips alongside the cheeks.
-            // A face-relative mouth estimate also protects short tracking dropouts.
-            vec2 lipRadius=vec2(.30,.14);
+            float strength=clamp(uFunnyB.w,0.0,1.0);
+            float centeredX=p.x-.055*yaw;
+            // Stable, monotone cheek expansion: zero at the center and outside
+            // the face contour, with no effect leaking onto scarves/background.
+            float cheekWidth=sin(3.14159265*clamp(centeredX/1.25,-1.0,1.0));
+            float faceHeight=1.0-smoothstep(.78,1.25,abs(p.y+.02));
+            // Tracker mouth bounds cover the inner lips, not the complete lip
+            // silhouette or jaw movement. Add enough guard space for speech.
+            vec2 protectedMouth=vec2(.34,.30);
             if(uMouthRegion.z>.001 && uMouthRegion.w>.001) {
-                lipRadius=max(vec2(.23,.11),
-                    uMouthRegion.zw*faceMetricScale()/extent);
+                protectedMouth=max(protectedMouth,
+                    uMouthRegion.zw*faceMetricScale()/extent*vec2(2.0,3.8));
             }
-            float lipDistance=length((p-mouth)/lipRadius);
-            float lipProtection=smoothstep(1.05,1.75,lipDistance);
-            delta+=(q-p)*(uFunnyB.w*lipProtection);
+            float keepLips=smoothstep(1.0,2.25,
+                length((p-mouth)/protectedMouth));
+            // Keep both tracked eye/eyelid regions intact, even when blinking.
+            vec2 leftEye=vec2(-.38,.30);
+            vec2 rightEye=vec2(.38,.30);
+            if(uLeftEye.z>.001) {
+                leftEye=faceToLocal(uLeftEye.xy-uFaceRegion.xy)/extent;
+            }
+            if(uRightEye.z>.001) {
+                rightEye=faceToLocal(uRightEye.xy-uFaceRegion.xy)/extent;
+            }
+            float keepLeftEye=smoothstep(1.0,2.0,
+                length((p-leftEye)/vec2(.34,.29)));
+            float keepRightEye=smoothstep(1.0,2.0,
+                length((p-rightEye)/vec2(.34,.29)));
+            float featureGuard=keepLips*keepLeftEye*keepRightEye;
+            float chinWeight=smoothstep(.43,.72,-p.y)*
+                (1.0-smoothstep(.91,1.25,-p.y));
+            float chinWidth=1.0-smoothstep(.68,1.12,abs(centeredX));
+            vec2 displacement=vec2(
+                -.14*cheekWidth*faceHeight,
+                .060*chinWeight*chinWidth
+            );
+            delta+=displacement*(featureGuard*strength);
         }
         // Ass Face: two rounded lower-face lobes and a narrow central cleft; comic anatomy only.
         if(uFunnyC.x>.0) {
