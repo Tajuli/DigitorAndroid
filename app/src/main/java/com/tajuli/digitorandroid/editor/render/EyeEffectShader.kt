@@ -506,7 +506,7 @@ internal const val EYE_EFFECT_SHADER = """
             // fades smoothly to zero before it reaches the outer background.
             float cheekSide=smoothstep(.38,1.00,radialX)*
                 (1.0-smoothstep(1.05,1.38,radialX));
-            float cheekHeight=(1.0-smoothstep(eyeLine-.14,eyeLine+.05,p.y))*
+            float cheekHeight=(1.0-smoothstep(eyeLine-.35,eyeLine-.08,p.y))*
                 (1.0-smoothstep(.86,1.23,-p.y));
 
             // Mouth ROI is the lip bounding box, not the entire lower face.
