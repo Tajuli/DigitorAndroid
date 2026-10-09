@@ -12,7 +12,14 @@ its existing calibrated portrait pose.
 
 The renderer uses bounded inverse lenses in aspect-correct, face-roll coordinates.
 The tracked mouth anchors cheek position, with a face-relative fallback if mouth
-bounds are unavailable. Head yaw shifts the cheek pair. Each deformation has a
+bounds are unavailable. Head yaw shifts the cheek pair.
+
+**Fat Face** uses full-face inverse lenses to round the forehead, temples, cheeks,
+and chin/jaw, rather than merely widening the lower cheeks. It keeps the tracked
+lip oval at its **original source pixels**, with a feathered boundary so the rest
+of the face can expand smoothly. Short missing-mouth frames use an estimated
+face-relative lip region. The existing Fat Face slot (27) is unchanged; this is
+not a second effect, and existing timeline/project data remains compatible. Each deformation has a
 smooth compact boundary; distant background is unchanged. Multiple new presets
 in one node combine with a normalized displacement budget. Existing presets keep
 their original math. There is no procedural temporal jitter or extra tracking

@@ -481,10 +481,25 @@ internal const val EYE_EFFECT_SHADER = """
         vec2 left=cheekCenter+vec2(-.43+.07*yaw,0.0);
         vec2 right=cheekCenter+vec2(.43+.07*yaw,0.0);
         vec2 delta=vec2(0.0);
-        // Fat Face: broad jaw/cheek expansion, preserving the upper forehead and eye row.
+        // Fat Face: inflate the whole face silhouette, not just the lower cheeks.
+        // Sample inverse lenses in tracked face/roll space to round the temples,
+        // forehead, cheeks and jaw without drifting with head movement.
         if(uFunnyB.w>.0) {
-            vec2 q=comicLens(p,cheekCenter,vec2(1.20,.87),vec2(.78,.18));
-            delta+=(q-p)*uFunnyB.w;
+            vec2 q=comicLens(p,vec2(mouth.x*.22,-.055),vec2(1.47,1.53),vec2(.70,.37));
+            q=comicLens(q,vec2(-.50+.07*yaw,-.27),vec2(.86,.91),vec2(.54,.13));
+            q=comicLens(q,vec2( .50+.07*yaw,-.27),vec2(.86,.91),vec2(.54,.13));
+            q=comicLens(q,vec2(mouth.x*.25,-.60),vec2(.95,.64),vec2(.27,.28));
+            // Retain the original source UV over the lips; feather the transition
+            // around them instead of stretching the lips alongside the cheeks.
+            // A face-relative mouth estimate also protects short tracking dropouts.
+            vec2 lipRadius=vec2(.30,.14);
+            if(uMouthRegion.z>.001 && uMouthRegion.w>.001) {
+                lipRadius=max(vec2(.23,.11),
+                    uMouthRegion.zw*faceMetricScale()/extent);
+            }
+            float lipDistance=length((p-mouth)/lipRadius);
+            float lipProtection=smoothstep(1.05,1.75,lipDistance);
+            delta+=(q-p)*(uFunnyB.w*lipProtection);
         }
         // Ass Face: two rounded lower-face lobes and a narrow central cleft; comic anatomy only.
         if(uFunnyC.x>.0) {

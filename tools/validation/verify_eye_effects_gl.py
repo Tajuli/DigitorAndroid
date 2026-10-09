@@ -164,6 +164,25 @@ for index in range(27,33):
     fn(gl,'glUseProgram',None,U)(program)
 print('PASS: six comic presets preserve background, respond to strength/pose, avoid temporal wobble, and match full/fast GPU routes.')
 
+# Fat Face must round the *whole* face, not just the lower cheeks, while the
+# original lip pixels remain untouched at any strength and through mouth dropout.
+amounts(27,1)
+full_fat = render()
+forehead = np.s_[int(h*.64):int(h*.76), int(w*.36):int(w*.64)]
+cheeks = np.s_[int(h*.39):int(h*.55), int(w*.64):int(w*.77)]
+lip_core = np.s_[int(h*.35)-2:int(h*.35)+3, int(w*.5)-4:int(w*.5)+5]
+assert not np.array_equal(full_fat[forehead],source[forehead]), 'Fat Face must include the forehead'
+assert not np.array_equal(full_fat[cheeks],source[cheeks]), 'Fat Face must widen cheeks'
+assert np.array_equal(full_fat[lip_core],source[lip_core]), 'Fat Face must not distort lips'
+amounts(27,.5)
+assert np.array_equal(render()[lip_core],source[lip_core]), 'Half-strength Fat Face changes lips'
+vec('uMouthRegion',[0,0,0,0])
+amounts(27,1)
+assert np.array_equal(render()[lip_core],source[lip_core]), 'Fallback Fat Face changes lips'
+vec('uMouthRegion',[.5,.35,.08,.045])
+amounts(-1)
+print('PASS: Fat Face expands forehead and cheeks while preserving lip pixels at full/half strength and during mouth dropout.')
+
 
 # Non-square, off-center coordinates catch axis flips hidden by a square center-only test.
 source[:,:,:3]=30
