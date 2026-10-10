@@ -487,7 +487,9 @@ internal const val EYE_EFFECT_SHADER = """
         // Fat Face V106: use the tracked facial outline, not a fixed bounding
         // box. One bounded inverse warp plumps cheeks without duplicating teeth.
         if(uFunnyB.w>.0) {
-            float strength=clamp(uFunnyB.w,0.0,1.0);
+            // Stronger, visibly rounder cheeks/jaw even at a mid slider
+            // value. Keep both zero and full strength exactly mapped.
+            float strength=pow(clamp(uFunnyB.w,0.0,1.0),.90);
             vec2 eyeL=vec2(-.44,.30);
             vec2 eyeR=vec2(.44,.30);
             if(uLeftEye.z>.001)
@@ -524,10 +526,10 @@ internal const val EYE_EFFECT_SHADER = """
             float relativeX=radialX/radius;
             // Localized support reaches just outside the cheek landmark and
             // feathers off before distorting distant hair, hijab or background.
-            float cheekBand=smoothstep(.27,.80,relativeX)*
-                (1.0-smoothstep(1.15,1.48,relativeX));
-            float cheekHeight=(1.0-smoothstep(eyeLine-.80,eyeLine-.50,p.y))*
-                (1.0-smoothstep(.89,1.25,-p.y));
+            float cheekBand=smoothstep(.18,.72,relativeX)*
+                (1.0-smoothstep(1.24,1.62,relativeX));
+            float cheekHeight=(1.0-smoothstep(eyeLine-.92,eyeLine-.40,p.y))*
+                (1.0-smoothstep(.96,1.30,-p.y));
 
             vec2 lipRadius=vec2(.57,.34);
             if(uMouthRegion.z>.001 && uMouthRegion.w>.001)
@@ -543,14 +545,14 @@ internal const val EYE_EFFECT_SHADER = """
 
             // Monotone, single-sample horizontal displacement. The protective
             // masks never stretch the mouth or eyelid source pixels.
-            float sideDisplacement=-sign(p.x-centerX)*.205*radius*
+            float sideDisplacement=-sign(p.x-centerX)*.30*radius*
                 cheekBand*cheekHeight*featureGuard;
             float belowMouth=mouthCenter.y-p.y;
             float chinBand=smoothstep(.12,.38,belowMouth)*
                 (1.0-smoothstep(.86,1.17,belowMouth));
             float chinWidth=1.0-smoothstep(.42,1.0,relativeX);
             float chinGuard=smoothstep(.22,.48,belowMouth);
-            float chinDisplacement=.080*chinBand*chinWidth*chinGuard;
+            float chinDisplacement=.12*chinBand*chinWidth*chinGuard;
             delta+=vec2(sideDisplacement,chinDisplacement)*strength;
         }
         // Ass Face: two rounded lower-face lobes and a narrow central cleft; comic anatomy only.

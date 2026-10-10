@@ -14,6 +14,15 @@ The updated Fat Face uses **real source-frame Face Mesh cheek and jaw landmarks*
 not just the face bounding box. Four per-frame contour points are transported
 through the existing face pose to both GPU routes, with pose interpolation,
 strength/timing compatibility and a fallback when contour data is missing.
+Fat Face's fuller cheek/jaw profile raises the maximum horizontal displacement
+from 0.205 to 0.30 face-relative units (before landmark-radius scaling), and
+raises chin displacement from 0.080 to 0.12. The cheek falloff broadens from
+a 1.48 to a 1.62 radius boundary, with a smooth feather. The amount slider
+uses a gentle gamma curve to make medium strengths more visible without
+changing its zero or maximum endpoints. The existing lip/eye guards remain.
+The shader regression asserts that the same contour renders stronger at 100%
+than 65%, and that tracked mouth/eye source regions stay intact.
+
 The cheek expansion follows the face boundary, while lips, teeth and eyelids
 are protected with tracked feature guards. Motion is deterministic, with no
 procedural wobble. A soft falloff limits movement of nearby hijab/hair, but

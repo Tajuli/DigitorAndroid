@@ -182,7 +182,7 @@ assert not np.array_equal(fat[jaw],source[jaw]), 'Fat Face jaw invisible'
 for name,region in [('forehead',forehead),('lips',lip_core),
                     ('left eye',left_eye_core),('right eye',right_eye_core)]:
     assert np.array_equal(fat[region],source[region]), ('Fat Face distorts',name)
-for strength in [.35,.65]:
+for strength in [.35,.65,.85]:
     amounts(27,strength)
     mid=render()
     assert not np.array_equal(mid[cheeks],source[cheeks]), ('Fat Face strength invisible',strength)
@@ -200,6 +200,14 @@ wide_lips=np.s_[int(h*.35)-2:int(h*.35)+3,int(w*.5)-9:int(w*.5)+10]
 under_eyes=np.s_[int(h*.46):int(h*.49),int(w*.34):int(w*.66)]
 assert np.array_equal(with_contour[wide_lips],source[wide_lips]), 'Lip oval moved'
 assert np.array_equal(with_contour[under_eyes],source[under_eyes]), 'Lower eye row moved'
+# Fat Face at full strength must create visibly stronger cheek inflation
+# than the same tracked pose rendered at 65 percent.
+amounts(27,.65)
+medium_contour=render()
+amounts(27,1)
+high_delta=np.abs(with_contour[cheeks,:,:3].astype(np.int16)-source[cheeks,:,:3].astype(np.int16)).sum()
+mid_delta=np.abs(medium_contour[cheeks,:,:3].astype(np.int16)-source[cheeks,:,:3].astype(np.int16)).sum()
+assert high_delta>mid_delta, ('Fat Face full-strength plumping is too subtle',int(high_delta),int(mid_delta))
 vec('uFaceContourCheeks',[.26,.47,.74,.47])
 vec('uFaceContourJaw',[.33,.28,.67,.28])
 assert not np.array_equal(render(),with_contour), 'Contour anchors ignored'
