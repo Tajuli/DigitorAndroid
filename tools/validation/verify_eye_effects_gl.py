@@ -81,6 +81,7 @@ vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[-1,0,0,1])
 vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
 vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0]); vec('uEyeState',[1,1,0,0])
 vec('uFaceRegion',[.5,.5,.25,.35]);vec('uMouthRegion',[.5,.35,.08,.045])
+vec('uFaceContourCheeks',[.29,.47,.71,.47]);vec('uFaceContourJaw',[.35,.28,.65,.28])
 vertices=np.array([-1,-1,0,1,1,-1,0,1,-1,1,0,1,1,1,0,1],np.float32)
 attribute=fn(gl,'glGetAttribLocation',I,U,c.c_char_p)(program,b'aFramePosition')
 fn(gl,'glEnableVertexAttribArray',None,U)(attribute)
@@ -93,11 +94,11 @@ def render():
     assert fn(gl,'glGetError',U)()==0
     return out
 def amounts(index, strength=1):
-    a=[0.]*28
+    a=[0.]*36
     if index>=0: a[index]=strength
-    for name,part in zip(['uEyesA','uEyesB','uEyesC','uEyesD','uEyesE','uFunnyA','uFunnyB'],[a[i:i+4] for i in range(0,28,4)]): vec(name,part)
+    for name,part in zip(['uEyesA','uEyesB','uEyesC','uEyesD','uEyesE','uFunnyA','uFunnyB','uFunnyC','uFunnyD'],[a[i:i+4] for i in range(0,36,4)]): vec(name,part)
 amounts(-1); assert np.array_equal(render(),source),'Zero strength'
-active_indices=[i for i in range(27) if i != 12]
+active_indices=[i for i in range(33) if i != 12]
 results={}
 for index in active_indices:
     amounts(index); vec('uEyeState',[1,1,0,0])
@@ -113,6 +114,7 @@ for index in active_indices:
     vec('uFaceRegion',[0,0,0,0]);vec('uMouthRegion',[0,0,0,0])
     assert np.array_equal(render(),source),('Missing face',index)
     vec('uFaceRegion',[.5,.5,.25,.35]);vec('uMouthRegion',[.5,.35,.08,.045])
+    vec('uFaceContourCheeks',[.29,.47,.71,.47]);vec('uFaceContourJaw',[.35,.28,.65,.28])
     vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0])
 for pos,i in enumerate(active_indices):
     for j in active_indices[:pos]: assert not np.array_equal(results[i],results[j]),('Duplicate',i,j)
@@ -120,7 +122,109 @@ amounts(12); assert np.array_equal(render(),source),'Removed Electric slot must 
 # Movement and head tilt must alter the actual rendered pixels.
 amounts(1); before=render(); vec('uLeftEye',[.42,.4,.055,0]); vec('uEyeState',[1,1,.6,0])
 assert not np.array_equal(before,render()),'Tracking uniforms ignored'
-print('PASS: production shader compiles/links; 26 public effects; Electric Eyes ignores blink while other blink-aware effects and missing-face checks pass.')
+print('PASS: production shader compiles/links; 32 public effects; Electric Eyes ignores blink while other blink-aware effects and missing-face checks pass.')
+
+
+# Funny Faces must remain local, continuous in strength, and identical on both GPU routes.
+# Reset the eye movement from the preceding test; eyes do not emit light for these presets.
+vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0])
+vec('uEyeState',[1,1,0,0])
+full_program=program
+for index in range(27,33):
+    amounts(index,0); assert np.array_equal(render(),source), ('Comic zero',index)
+    amounts(index,.35); low=render()
+    amounts(index,1); high=render()
+    assert not np.array_equal(low,high), ('Comic strength ignored',index)
+    # The compact deformation must not bend the distant background.
+    assert np.array_equal(high[:,:8],source[:,:8]), ('Comic leaks left',index)
+    assert np.array_equal(high[:,-8:],source[:,-8:]), ('Comic leaks right',index)
+    uniform('uEyeTime',1.8)
+    assert np.array_equal(render(),high), ('Comic adds unwanted temporal wobble',index)
+    uniform('uEyeTime',.35)
+    vec('uHeadPose',[.45,0,.55,.85]); tilted=render()
+    assert not np.array_equal(tilted,high), ('Comic ignores head pose',index)
+    vec('uHeadPose',[0,0,0,1])
+    vec('uMouthRegion',[0,0,0,0]); fallback=render()
+    assert not np.array_equal(fallback,source), ('Comic requires mouth on every frame',index)
+    vec('uMouthRegion',[.5,.35,.08,.045])
+    # Set all shared uniforms on the dedicated fast program, not just compile it.
+    program=eye_fast_program
+    fn(gl,'glUseProgram',None,U)(program)
+    attr=fn(gl,'glGetAttribLocation',I,U,c.c_char_p)(program,b'aFramePosition')
+    fn(gl,'glEnableVertexAttribArray',None,U)(attr)
+    fn(gl,'glVertexAttribPointer',None,U,I,U,U,I,P)(attr,4,0x1406,0,0,vertices.ctypes.data)
+    vec('uEyeTransform',[1,0,1,1]); vec('uEyeTranslation',[0,0])
+    vec('uTexelSize',[1/w,1/h]); uniform('uEyeTime',.35)
+    vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[-1,0,0,1])
+    vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
+    vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0])
+    vec('uEyeState',[1,1,0,0])
+    vec('uFaceRegion',[.5,.5,.25,.35]); vec('uMouthRegion',[.5,.35,.08,.045])
+    vec('uFaceContourCheeks',[.29,.47,.71,.47]); vec('uFaceContourJaw',[.35,.28,.65,.28])
+    amounts(index)
+    assert np.array_equal(render(),high), ('Comic full/fast shader parity',index)
+    program=full_program
+    fn(gl,'glUseProgram',None,U)(program)
+print('PASS: six comic presets preserve background, respond to strength/pose, avoid temporal wobble, and match full/fast GPU routes.')
+
+# User clip regression: widening must be concentrated in the cheeks/jaw.
+# Eyelids, the complete lips, forehead and non-face background stay untouched.
+amounts(27,1)
+fat=render()
+forehead = np.s_[int(h*.73):int(h*.82), int(w*.38):int(w*.62)]
+cheeks = np.s_[int(h*.26):int(h*.34), int(w*.69):int(w*.77)]
+jaw = np.s_[int(h*.22):int(h*.31), int(w*.42):int(w*.60)]
+lip_core = np.s_[int(h*.35)-2:int(h*.35)+3, int(w*.5)-4:int(w*.5)+5]
+left_eye_core = np.s_[int(h*.5)-2:int(h*.5)+3, int(w*.35)-3:int(w*.35)+4]
+right_eye_core = np.s_[int(h*.5)-2:int(h*.5)+3, int(w*.65)-3:int(w*.65)+4]
+assert not np.array_equal(fat[cheeks],source[cheeks]), 'Fat Face cheeks invisible'
+assert not np.array_equal(fat[jaw],source[jaw]), 'Fat Face jaw invisible'
+for name,region in [('forehead',forehead),('lips',lip_core),
+                    ('left eye',left_eye_core),('right eye',right_eye_core)]:
+    assert np.array_equal(fat[region],source[region]), ('Fat Face distorts',name)
+for strength in [.35,.65,.85]:
+    amounts(27,strength)
+    mid=render()
+    assert not np.array_equal(mid[cheeks],source[cheeks]), ('Fat Face strength invisible',strength)
+    for name,region in [('lips',lip_core),('left eye',left_eye_core),('right eye',right_eye_core)]:
+        assert np.array_equal(mid[region],source[region]), ('Fat Face strength distorts',name,strength)
+amounts(27,1)
+vec('uMouthRegion',[0,0,0,0])
+assert np.array_equal(render()[lip_core],source[lip_core]), 'Missing-mouth fallback changes lips'
+vec('uMouthRegion',[.5,.35,.08,.045])
+# Face-outline coordinates must affect the plumping. Pixels in the tracked eye
+# row and entire lip interior remain source-exact at multiple strengths.
+amounts(27,1)
+with_contour=render()
+wide_lips=np.s_[int(h*.35)-2:int(h*.35)+3,int(w*.5)-9:int(w*.5)+10]
+under_eyes=np.s_[int(h*.46):int(h*.49),int(w*.34):int(w*.66)]
+assert np.array_equal(with_contour[wide_lips],source[wide_lips]), 'Lip oval moved'
+assert np.array_equal(with_contour[under_eyes],source[under_eyes]), 'Lower eye row moved'
+# Fat Face at full strength must create visibly stronger cheek inflation
+# than the same tracked pose rendered at 65 percent.
+amounts(27,.65)
+medium_contour=render()
+amounts(27,1)
+high_delta=np.abs(with_contour[cheeks][...,:3].astype(np.int16)-source[cheeks][...,:3].astype(np.int16)).sum()
+mid_delta=np.abs(medium_contour[cheeks][...,:3].astype(np.int16)-source[cheeks][...,:3].astype(np.int16)).sum()
+assert high_delta>mid_delta, ('Fat Face full-strength plumping is too subtle',int(high_delta),int(mid_delta))
+vec('uFaceContourCheeks',[.26,.47,.74,.47])
+vec('uFaceContourJaw',[.33,.28,.67,.28])
+assert not np.array_equal(render(),with_contour), 'Contour anchors ignored'
+vec('uFaceContourCheeks',[.29,.47,.71,.47])
+vec('uFaceContourJaw',[.35,.28,.65,.28])
+# Pixel ramp is monotone if the inverse mapping has no fold-overs/doubled teeth.
+saved_source=source.copy()
+source[:,:,:3]=np.arange(w,dtype=np.uint8)[None,:,None]*2
+fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
+amounts(27,1)
+ramp=render()
+for py in [int(h*.24),int(h*.35),int(h*.5),int(h*.56),int(h*.59),int(h*.74)]:
+    assert (np.diff(ramp[py,:,0].astype(int))>=0).all(), ('Fat Face UV fold',py)
+source[:]=saved_source
+fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
+amounts(-1)
+print('PASS: Fat Face alters cheeks/jaw but preserves facial features, forehead, and monotone UV.')
 
 
 # Non-square, off-center coordinates catch axis flips hidden by a square center-only test.

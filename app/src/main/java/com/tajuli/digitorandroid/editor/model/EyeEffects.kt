@@ -6,14 +6,15 @@ import kotlin.math.abs
 object EyeEffectCatalog {
     // Keep shader slots stable so existing non-Laser eye/funny effects do not shift. Slot 12 is
     // intentionally reserved after removing the old Electric Eyes implementation.
-    const val SLOT_COUNT = 27
+    const val SLOT_COUNT = 33
     private const val REMOVED_ELECTRIC_SLOT = "__removed_electric__"
     private val slots = listOf("Fire Eyes", "Electric Eyes", "Lightning Eyes", "Plasma Eyes",
         "Ice Eyes", "Galaxy Eyes", "Neon Eyes", "Solar Eyes", "Cyber Eyes",
         "Heart Eyes", "Star Eyes", "Rainbow Eyes",
         REMOVED_ELECTRIC_SLOT, "Flame Eyes", "Flame Eyes 2", "Flaming Horns",
         "Outline Scan", "Eye Reflection", "Face Glitch", "Futuristic Lab 2",
-        "Cheer", "Embarrassed Face", "Fake Laugh", "Big Head", "Gorilla Face", "Big Mouth", "Bend")
+        "Cheer", "Embarrassed Face", "Fake Laugh", "Big Head", "Gorilla Face", "Big Mouth", "Bend",
+        "Fat Face", "Ass Face", "Chipmunk Cheeks", "Tiny Face", "Long Face", "Balloon Head")
 
     val names = slots.filterNot { it.startsWith("__removed_") }
     val funnyNames get() = slots.drop(20).filterNot { it.startsWith("__removed_") }
@@ -58,6 +59,23 @@ data class TrackedEye(val x: Float, val y: Float, val radius: Float, val roll: F
         )
     }
 }
+/** Original-frame, normalized Face Mesh outline anchors (image Y runs downward). */
+data class FacePointV106(val x: Float, val y: Float) {
+    fun lerp(b: FacePointV106, t: Float) = FacePointV106(
+        x + (b.x - x) * t, y + (b.y - y) * t,
+    )
+}
+data class FaceContourV106(
+    val leftCheek: FacePointV106,
+    val rightCheek: FacePointV106,
+    val leftJaw: FacePointV106,
+    val rightJaw: FacePointV106,
+) {
+    fun lerp(b: FaceContourV106, t: Float) = FaceContourV106(
+        leftCheek.lerp(b.leftCheek, t), rightCheek.lerp(b.rightCheek, t),
+        leftJaw.lerp(b.leftJaw, t), rightJaw.lerp(b.rightJaw, t),
+    )
+}
 data class EyePose(
     val left: TrackedEye,
     val right: TrackedEye,
@@ -78,10 +96,11 @@ data class EyePose(
     val rightGazeY: Float = 0f,
     val rightGazeForward: Float = 1f,
     val rightGazeConfidence: Float = 0f,
+    val faceContour: FaceContourV106? = null,
 )
 data class EyeSample(val timeUs: Long, val pose: EyePose?)
-data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 18) {
-    fun covers(clip: TimelineClip): Boolean = version == 18 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
+data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val samples: List<EyeSample>, val version: Int = 19) {
+    fun covers(clip: TimelineClip): Boolean = version == 19 && uri == clip.uri && startUs <= clip.sourceInUs && endUs >= clip.sourceOutUs
 
     private fun validAtOrBefore(index: Int): EyeSample? {
         var i = index.coerceAtMost(samples.lastIndex)
@@ -174,7 +193,9 @@ data class EyeTrack(val uri: String, val startUs: Long, val endUs: Long, val sam
                 (pb.rightGazeForward - pa.rightGazeForward) * clampedT,
             rightGazeConfidence = pa.rightGazeConfidence +
                 (pb.rightGazeConfidence - pa.rightGazeConfidence) * clampedT,
+            faceContour = pa.faceContour?.let { a ->
+                pb.faceContour?.let { b -> a.lerp(b, clampedT) }
+            },
         )
     }
 }
-

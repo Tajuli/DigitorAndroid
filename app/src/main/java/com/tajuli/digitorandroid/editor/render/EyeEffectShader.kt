@@ -9,8 +9,13 @@ internal const val EYE_EFFECT_SHADER = """
     uniform vec4 uEyesE;
     uniform vec4 uFunnyA;
     uniform vec4 uFunnyB;
+    uniform vec4 uFunnyC;
+    uniform vec4 uFunnyD;
     uniform vec4 uFaceRegion;
     uniform vec4 uMouthRegion;
+    // True 468-landmark Face Mesh outline, normalized source UV, Y up.
+    uniform vec4 uFaceContourCheeks;
+    uniform vec4 uFaceContourJaw;
     uniform vec4 uLeftEye;
     uniform vec4 uRightEye;
     uniform vec4 uEyeState;
@@ -452,9 +457,141 @@ internal const val EYE_EFFECT_SHADER = """
         vec2 warped=local/mix(vec2(1),scale,weight*amount);
         return region.xy+faceFromLocal(warped);
     }
+    // Compact inverse lenses: continuous at the support boundary and a single texture lookup.
+    // Work in the tracked face's metric/roll space, not screen axes. No time-based wobble is
+    // added: head motion comes exclusively from the same source-time pose in preview/export.
+    float comicWeight(vec2 p,vec2 center,vec2 radius) {
+        float r=length((p-center)/radius);
+        return 1.0-smoothstep(.15,1.0,r);
+    }
+    vec2 comicLens(vec2 p,vec2 center,vec2 radius,vec2 expansion) {
+        float w=comicWeight(p,center,radius);
+        return center+(p-center)/(vec2(1.0)+expansion*w);
+    }
+    vec2 comicFaceUv(vec2 uv) {
+        float total=uFunnyB.w+dot(uFunnyC,vec4(1.0))+uFunnyD.x;
+        if(total<.0001) return uv;
+        vec2 extent=max(uFaceRegion.zw*faceMetricScale(),vec2(.001));
+        vec2 p=faceToLocal(uv-uFaceRegion.xy)/extent;
+        // Mouth position makes the cheek pair follow expressions rather than a fixed screen row.
+        vec2 mouth=vec2(0.0,-.40);
+        if(uMouthRegion.z>.001 && uMouthRegion.w>.001) {
+            mouth=clamp(faceToLocal(uMouthRegion.xy-uFaceRegion.xy)/extent,
+                        vec2(-.30,-.65),vec2(.30,-.12));
+        }
+        float yaw=clamp(uHeadPose.x,-1.0,1.0);
+        vec2 cheekCenter=vec2(mouth.x*.45,mouth.y*.65);
+        vec2 left=cheekCenter+vec2(-.43+.07*yaw,0.0);
+        vec2 right=cheekCenter+vec2(.43+.07*yaw,0.0);
+        vec2 delta=vec2(0.0);
+        // Fat Face V106: use the tracked facial outline, not a fixed bounding
+        // box. One bounded inverse warp plumps cheeks without duplicating teeth.
+        if(uFunnyB.w>.0) {
+            // Stronger, visibly rounder cheeks/jaw even at a mid slider
+            // value. Keep both zero and full strength exactly mapped.
+            float strength=pow(clamp(uFunnyB.w,0.0,1.0),.90);
+            vec2 eyeL=vec2(-.44,.30);
+            vec2 eyeR=vec2(.44,.30);
+            if(uLeftEye.z>.001)
+                eyeL=faceToLocal(uLeftEye.xy-uFaceRegion.xy)/extent;
+            if(uRightEye.z>.001)
+                eyeR=faceToLocal(uRightEye.xy-uFaceRegion.xy)/extent;
+            float eyeLine=(eyeL.y+eyeR.y)*.5;
+
+            vec2 mouthCenter=mouth;
+            if(uMouthRegion.z>.001 && uMouthRegion.w>.001)
+                mouthCenter=clamp(
+                    faceToLocal(uMouthRegion.xy-uFaceRegion.xy)/extent,
+                    vec2(-.55,-.90),vec2(.55,-.08));
+
+            float centerX=.035*yaw;
+            float radius=.95;
+            if(uFaceContourCheeks.x>.001 && uFaceContourCheeks.z>.001 &&
+               uFaceContourJaw.x>.001 && uFaceContourJaw.z>.001) {
+                vec2 cheekL=faceToLocal(uFaceContourCheeks.xy-uFaceRegion.xy)/extent;
+                vec2 cheekR=faceToLocal(uFaceContourCheeks.zw-uFaceRegion.xy)/extent;
+                vec2 jawL=faceToLocal(uFaceContourJaw.xy-uFaceRegion.xy)/extent;
+                vec2 jawR=faceToLocal(uFaceContourJaw.zw-uFaceRegion.xy)/extent;
+                float cheekY=(cheekL.y+cheekR.y)*.5;
+                float jawY=(jawL.y+jawR.y)*.5;
+                float t=clamp((p.y-jawY)/max(.12,cheekY-jawY),0.0,1.0);
+                float cheekCenterX=(cheekL.x+cheekR.x)*.5;
+                float jawCenterX=(jawL.x+jawR.x)*.5;
+                centerX=mix(jawCenterX,cheekCenterX,t);
+                float leftRadius=abs(mix(jawL.x,cheekL.x,t)-centerX);
+                float rightRadius=abs(mix(jawR.x,cheekR.x,t)-centerX);
+                radius=clamp((leftRadius+rightRadius)*.5,.68,1.18);
+            }
+            float radialX=abs(p.x-centerX);
+            float relativeX=radialX/radius;
+            // Localized support reaches just outside the cheek landmark and
+            // feathers off before distorting distant hair, hijab or background.
+            float cheekBand=smoothstep(.18,.72,relativeX)*
+                (1.0-smoothstep(1.24,1.62,relativeX));
+            float cheekHeight=(1.0-smoothstep(eyeLine-.92,eyeLine-.40,p.y))*
+                (1.0-smoothstep(.96,1.30,-p.y));
+
+            vec2 lipRadius=vec2(.57,.34);
+            if(uMouthRegion.z>.001 && uMouthRegion.w>.001)
+                lipRadius=max(lipRadius,
+                    uMouthRegion.zw*faceMetricScale()/extent*vec2(1.65,2.3));
+            float lipGuard=smoothstep(1.0,1.9,
+                length((p-mouthCenter)/lipRadius));
+            float leftEyeGuard=smoothstep(1.0,1.8,
+                length((p-eyeL)/vec2(.38,.36)));
+            float rightEyeGuard=smoothstep(1.0,1.8,
+                length((p-eyeR)/vec2(.38,.36)));
+            float featureGuard=lipGuard*leftEyeGuard*rightEyeGuard;
+
+            // Monotone, single-sample horizontal displacement. The protective
+            // masks never stretch the mouth or eyelid source pixels.
+            float sideDisplacement=-sign(p.x-centerX)*.30*radius*
+                cheekBand*cheekHeight*featureGuard;
+            float belowMouth=mouthCenter.y-p.y;
+            float chinBand=smoothstep(.12,.38,belowMouth)*
+                (1.0-smoothstep(.86,1.17,belowMouth));
+            float chinWidth=1.0-smoothstep(.42,1.0,relativeX);
+            float chinGuard=smoothstep(.22,.48,belowMouth);
+            float chinDisplacement=.12*chinBand*chinWidth*chinGuard;
+            delta+=vec2(sideDisplacement,chinDisplacement)*strength;
+        }
+        // Ass Face: two rounded lower-face lobes and a narrow central cleft; comic anatomy only.
+        if(uFunnyC.x>.0) {
+            vec2 q=comicLens(p,left,vec2(.70,.72),vec2(.95,.65));
+            q=comicLens(q,right,vec2(.70,.72),vec2(.95,.65));
+            float cleft=comicWeight(p,cheekCenter,vec2(.30,.70));
+            q.x+=(p.x-cheekCenter.x)*.42*cleft;
+            q.y+=.11*cleft;
+            delta+=(q-p)*uFunnyC.x;
+        }
+        // Chipmunk: separate side pouches leave the mouth and nose recognizable.
+        if(uFunnyC.y>.0) {
+            vec2 q=comicLens(p,left,vec2(.57,.49),vec2(.82,.38));
+            q=comicLens(q,right,vec2(.57,.49),vec2(.82,.38));
+            delta+=(q-p)*uFunnyC.y;
+        }
+        // Tiny Face shrinks features inside the head; the outer silhouette stays undisturbed.
+        if(uFunnyC.z>.0) {
+            vec2 center=vec2(mouth.x*.25,-.05);
+            vec2 q=p+(p-center)*.48*comicWeight(p,center,vec2(1.08,1.08));
+            delta+=(q-p)*uFunnyC.z;
+        }
+        if(uFunnyC.w>.0) {
+            vec2 q=comicLens(p,vec2(0.0,-.12),vec2(1.04,1.38),vec2(-.20,.65));
+            delta+=(q-p)*uFunnyC.w;
+        }
+        if(uFunnyD.x>.0) {
+            vec2 q=comicLens(p,vec2(0.0,.25),vec2(1.30,1.32),vec2(.80,.70));
+            delta+=(q-p)*uFunnyD.x;
+        }
+        // Bound stacks of comic presets instead of repeatedly magnifying an already warped face.
+        p+=delta/max(1.0,total);
+        return uFaceRegion.xy+faceFromLocal(p*extent);
+    }
     vec2 funnyUv(vec2 uv) {
         vec2 p=eyeSourceUv(uv);
-        if(uFaceRegion.z<.001) return uv;
+        if(uFaceRegion.z<.001 || uFaceRegion.w<.001) return uv;
+        p=comicFaceUv(p);
         p=regionalWarp(p,uFaceRegion,vec2(1.55,1.35),uFunnyA.w);
         p=regionalWarp(p,uMouthRegion,vec2(1.1,1.9),uFunnyA.x);
         p=regionalWarp(p,uMouthRegion,vec2(1.8,1.1),uFunnyA.z);

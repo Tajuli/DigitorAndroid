@@ -20,7 +20,7 @@ constexpr int kMeshSize = 192;
 constexpr int kAnchorCount = 896;
 constexpr int kRegValues = 16;
 constexpr int kLandmarkCount = 468;
-constexpr int kOutputCount = 32;
+constexpr int kOutputCount = 40;
 constexpr float kPi = 3.14159265358979323846f;
 
 using face_tracking::Point;
@@ -716,6 +716,28 @@ bool RunMesh(
     output[15] = Clamp(std::min({mouthL.y, mouthR.y, mouthT.y, mouthB.y}) / height, 0.f, 1.f);
     output[16] = Clamp(std::max({mouthL.x, mouthR.x, mouthT.x, mouthB.x}) / width, 0.f, 1.f);
     output[17] = Clamp(std::max({mouthL.y, mouthR.y, mouthT.y, mouthB.y}) / height, 0.f, 1.f);
+
+    // Face Mesh outline anchors, in image coordinates. These locate the real
+    // cheek/jaw perimeter instead of assuming the whole landmark bounding box
+    // is a cheek. Keep zeros when an anchor is implausible; never reject a good
+    // eye track merely because peripheral contour data is missing.
+    const Point contour[4] = {points[234], points[454], points[172], points[397]};
+    bool validContour = true;
+    for (const Point& anchor : contour) {
+        validContour = validContour && std::isfinite(anchor.x) &&
+            std::isfinite(anchor.y) && anchor.x >= -width * .05f &&
+            anchor.x <= width * 1.05f && anchor.y >= -height * .05f &&
+            anchor.y <= height * 1.05f;
+    }
+    validContour = validContour &&
+        face_tracking::Distance(contour[0], contour[1]) >= eyeDistance * .8f &&
+        face_tracking::Distance(contour[2], contour[3]) >= eyeDistance * .45f;
+    if (validContour) {
+        for (int i = 0; i < 4; ++i) {
+            output[32 + i * 2] = Clamp(contour[i].x / width, 0.f, 1.f);
+            output[33 + i * 2] = Clamp(contour[i].y / height, 0.f, 1.f);
+        }
+    }
 
     const Roi next = face_tracking::LandmarkRoi(points, kLandmarkCount, stableRoll);
     const bool nextRoiPlausible =

@@ -103,6 +103,47 @@ class EyeEffectsTest {
         assertTrue(resolveEyeEffects(listOf(fire.copy(amount=0f)), clip, 300_000).all { it == 0f })
         assertTrue(resolveCreatorEffectsV25(listOf(fire)).isIdentity)
     }
+    @Test fun comicPresetsUseTrackedTimedEffectsWithoutShiftingSavedLegacySlots() {
+        assertEquals(23, EyeEffectCatalog.index("Big Head"))
+        assertEquals(26, EyeEffectCatalog.index("Bend"))
+        val names = listOf("Fat Face", "Ass Face", "Chipmunk Cheeks", "Tiny Face", "Long Face", "Balloon Head")
+        names.forEachIndexed { offset, name ->
+            val slot = 27 + offset
+            assertEquals(slot, EyeEffectCatalog.index(name))
+            assertTrue(name in EyeEffectCatalog.funnyNames)
+            assertEquals("Funny Faces", CreatorEffectCatalogV25.find(name)!!.category)
+            val effect = NodeEffect(name = name, amount = .65f,
+                sourceStartUsV26 = 200_000, sourceEndUsV26 = 700_000)
+            assertTrue(resolveCreatorEffectsV25(listOf(effect)).isIdentity)
+            assertTrue(resolveEyeEffects(listOf(effect), clip, 199_999).all { it == 0f })
+            assertEquals(.65f, resolveEyeEffects(listOf(effect), clip, 300_000)[slot], 0f)
+            assertTrue(resolveEyeEffects(listOf(effect), clip, 700_000).all { it == 0f })
+            assertTrue(resolveEyeEffects(listOf(effect.copy(enabled = false)), clip, 300_000).all { it == 0f })
+        }
+    }
+    @Test fun contourAnchorsInterpolateAndOldTrackingCacheIsInvalidated() {
+        val ca = FaceContourV106(
+            FacePointV106(.25f, .46f), FacePointV106(.75f, .46f),
+            FacePointV106(.30f, .70f), FacePointV106(.70f, .70f),
+        )
+        val cb = FaceContourV106(
+            FacePointV106(.27f, .50f), FacePointV106(.77f, .50f),
+            FacePointV106(.34f, .72f), FacePointV106(.74f, .72f),
+        )
+        val track = EyeTrack(
+            clip.uri, 0, 1_000_000,
+            listOf(
+                EyeSample(0, pose().copy(faceContour = ca)),
+                EyeSample(40_000, pose().copy(faceContour = cb)),
+            ),
+        )
+        assertEquals(19, track.version)
+        assertFalse(track.copy(version = 18).covers(clip))
+        val middle = track.at(20_000)!!.faceContour!!
+        assertEquals(.26f, middle.leftCheek.x, .0001f)
+        assertEquals(.72f, middle.rightJaw.x, .0001f)
+        assertEquals(.71f, middle.rightJaw.y, .0001f)
+    }
     @Test fun rollInterpolationTakesShortestArc() {
         val a=TrackedEye(.3f,.4f,.04f,3.1f,1f)
         val b=a.copy(roll=-3.1f)
@@ -158,6 +199,7 @@ class EyeEffectsTest {
     @Test fun requiresFreshAnalysisForTheOldNominalTimestampCache() {
         val current = EyeTrack(clip.uri, 0, clip.sourceOutUs, listOf(EyeSample(0, pose())))
         assertTrue(current.covers(clip))
+        assertFalse(current.copy(version = 18).covers(clip))
         assertFalse(current.copy(version = 17).covers(clip))
         assertFalse(current.copy(version = 16).covers(clip))
         assertFalse(current.copy(version = 15).covers(clip))
