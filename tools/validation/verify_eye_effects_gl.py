@@ -172,7 +172,7 @@ print('PASS: six comic presets preserve background, respond to strength/pose, av
 amounts(27,1)
 fat=render()
 forehead = np.s_[int(h*.73):int(h*.82), int(w*.38):int(w*.62)]
-cheeks = np.s_[int(h*.35):int(h*.46), int(w*.69):int(w*.77)]
+cheeks = np.s_[int(h*.26):int(h*.34), int(w*.69):int(w*.77)]
 jaw = np.s_[int(h*.22):int(h*.31), int(w*.42):int(w*.60)]
 lip_core = np.s_[int(h*.35)-2:int(h*.35)+3, int(w*.5)-4:int(w*.5)+5]
 left_eye_core = np.s_[int(h*.5)-2:int(h*.5)+3, int(w*.35)-3:int(w*.35)+4]
