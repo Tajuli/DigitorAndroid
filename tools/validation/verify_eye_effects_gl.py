@@ -216,6 +216,25 @@ vec('uFaceContourJaw',[.33,.28,.67,.28])
 assert not np.array_equal(render(),with_contour), 'Contour anchors ignored'
 vec('uFaceContourCheeks',[.29,.47,.71,.47])
 vec('uFaceContourJaw',[.35,.28,.65,.28])
+# When the tracked jaw tilts, the chin should move with the slanted jaw.
+# The image-space location of cheek/jaw distortion must respond to each
+# independently tracked contour instead of a fixed vertical displacement.
+amounts(27,1)
+frontal=render()
+vec('uFaceContourJaw',[.35,.34,.65,.22])
+vec('uFaceContourCheeks',[.29,.53,.71,.41])
+tilted=render()
+assert not np.array_equal(tilted,frontal), 'Jaw roll ignored by Fat Face'
+assert np.array_equal(tilted[wide_lips],source[wide_lips]), 'Tilted jaw changes lips'
+vec('uFaceContourCheeks',[0,0,0,0])
+jaw_only=render()
+assert not np.array_equal(jaw_only,source), 'Missing cheek contours hide Fat Face'
+assert np.array_equal(jaw_only[wide_lips],source[wide_lips]), 'Jaw-only fallback changes lips'
+vec('uFaceContourCheeks',[.29,.47,.71,.47])
+vec('uFaceContourJaw',[0,0,0,0])
+cheeks_only=render()
+assert not np.array_equal(cheeks_only,source), 'Missing jaw contours hide Fat Face'
+vec('uFaceContourJaw',[.35,.28,.65,.28])
 # Pixel ramp is monotone if the inverse mapping has no fold-overs/doubled teeth.
 saved_source=source.copy()
 source[:,:,:3]=np.arange(w,dtype=np.uint8)[None,:,None]*2

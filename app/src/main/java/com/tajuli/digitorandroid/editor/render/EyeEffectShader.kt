@@ -469,10 +469,9 @@ internal const val EYE_EFFECT_SHADER = """
         return center+(p-center)/(vec2(1.0)+expansion*w);
     }
 
-    // Inverse displacement for a *single* conservative Fat Face pass. Evaluate
-    // this twice in face-metric space instead of doubling coefficients: a raw
-    // 0.60 cheek gain folds UVs near the lip guard and duplicates teeth.
-    // Composition broadens cheeks/jaw while retaining a single texture sample.
+    // Head-locked Fat Face inverse warp. All directions come from the tracked
+    // jaw axis in face metric coordinates, not fixed video/frame vertical axes.
+    // The independent cheek/jaw fallbacks remain anchored when a face is cropped.
     vec2 fatFacePass(vec2 p, vec2 extent, vec2 mouth, float yaw) {
         vec2 eyeL=vec2(-.44,.30);
         vec2 eyeR=vec2( .44,.30);
@@ -480,58 +479,91 @@ internal const val EYE_EFFECT_SHADER = """
             eyeL=faceToLocal(uLeftEye.xy-uFaceRegion.xy)/extent;
         if(uRightEye.z>.001)
             eyeR=faceToLocal(uRightEye.xy-uFaceRegion.xy)/extent;
-        float eyeLine=(eyeL.y+eyeR.y)*.5;
 
         vec2 mouthCenter=mouth;
         if(uMouthRegion.z>.001 && uMouthRegion.w>.001)
             mouthCenter=clamp(faceToLocal(uMouthRegion.xy-uFaceRegion.xy)/extent,
                              vec2(-.55,-.90),vec2(.55,-.08));
 
-        float centerX=.035*yaw;
-        float radius=.95;
-        if(uFaceContourCheeks.x>.001 && uFaceContourCheeks.z>.001 &&
-           uFaceContourJaw.x>.001 && uFaceContourJaw.z>.001) {
-            vec2 cheekL=faceToLocal(uFaceContourCheeks.xy-uFaceRegion.xy)/extent;
-            vec2 cheekR=faceToLocal(uFaceContourCheeks.zw-uFaceRegion.xy)/extent;
-            vec2 jawL=faceToLocal(uFaceContourJaw.xy-uFaceRegion.xy)/extent;
-            vec2 jawR=faceToLocal(uFaceContourJaw.zw-uFaceRegion.xy)/extent;
-            float cheekY=(cheekL.y+cheekR.y)*.5;
-            float jawY=(jawL.y+jawR.y)*.5;
-            float t=clamp((p.y-jawY)/max(.12,cheekY-jawY),0.0,1.0);
-            float cheekCenterX=(cheekL.x+cheekR.x)*.5;
-            float jawCenterX=(jawL.x+jawR.x)*.5;
-            centerX=mix(jawCenterX,cheekCenterX,t);
-            float leftRadius=abs(mix(jawL.x,cheekL.x,t)-centerX);
-            float rightRadius=abs(mix(jawR.x,cheekR.x,t)-centerX);
-            radius=clamp((leftRadius+rightRadius)*.5,.68,1.18);
+        bool hasCheeks=uFaceContourCheeks.x>.001 && uFaceContourCheeks.z>.001;
+        bool hasJaw=uFaceContourJaw.x>.001 && uFaceContourJaw.z>.001;
+        vec2 cheekL=vec2(-.58,-.11);
+        vec2 cheekR=vec2( .58,-.11);
+        vec2 jawL=vec2(-.38,-.61);
+        vec2 jawR=vec2( .38,-.61);
+        if(hasCheeks) {
+            cheekL=faceToLocal(uFaceContourCheeks.xy-uFaceRegion.xy)/extent;
+            cheekR=faceToLocal(uFaceContourCheeks.zw-uFaceRegion.xy)/extent;
         }
-        float relativeX=abs(p.x-centerX)/radius;
-        float cheekBand=smoothstep(.18,.72,relativeX)*
-            (1.0-smoothstep(1.24,1.62,relativeX));
-        float cheekHeight=(1.0-smoothstep(eyeLine-.92,eyeLine-.40,p.y))*
-            (1.0-smoothstep(.96,1.30,-p.y));
+        if(hasJaw) {
+            jawL=faceToLocal(uFaceContourJaw.xy-uFaceRegion.xy)/extent;
+            jawR=faceToLocal(uFaceContourJaw.zw-uFaceRegion.xy)/extent;
+        }
 
-        vec2 lipRadius=vec2(.57,.34);
+        // Infer the missing contour tier from the available tracked tier; do
+        // not revert to a screen-aligned chin when the forehead is out of frame.
+        vec2 axis=jawR-jawL;
+        if(length(axis)<.12) axis=cheekR-cheekL;
+        axis=normalize(axis+vec2(.00001,0.0));
+        vec2 outward=vec2(axis.y,-axis.x);
+        if(dot(outward,(jawL+jawR)*.5-mouthCenter)<0.0)
+            outward=-outward;
+        if(!hasCheeks && hasJaw) {
+            cheekL=jawL-axis*.12-outward*.34;
+            cheekR=jawR+axis*.12-outward*.34;
+        }
+        if(!hasJaw && hasCheeks) {
+            jawL=cheekL+axis*.12+outward*.43;
+            jawR=cheekR-axis*.12+outward*.43;
+        }
+
+        vec2 cheekMid=(cheekL+cheekR)*.5;
+        vec2 jawMid=(jawL+jawR)*.5;
+        vec2 eyeMid=(eyeL+eyeR)*.5;
+        float cheekDown=dot(cheekMid-mouthCenter,outward);
+        float jawDown=dot(jawMid-mouthCenter,outward);
+        float down=dot(p-mouthCenter,outward);
+        float alongT=clamp((jawDown-down)/max(.12,jawDown-cheekDown),0.0,1.0);
+        vec2 center=mix(jawMid,cheekMid,alongT);
+        float centerSide=dot(center,axis);
+        float side=dot(p,axis)-centerSide-.025*yaw;
+        float leftRadius=abs(dot(mix(jawL,cheekL,alongT)-center,axis));
+        float rightRadius=abs(dot(mix(jawR,cheekR,alongT)-center,axis));
+        float radius=clamp((leftRadius+rightRadius)*.5,.65,1.22);
+        float relativeX=abs(side)/radius;
+
+        // Inflate broad cheek volume, not a narrow band on the jaw edge.
+        float cheekBand=smoothstep(.12,.65,relativeX)*
+            (1.0-smoothstep(1.27,1.66,relativeX));
+        float belowEyes=dot(p-eyeMid,outward);
+        float cheekHeight=smoothstep(.10,.38,belowEyes)*
+            (1.0-smoothstep(1.08,1.46,belowEyes));
+
+        // Protect the moving mouth and both eyes in head-aligned coordinates.
+        vec2 lipRadius=vec2(.43,.30);
         if(uMouthRegion.z>.001 && uMouthRegion.w>.001)
             lipRadius=max(lipRadius,
-                uMouthRegion.zw*faceMetricScale()/extent*vec2(1.65,2.3));
-        float lipGuard=smoothstep(1.0,1.9,
-            length((p-mouthCenter)/lipRadius));
-        float leftEyeGuard=smoothstep(1.0,1.8,
-            length((p-eyeL)/vec2(.38,.36)));
-        float rightEyeGuard=smoothstep(1.0,1.8,
-            length((p-eyeR)/vec2(.38,.36)));
-        float featureGuard=lipGuard*leftEyeGuard*rightEyeGuard;
+                uMouthRegion.zw*faceMetricScale()/extent*vec2(1.45,2.05));
+        vec2 mouthDelta=p-mouthCenter;
+        vec2 lipP=vec2(dot(mouthDelta,axis),dot(mouthDelta,outward));
+        float lipGuard=smoothstep(1.0,1.72,length(lipP/lipRadius));
+        vec2 leftDelta=p-eyeL;
+        vec2 rightDelta=p-eyeR;
+        float eyeGuardL=smoothstep(1.0,1.8,length(
+            vec2(dot(leftDelta,axis),dot(leftDelta,outward))/vec2(.36,.32)));
+        float eyeGuardR=smoothstep(1.0,1.8,length(
+            vec2(dot(rightDelta,axis),dot(rightDelta,outward))/vec2(.36,.32)));
+        float featureGuard=lipGuard*eyeGuardL*eyeGuardR;
 
-        float side=-sign(p.x-centerX)*.30*radius*
-            cheekBand*cheekHeight*featureGuard;
-        float belowMouth=mouthCenter.y-p.y;
-        float chinBand=smoothstep(.12,.38,belowMouth)*
-            (1.0-smoothstep(.86,1.17,belowMouth));
-        float chinWidth=1.0-smoothstep(.42,1.0,relativeX);
-        float chinGuard=smoothstep(.22,.48,belowMouth);
-        float chin=.12*chinBand*chinWidth*chinGuard;
-        return vec2(side,chin);
+        // Inverse sample displacement toward the middle enlarges the skin.
+        // Crucially, both vectors rotate with jaw landmarks and head roll.
+        vec2 cheekWarp=-axis*sign(side)*(.36*radius*
+            cheekBand*cheekHeight*featureGuard);
+        float chinBand=smoothstep(.16,.39,down)*
+            (1.0-smoothstep(.92,1.19,down));
+        float chinWidth=1.0-smoothstep(.35,1.06,relativeX);
+        vec2 chinWarp=-outward*(.13*chinBand*chinWidth*lipGuard);
+        return cheekWarp+chinWarp;
     }
     vec2 comicFaceUv(vec2 uv) {
         float total=uFunnyB.w+dot(uFunnyC,vec4(1.0))+uFunnyD.x;

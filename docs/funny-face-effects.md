@@ -10,6 +10,16 @@ legacy names/slots and the reserved Electric slot remain unchanged. No additiona
 model or asset download is introduced. Thumbnails use the production pipeline and
 its existing calibrated portrait pose.
 
+**Head-tilt and cheek accuracy correction:** Chin expansion is now aligned
+with the actual tracked jaw axis and its outward normal, rather than a fixed
+downward direction. Both cheek and chin inverse displacements rotate in
+face-metric coordinates; tilted and partly cropped faces use independent
+cheek-only and jaw-only landmark fallbacks. The cheek support is broadened
+and the excessive lip suppression reduced for fuller cheeks while keeping
+eyes/lips protected. Preview and export still share exactly the same shader.
+The synthetic shader regression checks a tilted jaw, contour dropout, eyes,
+lips, and scanline UV fold safety.
+
 **Fat Face doubled fullness (PR #106):** At full slider strength the GPU
 now composes two face-contour-guided inverse-warp passes (100% + a damped 90%
 second pass). This produces approximately 1.9x peak displacement on the
