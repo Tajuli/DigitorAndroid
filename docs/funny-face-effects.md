@@ -10,6 +10,16 @@ legacy names/slots and the reserved Electric slot remain unchanged. No additiona
 model or asset download is introduced. Thumbnails use the production pipeline and
 its existing calibrated portrait pose.
 
+**Fat Face doubled fullness (PR #106):** At full slider strength the GPU
+now composes two face-contour-guided inverse-warp passes (100% + a damped 90%
+second pass). This produces approximately 1.9x peak displacement on the
+calibrated geometry while retaining **one texture lookup** and the existing
+lip, teeth, eyelid, head-pose and tracked-cheek guards. Simply doubling
+the horizontal gain made the inverse mapping fold near the mouth region.
+The second pass is therefore evaluated on the already-remapped coordinates.
+This is a stronger 2D caricature, not guaranteed to reconstruct cheek pixels
+hidden by hair or a scarf. No change to effect slot 27 or saved FX projects.
+
 The updated Fat Face uses **real source-frame Face Mesh cheek and jaw landmarks**,
 not just the face bounding box. Four per-frame contour points are transported
 through the existing face pose to both GPU routes, with pose interpolation,

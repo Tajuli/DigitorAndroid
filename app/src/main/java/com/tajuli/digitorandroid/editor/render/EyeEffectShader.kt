@@ -468,6 +468,71 @@ internal const val EYE_EFFECT_SHADER = """
         float w=comicWeight(p,center,radius);
         return center+(p-center)/(vec2(1.0)+expansion*w);
     }
+
+    // Inverse displacement for a *single* conservative Fat Face pass. Evaluate
+    // this twice in face-metric space instead of doubling coefficients: a raw
+    // 0.60 cheek gain folds UVs near the lip guard and duplicates teeth.
+    // Composition broadens cheeks/jaw while retaining a single texture sample.
+    vec2 fatFacePass(vec2 p, vec2 extent, vec2 mouth, float yaw) {
+        vec2 eyeL=vec2(-.44,.30);
+        vec2 eyeR=vec2( .44,.30);
+        if(uLeftEye.z>.001)
+            eyeL=faceToLocal(uLeftEye.xy-uFaceRegion.xy)/extent;
+        if(uRightEye.z>.001)
+            eyeR=faceToLocal(uRightEye.xy-uFaceRegion.xy)/extent;
+        float eyeLine=(eyeL.y+eyeR.y)*.5;
+
+        vec2 mouthCenter=mouth;
+        if(uMouthRegion.z>.001 && uMouthRegion.w>.001)
+            mouthCenter=clamp(faceToLocal(uMouthRegion.xy-uFaceRegion.xy)/extent,
+                             vec2(-.55,-.90),vec2(.55,-.08));
+
+        float centerX=.035*yaw;
+        float radius=.95;
+        if(uFaceContourCheeks.x>.001 && uFaceContourCheeks.z>.001 &&
+           uFaceContourJaw.x>.001 && uFaceContourJaw.z>.001) {
+            vec2 cheekL=faceToLocal(uFaceContourCheeks.xy-uFaceRegion.xy)/extent;
+            vec2 cheekR=faceToLocal(uFaceContourCheeks.zw-uFaceRegion.xy)/extent;
+            vec2 jawL=faceToLocal(uFaceContourJaw.xy-uFaceRegion.xy)/extent;
+            vec2 jawR=faceToLocal(uFaceContourJaw.zw-uFaceRegion.xy)/extent;
+            float cheekY=(cheekL.y+cheekR.y)*.5;
+            float jawY=(jawL.y+jawR.y)*.5;
+            float t=clamp((p.y-jawY)/max(.12,cheekY-jawY),0.0,1.0);
+            float cheekCenterX=(cheekL.x+cheekR.x)*.5;
+            float jawCenterX=(jawL.x+jawR.x)*.5;
+            centerX=mix(jawCenterX,cheekCenterX,t);
+            float leftRadius=abs(mix(jawL.x,cheekL.x,t)-centerX);
+            float rightRadius=abs(mix(jawR.x,cheekR.x,t)-centerX);
+            radius=clamp((leftRadius+rightRadius)*.5,.68,1.18);
+        }
+        float relativeX=abs(p.x-centerX)/radius;
+        float cheekBand=smoothstep(.18,.72,relativeX)*
+            (1.0-smoothstep(1.24,1.62,relativeX));
+        float cheekHeight=(1.0-smoothstep(eyeLine-.92,eyeLine-.40,p.y))*
+            (1.0-smoothstep(.96,1.30,-p.y));
+
+        vec2 lipRadius=vec2(.57,.34);
+        if(uMouthRegion.z>.001 && uMouthRegion.w>.001)
+            lipRadius=max(lipRadius,
+                uMouthRegion.zw*faceMetricScale()/extent*vec2(1.65,2.3));
+        float lipGuard=smoothstep(1.0,1.9,
+            length((p-mouthCenter)/lipRadius));
+        float leftEyeGuard=smoothstep(1.0,1.8,
+            length((p-eyeL)/vec2(.38,.36)));
+        float rightEyeGuard=smoothstep(1.0,1.8,
+            length((p-eyeR)/vec2(.38,.36)));
+        float featureGuard=lipGuard*leftEyeGuard*rightEyeGuard;
+
+        float side=-sign(p.x-centerX)*.30*radius*
+            cheekBand*cheekHeight*featureGuard;
+        float belowMouth=mouthCenter.y-p.y;
+        float chinBand=smoothstep(.12,.38,belowMouth)*
+            (1.0-smoothstep(.86,1.17,belowMouth));
+        float chinWidth=1.0-smoothstep(.42,1.0,relativeX);
+        float chinGuard=smoothstep(.22,.48,belowMouth);
+        float chin=.12*chinBand*chinWidth*chinGuard;
+        return vec2(side,chin);
+    }
     vec2 comicFaceUv(vec2 uv) {
         float total=uFunnyB.w+dot(uFunnyC,vec4(1.0))+uFunnyD.x;
         if(total<.0001) return uv;
@@ -484,76 +549,17 @@ internal const val EYE_EFFECT_SHADER = """
         vec2 left=cheekCenter+vec2(-.43+.07*yaw,0.0);
         vec2 right=cheekCenter+vec2(.43+.07*yaw,0.0);
         vec2 delta=vec2(0.0);
-        // Fat Face V106: use the tracked facial outline, not a fixed bounding
-        // box. One bounded inverse warp plumps cheeks without duplicating teeth.
+        // Fat Face: compose two conservative geometry passes (~1.9x peak
+        // displacement at full strength) instead of folding texture coordinates
+        // by directly doubling the gain. Still one final texture sample.
         if(uFunnyB.w>.0) {
-            // Stronger, visibly rounder cheeks/jaw even at a mid slider
-            // value. Keep both zero and full strength exactly mapped.
             float strength=pow(clamp(uFunnyB.w,0.0,1.0),.90);
-            vec2 eyeL=vec2(-.44,.30);
-            vec2 eyeR=vec2(.44,.30);
-            if(uLeftEye.z>.001)
-                eyeL=faceToLocal(uLeftEye.xy-uFaceRegion.xy)/extent;
-            if(uRightEye.z>.001)
-                eyeR=faceToLocal(uRightEye.xy-uFaceRegion.xy)/extent;
-            float eyeLine=(eyeL.y+eyeR.y)*.5;
-
-            vec2 mouthCenter=mouth;
-            if(uMouthRegion.z>.001 && uMouthRegion.w>.001)
-                mouthCenter=clamp(
-                    faceToLocal(uMouthRegion.xy-uFaceRegion.xy)/extent,
-                    vec2(-.55,-.90),vec2(.55,-.08));
-
-            float centerX=.035*yaw;
-            float radius=.95;
-            if(uFaceContourCheeks.x>.001 && uFaceContourCheeks.z>.001 &&
-               uFaceContourJaw.x>.001 && uFaceContourJaw.z>.001) {
-                vec2 cheekL=faceToLocal(uFaceContourCheeks.xy-uFaceRegion.xy)/extent;
-                vec2 cheekR=faceToLocal(uFaceContourCheeks.zw-uFaceRegion.xy)/extent;
-                vec2 jawL=faceToLocal(uFaceContourJaw.xy-uFaceRegion.xy)/extent;
-                vec2 jawR=faceToLocal(uFaceContourJaw.zw-uFaceRegion.xy)/extent;
-                float cheekY=(cheekL.y+cheekR.y)*.5;
-                float jawY=(jawL.y+jawR.y)*.5;
-                float t=clamp((p.y-jawY)/max(.12,cheekY-jawY),0.0,1.0);
-                float cheekCenterX=(cheekL.x+cheekR.x)*.5;
-                float jawCenterX=(jawL.x+jawR.x)*.5;
-                centerX=mix(jawCenterX,cheekCenterX,t);
-                float leftRadius=abs(mix(jawL.x,cheekL.x,t)-centerX);
-                float rightRadius=abs(mix(jawR.x,cheekR.x,t)-centerX);
-                radius=clamp((leftRadius+rightRadius)*.5,.68,1.18);
-            }
-            float radialX=abs(p.x-centerX);
-            float relativeX=radialX/radius;
-            // Localized support reaches just outside the cheek landmark and
-            // feathers off before distorting distant hair, hijab or background.
-            float cheekBand=smoothstep(.18,.72,relativeX)*
-                (1.0-smoothstep(1.24,1.62,relativeX));
-            float cheekHeight=(1.0-smoothstep(eyeLine-.92,eyeLine-.40,p.y))*
-                (1.0-smoothstep(.96,1.30,-p.y));
-
-            vec2 lipRadius=vec2(.57,.34);
-            if(uMouthRegion.z>.001 && uMouthRegion.w>.001)
-                lipRadius=max(lipRadius,
-                    uMouthRegion.zw*faceMetricScale()/extent*vec2(1.65,2.3));
-            float lipGuard=smoothstep(1.0,1.9,
-                length((p-mouthCenter)/lipRadius));
-            float leftEyeGuard=smoothstep(1.0,1.8,
-                length((p-eyeL)/vec2(.38,.36)));
-            float rightEyeGuard=smoothstep(1.0,1.8,
-                length((p-eyeR)/vec2(.38,.36)));
-            float featureGuard=lipGuard*leftEyeGuard*rightEyeGuard;
-
-            // Monotone, single-sample horizontal displacement. The protective
-            // masks never stretch the mouth or eyelid source pixels.
-            float sideDisplacement=-sign(p.x-centerX)*.30*radius*
-                cheekBand*cheekHeight*featureGuard;
-            float belowMouth=mouthCenter.y-p.y;
-            float chinBand=smoothstep(.12,.38,belowMouth)*
-                (1.0-smoothstep(.86,1.17,belowMouth));
-            float chinWidth=1.0-smoothstep(.42,1.0,relativeX);
-            float chinGuard=smoothstep(.22,.48,belowMouth);
-            float chinDisplacement=.12*chinBand*chinWidth*chinGuard;
-            delta+=vec2(sideDisplacement,chinDisplacement)*strength;
+            vec2 q=p;
+            q+=fatFacePass(q,extent,mouth,yaw)*strength;
+            // A 90% second pass leaves the contour and lip-protection transitions
+            // monotone even on a tightly framed/hijab-occluded face.
+            q+=fatFacePass(q,extent,mouth,yaw)*(strength*.90);
+            delta+=q-p;
         }
         // Ass Face: two rounded lower-face lobes and a narrow central cleft; comic anatomy only.
         if(uFunnyC.x>.0) {

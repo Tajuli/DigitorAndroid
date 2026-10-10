@@ -208,6 +208,9 @@ amounts(27,1)
 high_delta=np.abs(with_contour[cheeks][...,:3].astype(np.int16)-source[cheeks][...,:3].astype(np.int16)).sum()
 mid_delta=np.abs(medium_contour[cheeks][...,:3].astype(np.int16)-source[cheeks][...,:3].astype(np.int16)).sum()
 assert high_delta>mid_delta, ('Fat Face full-strength plumping is too subtle',int(high_delta),int(mid_delta))
+# Full strength must be materially stronger than mid-strength without changing
+# the guard ROIs. This measures *visible* pixel displacement, not just uniforms.
+assert high_delta>=mid_delta*1.12, ('Fat Face strength response too flat',int(high_delta),int(mid_delta))
 vec('uFaceContourCheeks',[.26,.47,.74,.47])
 vec('uFaceContourJaw',[.33,.28,.67,.28])
 assert not np.array_equal(render(),with_contour), 'Contour anchors ignored'
@@ -219,7 +222,9 @@ source[:,:,:3]=np.arange(w,dtype=np.uint8)[None,:,None]*2
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
 amounts(27,1)
 ramp=render()
-for py in [int(h*.24),int(h*.35),int(h*.5),int(h*.56),int(h*.59),int(h*.74)]:
+# Sweep many scanlines, including the cheek/jaw boundary where a naive
+# 2x gain can invert the sampling order and create a double mouth.
+for py in [int(h*z) for z in (.18,.21,.24,.27,.30,.33,.35,.39,.43,.47,.50,.53,.56,.59,.62,.66,.70,.74,.78)]:
     assert (np.diff(ramp[py,:,0].astype(int))>=0).all(), ('Fat Face UV fold',py)
 source[:]=saved_source
 fn(gl,'glTexImage2D',None,U,I,I,I,I,I,U,U,P)(0x0DE1,0,0x1908,w,h,0,0x1908,0x1401,source.ctypes.data)
