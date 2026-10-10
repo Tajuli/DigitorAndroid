@@ -114,7 +114,7 @@ for index in active_indices:
     vec('uFaceRegion',[0,0,0,0]);vec('uMouthRegion',[0,0,0,0])
     assert np.array_equal(render(),source),('Missing face',index)
     vec('uFaceRegion',[.5,.5,.25,.35]);vec('uMouthRegion',[.5,.35,.08,.045])
-vec('uFaceContourCheeks',[.29,.47,.71,.47]);vec('uFaceContourJaw',[.35,.28,.65,.28])
+    vec('uFaceContourCheeks',[.29,.47,.71,.47]);vec('uFaceContourJaw',[.35,.28,.65,.28])
     vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0])
 for pos,i in enumerate(active_indices):
     for j in active_indices[:pos]: assert not np.array_equal(results[i],results[j]),('Duplicate',i,j)
