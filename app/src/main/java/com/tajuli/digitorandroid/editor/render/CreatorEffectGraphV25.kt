@@ -352,6 +352,23 @@ internal class CreatorEffectGraphV25 private constructor(
                 }
             program.setFloatsUniform("uFaceRegion", region(pose?.face))
             program.setFloatsUniform("uMouthRegion", region(pose?.mouth))
+            val contour = pose?.faceContour
+            program.setFloatsUniform(
+                "uFaceContourCheeks",
+                if (contour == null) floatArrayOf(0f, 0f, 0f, 0f)
+                else floatArrayOf(
+                    contour.leftCheek.x, 1f - contour.leftCheek.y,
+                    contour.rightCheek.x, 1f - contour.rightCheek.y,
+                ),
+            )
+            program.setFloatsUniform(
+                "uFaceContourJaw",
+                if (contour == null) floatArrayOf(0f, 0f, 0f, 0f)
+                else floatArrayOf(
+                    contour.leftJaw.x, 1f - contour.leftJaw.y,
+                    contour.rightJaw.x, 1f - contour.rightJaw.y,
+                ),
+            )
 
             fun eyeUniform(eye: TrackedEye?) =
                 if (eye == null) {

@@ -81,6 +81,7 @@ vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[-1,0,0,1])
 vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
 vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0]); vec('uEyeState',[1,1,0,0])
 vec('uFaceRegion',[.5,.5,.25,.35]);vec('uMouthRegion',[.5,.35,.08,.045])
+vec('uFaceContourCheeks',[.29,.47,.71,.47]);vec('uFaceContourJaw',[.35,.28,.65,.28])
 vertices=np.array([-1,-1,0,1,1,-1,0,1,-1,1,0,1,1,1,0,1],np.float32)
 attribute=fn(gl,'glGetAttribLocation',I,U,c.c_char_p)(program,b'aFramePosition')
 fn(gl,'glEnableVertexAttribArray',None,U)(attribute)
@@ -113,6 +114,7 @@ for index in active_indices:
     vec('uFaceRegion',[0,0,0,0]);vec('uMouthRegion',[0,0,0,0])
     assert np.array_equal(render(),source),('Missing face',index)
     vec('uFaceRegion',[.5,.5,.25,.35]);vec('uMouthRegion',[.5,.35,.08,.045])
+vec('uFaceContourCheeks',[.29,.47,.71,.47]);vec('uFaceContourJaw',[.35,.28,.65,.28])
     vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0])
 for pos,i in enumerate(active_indices):
     for j in active_indices[:pos]: assert not np.array_equal(results[i],results[j]),('Duplicate',i,j)
@@ -158,6 +160,7 @@ for index in range(27,33):
     vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0])
     vec('uEyeState',[1,1,0,0])
     vec('uFaceRegion',[.5,.5,.25,.35]); vec('uMouthRegion',[.5,.35,.08,.045])
+    vec('uFaceContourCheeks',[.29,.47,.71,.47]); vec('uFaceContourJaw',[.35,.28,.65,.28])
     amounts(index)
     assert np.array_equal(render(),high), ('Comic full/fast shader parity',index)
     program=full_program

@@ -10,6 +10,20 @@ legacy names/slots and the reserved Electric slot remain unchanged. No additiona
 model or asset download is introduced. Thumbnails use the production pipeline and
 its existing calibrated portrait pose.
 
+The updated Fat Face uses **real source-frame Face Mesh cheek and jaw landmarks**,
+not just the face bounding box. Four per-frame contour points are transported
+through the existing face pose to both GPU routes, with pose interpolation,
+strength/timing compatibility and a fallback when contour data is missing.
+The cheek expansion follows the face boundary, while lips, teeth and eyelids
+are protected with tracked feature guards. Motion is deterministic, with no
+procedural wobble. A soft falloff limits movement of nearby hijab/hair, but
+a 2D shader alone cannot recover fully occluded cheek pixels.
+
+Native tracking now provides a 40-float pose (formerly 32). EyeTrack format
+version 19 forces fresh analysis so saved v18 tracks cannot silently render
+with incorrect contour geometry. Thumbnail poses have calibrated contour anchors.
+The serialized Fat Face slot remains 27; existing effect projects are compatible.
+
 The renderer uses bounded inverse lenses in aspect-correct, face-roll coordinates.
 The tracked mouth anchors cheek position, with a face-relative fallback if mouth
 bounds are unavailable. Head yaw shifts the cheek pair.

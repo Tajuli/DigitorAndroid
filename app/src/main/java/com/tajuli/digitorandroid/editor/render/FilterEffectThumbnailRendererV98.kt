@@ -157,6 +157,12 @@ internal object FilterEffectThumbnailRendererV98 {
             mouth = com.tajuli.digitorandroid.editor.model.BeautyRectV28(
                 .445f, .49f, .555f, .585f,
             ),
+            faceContour = com.tajuli.digitorandroid.editor.model.FaceContourV106(
+                leftCheek = com.tajuli.digitorandroid.editor.model.FacePointV106(.35f, .49f),
+                rightCheek = com.tajuli.digitorandroid.editor.model.FacePointV106(.65f, .49f),
+                leftJaw = com.tajuli.digitorandroid.editor.model.FacePointV106(.395f, .68f),
+                rightJaw = com.tajuli.digitorandroid.editor.model.FacePointV106(.605f, .68f),
+            ),
             headYaw = 0f,
             headPitch = -.58f,
             headForward = .74f,

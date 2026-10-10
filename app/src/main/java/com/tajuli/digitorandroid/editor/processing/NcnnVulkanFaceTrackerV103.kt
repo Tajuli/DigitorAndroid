@@ -4,6 +4,8 @@ import android.content.Context
 import android.graphics.Bitmap
 import com.tajuli.digitorandroid.editor.model.BeautyRectV28
 import com.tajuli.digitorandroid.editor.model.EyePose
+import com.tajuli.digitorandroid.editor.model.FaceContourV106
+import com.tajuli.digitorandroid.editor.model.FacePointV106
 import com.tajuli.digitorandroid.editor.model.TrackedEye
 import java.io.File
 
@@ -50,7 +52,7 @@ internal class NcnnVulkanFaceTrackerV103 private constructor(
 ) : AutoCloseable {
     private val lock = Any()
     private var pixels = IntArray(0)
-    private val output = FloatArray(32)
+    private val output = FloatArray(40)
 
     val backendLabel: String
         get() = if (gpuAccelerated) {
@@ -135,6 +137,14 @@ internal class NcnnVulkanFaceTrackerV103 private constructor(
                 rightGazeY = output[29].coerceIn(-1f, 1f),
                 rightGazeForward = output[30].coerceIn(0f, 1f),
                 rightGazeConfidence = output[31].coerceIn(0f, 1f),
+                faceContour = if (output[32] > 0f && output[34] > 0f &&
+                    output[36] > 0f && output[38] > 0f
+                ) {
+                    fun point(i: Int) = FacePointV106(
+                        output[i].coerceIn(0f, 1f), output[i + 1].coerceIn(0f, 1f),
+                    )
+                    FaceContourV106(point(32), point(34), point(36), point(38))
+                } else null,
             )
         } finally {
             owned?.recycle()
