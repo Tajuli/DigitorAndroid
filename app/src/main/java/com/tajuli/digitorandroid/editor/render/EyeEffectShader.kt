@@ -502,7 +502,7 @@ internal const val EYE_EFFECT_SHADER = """
 
         // Infer the missing contour tier from the available tracked tier; do
         // not revert to a screen-aligned chin when the forehead is out of frame.
-        vec2 axis=jawR-jawL;
+        vec2 axis=hasJaw ? jawR-jawL : cheekR-cheekL;
         if(length(axis)<.12) axis=cheekR-cheekL;
         axis=normalize(axis+vec2(.00001,0.0));
         vec2 outward=vec2(axis.y,-axis.x);
@@ -557,7 +557,7 @@ internal const val EYE_EFFECT_SHADER = """
 
         // Inverse sample displacement toward the middle enlarges the skin.
         // Crucially, both vectors rotate with jaw landmarks and head roll.
-        vec2 cheekWarp=-axis*sign(side)*(.36*radius*
+        vec2 cheekWarp=-axis*sign(side)*(.26*radius*
             cheekBand*cheekHeight*featureGuard);
         float chinBand=smoothstep(.16,.39,down)*
             (1.0-smoothstep(.92,1.19,down));

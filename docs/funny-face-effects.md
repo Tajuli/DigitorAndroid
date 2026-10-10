@@ -14,7 +14,7 @@ its existing calibrated portrait pose.
 with the actual tracked jaw axis and its outward normal, rather than a fixed
 downward direction. Both cheek and chin inverse displacements rotate in
 face-metric coordinates; tilted and partly cropped faces use independent
-cheek-only and jaw-only landmark fallbacks. The cheek support is broadened
+cheek-only and jaw-only landmark fallbacks. The cheek gain is capped at 0.26 per pass after the shader's lower-jaw UV-fold regression exposed excessive local compression; the stronger shape comes from wider cheek coverage and the two-pass composition. The cheek support is broadened
 and the excessive lip suppression reduced for fuller cheeks while keeping
 eyes/lips protected. Preview and export still share exactly the same shader.
 The synthetic shader regression checks a tilted jaw, contour dropout, eyes,

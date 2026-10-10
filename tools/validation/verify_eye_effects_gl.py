@@ -234,6 +234,9 @@ vec('uFaceContourCheeks',[.29,.47,.71,.47])
 vec('uFaceContourJaw',[0,0,0,0])
 cheeks_only=render()
 assert not np.array_equal(cheeks_only,source), 'Missing jaw contours hide Fat Face'
+vec('uFaceContourCheeks',[.29,.52,.71,.42])
+assert not np.array_equal(render(),cheeks_only), 'Jaw-missing cheek tilt ignored'
+vec('uFaceContourCheeks',[.29,.47,.71,.47])
 vec('uFaceContourJaw',[.35,.28,.65,.28])
 # Pixel ramp is monotone if the inverse mapping has no fold-overs/doubled teeth.
 saved_source=source.copy()
