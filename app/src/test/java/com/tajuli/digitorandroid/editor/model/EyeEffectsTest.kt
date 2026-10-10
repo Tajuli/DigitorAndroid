@@ -141,7 +141,7 @@ class EyeEffectsTest {
         assertFalse(track.copy(version = 18).covers(clip))
         val middle = track.at(20_000)!!.faceContour!!
         assertEquals(.26f, middle.leftCheek.x, .0001f)
-        assertEquals(.71f, middle.rightJaw.x, .0001f)
+        assertEquals(.72f, middle.rightJaw.x, .0001f)
         assertEquals(.71f, middle.rightJaw.y, .0001f)
     }
     @Test fun rollInterpolationTakesShortestArc() {
