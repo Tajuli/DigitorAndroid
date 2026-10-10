@@ -526,14 +526,14 @@ internal const val EYE_EFFECT_SHADER = """
             // feathers off before distorting distant hair, hijab or background.
             float cheekBand=smoothstep(.27,.80,relativeX)*
                 (1.0-smoothstep(1.15,1.48,relativeX));
-            float cheekHeight=(1.0-smoothstep(eyeLine-.54,eyeLine-.28,p.y))*
+            float cheekHeight=(1.0-smoothstep(eyeLine-.80,eyeLine-.50,p.y))*
                 (1.0-smoothstep(.89,1.25,-p.y));
 
-            vec2 lipRadius=vec2(.34,.26);
+            vec2 lipRadius=vec2(.57,.34);
             if(uMouthRegion.z>.001 && uMouthRegion.w>.001)
                 lipRadius=max(lipRadius,
-                    uMouthRegion.zw*faceMetricScale()/extent*vec2(1.4,2.3));
-            float lipGuard=smoothstep(1.0,2.3,
+                    uMouthRegion.zw*faceMetricScale()/extent*vec2(1.65,2.3));
+            float lipGuard=smoothstep(1.0,1.9,
                 length((p-mouthCenter)/lipRadius));
             float leftEyeGuard=smoothstep(1.0,1.8,
                 length((p-eyeL)/vec2(.38,.36)));

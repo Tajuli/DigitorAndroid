@@ -192,6 +192,19 @@ amounts(27,1)
 vec('uMouthRegion',[0,0,0,0])
 assert np.array_equal(render()[lip_core],source[lip_core]), 'Missing-mouth fallback changes lips'
 vec('uMouthRegion',[.5,.35,.08,.045])
+# Face-outline coordinates must affect the plumping. Pixels in the tracked eye
+# row and entire lip interior remain source-exact at multiple strengths.
+amounts(27,1)
+with_contour=render()
+wide_lips=np.s_[int(h*.35)-2:int(h*.35)+3,int(w*.5)-9:int(w*.5)+10]
+under_eyes=np.s_[int(h*.46):int(h*.49),int(w*.34):int(w*.66)]
+assert np.array_equal(with_contour[wide_lips],source[wide_lips]), 'Lip oval moved'
+assert np.array_equal(with_contour[under_eyes],source[under_eyes]), 'Lower eye row moved'
+vec('uFaceContourCheeks',[.26,.47,.74,.47])
+vec('uFaceContourJaw',[.33,.28,.67,.28])
+assert not np.array_equal(render(),with_contour), 'Contour anchors ignored'
+vec('uFaceContourCheeks',[.29,.47,.71,.47])
+vec('uFaceContourJaw',[.35,.28,.65,.28])
 # Pixel ramp is monotone if the inverse mapping has no fold-overs/doubled teeth.
 saved_source=source.copy()
 source[:,:,:3]=np.arange(w,dtype=np.uint8)[None,:,None]*2

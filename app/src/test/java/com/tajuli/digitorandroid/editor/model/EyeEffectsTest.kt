@@ -121,6 +121,29 @@ class EyeEffectsTest {
             assertTrue(resolveEyeEffects(listOf(effect.copy(enabled = false)), clip, 300_000).all { it == 0f })
         }
     }
+    @Test fun contourAnchorsInterpolateAndOldTrackingCacheIsInvalidated() {
+        val ca = FaceContourV106(
+            FacePointV106(.25f, .46f), FacePointV106(.75f, .46f),
+            FacePointV106(.30f, .70f), FacePointV106(.70f, .70f),
+        )
+        val cb = FaceContourV106(
+            FacePointV106(.27f, .50f), FacePointV106(.77f, .50f),
+            FacePointV106(.34f, .72f), FacePointV106(.74f, .72f),
+        )
+        val track = EyeTrack(
+            clip.uri, 0, 1_000_000,
+            listOf(
+                EyeSample(0, pose().copy(faceContour = ca)),
+                EyeSample(40_000, pose().copy(faceContour = cb)),
+            ),
+        )
+        assertEquals(19, track.version)
+        assertFalse(track.copy(version = 18).covers(clip))
+        val middle = track.at(20_000)!!.faceContour!!
+        assertEquals(.26f, middle.leftCheek.x, .0001f)
+        assertEquals(.71f, middle.rightJaw.x, .0001f)
+        assertEquals(.71f, middle.rightJaw.y, .0001f)
+    }
     @Test fun rollInterpolationTakesShortestArc() {
         val a=TrackedEye(.3f,.4f,.04f,3.1f,1f)
         val b=a.copy(roll=-3.1f)
