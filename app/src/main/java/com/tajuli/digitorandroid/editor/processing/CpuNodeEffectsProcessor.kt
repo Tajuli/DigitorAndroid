@@ -1,6 +1,7 @@
 package com.tajuli.digitorandroid.editor.processing
 
 import com.tajuli.digitorandroid.editor.model.ColorNode
+import com.tajuli.digitorandroid.editor.model.MotionTemplateCatalogV1
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.SpatialNodeGraphPlan
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -49,7 +50,7 @@ class CpuNodeEffectsProcessor(
                         slots[operation.slot] = input
                     } else {
                         val output = IntArray(width * height)
-                        renderNode(input, output, width, height, node, sourceTimeUs)
+                        renderNode(input, output, width, height, node, clip, sourceTimeUs)
                         slots[operation.slot] = output
                     }
                 }
@@ -99,6 +100,7 @@ class CpuNodeEffectsProcessor(
         width: Int,
         height: Int,
         node: ColorNode,
+        clip: TimelineClip,
         sourceTimeUs: Long,
     ) {
         val effects = node.visibleEffects()
@@ -112,6 +114,7 @@ class CpuNodeEffectsProcessor(
         val sharpen = amount("Sharpen")
         val glow = amount("Glow")
         val grain = amount("Film Grain")
+        val motion = CpuMotionTemplateV1.from(MotionTemplateCatalogV1.atSourceTime(effects, clip, sourceTimeUs))
         val radius = (1f + blur * 4f + glow * 2f).toInt().coerceIn(1, 7)
         val frameSeed = ((sourceTimeUs / 33_333L).toInt() * 31) xor node.id.hashCode()
         val stripe = (height / workerCount).coerceAtLeast(1)
@@ -123,16 +126,19 @@ class CpuNodeEffectsProcessor(
             jobs += Callable {
                 for (py in startY until endY) {
                     for (px in 0 until width) {
-                        val center = source[py * width + px]
+                        val sourceIndex = motion.sampleIndex(px, py, width, height)
+                        val sx = sourceIndex % width
+                        val sy = sourceIndex / width
+                        val center = source[sourceIndex]
                         val centerRgb = rgb(center)
-                        val n = rgb(sample(source, width, height, px, py - radius))
-                        val s = rgb(sample(source, width, height, px, py + radius))
-                        val e = rgb(sample(source, width, height, px + radius, py))
-                        val w = rgb(sample(source, width, height, px - radius, py))
-                        val ne = rgb(sample(source, width, height, px + radius, py - radius))
-                        val nw = rgb(sample(source, width, height, px - radius, py - radius))
-                        val se = rgb(sample(source, width, height, px + radius, py + radius))
-                        val sw = rgb(sample(source, width, height, px - radius, py + radius))
+                        val n = rgb(sample(source, width, height, sx, sy - radius))
+                        val s = rgb(sample(source, width, height, sx, sy + radius))
+                        val e = rgb(sample(source, width, height, sx + radius, sy))
+                        val w = rgb(sample(source, width, height, sx - radius, sy))
+                        val ne = rgb(sample(source, width, height, sx + radius, sy - radius))
+                        val nw = rgb(sample(source, width, height, sx - radius, sy - radius))
+                        val se = rgb(sample(source, width, height, sx + radius, sy + radius))
+                        val sw = rgb(sample(source, width, height, sx - radius, sy + radius))
 
                         val blurred = FloatArray(3) { channel ->
                             (centerRgb[channel] * 4f +
@@ -161,6 +167,14 @@ class CpuNodeEffectsProcessor(
                             for (channel in 0..2) out[channel] += delta
                         }
 
+                        if (motion.echo > 0f) {
+                            val shifted = rgb(sample(source, width, height, sx + (width * .025f).toInt(), sy + (height * .012f).toInt()))
+                            for (channel in 0..2) {
+                                val echo = maxOf(out[channel], shifted[channel])
+                                out[channel] += (echo - out[channel]) * motion.echo
+                            }
+                        }
+                        motion.grade(out, px, py, width, height)
                         val a = (center ushr 24) and 0xFF
                         val r = (out[0].coerceIn(0f, 1f) * 255f + .5f).toInt()
                         val g = (out[1].coerceIn(0f, 1f) * 255f + .5f).toInt()
