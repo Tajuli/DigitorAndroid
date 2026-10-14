@@ -468,71 +468,73 @@ internal const val EYE_EFFECT_SHADER = """
         return center+(p-center)/(vec2(1.0)+expansion*w);
     }
 
-    // Cheek-only Fat Face in source UV space. JNI eye samples are top-left
-    // image coordinates; mouth/contour uniforms are already flipped to GL
-    // bottom-left. This explicit conversion fixes the plumping mask drifting
-    // down to the scarf/chest when the eyes are high in the video frame.
+    // Spherical inverse lenses: two rounded puffy cheeks, not two horizontal
+    // shelves. A C1-continuous elliptical field expands the cheek and nearby
+    // scarf together while preserving the center of the face and the neck.
+    // Eye tracking uses top-down Y; mouth and contour uniforms are GL Y-up.
     vec2 fatFacePass(vec2 p,vec2 extent,vec2 mouth,float yaw) {
-        // Missing/conflicting landmarks: identity instead of guessing a region
-        // on the clothing. Do not weaken this guard for animation smoothness.
         if(uLeftEye.z<.001 || uRightEye.z<.001 ||
            uMouthRegion.z<.001 || uMouthRegion.w<.001)
             return vec2(0.0);
         vec2 metric=faceMetricScale();
         vec2 eyeL=vec2(uLeftEye.x,1.0-uLeftEye.y)*metric;
         vec2 eyeR=vec2(uRightEye.x,1.0-uRightEye.y)*metric;
-        vec2 mouthUv=uMouthRegion.xy*metric;
-        vec2 eyeMid=(eyeL+eyeR)*.5;
-        vec2 eyeSpan=eyeR-eyeL;
-        float eyeWidth=length(eyeSpan);
-        if(eyeWidth<.012 || eyeWidth>.40) return vec2(0.0);
-        vec2 sideways=eyeSpan/eyeWidth;
-        vec2 down=vec2(sideways.y,-sideways.x);
-        if(dot(mouthUv-eyeMid,down)<0.0) down=-down;
-        float eyeToMouth=dot(mouthUv-eyeMid,down);
-        float ratio=eyeToMouth/eyeWidth;
-        float mouthSide=abs(dot(mouthUv-eyeMid,sideways))/eyeWidth;
-        if(ratio<.24 || ratio>1.80 || mouthSide>.72)
+        vec2 midEye=(eyeL+eyeR)*.5;
+        vec2 eyeAxis=eyeR-eyeL;
+        float width=length(eyeAxis);
+        if(width<.012 || width>.40) return vec2(0.0);
+        vec2 across=eyeAxis/width;
+        vec2 downward=vec2(across.y,-across.x);
+        vec2 mouthPoint=uMouthRegion.xy*metric;
+        if(dot(mouthPoint-midEye,downward)<0.0)
+            downward=-downward;
+        float mouthDepth=dot(mouthPoint-midEye,downward);
+        float ratio=mouthDepth/width;
+        if(ratio<.24 || ratio>1.80 ||
+           abs(dot(mouthPoint-midEye,across))/width>.72)
             return vec2(0.0);
+        vec2 pos=(uFaceRegion.xy+faceFromLocal(p*extent))*metric;
+        vec2 rel=pos-midEye;
+        float x=dot(rel,across)/width;
+        float y=dot(rel,downward)/mouthDepth;
 
-        vec2 sourceUv=uFaceRegion.xy+faceFromLocal(p*extent);
-        vec2 fromEyes=sourceUv*metric-eyeMid;
-        float side=dot(fromEyes,sideways)/eyeWidth;
-        float below=dot(fromEyes,down)/eyeToMouth;
-        float absSide=abs(side);
-
-        // A wide inner transition prevents UV inversion even after two passes.
-        // Optional contour refines only horizontal lobe placement *after*
-        // passing anatomical plausibility; it can never extend vertical
-        // coverage to the jaw, neck, scarf or chest.
-        float lobeCenter=.75;
+        // Contours refine the cheek lens centers only when they are genuinely
+        // next to the tracked eyes and mouth. The jaw may never extend these
+        // support regions down to the throat or chest.
+        float leftCenter=.82;
+        float rightCenter=.82;
         if(uFaceContourCheeks.x>.001 && uFaceContourCheeks.z>.001) {
-            vec2 contourL=uFaceContourCheeks.xy*metric;
-            vec2 contourR=uFaceContourCheeks.zw*metric;
-            float leftSide=dot(contourL-eyeMid,sideways)/eyeWidth;
-            float rightSide=dot(contourR-eyeMid,sideways)/eyeWidth;
-            float leftDown=dot(contourL-eyeMid,down)/eyeToMouth;
-            float rightDown=dot(contourR-eyeMid,down)/eyeToMouth;
-            if(leftSide<-.55 && leftSide>-1.65 &&
-               rightSide>.55 && rightSide<1.65 &&
-               leftDown>.15 && leftDown<1.25 &&
-               rightDown>.15 && rightDown<1.25) {
-                float outline=(abs(leftSide)+abs(rightSide))*.5;
-                lobeCenter=mix(lobeCenter,clamp(outline,.64,.94),.45);
+            vec2 contourL=uFaceContourCheeks.xy*metric-midEye;
+            vec2 contourR=uFaceContourCheeks.zw*metric-midEye;
+            float leftX=dot(contourL,across)/width;
+            float rightX=dot(contourR,across)/width;
+            float leftY=dot(contourL,downward)/mouthDepth;
+            float rightY=dot(contourR,downward)/mouthDepth;
+            if(leftX<-.55 && leftX>-1.65 && rightX>.55 && rightX<1.65 &&
+               leftY>.12 && leftY<1.25 && rightY>.12 && rightY<1.25) {
+                leftCenter=mix(.82,clamp(-leftX*.96,.69,1.10),.48);
+                rightCenter=mix(.82,clamp(rightX*.96,.69,1.10),.48);
             }
         }
-        float sideMask=smoothstep(lobeCenter-.50,lobeCenter-.08,absSide)*
-            (1.0-smoothstep(lobeCenter+.28,lobeCenter+.52,absSide));
-        // Preserve the full under-eye row; cheeks start a little lower.
-        // 0 = eye line, 1 = mouth line. Strict face-relative vertical bound:
-        // nothing below 0.89 can be displaced under any tracker box size.
-        float verticalMask=smoothstep(.34,.47,below)*
-            (1.0-smoothstep(.68,.88,below));
-        // Nose/mouth center, eyes, forehead, chin and everything beyond the
-        // real eye/mouth envelope are exactly source-identical.
-        float cheekMask=sideMask*verticalMask;
-        vec2 metricShift=-sideways*sign(side)*(.22*eyeWidth*cheekMask);
-        return faceToLocal(metricShift/metric)/extent;
+
+        // Elliptical C1 radial falloff, wide enough to cover the adjacent
+        // hijab without an abrupt horizontal skin-strip boundary.
+        const float verticalCenter=.58;
+        float rL=length(vec2((x+leftCenter)/1.18,(y-verticalCenter)/.85));
+        float rR=length(vec2((x-rightCenter)/1.18,(y-verticalCenter)/.85));
+        float lobeL=1.0-smoothstep(.20,1.45,rL);
+        float lobeR=1.0-smoothstep(.20,1.45,rR);
+        // Anatomical envelope: zero on eyes, nose, mouth, forehead, chin and
+        // the entire neck/chest; still permits hijab *beside* each cheek.
+        float protect=smoothstep(.35,.52,abs(x))*
+            smoothstep(.24,.43,y)*
+            (1.0-smoothstep(.92,1.10,y));
+        vec2 sourceDelta=(
+            vec2(-(x+leftCenter)*width,-(y-verticalCenter)*mouthDepth)*lobeL+
+            vec2(-(x-rightCenter)*width,-(y-verticalCenter)*mouthDepth)*lobeR
+        )*protect;
+        vec2 metricDelta=sourceDelta.x*across+sourceDelta.y*downward;
+        return faceToLocal(metricDelta/metric)/extent;
     }
     vec2 comicFaceUv(vec2 uv) {
         float total=uFunnyB.w+dot(uFunnyC,vec4(1.0))+uFunnyD.x;
@@ -550,14 +552,15 @@ internal const val EYE_EFFECT_SHADER = """
         vec2 left=cheekCenter+vec2(-.43+.07*yaw,0.0);
         vec2 right=cheekCenter+vec2(.43+.07*yaw,0.0);
         vec2 delta=vec2(0.0);
-        // Fat Face: two bounded cheek-only passes, with no chin or central
-        // facial deformation. One final texture sample in preview and export.
+        // Fat Face: soft spherical cheek lenses, including adjacent hijab folds,
+        // preserving eyes, nose, mouth, chin and chest; one texture sample.
         if(uFunnyB.w>.0) {
             float strength=pow(clamp(uFunnyB.w,0.0,1.0),.90);
             vec2 q=p;
-            q+=fatFacePass(q,extent,mouth,yaw)*strength;
-            // A damped second pass avoids pulling cheek textures across nose/lips.
-            q+=fatFacePass(q,extent,mouth,yaw)*(strength*.75);
+            // Two bounded sphere passes keep texture mapping monotone at
+            // maximum intensity rather than pulling skin into a flat shelf.
+            q+=fatFacePass(q,extent,mouth,yaw)*(strength*.46);
+            q+=fatFacePass(q,extent,mouth,yaw)*(strength*.29);
             delta+=q-p;
         }
         // Ass Face: two rounded lower-face lobes and a narrow central cleft; comic anatomy only.

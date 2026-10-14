@@ -178,8 +178,9 @@ for index in range(27,33):
     fn(gl,'glUseProgram',None,U)(program)
 print('PASS: six comic presets preserve background, respond to strength/pose, avoid temporal wobble, and match full/fast GPU routes.')
 
-# Fat Face changes only cheek lobes. Keep nose, complete mouth, eyes,
-# forehead, mid-face and chin original, including at partial strengths.
+# Round cheek lenses replace the earlier rectangular side-shelf warp.
+# Only cheeks and the immediately adjacent hijab may change; eyes, nose,
+# lips, forehead, central chin and chest must remain unchanged.
 amounts(27,1)
 fat=render()
 forehead = np.s_[int(h*.73):int(h*.82), int(w*.38):int(w*.62)]
@@ -259,7 +260,7 @@ top_face=render()
 upper_cheek=np.s_[int(h*.59):int(h*.65),int(w*.69):int(w*.76)]
 chest=np.s_[:int(h*.40),:]
 assert not np.array_equal(top_face[upper_cheek],source[upper_cheek]), 'Cheeks do not follow top-origin eye landmarks'
-assert np.array_equal(top_face[chest],source[chest]), 'Cheek distortion leaks onto scarf/chest'
+assert np.array_equal(top_face[chest],source[chest]), 'Round cheeks leak onto chest'
 vec('uLeftEye',[.35,.50,.055,0]); vec('uRightEye',[.65,.50,.055,0])
 vec('uMouthRegion',[.5,.35,.08,.045]); vec('uFaceRegion',[.5,.5,.25,.35])
 vec('uFaceContourCheeks',[.29,.47,.71,.47])

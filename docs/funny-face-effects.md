@@ -10,6 +10,19 @@ legacy names/slots and the reserved Electric slot remain unchanged. No additiona
 model or asset download is introduced. Thumbnails use the production pipeline and
 its existing calibrated portrait pose.
 
+**Round cheek + hijab volume, not side shelves (PR #106):** The previous
+horizontal displacement created flat-edged skin strips. Two softened
+elliptical inverse lenses now track the eye-to-mouth axis and deform
+the lateral cheek skin together with adjacent hijab fabric. The lens
+is C1 smooth at its outer boundary, with two conservative strength
+passes to avoid UV folds. The forehead, eyes, nose, mouth, central chin,
+neck and chest remain outside the effect envelope. Genuine cheek Face
+Mesh anchors refine the two lens centers but cannot move them down
+toward the chest. Motion follows the tracked head orientation with
+one final source-texture sample. The new shape is a 2D approximation
+of plump cheeks; occluded skin under cloth cannot be reconstructed
+or made photorealistic without face/hijab segmentation and depth.
+
 **Fix for cheek effects appearing over the scarf/chest:** The ncnn eye
 landmarks use normalized, top-origin bitmap coordinates, whereas mouth,
 face-box and cheek-contour uniforms are passed in bottom-origin GL coordinates.
