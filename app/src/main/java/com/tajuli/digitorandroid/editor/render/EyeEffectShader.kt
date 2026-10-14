@@ -527,6 +527,7 @@ internal const val EYE_EFFECT_SHADER = """
         // Anatomical envelope: zero on eyes, nose, mouth, forehead, chin and
         // the entire neck/chest; still permits hijab *beside* each cheek.
         float protect=smoothstep(.35,.52,abs(x))*
+            (1.0-smoothstep(1.18,1.42,abs(x)))*
             smoothstep(.24,.43,y)*
             (1.0-smoothstep(.92,1.10,y));
         vec2 sourceDelta=(
