@@ -10,6 +10,18 @@ legacy names/slots and the reserved Electric slot remain unchanged. No additiona
 model or asset download is introduced. Thumbnails use the production pipeline and
 its existing calibrated portrait pose.
 
+**Fix for cheek effects appearing over the scarf/chest:** The ncnn eye
+landmarks use normalized, top-origin bitmap coordinates, whereas mouth,
+face-box and contour uniforms are passed in bottom-origin GL coordinates.
+Fat Face now flips the eye Y *only in its cheek anchor calculations*, leaving
+all other eye/electric effects unchanged. The mask is anchored directly to
+real eye and mouth locations (not the potentially oversized face ROI) and
+its support fades out before the mouth line. If an eye or mouth landmark is
+missing or anatomically implausible, it samples the original image. Tracked
+Face Mesh cheek points may adjust width within strict plausibility limits
+but cannot extend the effect down the neck or clothing. A synthetic
+top-origin eye regression now asserts the full chest strip is unchanged.
+
 **Fat Face = cheek-only plumping (PR #106):** Only the two tracked lateral
 cheek regions are expanded. Forehead, eyes, nose, lips, mouth and central
 chin are unchanged: the old downward/rotated chin warp is removed entirely.

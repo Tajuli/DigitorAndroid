@@ -141,11 +141,22 @@ for index in range(27,33):
     uniform('uEyeTime',1.8)
     assert np.array_equal(render(),high), ('Comic adds unwanted temporal wobble',index)
     uniform('uEyeTime',.35)
-    vec('uHeadPose',[.45,0,.55,.85]); tilted=render()
-    assert not np.array_equal(tilted,high), ('Comic ignores head pose',index)
-    vec('uHeadPose',[0,0,0,1])
+    if index == 27:
+        # Fat Face follows REAL eye/mouth anchors, not head-angle metadata
+        # that can be stale after a crop or brief tracker dropout.
+        vec('uLeftEye',[.34,.51,.055,0]);vec('uRightEye',[.66,.49,.055,0])
+        tilted=render()
+        assert not np.array_equal(tilted,high), ('Cheek plumping ignores moving eyes',index)
+        vec('uLeftEye',[.35,.5,.055,0]);vec('uRightEye',[.65,.5,.055,0])
+    else:
+        vec('uHeadPose',[.45,0,.55,.85]); tilted=render()
+        assert not np.array_equal(tilted,high), ('Comic ignores head pose',index)
+        vec('uHeadPose',[0,0,0,1])
     vec('uMouthRegion',[0,0,0,0]); fallback=render()
-    assert not np.array_equal(fallback,source), ('Comic requires mouth on every frame',index)
+    if index == 27:
+        assert np.array_equal(fallback,source), 'Cheek-only effect must disable without a tracked mouth'
+    else:
+        assert not np.array_equal(fallback,source), ('Comic requires mouth on every frame',index)
     vec('uMouthRegion',[.5,.35,.08,.045])
     # Set all shared uniforms on the dedicated fast program, not just compile it.
     program=eye_fast_program
@@ -172,8 +183,8 @@ print('PASS: six comic presets preserve background, respond to strength/pose, av
 amounts(27,1)
 fat=render()
 forehead = np.s_[int(h*.73):int(h*.82), int(w*.38):int(w*.62)]
-cheeks = np.s_[int(h*.26):int(h*.34), int(w*.69):int(w*.77)]
-left_cheek = np.s_[int(h*.26):int(h*.34), int(w*.23):int(w*.31)]
+cheeks = np.s_[int(h*.38):int(h*.44), int(w*.69):int(w*.77)]
+left_cheek = np.s_[int(h*.38):int(h*.44), int(w*.23):int(w*.31)]
 nose_core = np.s_[int(h*.43):int(h*.51), int(w*.47):int(w*.53)]
 chin_core = np.s_[int(h*.19):int(h*.27), int(w*.46):int(w*.54)]
 lip_core = np.s_[int(h*.35)-2:int(h*.35)+3, int(w*.5)-4:int(w*.5)+5]
@@ -193,7 +204,7 @@ for strength in [.35,.65,.85]:
         assert np.array_equal(mid[region],source[region]), ('Cheek-only strength distorts',name,strength)
 amounts(27,1)
 vec('uMouthRegion',[0,0,0,0])
-assert np.array_equal(render()[lip_core],source[lip_core]), 'Missing-mouth fallback changes lips'
+assert np.array_equal(render(),source), 'Missing mouth must disable all cheek displacement'
 vec('uMouthRegion',[.5,.35,.08,.045])
 # Face-outline coordinates must affect the plumping. Pixels in the tracked eye
 # row and entire lip interior remain source-exact at multiple strengths.
@@ -226,7 +237,7 @@ frontal=render()
 vec('uFaceContourJaw',[.35,.34,.65,.22])
 vec('uFaceContourCheeks',[.29,.53,.71,.41])
 tilted=render()
-assert not np.array_equal(tilted,frontal), 'Jaw roll ignored by Fat Face'
+assert not np.array_equal(tilted,frontal), 'Cheek contour changes ignored by Fat Face'
 assert np.array_equal(tilted[wide_lips],source[wide_lips]), 'Tilted jaw changes lips'
 for name,region in protected:
     assert np.array_equal(tilted[region],source[region]), ('Tilted jaw distorts',name)
@@ -240,10 +251,26 @@ vec('uFaceContourCheeks',[.29,.47,.71,.47])
 vec('uFaceContourJaw',[0,0,0,0])
 cheeks_only=render()
 assert not np.array_equal(cheeks_only,source), 'Missing jaw contours hide Fat Face'
-vec('uFaceContourCheeks',[.29,.52,.71,.42])
-assert not np.array_equal(render(),cheeks_only), 'Jaw-missing cheek tilt ignored'
+vec('uFaceContourCheeks',[.24,.52,.76,.42])
+assert not np.array_equal(render(),cheeks_only), 'Jaw-missing cheek width ignored'
 vec('uFaceContourCheeks',[.29,.47,.71,.47])
 vec('uFaceContourJaw',[.35,.28,.65,.28])
+# Real source-frame regression: JNI eye Y is top-down (around .27) but
+# mouth/contour uniforms are GL Y-up (around .55). The cheek mask must
+# follow the *real cheeks near the eyes*, never the lower scarf/chest.
+amounts(27,1)
+vec('uFaceRegion',[.5,.55,.22,.31])
+vec('uLeftEye',[.35,.28,.055,0]); vec('uRightEye',[.65,.28,.055,0])
+vec('uMouthRegion',[.5,.57,.085,.04])
+vec('uFaceContourCheeks',[.28,.61,.72,.61]); vec('uFaceContourJaw',[.35,.49,.65,.49])
+top_face=render()
+upper_cheek=np.s_[int(h*.59):int(h*.65),int(w*.69):int(w*.76)]
+chest=np.s_[:int(h*.40),:]
+assert not np.array_equal(top_face[upper_cheek],source[upper_cheek]), 'Cheeks do not follow top-origin eye landmarks'
+assert np.array_equal(top_face[chest],source[chest]), 'Cheek distortion leaks onto scarf/chest'
+vec('uLeftEye',[.35,.50,.055,0]); vec('uRightEye',[.65,.50,.055,0])
+vec('uMouthRegion',[.5,.35,.08,.045]); vec('uFaceRegion',[.5,.5,.25,.35])
+vec('uFaceContourCheeks',[.29,.47,.71,.47]); vec('uFaceContourJaw',[.35,.28,.65,.28])
 # Pixel ramp is monotone if the inverse mapping has no fold-overs/doubled teeth.
 saved_source=source.copy()
 source[:,:,:3]=np.arange(w,dtype=np.uint8)[None,:,None]*2
