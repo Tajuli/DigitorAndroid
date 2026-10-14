@@ -945,6 +945,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         node.copy(corrections = next)
     }
 
+    /** Motion templates are mutually exclusive on a node; other creator effects stay untouched. */
+    fun applyMotionTemplateToSelectedNodeV1(name: String) = updateSelectedEditableNode { node ->
+        if (com.tajuli.digitorandroid.editor.model.MotionTemplateCatalogV1.find(name) == null) node
+        else node.copy(effects = node.effects.filterNot {
+            com.tajuli.digitorandroid.editor.model.MotionTemplateCatalogV1.find(it.name) != null
+        } + NodeEffect(name = name))
+    }
+
     fun addEffectToSelectedNode(name: String, amount: Float = 1f) = updateSelectedEditableNode { node ->
         val existing = node.effects.indexOfFirst { it.name == name }
         if (existing >= 0) node.copy(effects = node.effects.mapIndexed { index, effect -> if (index == existing) effect.copy(amount = amount, enabled = true) else effect })
