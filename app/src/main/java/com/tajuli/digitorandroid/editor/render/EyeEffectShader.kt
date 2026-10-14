@@ -15,7 +15,6 @@ internal const val EYE_EFFECT_SHADER = """
     uniform vec4 uMouthRegion;
     // True 468-landmark Face Mesh outline, normalized source UV, Y up.
     uniform vec4 uFaceContourCheeks;
-    uniform vec4 uFaceContourJaw;
     uniform vec4 uLeftEye;
     uniform vec4 uRightEye;
     uniform vec4 uEyeState;
@@ -518,7 +517,7 @@ internal const val EYE_EFFECT_SHADER = """
                leftDown>.15 && leftDown<1.25 &&
                rightDown>.15 && rightDown<1.25) {
                 float outline=(abs(leftSide)+abs(rightSide))*.5;
-                lobeCenter=mix(lobeCenter,clamp(outline*.76,.67,.89),.35);
+                lobeCenter=mix(lobeCenter,clamp(outline,.64,.94),.45);
             }
         }
         float sideMask=smoothstep(lobeCenter-.43,lobeCenter-.14,absSide)*

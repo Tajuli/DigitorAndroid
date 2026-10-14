@@ -12,7 +12,7 @@ its existing calibrated portrait pose.
 
 **Fix for cheek effects appearing over the scarf/chest:** The ncnn eye
 landmarks use normalized, top-origin bitmap coordinates, whereas mouth,
-face-box and contour uniforms are passed in bottom-origin GL coordinates.
+face-box and cheek-contour uniforms are passed in bottom-origin GL coordinates.
 Fat Face now flips the eye Y *only in its cheek anchor calculations*, leaving
 all other eye/electric effects unchanged. The mask is anchored directly to
 real eye and mouth locations (not the potentially oversized face ROI) and
@@ -28,13 +28,15 @@ chin are unchanged: the old downward/rotated chin warp is removed entirely.
 The shader's paired cheek lobes sit below the eye line and fade out before
 the lower jaw. Local, roll-aware eye, nose and lip guards prevent expressions
 from being enlarged. The cheek-only inverse warp runs in face-metric space
-using tracked Face Mesh cheek/jaw landmarks, so it follows head rotation.
+using tracked eyes, mouth and optional Face Mesh cheek landmarks, so it follows head rotation.
 
 The existing 2-pass GPU effect keeps the same slot 27, amount slider,
 project serialization, FX track behavior and fast/full rendering parity.
 The second pass is damped to 75% to avoid texture inversion around protected
-features. Cheek/jaw contour dropout is handled by head-relative fallback
-landmarks. This still uses one final texture sample.
+features. Cheek contour dropout uses valid eye/mouth anchors. The jaw uniform is
+no longer bound to GLSL: the cheek-only shader does not use it, so the GPU
+optimizes it out. Binding it would break shader validation and some devices.
+This still uses one final texture sample.
 
 The native tracking contract remains a 40-float face pose; version 19
 tracking caches automatically require fresh analysis when needed. Occluded
@@ -48,7 +50,7 @@ funny presets for GLSL compilation, public effect behavior, render parity,
 strength variation, time stability and zero-strength identity. Cheek-only
 tests now assert visible change in both cheeks and source-exact preservation
 of forehead, nose, lips, eyes and central chin at several strengths, including
-rotated-jaw and missing-contour cases. UV scanlines are checked for folding.
+rotated-eye and missing/implausible cheek-contour cases. UV scanlines are checked for folding.
 
 Android CI covers shader regression, Kotlin unit tests, ARM64 APK build,
 optimized release build and emulator pixel-parity smoke tests. Real-device

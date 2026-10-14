@@ -81,7 +81,7 @@ vec('uHeadPose',[0,0,0,1]); vec('uGazePose',[-1,0,0,1])
 vec('uLeftGaze',[0,0,1,0]); vec('uRightGaze',[0,0,1,0])
 vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0]); vec('uEyeState',[1,1,0,0])
 vec('uFaceRegion',[.5,.5,.25,.35]);vec('uMouthRegion',[.5,.35,.08,.045])
-vec('uFaceContourCheeks',[.29,.47,.71,.47]);vec('uFaceContourJaw',[.35,.28,.65,.28])
+vec('uFaceContourCheeks',[.29,.47,.71,.47])
 vertices=np.array([-1,-1,0,1,1,-1,0,1,-1,1,0,1,1,1,0,1],np.float32)
 attribute=fn(gl,'glGetAttribLocation',I,U,c.c_char_p)(program,b'aFramePosition')
 fn(gl,'glEnableVertexAttribArray',None,U)(attribute)
@@ -114,7 +114,7 @@ for index in active_indices:
     vec('uFaceRegion',[0,0,0,0]);vec('uMouthRegion',[0,0,0,0])
     assert np.array_equal(render(),source),('Missing face',index)
     vec('uFaceRegion',[.5,.5,.25,.35]);vec('uMouthRegion',[.5,.35,.08,.045])
-    vec('uFaceContourCheeks',[.29,.47,.71,.47]);vec('uFaceContourJaw',[.35,.28,.65,.28])
+    vec('uFaceContourCheeks',[.29,.47,.71,.47])
     vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0])
 for pos,i in enumerate(active_indices):
     for j in active_indices[:pos]: assert not np.array_equal(results[i],results[j]),('Duplicate',i,j)
@@ -171,7 +171,7 @@ for index in range(27,33):
     vec('uLeftEye',[.35,.5,.055,0]); vec('uRightEye',[.65,.5,.055,0])
     vec('uEyeState',[1,1,0,0])
     vec('uFaceRegion',[.5,.5,.25,.35]); vec('uMouthRegion',[.5,.35,.08,.045])
-    vec('uFaceContourCheeks',[.29,.47,.71,.47]); vec('uFaceContourJaw',[.35,.28,.65,.28])
+    vec('uFaceContourCheeks',[.29,.47,.71,.47])
     amounts(index)
     assert np.array_equal(render(),high), ('Comic full/fast shader parity',index)
     program=full_program
@@ -225,36 +225,28 @@ amounts(27,1)
 assert not np.array_equal(with_contour[cheeks],medium_contour[cheeks]), (
     'Fat Face cheek strength response is missing')
 vec('uFaceContourCheeks',[.26,.47,.74,.47])
-vec('uFaceContourJaw',[.33,.28,.67,.28])
 assert not np.array_equal(render(),with_contour), 'Contour anchors ignored'
 vec('uFaceContourCheeks',[.29,.47,.71,.47])
-vec('uFaceContourJaw',[.35,.28,.65,.28])
-# When the tracked jaw tilts, the chin should move with the slanted jaw.
-# The image-space location of cheek/jaw distortion must respond to each
-# independently tracked contour instead of a fixed vertical displacement.
+# Cheek-only deformation is driven by eye/mouth anchors and optional cheek
+# landmarks. Jaw points are not rendering anchors and must never pull the
+# effect into the scarf or chest.
 amounts(27,1)
 frontal=render()
-vec('uFaceContourJaw',[.35,.34,.65,.22])
-vec('uFaceContourCheeks',[.29,.53,.71,.41])
-tilted=render()
-assert not np.array_equal(tilted,frontal), 'Cheek contour changes ignored by Fat Face'
-assert np.array_equal(tilted[wide_lips],source[wide_lips]), 'Tilted jaw changes lips'
+vec('uFaceContourCheeks',[.26,.47,.74,.47])
+wider=render()
+assert not np.array_equal(wider,frontal), 'Tracked cheek outline ignored'
 for name,region in protected:
-    assert np.array_equal(tilted[region],source[region]), ('Tilted jaw distorts',name)
+    assert np.array_equal(wider[region],source[region]), ('Wider cheek distorts',name)
+# Missing outline: base the effect on valid eyes and mouth alone.
 vec('uFaceContourCheeks',[0,0,0,0])
-jaw_only=render()
-assert not np.array_equal(jaw_only,source), 'Missing cheek contours hide Fat Face'
-assert np.array_equal(jaw_only[wide_lips],source[wide_lips]), 'Jaw-only fallback changes lips'
+fallback=render()
+assert not np.array_equal(fallback[cheeks],source[cheeks]), 'Cheek contour dropout hides effect'
 for name,region in protected:
-    assert np.array_equal(jaw_only[region],source[region]), ('Jaw-only fallback distorts',name)
+    assert np.array_equal(fallback[region],source[region]), ('Cheek fallback distorts',name)
+# Out-of-face contour cannot move cheek mask to clothing.
+vec('uFaceContourCheeks',[.10,.15,.90,.15])
+assert np.array_equal(render(),fallback), 'Implausible contour shifts cheek effect'
 vec('uFaceContourCheeks',[.29,.47,.71,.47])
-vec('uFaceContourJaw',[0,0,0,0])
-cheeks_only=render()
-assert not np.array_equal(cheeks_only,source), 'Missing jaw contours hide Fat Face'
-vec('uFaceContourCheeks',[.24,.52,.76,.42])
-assert not np.array_equal(render(),cheeks_only), 'Jaw-missing cheek width ignored'
-vec('uFaceContourCheeks',[.29,.47,.71,.47])
-vec('uFaceContourJaw',[.35,.28,.65,.28])
 # Real source-frame regression: JNI eye Y is top-down (around .27) but
 # mouth/contour uniforms are GL Y-up (around .55). The cheek mask must
 # follow the *real cheeks near the eyes*, never the lower scarf/chest.
@@ -262,7 +254,7 @@ amounts(27,1)
 vec('uFaceRegion',[.5,.55,.22,.31])
 vec('uLeftEye',[.35,.28,.055,0]); vec('uRightEye',[.65,.28,.055,0])
 vec('uMouthRegion',[.5,.57,.085,.04])
-vec('uFaceContourCheeks',[.28,.61,.72,.61]); vec('uFaceContourJaw',[.35,.49,.65,.49])
+vec('uFaceContourCheeks',[.28,.61,.72,.61])
 top_face=render()
 upper_cheek=np.s_[int(h*.59):int(h*.65),int(w*.69):int(w*.76)]
 chest=np.s_[:int(h*.40),:]
@@ -270,7 +262,7 @@ assert not np.array_equal(top_face[upper_cheek],source[upper_cheek]), 'Cheeks do
 assert np.array_equal(top_face[chest],source[chest]), 'Cheek distortion leaks onto scarf/chest'
 vec('uLeftEye',[.35,.50,.055,0]); vec('uRightEye',[.65,.50,.055,0])
 vec('uMouthRegion',[.5,.35,.08,.045]); vec('uFaceRegion',[.5,.5,.25,.35])
-vec('uFaceContourCheeks',[.29,.47,.71,.47]); vec('uFaceContourJaw',[.35,.28,.65,.28])
+vec('uFaceContourCheeks',[.29,.47,.71,.47])
 # Pixel ramp is monotone if the inverse mapping has no fold-overs/doubled teeth.
 saved_source=source.copy()
 source[:,:,:3]=np.arange(w,dtype=np.uint8)[None,:,None]*2
