@@ -42,6 +42,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
+import com.tajuli.digitorandroid.editor.model.MotionTemplateCatalogV1
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.NodeKind
@@ -80,13 +81,19 @@ fun CreatorEffectsWorkspace(
     val selectedEffectId = timelineSelection
         ?.takeIf { it.clipId == clip.id && it.nodeId == node.id }
         ?.effectId
-    var category by remember { mutableStateOf("Basic") }
+    var category by remember(clip.id, clip.isImageV21) {
+        mutableStateOf(if (clip.isImageV21) MotionTemplateCatalogV1.IMAGE else MotionTemplateCatalogV1.VIDEO)
+    }
     var bodySettingsExpanded by remember(clip.id) { mutableStateOf(false) }
     var faceTrackingReady by remember(clip.id, clip.uri, clip.sourceInUs, clip.sourceOutUs) {
         mutableStateOf(false)
     }
     val faceTrackingCategory = category == "Eyes" || category == "Funny Faces"
-    val categoryPresets = remember(category) { CreatorEffectCatalogV25.inCategory(category) }
+    val wrongMotionMedia = (category == MotionTemplateCatalogV1.VIDEO && clip.isImageV21) ||
+        (category == MotionTemplateCatalogV1.IMAGE && !clip.isImageV21)
+    val categoryPresets = remember(category, clip.isImageV21) {
+        if (wrongMotionMedia) emptyList() else CreatorEffectCatalogV25.inCategory(category)
+    }
     val nodeEffects = node.visibleEffects()
     val selectedEffect = nodeEffects.firstOrNull { it.id == selectedEffectId }
     val selectedEffectName = selectedEffect?.name
@@ -123,6 +130,16 @@ fun CreatorEffectsWorkspace(
                     Text(name, fontSize = 8.sp, color = if (selected) Fx25Accent else Color.White.copy(alpha = .82f))
                 }
             }
+        }
+
+        if (wrongMotionMedia) {
+            Text(
+                if (clip.isImageV21) "Video Effect templates require a video clip."
+                else "Image Effect templates require a photo clip.",
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                fontSize = 9.sp,
+                color = Fx25Muted,
+            )
         }
 
         if (faceTrackingCategory) {
@@ -316,7 +333,11 @@ fun CreatorEffectsWorkspace(
                                 )
                                 PreviewProjectRegistry.update(vm.state.value.project)
                             } else {
-                                vm.addEffectToSelectedNode(preset.name)
+                                if (MotionTemplateCatalogV1.find(preset.name) != null) {
+                                    vm.applyMotionTemplateToSelectedNodeV1(preset.name)
+                                } else {
+                                    vm.addEffectToSelectedNode(preset.name)
+                                }
                                 val updatedClip = vm.state.value.project.clip(clip.id)
                                 val updatedNode = updatedClip
                                     ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
