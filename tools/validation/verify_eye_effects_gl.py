@@ -173,8 +173,12 @@ tracker_contract=Path('app/src/main/cpp/FaceTrackingNcnnVulkanJni.cpp').read_tex
 creator_contract=Path('app/src/main/java/com/tajuli/digitorandroid/editor/render/CreatorEffectGraphV25.kt').read_text()
 assert 'private val EYE_ONLY_FRAGMENT_SHADER' in creator_contract, (
     'Dedicated eye/funny-only GPU shader missing')
-assert 'if (vector.isIdentity && hasActiveEyes)' in creator_contract, (
-    'Eye-only nodes must bypass the full creator shader')
+# Motion templates need the full creator shader even when an eye effect is present.
+# Preserve the eye-only fast path for nodes with no active camera motion.
+assert (
+    'if (vector.isIdentity && hasActiveEyes && !motion.active)' in creator_contract
+    or 'if (vector.isIdentity && hasActiveEyes)' in creator_contract
+), 'Eye-only nodes must bypass the full creator shader unless motion is active'
 assert 'renderEyeOnlyNode(' in creator_contract, (
     'Eye-only render dispatch missing')
 assert 'private val exportEyeTrack' in creator_contract, (
