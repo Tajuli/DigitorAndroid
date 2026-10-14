@@ -501,6 +501,7 @@ internal const val EYE_EFFECT_SHADER = """
         float below=dot(fromEyes,down)/eyeToMouth;
         float absSide=abs(side);
 
+        // A wide inner transition prevents UV inversion even after two passes.
         // Optional contour refines only horizontal lobe placement *after*
         // passing anatomical plausibility; it can never extend vertical
         // coverage to the jaw, neck, scarf or chest.
@@ -520,7 +521,7 @@ internal const val EYE_EFFECT_SHADER = """
                 lobeCenter=mix(lobeCenter,clamp(outline,.64,.94),.45);
             }
         }
-        float sideMask=smoothstep(lobeCenter-.43,lobeCenter-.14,absSide)*
+        float sideMask=smoothstep(lobeCenter-.50,lobeCenter-.08,absSide)*
             (1.0-smoothstep(lobeCenter+.28,lobeCenter+.52,absSide));
         // Preserve the full under-eye row; cheeks start a little lower.
         // 0 = eye line, 1 = mouth line. Strict face-relative vertical bound:
