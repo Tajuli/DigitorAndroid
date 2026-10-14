@@ -522,9 +522,10 @@ internal const val EYE_EFFECT_SHADER = """
         }
         float sideMask=smoothstep(lobeCenter-.43,lobeCenter-.14,absSide)*
             (1.0-smoothstep(lobeCenter+.28,lobeCenter+.52,absSide));
+        // Preserve the full under-eye row; cheeks start a little lower.
         // 0 = eye line, 1 = mouth line. Strict face-relative vertical bound:
         // nothing below 0.89 can be displaced under any tracker box size.
-        float verticalMask=smoothstep(.18,.39,below)*
+        float verticalMask=smoothstep(.34,.47,below)*
             (1.0-smoothstep(.68,.88,below));
         // Nose/mouth center, eyes, forehead, chin and everything beyond the
         // real eye/mouth envelope are exactly source-identical.
