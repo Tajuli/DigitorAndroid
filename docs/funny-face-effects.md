@@ -10,70 +10,38 @@ legacy names/slots and the reserved Electric slot remain unchanged. No additiona
 model or asset download is introduced. Thumbnails use the production pipeline and
 its existing calibrated portrait pose.
 
-**Head-tilt and cheek accuracy correction:** Chin expansion is now aligned
-with the actual tracked jaw axis and its outward normal, rather than a fixed
-downward direction. Both cheek and chin inverse displacements rotate in
-face-metric coordinates; tilted and partly cropped faces use independent
-cheek-only and jaw-only landmark fallbacks. The cheek gain is capped at 0.26 per pass after the shader's lower-jaw UV-fold regression exposed excessive local compression; the stronger shape comes from wider cheek coverage and the two-pass composition. The cheek support is broadened
-and the excessive lip suppression reduced for fuller cheeks while keeping
-eyes/lips protected. Preview and export still share exactly the same shader.
-The synthetic shader regression checks a tilted jaw, contour dropout, eyes,
-lips, and scanline UV fold safety.
+**Fat Face = cheek-only plumping (PR #106):** Only the two tracked lateral
+cheek regions are expanded. Forehead, eyes, nose, lips, mouth and central
+chin are unchanged: the old downward/rotated chin warp is removed entirely.
+The shader's paired cheek lobes sit below the eye line and fade out before
+the lower jaw. Local, roll-aware eye, nose and lip guards prevent expressions
+from being enlarged. The cheek-only inverse warp runs in face-metric space
+using tracked Face Mesh cheek/jaw landmarks, so it follows head rotation.
 
-**Fat Face doubled fullness (PR #106):** At full slider strength the GPU
-now composes two face-contour-guided inverse-warp passes (100% + a damped 90%
-second pass). This produces approximately 1.9x peak displacement on the
-calibrated geometry while retaining **one texture lookup** and the existing
-lip, teeth, eyelid, head-pose and tracked-cheek guards. Simply doubling
-the horizontal gain made the inverse mapping fold near the mouth region.
-The second pass is therefore evaluated on the already-remapped coordinates.
-This is a stronger 2D caricature, not guaranteed to reconstruct cheek pixels
-hidden by hair or a scarf. No change to effect slot 27 or saved FX projects.
+The existing 2-pass GPU effect keeps the same slot 27, amount slider,
+project serialization, FX track behavior and fast/full rendering parity.
+The second pass is damped to 75% to avoid texture inversion around protected
+features. Cheek/jaw contour dropout is handled by head-relative fallback
+landmarks. This still uses one final texture sample.
 
-The updated Fat Face uses **real source-frame Face Mesh cheek and jaw landmarks**,
-not just the face bounding box. Four per-frame contour points are transported
-through the existing face pose to both GPU routes, with pose interpolation,
-strength/timing compatibility and a fallback when contour data is missing.
-Fat Face's fuller cheek/jaw profile raises the maximum horizontal displacement
-from 0.205 to 0.30 face-relative units (before landmark-radius scaling), and
-raises chin displacement from 0.080 to 0.12. The cheek falloff broadens from
-a 1.48 to a 1.62 radius boundary, with a smooth feather. The amount slider
-uses a gentle gamma curve to make medium strengths more visible without
-changing its zero or maximum endpoints. The existing lip/eye guards remain.
-The shader regression asserts that the same contour renders stronger at 100%
-than 65%, and that tracked mouth/eye source regions stay intact.
+The native tracking contract remains a 40-float face pose; version 19
+tracking caches automatically require fresh analysis when needed. Occluded
+cheek pixels hidden by hair or a hijab cannot be reconstructed with a 2D warp.
+Fullness is therefore constrained near headwear to avoid severe seam artifacts.
 
-The cheek expansion follows the face boundary, while lips, teeth and eyelids
-are protected with tracked feature guards. Motion is deterministic, with no
-procedural wobble. A soft falloff limits movement of nearby hijab/hair, but
-a 2D shader alone cannot recover fully occluded cheek pixels.
+## Validation
 
-Native tracking now provides a 40-float pose (formerly 32). EyeTrack format
-version 19 forces fresh analysis so saved v18 tracks cannot silently render
-with incorrect contour geometry. Thumbnail poses have calibrated contour anchors.
-The serialized Fat Face slot remains 27; existing effect projects are compatible.
+`python3 tools/validation/verify_eye_effects_gl.py` checks all eye and
+funny presets for GLSL compilation, public effect behavior, render parity,
+strength variation, time stability and zero-strength identity. Cheek-only
+tests now assert visible change in both cheeks and source-exact preservation
+of forehead, nose, lips, eyes and central chin at several strengths, including
+rotated-jaw and missing-contour cases. UV scanlines are checked for folding.
 
-The renderer uses bounded inverse lenses in aspect-correct, face-roll coordinates.
-The tracked mouth anchors cheek position, with a face-relative fallback if mouth
-bounds are unavailable. Head yaw shifts the cheek pair.
-
-**Fat Face** now separates cheek/jaw plumping from facial-expression geometry.
-The side warp begins below the tracked eye line and fades out at the headwear
-boundary. Mouth lips/teeth and both eyes are guarded using the actual source
-time tracking anchors, with bounded fallback when landmarks are missing.
-The dynamically sized mouth protection is no longer so broad that it suppresses
-all cheek deformation. Chin fullness is centered below the mouth. The inverse
-field remains a single texture sample with no added frame-to-frame jitter,
-and both full and fast GPU paths share the function.
-
-The supplied 1920x1080 original and exported video were manually compared
-at seven matching timestamps. Under a tight-fitting hijab, arbitrary inflation
-past the visible skin edge also warps the hijab texture. Until the pipeline
-provides a face/headwear occlusion mask, this shader deliberately keeps the
-contour deformation bounded rather than promising perfect 3D swelling.
-
-Slot 27, the effect name, project serialization, timed FX and exported shader
-routing remain unchanged. No new assets or dependencies are needed.
+Android CI covers shader regression, Kotlin unit tests, ARM64 APK build,
+optimized release build and emulator pixel-parity smoke tests. Real-device
+video remains necessary to judge skin/headwear boundaries and tracking
+accuracy for all head poses.
 
 Both the full creator shader and the dedicated eye/funny fast shader consume the
 same uniforms and deformation function. The fast route still samples the source
