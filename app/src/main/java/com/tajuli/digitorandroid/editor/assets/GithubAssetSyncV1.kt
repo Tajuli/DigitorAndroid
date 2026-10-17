@@ -13,12 +13,14 @@ import java.net.URL
 /**
  * Downloads JSON presets over TLS from a public GitHub repository.
  *
- * The selected source is the dedicated public assets repository. During migration, the app
- * can use its original bundled-catalog repo as a fallback when the asset repo is empty or
- * temporarily unavailable. Catalogs are non-executable JSON; no remote native code is loaded.
+ * Prefers the dedicated DigitorAssets repository. During a repository rename, the app
+ * retains a temporary fallback to its previous name, then the original bundled catalog.
+ * Catalogs are non-executable JSON; no remote native code is loaded.
  */
 object GithubAssetSyncV1 {
     private const val BASE_URL =
+        "https://raw.githubusercontent.com/Tajuli/DigitorAssets/main"
+    private const val PRE_RENAME_BASE_URL =
         "https://raw.githubusercontent.com/Tajuli/Digitor-Assets-/main"
     private const val FALLBACK_BASE_URL =
         "https://raw.githubusercontent.com/Tajuli/DigitorAndroid/main/remote-assets"
@@ -52,7 +54,7 @@ object GithubAssetSyncV1 {
             var allSucceeded = true
             for (kind in categories) {
                 // One small, bounded, data-only file for each category.
-                val json = sequenceOf(BASE_URL, FALLBACK_BASE_URL)
+                val json = sequenceOf(BASE_URL, PRE_RENAME_BASE_URL, FALLBACK_BASE_URL)
                     .mapNotNull { base ->
                         runCatching { download("$base/$kind/presets.json") }.getOrNull()
                             ?.takeIf { RemoteAssetCatalogV1.isValid(kind, it) }
