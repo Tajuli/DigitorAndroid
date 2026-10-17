@@ -1,7 +1,8 @@
 package com.tajuli.digitorandroid.editor.processing
 
 import com.tajuli.digitorandroid.editor.model.ColorNode
-import com.tajuli.digitorandroid.editor.model.MotionTemplateCatalogV1
+import com.tajuli.digitorandroid.editor.model.CompositeTemplateCatalogV2
+import com.tajuli.digitorandroid.editor.model.resolveTimedCreatorEffectsV26
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.SpatialNodeGraphPlan
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -110,11 +111,12 @@ class CpuNodeEffectsProcessor(
             ?.coerceIn(0f, 1f)
             ?: 0f
 
-        val blur = amount("Blur")
-        val sharpen = amount("Sharpen")
-        val glow = amount("Glow")
-        val grain = amount("Film Grain")
-        val motion = CpuMotionTemplateV1.from(MotionTemplateCatalogV1.atSourceTime(effects, clip, sourceTimeUs))
+        val vector = resolveTimedCreatorEffectsV26(effects, clip, sourceTimeUs)
+        val blur = vector.blur
+        val sharpen = vector.sharpen
+        val glow = vector.glow
+        val grain = vector.grain
+        val motion = CpuMotionTemplateV1.from(CompositeTemplateCatalogV2.atSourceTime(effects, clip, sourceTimeUs))
         val radius = (1f + blur * 4f + glow * 2f).toInt().coerceIn(1, 7)
         val frameSeed = ((sourceTimeUs / 33_333L).toInt() * 31) xor node.id.hashCode()
         val stripe = (height / workerCount).coerceAtLeast(1)
