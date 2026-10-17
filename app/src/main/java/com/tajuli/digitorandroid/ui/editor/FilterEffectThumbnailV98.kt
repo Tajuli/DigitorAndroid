@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Modifier
@@ -15,6 +16,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import com.tajuli.digitorandroid.R
+import com.tajuli.digitorandroid.editor.assets.RemoteAssetCatalogV1
 import com.tajuli.digitorandroid.editor.render.FilterEffectThumbnailRendererV98
 
 @Composable
@@ -22,8 +24,9 @@ internal fun FilterThumbnailV98(
     presetId: String,
     modifier: Modifier = Modifier,
 ) {
+    val remoteAssets by RemoteAssetCatalogV1.state.collectAsState()
     ThumbnailV98(
-        cacheKey = "filter::" + presetId,
+        cacheKey = "filter::" + presetId + "::" + remoteAssets.revision,
         modifier = modifier,
     ) { context ->
         FilterEffectThumbnailRendererV98.renderFilter(context, presetId)
@@ -35,8 +38,9 @@ internal fun EffectThumbnailV98(
     effectName: String,
     modifier: Modifier = Modifier,
 ) {
+    val remoteAssets by RemoteAssetCatalogV1.state.collectAsState()
     ThumbnailV98(
-        cacheKey = "effect::" + effectName,
+        cacheKey = "effect::" + effectName + "::" + remoteAssets.revision,
         modifier = modifier,
     ) { context ->
         FilterEffectThumbnailRendererV98.renderEffect(context, effectName)
