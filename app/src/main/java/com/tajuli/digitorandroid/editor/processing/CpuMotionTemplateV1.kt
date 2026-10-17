@@ -1,6 +1,6 @@
 package com.tajuli.digitorandroid.editor.processing
 
-import com.tajuli.digitorandroid.editor.model.MotionTemplateFrameV1
+import com.tajuli.digitorandroid.editor.model.CompositeTemplateFrameV2
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.max
@@ -70,7 +70,7 @@ internal class CpuMotionTemplateV1 private constructor(
     }
 
     companion object {
-        fun from(frame: MotionTemplateFrameV1): CpuMotionTemplateV1 {
+        fun from(frame: CompositeTemplateFrameV2): CpuMotionTemplateV1 {
             val a = frame.amount.coerceIn(0f, 1f)
             val t = frame.progress.coerceIn(0f, 1f)
             val smooth = t * t * (3f - 2f * t)
