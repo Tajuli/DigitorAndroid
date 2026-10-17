@@ -28,6 +28,20 @@
         "rgbSplit": 0.31,
         "flicker": 0.14
       }
+    },
+    {
+      "name": "Test",
+      "category": "Motion",
+      "motion": {
+        "type": "BEAT_CIRCLE_V1",
+        "blurSeconds": 2,
+        "blurStrength": 0.95,
+        "shakeStrength": 0.18,
+        "zoomStrength": 0.018,
+        "zoomPeriodSeconds": 10,
+        "rippleStrength": 0.18,
+        "rippleIntervalSeconds": 4.8
+      }
     }
   ]
 }
