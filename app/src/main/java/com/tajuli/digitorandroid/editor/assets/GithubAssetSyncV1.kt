@@ -13,12 +13,14 @@ import java.net.URL
 /**
  * Downloads JSON presets over TLS from a public GitHub repository.
  *
- * This bootstrap path works until a dedicated asset repository is provisioned. To move assets,
- * point BASE_URL to https://raw.githubusercontent.com/<owner>/<asset-repo>/<branch>.
- * Catalogs are non-executable JSON. Native shaders/code cannot be loaded remotely.
+ * The selected source is the dedicated public assets repository. During migration, the app
+ * can use its original bundled-catalog repo as a fallback when the asset repo is empty or
+ * temporarily unavailable. Catalogs are non-executable JSON; no remote native code is loaded.
  */
 object GithubAssetSyncV1 {
     private const val BASE_URL =
+        "https://raw.githubusercontent.com/Tajuli/Digitor-Assets-/main"
+    private const val FALLBACK_BASE_URL =
         "https://raw.githubusercontent.com/Tajuli/DigitorAndroid/main/remote-assets"
     private const val MAX_BYTES = 256 * 1024
     private const val SUCCESS_INTERVAL_MS = 6L * 60 * 60 * 1000
@@ -50,8 +52,13 @@ object GithubAssetSyncV1 {
             var allSucceeded = true
             for (kind in categories) {
                 // One small, bounded, data-only file for each category.
-                val json = runCatching { download("$BASE_URL/$kind/presets.json") }.getOrNull()
-                if (json == null || !RemoteAssetCatalogV1.isValid(kind, json)) {
+                val json = sequenceOf(BASE_URL, FALLBACK_BASE_URL)
+                    .mapNotNull { base ->
+                        runCatching { download("$base/$kind/presets.json") }.getOrNull()
+                            ?.takeIf { RemoteAssetCatalogV1.isValid(kind, it) }
+                    }
+                    .firstOrNull()
+                if (json == null) {
                     allSucceeded = false
                     continue
                 }
