@@ -39,7 +39,7 @@ class RemoteAssetCatalogV1Test {
     @Test
     fun beatRippleEffectIsDownloadableAndFollowsTimeAndBeatStrength() {
         val testJson = """{"schemaVersion":1,"presets":[{
-            "name":"Test","category":"Motion",
+            "name":"Test","category":"Motion","vector":{"blur":0.18},
             "motion":{"type":"BEAT_CIRCLE_V1","blurSeconds":2,"blurStrength":0.95,
             "shakeStrength":0.18,"zoomStrength":0.018,"zoomPeriodSeconds":10,
             "rippleStrength":0.18,"rippleIntervalSeconds":4.8}
@@ -60,6 +60,9 @@ class RemoteAssetCatalogV1Test {
         assertEquals(20, opening.style)
         assertTrue(opening.blurReveal > middle.blurReveal)
         assertEquals(0f, clear.blurReveal, .00001f)
+        assertTrue(com.tajuli.digitorandroid.editor.model.resolveTimedCreatorEffectsV26(
+            listOf(NodeEffect(name = "Test")), clip, 2_000_000L,
+        ).isIdentity)
         assertEquals(0f, clear.shakeStrength, 0f)
         assertTrue(frame(3_400_000L, 0f).waveStrength > 0f)
         assertTrue(frame(3_400_000L, 0f).zoomScale > 1f)
