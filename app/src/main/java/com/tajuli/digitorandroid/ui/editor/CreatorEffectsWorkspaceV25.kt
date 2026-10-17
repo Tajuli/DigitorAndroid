@@ -142,6 +142,15 @@ fun CreatorEffectsWorkspace(
             )
         }
 
+        if (category == CompositeTemplateCatalogV2.VIDEO || category == CompositeTemplateCatalogV2.IMAGE) {
+            Text(
+                "COMBO TEMPLATES · one tap = multiple effects + three animated stages · drag the FX timeline bar to time the whole edit",
+                color = Fx25Accent,
+                fontSize = 8.sp,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            )
+        }
+
         if (faceTrackingCategory) {
             EyeAnalysisControls(clip) { ready ->
                 faceTrackingReady = ready
@@ -373,6 +382,20 @@ fun CreatorEffectsWorkspace(
                         color = Color.White.copy(alpha = .90f),
                         maxLines = 1,
                     )
+                    CompositeTemplateCatalogV2.find(preset.name)?.let { recipe ->
+                        Text(
+                            "COMBO · " + recipe.stages.size + " animated steps",
+                            fontSize = 7.sp,
+                            color = Fx25Accent,
+                            maxLines = 1,
+                        )
+                        Text(
+                            recipe.description,
+                            fontSize = 7.sp,
+                            color = Fx25Muted,
+                            maxLines = 2,
+                        )
+                    }
                 }
             }
         }
