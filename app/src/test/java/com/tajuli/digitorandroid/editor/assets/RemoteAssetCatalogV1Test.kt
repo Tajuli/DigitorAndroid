@@ -2,6 +2,7 @@ package com.tajuli.digitorandroid.editor.assets
 
 import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
 import com.tajuli.digitorandroid.editor.model.creatorFilterPresetV36
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -10,6 +11,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RemoteAssetCatalogV1Test {
+    // Keep the process-wide remote catalog empty between tests so built-in catalog
+    // cardinality tests are order independent.
+    @After
+    fun resetRemotePresets() {
+        val empty = """{"schemaVersion":1,"presets":[]}"""
+        RemoteAssetCatalogV1.install("transitions", empty)
+        RemoteAssetCatalogV1.install("effects", empty)
+        RemoteAssetCatalogV1.install("filters", empty)
+    }
+
     @Test
     fun remoteEffectsBecomeNativeRenderRecipes() {
         val json = """{"schemaVersion":1,"presets":[
