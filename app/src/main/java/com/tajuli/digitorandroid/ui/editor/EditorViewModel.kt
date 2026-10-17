@@ -946,10 +946,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /** Motion templates are mutually exclusive on a node; other creator effects stay untouched. */
-    fun applyMotionTemplateToSelectedNodeV1(name: String) = updateSelectedEditableNode { node ->
-        if (com.tajuli.digitorandroid.editor.model.MotionTemplateCatalogV1.find(name) == null) node
+    fun applyCompositeTemplateToSelectedNodeV2(name: String) = updateSelectedEditableNode { node ->
+        if (com.tajuli.digitorandroid.editor.model.CompositeTemplateCatalogV2.find(name) == null) node
         else node.copy(effects = node.effects.filterNot {
-            com.tajuli.digitorandroid.editor.model.MotionTemplateCatalogV1.find(it.name) != null
+            com.tajuli.digitorandroid.editor.model.CompositeTemplateCatalogV2.find(it.name) != null
         } + NodeEffect(name = name))
     }
 
