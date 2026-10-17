@@ -319,6 +319,11 @@ internal fun CapCutTransitionSheet(
                 }
             }
 
+            RemoteCategoryDownloadControlV2(
+                kind = "transitions",
+                folder = category.label,
+            )
+
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

@@ -181,6 +181,10 @@ fun CreatorFiltersWorkspace(
                 }
             }
         }
+        RemoteCategoryDownloadControlV2(
+            kind = "filters",
+            folder = if (group == CreatorFilterGroupV36.LOOKS) "Looks" else "Beauty",
+        )
         LazyRow(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(7.dp),

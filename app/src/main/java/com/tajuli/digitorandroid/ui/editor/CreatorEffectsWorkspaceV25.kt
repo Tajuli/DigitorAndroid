@@ -134,6 +134,8 @@ fun CreatorEffectsWorkspace(
             }
         }
 
+        RemoteCategoryDownloadControlV2(kind = "effects", folder = category)
+
         if (wrongMotionMedia) {
             Text(
                 if (clip.isImageV21) "Video Effect templates require a video clip."
