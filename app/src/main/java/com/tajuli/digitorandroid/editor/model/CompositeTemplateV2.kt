@@ -1,18 +1,17 @@
 package com.tajuli.digitorandroid.editor.model
 
-/**
- * A template is one editable timeline effect that orchestrates several existing visual
- * effects and camera moves across multiple timed phases. It is NOT a list of isolated
- * one-effect shortcuts. A template is persisted as a single NodeEffect in saved projects.
- */
+import kotlin.math.PI
+import kotlin.math.exp
+import kotlin.math.floor
+import kotlin.math.sin
+
+/** A single durable FX timeline bar drives the same sequential look on video or a still photo. */
 data class CompositeEffectLayerV2(val effectName: String, val amount: Float)
 
 data class CompositeTemplateStageV2(
-    /** Exclusive end fraction of the effect timeline bar, except the final stage. */
-    val end: Float,
-    val motionStyle: Int,
-    val motionAmount: Float,
-    val layers: List<CompositeEffectLayerV2>,
+    val label: String,
+    val startSeconds: Int,
+    val endSeconds: Int,
 )
 
 data class CompositeEffectTemplateV2(
@@ -26,121 +25,133 @@ data class CompositeTemplateFrameV2(
     val style: Int = 0,
     val amount: Float = 0f,
     val progress: Float = 0f,
+    /** Elapsed in OUTPUT seconds, not original source seconds (works on retimed clips). */
     val elapsedSeconds: Float = 0f,
+    val zoomScale: Float = 1f,
+    val blurReveal: Float = 0f,
+    val waveProgress: Float = 0f,
+    val waveStrength: Float = 0f,
+    val shakeStrength: Float = 0f,
     val layers: List<CompositeEffectLayerV2> = emptyList(),
 ) {
     val active: Boolean get() = style != 0 && amount > 0f
 }
 
-/** Original Digitor multi-effect edit recipes; never depends on external video templates. */
+/**
+ * One template per media type, intentionally. The old single-effect and multi-card
+ * galleries are removed from these categories; all ordinary creator-effect families
+ * outside these two template categories remain available.
+ *
+ * Timeline:
+ *  0..2 sec   strong blur progressively clears (only once)
+ *  2..7 sec   clean frame + one top-left -> bottom-right travelling wave
+ *  7..12 sec  clean frame + two distinct shake impulses
+ *  12..17 ... alternate the wave and shake sections in 5-second windows.
+ * A very slow, seamless zoom-in/out oscillation continues across ALL sections.
+ */
 object CompositeTemplateCatalogV2 {
     const val VIDEO = "Video Effect"
     const val IMAGE = "Image Effect"
+    const val VIDEO_NAME = "Signature Motion"
+    const val IMAGE_NAME = "Signature Photo Motion"
+    const val WAVE_SECONDS = 5f
+    const val OPENING_SECONDS = 2f
+    const val ZOOM_PERIOD_SECONDS = 16f
 
-    private fun fx(name: String, amount: Float) = CompositeEffectLayerV2(name, amount)
-    private fun stage(end: Float, motion: Int, motionAmount: Float, vararg layers: CompositeEffectLayerV2) =
-        CompositeTemplateStageV2(end, motion, motionAmount, layers.toList())
-    private fun t(
-        name: String,
-        category: String,
-        description: String,
-        vararg stages: CompositeTemplateStageV2,
-    ) = CompositeEffectTemplateV2(name, category, description, stages.toList())
-
-    val presets: List<CompositeEffectTemplateV2> = listOf(
-        t("Fashion Velocity", VIDEO, "Whip + chromatic blur, cinematic hold, flash finish",
-            stage(.23f, 2, .85f, fx("Zoom Blur", .75f), fx("RGB Split", .48f), fx("Motion Blur", .62f)),
-            stage(.72f, 1, .42f, fx("HDR Pop", .55f), fx("Dreamy", .27f), fx("Vignette", .23f)),
-            stage(1f, 4, .76f, fx("Glow", .55f), fx("Chromatic", .38f), fx("Sharpen", .24f))),
-        t("Beat Drop Cinema", VIDEO, "Slow focus builds to a shake, zoom blur and beat flash",
-            stage(.37f, 1, .31f, fx("Soft Focus", .55f), fx("Black Mist", .27f), fx("Glow", .20f)),
-            stage(.72f, 3, .73f, fx("Zoom Blur", .68f), fx("RGB Split", .32f), fx("HDR Pop", .31f)),
-            stage(1f, 4, .86f, fx("Film Burn", .48f), fx("Sharpen", .41f), fx("Ghost Trail", .19f))),
-        t("Dreamy Slowmo", VIDEO, "Smooth camera drift, bloom, soft-focus glow and gentle echo",
-            stage(.38f, 11, .28f, fx("Dreamy", .68f), fx("Soft Focus", .41f), fx("Black Mist", .21f)),
-            stage(.77f, 5, .47f, fx("Glow", .52f), fx("Ghost Trail", .34f), fx("Sepia Fade", .20f)),
-            stage(1f, 12, .40f, fx("Dreamy", .34f), fx("Sharpen", .34f), fx("Vignette", .19f))),
-        t("Neon Glitch Rush", VIDEO, "RGB channel drift, glitch bursts, scanlines and zoom echo",
-            stage(.26f, 2, .70f, fx("Digital Glitch", .62f), fx("RGB Split", .55f), fx("Zoom Blur", .42f)),
-            stage(.68f, 5, .56f, fx("Ghost Trail", .62f), fx("Chromatic", .62f), fx("Glow", .43f)),
-            stage(1f, 3, .61f, fx("VHS", .52f), fx("Jitter", .42f), fx("Flash", .48f))),
-        t("Color Reveal Story", VIDEO, "Monochrome opening, soft zoom reveal, then vivid flare",
-            stage(.42f, 6, .88f, fx("Old Film", .33f), fx("Vignette", .44f), fx("Soft Focus", .24f)),
-            stage(.78f, 1, .41f, fx("HDR Pop", .62f), fx("Glow", .37f), fx("Sharpen", .26f)),
-            stage(1f, 4, .51f, fx("Light Leak", .36f), fx("Chromatic", .25f), fx("Glow", .39f))),
-        t("Split Screen Beat", VIDEO, "Four-panel burst followed by a zoom and flicker echo",
-            stage(.43f, 7, .81f, fx("RGB Split", .29f), fx("Glow", .24f), fx("Sharpen", .41f)),
-            stage(.76f, 2, .61f, fx("Zoom Blur", .67f), fx("Digital Glitch", .27f), fx("Ghost Trail", .30f)),
-            stage(1f, 4, .61f, fx("Strobe", .39f), fx("Chromatic", .38f), fx("HDR Pop", .26f))),
-        t("Retro Music Video", VIDEO, "Vintage look layered over rhythmic camera and flash",
-            stage(.34f, 11, .27f, fx("Old Film", .76f), fx("VHS", .38f), fx("Vignette", .22f)),
-            stage(.76f, 3, .43f, fx("Retro Noise", .55f), fx("Light Leak", .32f), fx("Ghost Trail", .22f)),
-            stage(1f, 4, .47f, fx("Film Burn", .46f), fx("Glow", .26f), fx("Scan Lines", .24f))),
-        t("Cinematic Photo Story", IMAGE, "Slow Ken Burns, focus bloom and a warm photographic finish",
-            stage(.34f, 11, .63f, fx("Soft Focus", .55f), fx("Dreamy", .37f), fx("Vignette", .26f)),
-            stage(.73f, 13, .35f, fx("HDR Pop", .42f), fx("Glow", .25f), fx("Sepia Fade", .33f)),
-            stage(1f, 12, .40f, fx("Light Leak", .33f), fx("Sharpen", .26f), fx("Black Mist", .24f))),
-        t("Vintage Memory Reel", IMAGE, "A moving photograph with analog dust, warmth and film burn",
-            stage(.33f, 11, .45f, fx("Old Film", .69f), fx("Film Grain", .39f), fx("Vignette", .32f)),
-            stage(.77f, 14, .29f, fx("Super 8", .45f), fx("Sepia Fade", .38f), fx("Soft Focus", .26f)),
-            stage(1f, 16, .46f, fx("Film Burn", .47f), fx("Retro Noise", .26f), fx("Glow", .25f))),
-        t("Portrait Dream Glow", IMAGE, "Floating portrait, luminous soft focus and glowing reveal",
-            stage(.39f, 13, .36f, fx("Dreamy", .61f), fx("Soft Focus", .40f), fx("Black Mist", .29f)),
-            stage(.78f, 12, .50f, fx("Glow", .63f), fx("HDR Pop", .23f), fx("Vignette", .18f)),
-            stage(1f, 16, .32f, fx("Light Leak", .44f), fx("Sharpen", .29f), fx("Glow", .25f))),
-        t("Photo Collage Rush", IMAGE, "Animated tiled reveal, pan zoom and vivid glitch highlight",
-            stage(.45f, 17, .81f, fx("RGB Split", .34f), fx("HDR Pop", .35f), fx("Sharpen", .36f)),
-            stage(.78f, 15, .53f, fx("Zoom Blur", .49f), fx("Glow", .29f), fx("Chromatic", .33f)),
-            stage(1f, 16, .61f, fx("Digital Glitch", .33f), fx("Flash", .30f), fx("Sharpen", .23f))),
-        t("Golden Hour Motion", IMAGE, "Gentle pan, warm film softness and light leak finale",
-            stage(.39f, 11, .44f, fx("Dreamy", .40f), fx("Sepia Fade", .60f), fx("Soft Focus", .28f)),
-            stage(.76f, 13, .30f, fx("Light Leak", .52f), fx("Glow", .30f), fx("Vignette", .23f)),
-            stage(1f, 12, .30f, fx("Fade Film", .40f), fx("HDR Pop", .25f), fx("Sharpen", .22f))),
-        t("Photo Beat Flash", IMAGE, "Beat-synced photo push, chromatic offset and strobe finale",
-            stage(.35f, 15, .56f, fx("Zoom Blur", .44f), fx("Chromatic", .35f), fx("Glow", .27f)),
-            stage(.76f, 12, .60f, fx("RGB Split", .46f), fx("HDR Pop", .49f), fx("Ghost Trail", .24f)),
-            stage(1f, 16, .73f, fx("Flash", .53f), fx("Sharpen", .29f), fx("Glow", .43f))),
-        t("Film Frame Journey", IMAGE, "Travel-photo parallax, analog flicker and a vignette fade",
-            stage(.33f, 14, .29f, fx("90s Cam", .52f), fx("Film Grain", .32f), fx("Vignette", .44f)),
-            stage(.72f, 13, .42f, fx("Vintage Lens", .44f), fx("Light Leak", .22f), fx("Soft Focus", .19f)),
-            stage(1f, 11, .39f, fx("Fade Film", .55f), fx("Old Film", .25f), fx("Glow", .20f))),
+    private val sequence = listOf(
+        CompositeTemplateStageV2("Heavy blur → clean", 0, 2),
+        CompositeTemplateStageV2("Clean + corner-to-corner wave", 2, 7),
+        CompositeTemplateStageV2("Clean + two shake pulses", 7, 12),
+        CompositeTemplateStageV2("Then repeat wave / double-shake every 5s", 12, 17),
     )
 
+    val presets: List<CompositeEffectTemplateV2> = listOf(
+        CompositeEffectTemplateV2(
+            VIDEO_NAME, VIDEO,
+            "2s blur reveal · 5s diagonal wave · 5s double shake · repeating beats · continuous slow zoom",
+            sequence,
+        ),
+        CompositeEffectTemplateV2(
+            IMAGE_NAME, IMAGE,
+            "Animated photo: 2s blur reveal · 5s diagonal wave · 5s double shake · continuous slow zoom",
+            sequence,
+        ),
+    )
     private val byName = presets.associateBy { it.name.lowercase() }
     fun find(name: String): CompositeEffectTemplateV2? = byName[name.lowercase()]
     fun forCategory(category: String): List<CompositeEffectTemplateV2> =
         presets.filter { it.category == category }
 
-    /** Uses the user's existing V26 effect bar, including trims and source-time retiming. */
+    /** Pure frame schedule shared by GPU preview/export and the CPU rendering fallback. */
     fun atSourceTime(
         effects: List<NodeEffect>,
         clip: TimelineClip,
         sourceTimeUs: Long,
     ): CompositeTemplateFrameV2 {
         val chosen = effects.lastOrNull { effect ->
-            find(effect.name)?.let { template ->
+            val template = find(effect.name)
+            template != null &&
                 template.category == (if (clip.isImageV21) IMAGE else VIDEO) &&
-                    effect.activeAtSourceTimeV26(clip, sourceTimeUs)
-            } == true
+                effect.activeAtSourceTimeV26(clip, sourceTimeUs)
         } ?: return CompositeTemplateFrameV2()
-        val preset = find(chosen.name) ?: return CompositeTemplateFrameV2()
-        val start = chosen.resolvedSourceStartUsV26(clip)
-        val end = chosen.resolvedSourceEndUsV26(clip)
-        val length = (end - start).coerceAtLeast(1L)
-        val elapsed = (sourceTimeUs - start).coerceAtLeast(0L)
-        val overall = (elapsed.toDouble() / length).toFloat().coerceIn(0f, 1f)
-        val index = preset.stages.indexOfFirst { overall < it.end }.let {
-            if (it >= 0) it else preset.stages.lastIndex
+
+        val startSourceUs = chosen.resolvedSourceStartUsV26(clip)
+        // Use the displayed timeline's clock so a curve-retimed clip still has a 2s
+        // opening and 5s sections. The bound stays anchored in SOURCE time for trims.
+        val elapsedUs = (clip.outputTimeForSource(sourceTimeUs) -
+            clip.outputTimeForSource(startSourceUs)).coerceAtLeast(0L)
+        val seconds = elapsedUs / 1_000_000f
+        val a = chosen.amount.coerceIn(0f, 1f)
+        val opening = (seconds / OPENING_SECONDS).coerceIn(0f, 1f)
+        val easedOpening = opening * opening * (3f - 2f * opening)
+        val blur = (1f - easedOpening) * a
+
+        // One gentle zoom cycle every 16 seconds; 1.04..1.13 at full intensity.
+        val zoomCycle = sin(2.0 * PI * seconds / ZOOM_PERIOD_SECONDS - PI / 2.0)
+        val zoom = 1f + a * (.04f + .09f * ((1f + zoomCycle.toFloat()) * .5f))
+
+        var waveProgress = 0f
+        var waveStrength = 0f
+        var shakeStrength = 0f
+        var progress = opening
+        if (seconds >= OPENING_SECONDS) {
+            val afterIntro = seconds - OPENING_SECONDS
+            val slot = floor(afterIntro / WAVE_SECONDS).toInt()
+            val inSlot = afterIntro - slot * WAVE_SECONDS
+            progress = (inSlot / WAVE_SECONDS).coerceIn(0f, 1f)
+            if (slot % 2 == 0) {
+                // One sweeping front in the 5-second clean section (0.6s..3.8s).
+                val waveT = ((inSlot - .6f) / 3.2f).coerceIn(0f, 1f)
+                val fadeIn = (inSlot / .6f).coerceIn(0f, 1f)
+                val fadeOut = ((WAVE_SECONDS - inSlot) / 1.2f).coerceIn(0f, 1f)
+                waveProgress = waveT
+                waveStrength = if (inSlot in .6f..3.8f) a * fadeIn * fadeOut else 0f
+            } else {
+                // Exactly two tight separate hits, at 1.45s and 3.45s of this slot.
+                fun impulse(center: Float): Float {
+                    val offset = (inSlot - center) / .17f
+                    return exp((-offset * offset).toDouble()).toFloat()
+                }
+                shakeStrength = (a * (impulse(1.45f) + impulse(3.45f))).coerceIn(0f, 1f)
+            }
         }
-        val stage = preset.stages[index]
-        val stageStart = if (index == 0) 0f else preset.stages[index - 1].end
-        val stageFraction = (stage.end - stageStart).coerceAtLeast(.001f)
+
         return CompositeTemplateFrameV2(
-            style = stage.motionStyle,
-            amount = (chosen.amount * stage.motionAmount).coerceIn(0f, 1f),
-            progress = ((overall - stageStart) / stageFraction).coerceIn(0f, 1f),
-            elapsedSeconds = (elapsed / 1_000_000f - stageStart * length / 1_000_000f).coerceAtLeast(0f),
-            layers = stage.layers.map { it.copy(amount = (it.amount * chosen.amount).coerceIn(0f, 1f)) },
+            style = if (clip.isImageV21) 19 else 18,
+            amount = a,
+            progress = progress,
+            elapsedSeconds = seconds,
+            zoomScale = zoom,
+            blurReveal = blur,
+            waveProgress = waveProgress,
+            waveStrength = waveStrength,
+            shakeStrength = shakeStrength,
+            // Existing creator shader also contributes its normal soft focus
+            // during the opening; it decays completely before the clean section.
+            layers = if (blur > 0.0001f) listOf(
+                CompositeEffectLayerV2("Blur", blur * .86f),
+                CompositeEffectLayerV2("Soft Focus", blur * .38f),
+            ) else emptyList(),
         )
     }
 }
