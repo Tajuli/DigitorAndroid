@@ -41,6 +41,9 @@
         "zoomPeriodSeconds": 10,
         "rippleStrength": 0.18,
         "rippleIntervalSeconds": 4.8
+      },
+      "vector": {
+        "blur": 0.18
       }
     }
   ]
