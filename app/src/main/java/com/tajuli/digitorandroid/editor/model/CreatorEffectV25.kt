@@ -151,6 +151,10 @@ fun resolveCreatorEffectsV25(effects: List<NodeEffect>): CreatorEffectVectorV25 
     var out = CreatorEffectVectorV25()
     effects.asSequence().filter { it.enabled && it.amount > 0f }.forEach { effect ->
         val preset = CreatorEffectCatalogV25.find(effect.name) ?: return@forEach
+        // New clients animate this recipe through CompositeTemplateCatalogV2.
+        // Its small static vector exists only so old catalog parsers can accept
+        // the JSON without dropping every downloaded effect in the file.
+        if (preset.remoteMotion != null) return@forEach
         val a = effect.amount.coerceIn(0f, 1f)
         val v = preset.vector
         out = out.copy(
