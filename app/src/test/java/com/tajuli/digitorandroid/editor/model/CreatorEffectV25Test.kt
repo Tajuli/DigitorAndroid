@@ -11,8 +11,11 @@ class CreatorEffectV25Test {
         val presets = CreatorEffectCatalogV25.presets
         assertEquals(presets.size, presets.map { it.name.lowercase() }.toSet().size)
         assertEquals(listOf("Video Effect", "Image Effect", "Basic", "Glitch", "Retro", "Lens", "Motion", "Body", "Eyes", "Funny Faces", "Glowing Lines", "Stroke", "Clone"), CreatorEffectCatalogV25.categories)
-        assertEquals(7, CreatorEffectCatalogV25.inCategory("Video Effect").size)
-        assertEquals(7, CreatorEffectCatalogV25.inCategory("Image Effect").size)
+        assertEquals(1, CreatorEffectCatalogV25.inCategory("Video Effect").size)
+        assertEquals(1, CreatorEffectCatalogV25.inCategory("Image Effect").size)
+        assertEquals("Signature Motion", CreatorEffectCatalogV25.inCategory("Video Effect").single().name)
+        assertEquals("Signature Photo Motion", CreatorEffectCatalogV25.inCategory("Image Effect").single().name)
+        assertTrue(CreatorEffectCatalogV25.find("Fashion Velocity") == null)
         assertEquals(11, CreatorEffectCatalogV25.inCategory("Basic").size)
         assertEquals(10, CreatorEffectCatalogV25.inCategory("Glitch").size)
         assertEquals(10, CreatorEffectCatalogV25.inCategory("Retro").size)
