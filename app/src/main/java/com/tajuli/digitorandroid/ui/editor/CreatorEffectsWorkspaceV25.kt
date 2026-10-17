@@ -42,6 +42,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
+import com.tajuli.digitorandroid.editor.model.CompositeTemplateCatalogV2
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.NodeKind
@@ -80,13 +81,19 @@ fun CreatorEffectsWorkspace(
     val selectedEffectId = timelineSelection
         ?.takeIf { it.clipId == clip.id && it.nodeId == node.id }
         ?.effectId
-    var category by remember { mutableStateOf("Basic") }
+    var category by remember(clip.id, clip.isImageV21) {
+        mutableStateOf(if (clip.isImageV21) CompositeTemplateCatalogV2.IMAGE else CompositeTemplateCatalogV2.VIDEO)
+    }
     var bodySettingsExpanded by remember(clip.id) { mutableStateOf(false) }
     var faceTrackingReady by remember(clip.id, clip.uri, clip.sourceInUs, clip.sourceOutUs) {
         mutableStateOf(false)
     }
     val faceTrackingCategory = category == "Eyes" || category == "Funny Faces"
-    val categoryPresets = remember(category) { CreatorEffectCatalogV25.inCategory(category) }
+    val wrongMotionMedia = (category == CompositeTemplateCatalogV2.VIDEO && clip.isImageV21) ||
+        (category == CompositeTemplateCatalogV2.IMAGE && !clip.isImageV21)
+    val categoryPresets = remember(category, clip.isImageV21) {
+        if (wrongMotionMedia) emptyList() else CreatorEffectCatalogV25.inCategory(category)
+    }
     val nodeEffects = node.visibleEffects()
     val selectedEffect = nodeEffects.firstOrNull { it.id == selectedEffectId }
     val selectedEffectName = selectedEffect?.name
@@ -123,6 +130,25 @@ fun CreatorEffectsWorkspace(
                     Text(name, fontSize = 8.sp, color = if (selected) Fx25Accent else Color.White.copy(alpha = .82f))
                 }
             }
+        }
+
+        if (wrongMotionMedia) {
+            Text(
+                if (clip.isImageV21) "Video Effect templates require a video clip."
+                else "Image Effect templates require a photo clip.",
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                fontSize = 9.sp,
+                color = Fx25Muted,
+            )
+        }
+
+        if (category == CompositeTemplateCatalogV2.VIDEO || category == CompositeTemplateCatalogV2.IMAGE) {
+            Text(
+                "SIGNATURE MOTION · 2s blur → 5s wave → 5s double shake → repeat · slow zoom throughout",
+                color = Fx25Accent,
+                fontSize = 8.sp,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            )
         }
 
         if (faceTrackingCategory) {
@@ -316,7 +342,11 @@ fun CreatorEffectsWorkspace(
                                 )
                                 PreviewProjectRegistry.update(vm.state.value.project)
                             } else {
-                                vm.addEffectToSelectedNode(preset.name)
+                                if (CompositeTemplateCatalogV2.find(preset.name) != null) {
+                                    vm.applyCompositeTemplateToSelectedNodeV2(preset.name)
+                                } else {
+                                    vm.addEffectToSelectedNode(preset.name)
+                                }
                                 val updatedClip = vm.state.value.project.clip(clip.id)
                                 val updatedNode = updatedClip
                                     ?.nodeGraph?.nodes?.firstOrNull { it.id == node.id }
@@ -352,6 +382,20 @@ fun CreatorEffectsWorkspace(
                         color = Color.White.copy(alpha = .90f),
                         maxLines = 1,
                     )
+                    CompositeTemplateCatalogV2.find(preset.name)?.let { recipe ->
+                        Text(
+                            "ONE TEMPLATE · repeating timed sequence",
+                            fontSize = 7.sp,
+                            color = Fx25Accent,
+                            maxLines = 1,
+                        )
+                        Text(
+                            recipe.description,
+                            fontSize = 7.sp,
+                            color = Fx25Muted,
+                            maxLines = 2,
+                        )
+                    }
                 }
             }
         }
@@ -408,11 +452,24 @@ fun CreatorEffectsWorkspace(
                 if (selectedEffect == null) {
                     "Tap an effect thumbnail to select it, then adjust its amount here."
                 } else {
-                    "Effect amount control. Duration and timeline controls remain below."
+                    "One strength slider controls the full template. Resize its single FX bar to change duration."
                 },
                 fontSize = 7.sp,
                 color = Fx25Muted,
             )
+            selectedEffect?.let { effect ->
+                CompositeTemplateCatalogV2.find(effect.name)?.let { recipe ->
+                    recipe.stages.forEachIndexed { index, step ->
+                        Text(
+                            "Step " + (index + 1) + " · " + step.startSeconds + "–" + step.endSeconds +
+                                "s · " + step.label,
+                            fontSize = 7.sp,
+                            color = Fx25Muted,
+                            maxLines = 2,
+                        )
+                    }
+                }
+            }
         }
 
         HorizontalDivider(color = Fx25Divider)

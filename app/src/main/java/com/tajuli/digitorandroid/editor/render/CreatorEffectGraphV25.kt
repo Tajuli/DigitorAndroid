@@ -51,6 +51,7 @@ internal class CreatorEffectGraphV25 private constructor(
             }
             val hasFx = editableNodes.any { node ->
                 !resolveCreatorEffectsV25(node.visibleEffects()).isIdentity ||
+                    node.visibleEffects().any { it.enabled && it.amount > 0f && CompositeTemplateCatalogV2.find(it.name) != null } ||
                     node.visibleEffects().any { EyeEffectCatalog.contains(it.name) } ||
                     clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
             }
@@ -195,14 +196,15 @@ internal class CreatorEffectGraphV25 private constructor(
                                 currentNode.visibleEffects()
                             }
                             val vector = resolveTimedCreatorEffectsV26(effectsWithTiming, currentClip, sourceUs)
+                            val motion = CompositeTemplateCatalogV2.atSourceTime(effectsWithTiming, currentClip, sourceUs)
                             val eyes = resolveEyeEffects(effectsWithTiming, currentClip, sourceUs)
                             val hasActiveEyes = eyePose != null && eyes.any { it != 0f }
-                            if (vector.isIdentity && !hasActiveEyes) {
+                            if (vector.isIdentity && !hasActiveEyes && !motion.active) {
                                 slotTextures[operation.slot] = input
                             } else {
                                 val (texture, fbo) = nextScratch()
                                 focus(fbo)
-                                if (vector.isIdentity && hasActiveEyes) {
+                                if (vector.isIdentity && hasActiveEyes && !motion.active) {
                                     // Fast path: eye/funny-only nodes do not need the creator shader's
                                     // 9-tap blur/denoise neighborhood, grain, RGB split, lens, zoom,
                                     // ghost or other inactive work. Keep identical eye/funny math with
@@ -220,6 +222,7 @@ internal class CreatorEffectGraphV25 private constructor(
                                         nodeProgram,
                                         input,
                                         vector,
+                                        motion,
                                         evaluated.id,
                                         sourceUs,
                                         eyes,
@@ -428,6 +431,7 @@ internal class CreatorEffectGraphV25 private constructor(
             program: GlProgram,
             inputTexture: Int,
             v: CreatorEffectVectorV25,
+            motion: CompositeTemplateFrameV2,
             nodeId: String,
             sourceUs: Long,
             eyes: FloatArray,
@@ -452,6 +456,14 @@ internal class CreatorEffectGraphV25 private constructor(
             program.setFloatUniform("uFlicker", v.flicker)
             program.setFloatUniform("uWarm", v.warm)
             program.setFloatUniform("uDenoise", v.denoise)
+            program.setFloatUniform("uMotionStyle", motion.style.toFloat())
+            program.setFloatUniform("uMotionAmount", motion.amount)
+            program.setFloatUniform("uMotionElapsed", motion.elapsedSeconds)
+            program.setFloatUniform("uMotionZoom", motion.zoomScale)
+            program.setFloatUniform("uMotionBlurReveal", motion.blurReveal)
+            program.setFloatUniform("uMotionWaveProgress", motion.waveProgress)
+            program.setFloatUniform("uMotionWaveStrength", motion.waveStrength)
+            program.setFloatUniform("uMotionShakeStrength", motion.shakeStrength)
             program.setFloatUniform(
                 "uTime",
                 (sourceUs % 10_000_000L).toFloat() / 1_000_000f,
@@ -562,6 +574,14 @@ internal class CreatorEffectGraphV25 private constructor(
                 uniform float uDenoise;
                 uniform float uTime;
                 uniform float uSeed;
+                uniform float uMotionStyle;
+                uniform float uMotionAmount;
+                uniform float uMotionElapsed;
+                uniform float uMotionZoom;
+                uniform float uMotionBlurReveal;
+                uniform float uMotionWaveProgress;
+                uniform float uMotionWaveStrength;
+                uniform float uMotionShakeStrength;
                 varying vec2 vTexCoord;
 
                 float hash21(vec2 p) {
@@ -593,8 +613,34 @@ internal class CreatorEffectGraphV25 private constructor(
                     return clamp(uv, 0.001, 0.999);
                 }
 
+
+                // Animated camera moves are evaluated against the effect's V26 timeline span.
+                // One pass is shared by real-time GPU preview and Media3 GPU export.
+                // Signature composite motion only: 16s slow zoom throughout the
+                // entire bar, one diagonal ripple per wave slot, and two distinct
+                // shake impulses in the next five-second clean slot.
+                vec2 motionUv(vec2 uv) {
+                    if (uMotionStyle < 17.5 || uMotionAmount <= 0.001) return uv;
+                    vec2 p = (uv - vec2(0.5)) / max(uMotionZoom, 1.0) + vec2(0.5);
+
+                    if (uMotionWaveStrength > 0.001) {
+                        float diagonal = uv.x + uv.y - 2.0 * uMotionWaveProgress;
+                        float band = exp(-38.0 * diagonal * diagonal);
+                        float ripple = sin(diagonal * 29.0) * band *
+                            0.026 * uMotionWaveStrength;
+                        p += vec2(ripple, -ripple);
+                    }
+                    if (uMotionShakeStrength > 0.001) {
+                        p += vec2(
+                            sin(uMotionElapsed * 98.0) * 0.026,
+                            cos(uMotionElapsed * 83.0) * 0.020
+                        ) * uMotionShakeStrength;
+                    }
+                    return clamp(p, 0.001, 0.999);
+                }
+
                 void main() {
-                    vec2 uv = funnyUv(creatorUv(vTexCoord));
+                    vec2 uv = funnyUv(creatorUv(motionUv(vTexCoord)));
                     vec4 center = texture2D(uTexSampler, uv);
                     float radius = 1.0 + uBlur * 4.0 + uGlow * 1.7;
                     vec2 o = uTexelSize * radius;
@@ -687,6 +733,30 @@ internal class CreatorEffectGraphV25 private constructor(
                     rgb *= 1.0 + (flick - 0.5) * uFlicker * 0.12;
                     rgb += vec3(flash * uFlicker * 0.22);
 
+                    // Strong optical blur fades smoothly to a clean frame exactly
+                    // over the first 2 output seconds. After that only the local
+                    // wave/shake event and the continuous zoom alter the image.
+                    if (uMotionStyle >= 17.5 && uMotionBlurReveal > 0.001) {
+                        vec2 radius = vec2(0.035) * (0.32 + 0.68 * uMotionBlurReveal);
+                        vec3 heavy = texture2D(uTexSampler, uv).rgb * 2.0;
+                        heavy += texture2D(uTexSampler, clamp(uv + vec2(radius.x, 0.0), 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv - vec2(radius.x, 0.0), 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv + vec2(0.0, radius.y), 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv - vec2(0.0, radius.y), 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv + radius, 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv - radius, 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv + vec2(radius.x, -radius.y), 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv + vec2(-radius.x, radius.y), 0.001, 0.999)).rgb;
+                        vec2 outer = radius * 1.7;
+                        heavy += texture2D(uTexSampler, clamp(uv + outer, 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv - outer, 0.001, 0.999)).rgb;
+                        rgb = mix(rgb, heavy / 12.0, clamp(uMotionBlurReveal * 0.96, 0.0, 0.96));
+                    }
+                    if (uMotionStyle >= 17.5 && uMotionWaveStrength > 0.001) {
+                        float diagonal = vTexCoord.x + vTexCoord.y - 2.0 * uMotionWaveProgress;
+                        float waveBand = exp(-48.0 * diagonal * diagonal);
+                        rgb += vec3(0.035 * waveBand * uMotionWaveStrength);
+                    }
                     rgb = applyEyeEffects(rgb, uv);
                     gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), center.a);
                 }

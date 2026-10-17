@@ -1,6 +1,8 @@
 package com.tajuli.digitorandroid.editor.processing
 
 import com.tajuli.digitorandroid.editor.model.ColorNode
+import com.tajuli.digitorandroid.editor.model.CompositeTemplateCatalogV2
+import com.tajuli.digitorandroid.editor.model.resolveTimedCreatorEffectsV26
 import com.tajuli.digitorandroid.editor.model.NodeKind
 import com.tajuli.digitorandroid.editor.model.SpatialNodeGraphPlan
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -49,7 +51,7 @@ class CpuNodeEffectsProcessor(
                         slots[operation.slot] = input
                     } else {
                         val output = IntArray(width * height)
-                        renderNode(input, output, width, height, node, sourceTimeUs)
+                        renderNode(input, output, width, height, node, clip, sourceTimeUs)
                         slots[operation.slot] = output
                     }
                 }
@@ -99,19 +101,29 @@ class CpuNodeEffectsProcessor(
         width: Int,
         height: Int,
         node: ColorNode,
+        clip: TimelineClip,
         sourceTimeUs: Long,
     ) {
         val effects = node.visibleEffects()
-        fun amount(name: String): Float = effects
-            .firstOrNull { it.name.equals(name, ignoreCase = true) && it.enabled }
-            ?.amount
-            ?.coerceIn(0f, 1f)
-            ?: 0f
 
-        val blur = amount("Blur")
-        val sharpen = amount("Sharpen")
-        val glow = amount("Glow")
-        val grain = amount("Film Grain")
+        val vector = resolveTimedCreatorEffectsV26(effects, clip, sourceTimeUs)
+        val blur = vector.blur
+        val sharpen = vector.sharpen
+        val glow = vector.glow
+        val grain = vector.grain
+        val motion = CpuMotionTemplateV1.from(CompositeTemplateCatalogV2.atSourceTime(effects, clip, sourceTimeUs))
+        val reveal = motion.blurReveal.coerceIn(0f, 1f)
+        val heavyRadiusX = (width * .035f * (.32f + .68f * reveal)).toInt().coerceAtLeast(1)
+        val heavyRadiusY = (height * .035f * (.32f + .68f * reveal)).toInt().coerceAtLeast(1)
+        val outerX = (heavyRadiusX * 1.7f).toInt()
+        val outerY = (heavyRadiusY * 1.7f).toInt()
+        // Cache the blur taps once per frame rather than allocating an array per pixel.
+        val heavyOffsets = intArrayOf(
+            heavyRadiusX, 0, -heavyRadiusX, 0, 0, heavyRadiusY, 0, -heavyRadiusY,
+            heavyRadiusX, heavyRadiusY, -heavyRadiusX, -heavyRadiusY,
+            heavyRadiusX, -heavyRadiusY, -heavyRadiusX, heavyRadiusY,
+            outerX, outerY, -outerX, -outerY,
+        )
         val radius = (1f + blur * 4f + glow * 2f).toInt().coerceIn(1, 7)
         val frameSeed = ((sourceTimeUs / 33_333L).toInt() * 31) xor node.id.hashCode()
         val stripe = (height / workerCount).coerceAtLeast(1)
@@ -123,16 +135,19 @@ class CpuNodeEffectsProcessor(
             jobs += Callable {
                 for (py in startY until endY) {
                     for (px in 0 until width) {
-                        val center = source[py * width + px]
+                        val sourceIndex = motion.sampleIndex(px, py, width, height)
+                        val sx = sourceIndex % width
+                        val sy = sourceIndex / width
+                        val center = source[sourceIndex]
                         val centerRgb = rgb(center)
-                        val n = rgb(sample(source, width, height, px, py - radius))
-                        val s = rgb(sample(source, width, height, px, py + radius))
-                        val e = rgb(sample(source, width, height, px + radius, py))
-                        val w = rgb(sample(source, width, height, px - radius, py))
-                        val ne = rgb(sample(source, width, height, px + radius, py - radius))
-                        val nw = rgb(sample(source, width, height, px - radius, py - radius))
-                        val se = rgb(sample(source, width, height, px + radius, py + radius))
-                        val sw = rgb(sample(source, width, height, px - radius, py + radius))
+                        val n = rgb(sample(source, width, height, sx, sy - radius))
+                        val s = rgb(sample(source, width, height, sx, sy + radius))
+                        val e = rgb(sample(source, width, height, sx + radius, sy))
+                        val w = rgb(sample(source, width, height, sx - radius, sy))
+                        val ne = rgb(sample(source, width, height, sx + radius, sy - radius))
+                        val nw = rgb(sample(source, width, height, sx - radius, sy - radius))
+                        val se = rgb(sample(source, width, height, sx + radius, sy + radius))
+                        val sw = rgb(sample(source, width, height, sx - radius, sy + radius))
 
                         val blurred = FloatArray(3) { channel ->
                             (centerRgb[channel] * 4f +
@@ -161,6 +176,29 @@ class CpuNodeEffectsProcessor(
                             for (channel in 0..2) out[channel] += delta
                         }
 
+                        if (reveal > .001f) {
+                            // Approximate the same 12-tap heavy blur as GPU for CPU-only exports.
+                            val heavy = FloatArray(3) { channel -> centerRgb[channel] * 2f }
+                            for (tap in heavyOffsets.indices step 2) {
+                                val sampleRgb = rgb(sample(
+                                    source, width, height,
+                                    sx + heavyOffsets[tap], sy + heavyOffsets[tap + 1],
+                                ))
+                                for (channel in 0..2) heavy[channel] += sampleRgb[channel]
+                            }
+                            for (channel in 0..2) {
+                                out[channel] += (heavy[channel] / 12f - out[channel]) * reveal * .96f
+                            }
+                        }
+
+                        if (motion.echo > 0f) {
+                            val shifted = rgb(sample(source, width, height, sx + (width * .025f).toInt(), sy + (height * .012f).toInt()))
+                            for (channel in 0..2) {
+                                val echo = maxOf(out[channel], shifted[channel])
+                                out[channel] += (echo - out[channel]) * motion.echo
+                            }
+                        }
+                        motion.grade(out, px, py, width, height)
                         val a = (center ushr 24) and 0xFF
                         val r = (out[0].coerceIn(0f, 1f) * 255f + .5f).toInt()
                         val g = (out[1].coerceIn(0f, 1f) * 255f + .5f).toInt()

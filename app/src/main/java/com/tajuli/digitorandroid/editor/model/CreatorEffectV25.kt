@@ -34,7 +34,7 @@ data class CreatorEffectVectorV25(
 }
 
 object CreatorEffectCatalogV25 {
-    val categories: List<String> = listOf("Basic", "Glitch", "Retro", "Lens", "Motion", "Body", "Eyes", "Funny Faces", "Glowing Lines", "Stroke", "Clone")
+    val categories: List<String> = listOf("Video Effect", "Image Effect", "Basic", "Glitch", "Retro", "Lens", "Motion", "Body", "Eyes", "Funny Faces", "Glowing Lines", "Stroke", "Clone")
 
     val presets: List<CreatorEffectPresetV25> = listOf(
         // Basic
@@ -111,7 +111,8 @@ object CreatorEffectCatalogV25 {
         p("Clone Echo", "Body"),
         p("Mirror Clone", "Body"),
     ) + EyeEffectCatalog.names.map { p(it, if(it in EyeEffectCatalog.funnyNames) "Funny Faces" else "Eyes") } +
-        BodyDecorationCatalog.names.mapIndexed { index, name -> p(name, BodyDecorationCatalog.category(index)) }
+        BodyDecorationCatalog.names.mapIndexed { index, name -> p(name, BodyDecorationCatalog.category(index)) } +
+        CompositeTemplateCatalogV2.presets.map { p(it.name, it.category) }
 
     private val byName = presets.associateBy { it.name.lowercase() }
 

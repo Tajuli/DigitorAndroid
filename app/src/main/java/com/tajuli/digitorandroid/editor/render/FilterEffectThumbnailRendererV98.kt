@@ -124,7 +124,16 @@ internal object FilterEffectThumbnailRendererV98 {
                 )
                 installEyeThumbnailTrackV103(appContext, imageClip)
                 renderProductionFrame(appContext, imageClip, base)
-            } else renderProductionFrame(appContext, clip, base)
+            } else {
+                // Photo-only composite templates need an IMAGE media-type marker,
+                // even when their thumbnail source is queued as a bitmap.
+                val template = com.tajuli.digitorandroid.editor.model.CompositeTemplateCatalogV2.find(preset.name)
+                val sampleClip = if (template?.category ==
+                    com.tajuli.digitorandroid.editor.model.CompositeTemplateCatalogV2.IMAGE
+                ) clip.copy(visualMediaV21 = com.tajuli.digitorandroid.editor.model.TimelineVisualMediaV21.IMAGE)
+                else clip
+                renderProductionFrame(appContext, sampleClip, base)
+            }
         }
 
     private fun installEyeThumbnailTrackV103(

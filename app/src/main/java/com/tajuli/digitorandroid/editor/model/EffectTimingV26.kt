@@ -38,9 +38,14 @@ fun resolveTimedCreatorEffectsV26(
     effects: List<NodeEffect>,
     clip: TimelineClip,
     sourceTimeUs: Long,
-): CreatorEffectVectorV25 = resolveCreatorEffectsV25(
-    effects.filter { it.activeAtSourceTimeV26(clip, sourceTimeUs) },
-)
+): CreatorEffectVectorV25 {
+    val active = effects.filter { it.activeAtSourceTimeV26(clip, sourceTimeUs) }
+    // One template bar expands to multiple actual creator effects at the current
+    // phase. All constituents use the existing validated GPU effect pipeline.
+    val layers = CompositeTemplateCatalogV2.atSourceTime(active, clip, sourceTimeUs)
+        .layers.map { NodeEffect(name = it.effectName, amount = it.amount) }
+    return resolveCreatorEffectsV25(active + layers)
+}
 
 
 /** Remap absolute source-time effect bars onto a newly baked 0-based retimed source. */
