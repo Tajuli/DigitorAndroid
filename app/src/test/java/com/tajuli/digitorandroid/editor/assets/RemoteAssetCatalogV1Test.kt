@@ -1,6 +1,9 @@
 package com.tajuli.digitorandroid.editor.assets
 
 import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
+import com.tajuli.digitorandroid.editor.model.CompositeTemplateCatalogV2
+import com.tajuli.digitorandroid.editor.model.NodeEffect
+import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.creatorFilterPresetV36
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -31,6 +34,50 @@ class RemoteAssetCatalogV1Test {
         assertNotNull(effect)
         assertEquals(0.6f, effect!!.vector.glow, 0.0001f)
         assertTrue(CreatorEffectCatalogV25.inCategory("Basic").any { it.name == "Downloaded Halo V1" })
+    }
+
+    @Test
+    fun beatRippleEffectIsDownloadableAndFollowsTimeAndBeatStrength() {
+        val testJson = """{"schemaVersion":1,"presets":[{
+            "name":"Test","category":"Motion",
+            "motion":{"type":"BEAT_CIRCLE_V1","blurSeconds":2,"blurStrength":0.95,
+            "shakeStrength":0.18,"zoomStrength":0.018,"zoomPeriodSeconds":10,
+            "rippleStrength":0.18,"rippleIntervalSeconds":4.8}
+        }]}"""
+        assertTrue(RemoteAssetCatalogV1.install("effects", testJson))
+        assertNotNull(CreatorEffectCatalogV25.find("Test")?.remoteMotion)
+        assertTrue(CreatorEffectCatalogV25.inCategory("Motion").any { it.name == "Test" })
+        val clip = TimelineClip(
+            uri = "content://video/1", label = "Test", timelineStartUs = 0L,
+            sourceOutUs = 15_000_000L,
+        )
+        fun frame(timeUs: Long, beat: Float) = CompositeTemplateCatalogV2.atSourceTime(
+            listOf(NodeEffect(name = "Test")), clip, timeUs, beat,
+        )
+        val opening = frame(0L, 0f)
+        val middle = frame(1_000_000L, 0f)
+        val clear = frame(2_000_000L, 0f)
+        assertEquals(20, opening.style)
+        assertTrue(opening.blurReveal > middle.blurReveal)
+        assertEquals(0f, clear.blurReveal, .00001f)
+        assertEquals(0f, clear.shakeStrength, 0f)
+        assertTrue(frame(3_400_000L, 0f).waveStrength > 0f)
+        assertTrue(frame(3_400_000L, 0f).zoomScale > 1f)
+        assertTrue(frame(5_000_000L, 0f).waveStrength == 0f)
+        assertEquals(.18f, frame(5_000_000L, 1f).shakeStrength, .0001f)
+    }
+
+    @Test
+    fun untrustedRemoteMotionTypeAndExcessiveShakeAreRejected() {
+        val unknown = """{"schemaVersion":1,"presets":[{
+            "name":"Test","category":"Motion","motion":{"type":"SCRIPT","shakeStrength":0.2}
+        }]}"""
+        val excessive = """{"schemaVersion":1,"presets":[{
+            "name":"Test","category":"Motion",
+            "motion":{"type":"BEAT_CIRCLE_V1","shakeStrength":900}
+        }]}"""
+        assertFalse(RemoteAssetCatalogV1.isValid("effects", unknown))
+        assertFalse(RemoteAssetCatalogV1.isValid("effects", excessive))
     }
 
     @Test
