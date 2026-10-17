@@ -112,7 +112,7 @@ object CreatorEffectCatalogV25 {
         p("Mirror Clone", "Body"),
     ) + EyeEffectCatalog.names.map { p(it, if(it in EyeEffectCatalog.funnyNames) "Funny Faces" else "Eyes") } +
         BodyDecorationCatalog.names.mapIndexed { index, name -> p(name, BodyDecorationCatalog.category(index)) } +
-        MotionTemplateCatalogV1.presets.map { p(it.name, it.category) }
+        CompositeTemplateCatalogV2.presets.map { p(it.name, it.category) }
 
     private val byName = presets.associateBy { it.name.lowercase() }
 
