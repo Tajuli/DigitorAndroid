@@ -10,6 +10,20 @@ data class CreatorEffectPresetV25(
     val name: String,
     val category: String,
     val vector: CreatorEffectVectorV25,
+    /** Whitelisted compiled animation recipe. Data-only GitHub presets cannot install shaders. */
+    val remoteMotion: RemoteMotionRecipeV1? = null,
+)
+
+/** Controlled parameters for the built-in beat-synced radial motion renderer. */
+data class RemoteMotionRecipeV1(
+    val type: String,
+    val blurSeconds: Float,
+    val blurStrength: Float,
+    val shakeStrength: Float,
+    val zoomStrength: Float,
+    val zoomPeriodSeconds: Float,
+    val rippleStrength: Float,
+    val rippleIntervalSeconds: Float,
 )
 
 data class CreatorEffectVectorV25(
