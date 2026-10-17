@@ -36,6 +36,58 @@ object RemoteAssetCatalogV1 {
     private val updates = MutableStateFlow(RemoteAssetSnapshotV1())
     val state = updates.asStateFlow()
 
+    private val effectFolders = linkedMapOf<String, List<CreatorEffectPresetV25>>()
+    private val filterFolders = linkedMapOf<String, List<CreatorFilterPresetV36>>()
+    private val transitionFolders = linkedMapOf<String, List<RemoteTransitionV1>>()
+
+    /** Called only after explicit user confirmation, exact Git blob SHA and schema validation. */
+    @Synchronized
+    fun installFolder(kind: String, folder: String, json: String): Boolean {
+        if (folder !in RemoteAssetFoldersV2.folders(kind)) return false
+        val next = runCatching {
+            val current = updates.value
+            when (kind) {
+                "effects" -> {
+                    val parsed = parseEffectsV1(json)
+                    require(parsed.all { it.category == folder }) { "Preset category mismatch" }
+                    effectFolders[folder] = parsed
+                    current.copy(effects = effectFolders.values.flatten())
+                }
+                "filters" -> {
+                    val parsed = parseFiltersV1(json)
+                    require(parsed.all { it.group.name.equals(folder, ignoreCase = true) })
+                    filterFolders[folder] = parsed
+                    current.copy(filters = filterFolders.values.flatten())
+                }
+                "transitions" -> {
+                    val parsed = parseTransitionsV1(json)
+                    require(parsed.all { it.category.equals(folder, ignoreCase = true) })
+                    transitionFolders[folder] = parsed
+                    current.copy(transitions = transitionFolders.values.flatten())
+                }
+                else -> error("Unknown category kind")
+            }.copy(revision = current.revision + 1L)
+        }.getOrNull() ?: return false
+        updates.value = next
+        return true
+    }
+
+    fun isValidFolder(kind: String, folder: String, json: String): Boolean {
+        if (folder !in RemoteAssetFoldersV2.folders(kind)) return false
+        return runCatching {
+            when (kind) {
+                "effects" -> parseEffectsV1(json).all { it.category == folder }
+                "filters" -> parseFiltersV1(json).all {
+                    it.group.name.equals(folder, ignoreCase = true)
+                }
+                "transitions" -> parseTransitionsV1(json).all {
+                    it.category.equals(folder, ignoreCase = true)
+                }
+                else -> false
+            }
+        }.getOrDefault(false)
+    }
+
     /** Validate before publishing: malformed files never replace the last valid snapshot. */
     @Synchronized
     fun install(kind: String, json: String): Boolean {
@@ -64,7 +116,7 @@ object RemoteAssetCatalogV1 {
 }
 
 private val remoteIdPatternV1 = Regex("[a-z0-9][a-z0-9_-]{2,63}")
-private val allowedEffectCategoriesV1 = setOf("Basic", "Glitch", "Retro", "Lens", "Motion")
+private val allowedEffectCategoriesV1 = RemoteAssetFoldersV2.effects.toSet()
 private val allowedTransitionCategoriesV1 = setOf("BASIC", "CAMERA", "EFFECT")
 
 private fun checkedPresetsV1(raw: String): List<JsonObject> {
@@ -169,14 +221,31 @@ internal fun parseFiltersV1(json: String): List<CreatorFilterPresetV36> =
     checkedPresetsV1(json).map { entry ->
         val id = entry.requiredTextV1("id")
         require(remoteIdPatternV1.matches(id)) { "Invalid filter ID" }
-        require(entry.requiredTextV1("group") == "LOOKS") { "Only native LOOKS recipes are supported" }
+        val group = CreatorFilterGroupV36.valueOf(entry.requiredTextV1("group"))
         val corrections = entry.optionalObjectV1("corrections")
         val log = entry.optionalObjectV1("log")
+        val weights = entry.optionalObjectV1("beautyWeights")
+        val allowedBeauty = mapOf(
+            "skinBright" to com.tajuli.digitorandroid.editor.model.BEAUTY_SKIN_BRIGHT_V28,
+            "skinSmooth" to com.tajuli.digitorandroid.editor.model.BEAUTY_SKIN_SMOOTH_V28,
+            "pinkLips" to com.tajuli.digitorandroid.editor.model.BEAUTY_PINK_LIP_V28,
+            "hairBrows" to com.tajuli.digitorandroid.editor.model.BEAUTY_HAIR_BROW_DARK_V28,
+            "eyePop" to com.tajuli.digitorandroid.editor.model.BEAUTY_EYE_POP_V28,
+        )
+        require(weights.keySet().all { it in allowedBeauty }) { "Unsupported beauty operation" }
+        val beautyWeights = allowedBeauty.mapNotNull { (label, name) ->
+            if (!weights.has(label)) null
+            else name to weights.numberV1(label, 0f, 1f)
+        }.toMap()
+        if (group == CreatorFilterGroupV36.BEAUTY) {
+            require(beautyWeights.isNotEmpty()) { "Beauty needs known operations" }
+        } else require(beautyWeights.isEmpty()) { "Looks cannot change semantic beauty" }
         CreatorFilterPresetV36(
             id = id,
             name = entry.requiredTextV1("name"),
             description = entry.requiredTextV1("description", 120),
-            group = CreatorFilterGroupV36.LOOKS,
+            group = group,
+            beautyWeights = beautyWeights,
             corrections = NodeCorrections(
                 exposure = corrections.numberV1("exposure", -2f, 2f),
                 contrast = corrections.numberV1("contrast", -100f, 100f),
