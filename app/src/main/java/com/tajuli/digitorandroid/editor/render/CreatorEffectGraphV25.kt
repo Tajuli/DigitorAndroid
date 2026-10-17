@@ -51,7 +51,7 @@ internal class CreatorEffectGraphV25 private constructor(
             }
             val hasFx = editableNodes.any { node ->
                 !resolveCreatorEffectsV25(node.visibleEffects()).isIdentity ||
-                    node.visibleEffects().any { it.enabled && it.amount > 0f && MotionTemplateCatalogV1.find(it.name) != null } ||
+                    node.visibleEffects().any { it.enabled && it.amount > 0f && CompositeTemplateCatalogV2.find(it.name) != null } ||
                     node.visibleEffects().any { EyeEffectCatalog.contains(it.name) } ||
                     clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
             }
@@ -196,7 +196,7 @@ internal class CreatorEffectGraphV25 private constructor(
                                 currentNode.visibleEffects()
                             }
                             val vector = resolveTimedCreatorEffectsV26(effectsWithTiming, currentClip, sourceUs)
-                            val motion = MotionTemplateCatalogV1.atSourceTime(effectsWithTiming, currentClip, sourceUs)
+                            val motion = CompositeTemplateCatalogV2.atSourceTime(effectsWithTiming, currentClip, sourceUs)
                             val eyes = resolveEyeEffects(effectsWithTiming, currentClip, sourceUs)
                             val hasActiveEyes = eyePose != null && eyes.any { it != 0f }
                             if (vector.isIdentity && !hasActiveEyes && !motion.active) {
@@ -431,7 +431,7 @@ internal class CreatorEffectGraphV25 private constructor(
             program: GlProgram,
             inputTexture: Int,
             v: CreatorEffectVectorV25,
-            motion: MotionTemplateFrameV1,
+            motion: CompositeTemplateFrameV2,
             nodeId: String,
             sourceUs: Long,
             eyes: FloatArray,
