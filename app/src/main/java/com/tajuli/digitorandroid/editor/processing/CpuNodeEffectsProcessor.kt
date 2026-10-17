@@ -115,6 +115,15 @@ class CpuNodeEffectsProcessor(
         val reveal = motion.blurReveal.coerceIn(0f, 1f)
         val heavyRadiusX = (width * .035f * (.32f + .68f * reveal)).toInt().coerceAtLeast(1)
         val heavyRadiusY = (height * .035f * (.32f + .68f * reveal)).toInt().coerceAtLeast(1)
+        val outerX = (heavyRadiusX * 1.7f).toInt()
+        val outerY = (heavyRadiusY * 1.7f).toInt()
+        // Cache the blur taps once per frame rather than allocating an array per pixel.
+        val heavyOffsets = intArrayOf(
+            heavyRadiusX, 0, -heavyRadiusX, 0, 0, heavyRadiusY, 0, -heavyRadiusY,
+            heavyRadiusX, heavyRadiusY, -heavyRadiusX, -heavyRadiusY,
+            heavyRadiusX, -heavyRadiusY, -heavyRadiusX, heavyRadiusY,
+            outerX, outerY, -outerX, -outerY,
+        )
         val radius = (1f + blur * 4f + glow * 2f).toInt().coerceIn(1, 7)
         val frameSeed = ((sourceTimeUs / 33_333L).toInt() * 31) xor node.id.hashCode()
         val stripe = (height / workerCount).coerceAtLeast(1)
@@ -170,16 +179,11 @@ class CpuNodeEffectsProcessor(
                         if (reveal > .001f) {
                             // Approximate the same 12-tap heavy blur as GPU for CPU-only exports.
                             val heavy = FloatArray(3) { channel -> centerRgb[channel] * 2f }
-                            val offsets = arrayOf(
-                                heavyRadiusX to 0, -heavyRadiusX to 0,
-                                0 to heavyRadiusY, 0 to -heavyRadiusY,
-                                heavyRadiusX to heavyRadiusY, -heavyRadiusX to -heavyRadiusY,
-                                heavyRadiusX to -heavyRadiusY, -heavyRadiusX to heavyRadiusY,
-                                (heavyRadiusX * 1.7f).toInt() to (heavyRadiusY * 1.7f).toInt(),
-                                -(heavyRadiusX * 1.7f).toInt() to -(heavyRadiusY * 1.7f).toInt(),
-                            )
-                            offsets.forEach { (ox, oy) ->
-                                val sampleRgb = rgb(sample(source, width, height, sx + ox, sy + oy))
+                            for (tap in heavyOffsets.indices step 2) {
+                                val sampleRgb = rgb(sample(
+                                    source, width, height,
+                                    sx + heavyOffsets[tap], sy + heavyOffsets[tap + 1],
+                                ))
                                 for (channel in 0..2) heavy[channel] += sampleRgb[channel]
                             }
                             for (channel in 0..2) {
