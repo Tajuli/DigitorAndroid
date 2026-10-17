@@ -458,8 +458,12 @@ internal class CreatorEffectGraphV25 private constructor(
             program.setFloatUniform("uDenoise", v.denoise)
             program.setFloatUniform("uMotionStyle", motion.style.toFloat())
             program.setFloatUniform("uMotionAmount", motion.amount)
-            program.setFloatUniform("uMotionProgress", motion.progress)
-            program.setFloatUniform("uMotionElapsed", motion.elapsedSeconds % 60f)
+            program.setFloatUniform("uMotionElapsed", motion.elapsedSeconds)
+            program.setFloatUniform("uMotionZoom", motion.zoomScale)
+            program.setFloatUniform("uMotionBlurReveal", motion.blurReveal)
+            program.setFloatUniform("uMotionWaveProgress", motion.waveProgress)
+            program.setFloatUniform("uMotionWaveStrength", motion.waveStrength)
+            program.setFloatUniform("uMotionShakeStrength", motion.shakeStrength)
             program.setFloatUniform(
                 "uTime",
                 (sourceUs % 10_000_000L).toFloat() / 1_000_000f,
@@ -572,8 +576,12 @@ internal class CreatorEffectGraphV25 private constructor(
                 uniform float uSeed;
                 uniform float uMotionStyle;
                 uniform float uMotionAmount;
-                uniform float uMotionProgress;
                 uniform float uMotionElapsed;
+                uniform float uMotionZoom;
+                uniform float uMotionBlurReveal;
+                uniform float uMotionWaveProgress;
+                uniform float uMotionWaveStrength;
+                uniform float uMotionShakeStrength;
                 varying vec2 vTexCoord;
 
                 float hash21(vec2 p) {
@@ -608,79 +616,27 @@ internal class CreatorEffectGraphV25 private constructor(
 
                 // Animated camera moves are evaluated against the effect's V26 timeline span.
                 // One pass is shared by real-time GPU preview and Media3 GPU export.
-                float motionPulse(float speed) {
-                    float beat = max(0.0, sin(uMotionElapsed * 6.2831853 * speed));
-                    return pow(beat, 8.0);
-                }
+                // Signature composite motion only: 16s slow zoom throughout the
+                // entire bar, one diagonal ripple per wave slot, and two distinct
+                // shake impulses in the next five-second clean slot.
                 vec2 motionUv(vec2 uv) {
-                    float a = clamp(uMotionAmount, 0.0, 1.0);
-                    if (a < 0.001 || uMotionStyle < 0.5) return uv;
-                    float style = uMotionStyle;
-                    float t = clamp(uMotionProgress, 0.0, 1.0);
-                    float s = t * t * (3.0 - 2.0 * t);
-                    float beat = motionPulse(1.8);
-                    float zoom = 1.0;
-                    float angle = 0.0;
-                    vec2 shift = vec2(0.0);
+                    if (uMotionStyle < 17.5 || uMotionAmount <= 0.001) return uv;
+                    vec2 p = (uv - vec2(0.5)) / max(uMotionZoom, 1.0) + vec2(0.5);
 
-                    if (abs(style - 1.0) < 0.5) {
-                        zoom = 1.02 + a * (0.08 + 0.27 * beat);
-                    } else if (abs(style - 2.0) < 0.5) {
-                        float whip = sin(uMotionElapsed * 6.2831853 * 1.35);
-                        shift.x = a * whip * 0.115;
-                        zoom = 1.0 + a * (0.17 + 0.07 * abs(whip));
-                    } else if (abs(style - 3.0) < 0.5) {
-                        float shake = motionPulse(1.55);
-                        shift = a * shake * vec2(
-                            sin(uMotionElapsed * 92.0) * 0.035,
-                            cos(uMotionElapsed * 71.0) * 0.029
-                        );
-                        angle = a * shake * sin(uMotionElapsed * 83.0) * 0.042;
-                        zoom = 1.0 + a * 0.15;
-                    } else if (abs(style - 4.0) < 0.5) {
-                        zoom = 1.0 + a * (0.06 + 0.17 * motionPulse(1.35));
-                    } else if (abs(style - 5.0) < 0.5) {
-                        zoom = 1.0 + a * (0.07 + 0.04 * sin(uMotionElapsed * 4.0));
-                    } else if (abs(style - 6.0) < 0.5) {
-                        zoom = 1.0 + a * 0.045;
-                    } else if (abs(style - 7.0) < 0.5) {
-                        zoom = 1.0 + a * (0.04 + 0.06 * beat);
-                    } else if (abs(style - 11.0) < 0.5) {
-                        zoom = 1.0 + a * (0.10 + 0.24 * s);
-                        shift = a * vec2(mix(-0.034, 0.034, s), mix(0.020, -0.020, s));
-                    } else if (abs(style - 12.0) < 0.5) {
-                        zoom = 1.0 + a * 0.32 * s;
-                    } else if (abs(style - 13.0) < 0.5) {
-                        zoom = 1.0 + a * 0.13;
-                        shift = a * vec2(sin(s * 6.2831853) * 0.035, cos(s * 6.2831853) * 0.027);
-                    } else if (abs(style - 14.0) < 0.5) {
-                        zoom = 1.0 + a * 0.18;
-                        angle = a * (s - 0.5) * 0.13;
-                    } else if (abs(style - 15.0) < 0.5) {
-                        zoom = 1.0 + a * (0.045 + 0.16 * motionPulse(1.25));
-                        shift.y = a * 0.016 * sin(uMotionElapsed * 6.2831853 * 1.25);
-                    } else if (abs(style - 16.0) < 0.5) {
-                        zoom = 1.0 + a * (0.045 + 0.15 * motionPulse(1.0));
-                    } else if (abs(style - 17.0) < 0.5) {
-                        zoom = 1.0 + a * (0.04 + 0.12 * s);
+                    if (uMotionWaveStrength > 0.001) {
+                        float diagonal = uv.x + uv.y - 2.0 * uMotionWaveProgress;
+                        float band = exp(-38.0 * diagonal * diagonal);
+                        float ripple = sin(diagonal * 29.0) * band *
+                            0.026 * uMotionWaveStrength;
+                        p += vec2(ripple, -ripple);
                     }
-                    float cs = cos(angle);
-                    float sn = sin(angle);
-                    vec2 p = uv - vec2(0.5);
-                    p = mat2(cs, sn, -sn, cs) * p;
-                    p = p / max(zoom, 0.8) + vec2(0.5) + shift;
-
-                    if (abs(style - 7.0) < 0.5 || abs(style - 17.0) < 0.5) {
-                        // Four individually offset crops from the same clip/photo.
-                        vec2 quadrant = floor(uv * 2.0);
-                        vec2 localUv = fract(uv * 2.0);
-                        vec2 move = vec2(
-                            sin(uMotionElapsed * 1.8 + quadrant.x * 1.4 + quadrant.y),
-                            cos(uMotionElapsed * 1.4 + quadrant.y * 2.0 + quadrant.x)
-                        ) * (0.018 * a);
-                        p = (localUv - 0.5) / (1.1 + 0.12 * a) + 0.5 + move;
+                    if (uMotionShakeStrength > 0.001) {
+                        p += vec2(
+                            sin(uMotionElapsed * 98.0) * 0.026,
+                            cos(uMotionElapsed * 83.0) * 0.020
+                        ) * uMotionShakeStrength;
                     }
-                    return clamp(mix(uv, p, a), 0.001, 0.999);
+                    return clamp(p, 0.001, 0.999);
                 }
 
                 void main() {
@@ -777,25 +733,29 @@ internal class CreatorEffectGraphV25 private constructor(
                     rgb *= 1.0 + (flick - 0.5) * uFlicker * 0.12;
                     rgb += vec3(flash * uFlicker * 0.22);
 
-                    // Video references: monochrome-to-colour, flash beats, echo,
-                    // and split-frame montage, without requiring separate baked assets.
-                    if (abs(uMotionStyle - 6.0) < 0.5) {
-                        float mono = uMotionAmount * (1.0 - smoothstep(0.28, 0.69, uMotionProgress));
-                        rgb = mix(rgb, vec3(lumaOf(rgb)), mono);
+                    // Strong optical blur fades smoothly to a clean frame exactly
+                    // over the first 2 output seconds. After that only the local
+                    // wave/shake event and the continuous zoom alter the image.
+                    if (uMotionStyle >= 17.5 && uMotionBlurReveal > 0.001) {
+                        vec2 radius = vec2(0.035) * (0.32 + 0.68 * uMotionBlurReveal);
+                        vec3 heavy = texture2D(uTexSampler, uv).rgb * 2.0;
+                        heavy += texture2D(uTexSampler, clamp(uv + vec2(radius.x, 0.0), 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv - vec2(radius.x, 0.0), 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv + vec2(0.0, radius.y), 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv - vec2(0.0, radius.y), 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv + radius, 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv - radius, 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv + vec2(radius.x, -radius.y), 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv + vec2(-radius.x, radius.y), 0.001, 0.999)).rgb;
+                        vec2 outer = radius * 1.7;
+                        heavy += texture2D(uTexSampler, clamp(uv + outer, 0.001, 0.999)).rgb;
+                        heavy += texture2D(uTexSampler, clamp(uv - outer, 0.001, 0.999)).rgb;
+                        rgb = mix(rgb, heavy / 12.0, clamp(uMotionBlurReveal * 0.96, 0.0, 0.96));
                     }
-                    if (abs(uMotionStyle - 4.0) < 0.5 || abs(uMotionStyle - 16.0) < 0.5) {
-                        float flash = motionPulse(abs(uMotionStyle - 4.0) < 0.5 ? 1.35 : 1.0);
-                        rgb += vec3(uMotionAmount * 0.65 * flash);
-                    }
-                    if (abs(uMotionStyle - 5.0) < 0.5) {
-                        vec2 echoOffset = vec2(0.025 * sin(uMotionElapsed * 4.0), 0.012) * uMotionAmount;
-                        vec3 echoRgb = texture2D(uTexSampler, clamp(uv + echoOffset, 0.001, 0.999)).rgb;
-                        rgb = mix(rgb, max(rgb, echoRgb), uMotionAmount * 0.46);
-                    }
-                    if (abs(uMotionStyle - 7.0) < 0.5 || abs(uMotionStyle - 17.0) < 0.5) {
-                        vec2 seam = abs(fract(vTexCoord * 2.0) - 0.5);
-                        float edge = step(0.488, max(seam.x, seam.y));
-                        rgb = mix(rgb, vec3(0.06), edge * uMotionAmount);
+                    if (uMotionStyle >= 17.5 && uMotionWaveStrength > 0.001) {
+                        float diagonal = vTexCoord.x + vTexCoord.y - 2.0 * uMotionWaveProgress;
+                        float waveBand = exp(-48.0 * diagonal * diagonal);
+                        rgb += vec3(0.035 * waveBand * uMotionWaveStrength);
                     }
                     rgb = applyEyeEffects(rgb, uv);
                     gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), center.a);
