@@ -27,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.tajuli.digitorandroid.editor.assets.GithubAssetSyncV1
 import com.tajuli.digitorandroid.editor.model.ProjectSaveCoordinator
 import com.tajuli.digitorandroid.editor.model.ProjectStore
 import com.tajuli.digitorandroid.editor.model.TimelineProject
@@ -49,6 +50,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Restore cached presets immediately and check GitHub for updates without blocking UI.
+        lifecycleScope.launch { GithubAssetSyncV1.syncOnLaunch(applicationContext) }
 
         // Keep the display awake for an active Pro Cutout analysis. If the user explicitly turns the
         // screen off, CutoutAnalysisPowerGuardV48's PARTIAL_WAKE_LOCK still keeps analysis runnable.

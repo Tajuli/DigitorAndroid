@@ -24,6 +24,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tajuli.digitorandroid.editor.assets.RemoteAssetCatalogV1
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
@@ -225,6 +227,10 @@ internal fun CapCutTransitionSheet(
     }
     var selectedDurationUs by remember(targetClipId) { mutableStateOf(projectDurationUs) }
     var appliedNotice by remember(targetClipId) { mutableStateOf(projectStyle != TransitionStyleV22.NONE) }
+    val remoteCatalog by RemoteAssetCatalogV1.state.collectAsState()
+    val availableTransitionPresets = remember(category, remoteCatalog.revision) {
+        presetsForCategoryV24(category)
+    }
 
     LaunchedEffect(projectStyle, persistedPresetId, projectDurationUs, targetClipId) {
         selectedStyle = projectStyle
@@ -313,11 +319,16 @@ internal fun CapCutTransitionSheet(
                 }
             }
 
+            RemoteCategoryDownloadControlV2(
+                kind = "transitions",
+                folder = category.label,
+            )
+
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                presetsForCategoryV24(category).forEach { item ->
+                availableTransitionPresets.forEach { item ->
                     val active = selectedPresetId == item.id
                     Column(
                         Modifier

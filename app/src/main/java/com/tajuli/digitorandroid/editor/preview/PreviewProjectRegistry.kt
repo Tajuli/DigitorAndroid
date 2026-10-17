@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.preview
 
+import com.tajuli.digitorandroid.editor.audio.MusicBeatPulseV1
 import com.tajuli.digitorandroid.editor.model.CutoutModeV43
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
@@ -23,6 +24,7 @@ internal object PreviewProjectRegistry {
     val flow: StateFlow<TimelineProject?> = mutableProject.asStateFlow()
 
     fun update(project: TimelineProject) {
+        MusicBeatPulseV1.useProject(project)
         latest.set(project)
         mutableProject.value = project
     }

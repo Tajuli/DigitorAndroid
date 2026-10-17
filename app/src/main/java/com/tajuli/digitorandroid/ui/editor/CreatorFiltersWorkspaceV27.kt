@@ -23,6 +23,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tajuli.digitorandroid.editor.assets.RemoteAssetCatalogV1
 import com.tajuli.digitorandroid.editor.model.BEAUTY_HAIR_BROW_DARK_V28
 import com.tajuli.digitorandroid.editor.model.BEAUTY_SKIN_BRIGHT_V28
 import com.tajuli.digitorandroid.editor.model.BEAUTY_SKIN_SMOOTH_V28
@@ -81,11 +83,15 @@ fun CreatorFiltersWorkspace(
     val scope = rememberCoroutineScope()
     var group by remember { mutableStateOf(CreatorFilterGroupV36.LOOKS) }
     var selectedPresetId by remember(clip.id, clip.nodeGraph.selectedNodeId) { mutableStateOf<String?>(null) }
+    val remoteAssets by RemoteAssetCatalogV1.state.collectAsState()
+    val presets = CREATOR_FILTERS_V36 + remoteAssets.filters.filter { remote ->
+        CREATOR_FILTERS_V36.none { it.id == remote.id }
+    }
     val host = clip.selectedCreatorFilterHostV41()
     val applied = host?.appliedCreatorFiltersV41() ?: linkedMapOf()
-    val selectedPreset = CREATOR_FILTERS_V36.firstOrNull { it.id == selectedPresetId }
+    val selectedPreset = presets.firstOrNull { it.id == selectedPresetId }
     val selectedIntensity = selectedPresetId?.let { applied[it] } ?: 0f
-    val visiblePresets = CREATOR_FILTERS_V36.filter { it.group == group }
+    val visiblePresets = presets.filter { it.group == group }
     val noneActive = visiblePresets.none { it.id in applied }
 
     fun refineBeautyInBackground(preset: CreatorFilterPresetV36) {
@@ -175,6 +181,10 @@ fun CreatorFiltersWorkspace(
                 }
             }
         }
+        RemoteCategoryDownloadControlV2(
+            kind = "filters",
+            folder = if (group == CreatorFilterGroupV36.LOOKS) "Looks" else "Beauty",
+        )
         LazyRow(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(7.dp),

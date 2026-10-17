@@ -1,5 +1,7 @@
 package com.tajuli.digitorandroid.editor.model
 
+import com.tajuli.digitorandroid.editor.assets.RemoteAssetCatalogV1
+
 /**
  * Creator-facing V25 effect library inspired by the effect families commonly used in short-form
  * editors. Names are intentionally generic and the renderer is Digitor's own implementation.
@@ -8,6 +10,20 @@ data class CreatorEffectPresetV25(
     val name: String,
     val category: String,
     val vector: CreatorEffectVectorV25,
+    /** Whitelisted compiled animation recipe. Data-only GitHub presets cannot install shaders. */
+    val remoteMotion: RemoteMotionRecipeV1? = null,
+)
+
+/** Controlled parameters for the built-in beat-synced radial motion renderer. */
+data class RemoteMotionRecipeV1(
+    val type: String,
+    val blurSeconds: Float,
+    val blurStrength: Float,
+    val shakeStrength: Float,
+    val zoomStrength: Float,
+    val zoomPeriodSeconds: Float,
+    val rippleStrength: Float,
+    val rippleIntervalSeconds: Float,
 )
 
 data class CreatorEffectVectorV25(
@@ -116,14 +132,29 @@ object CreatorEffectCatalogV25 {
 
     private val byName = presets.associateBy { it.name.lowercase() }
 
-    fun find(name: String): CreatorEffectPresetV25? = byName[name.lowercase()]
-    fun inCategory(category: String): List<CreatorEffectPresetV25> = presets.filter { it.category == category }
+    fun find(name: String): CreatorEffectPresetV25? =
+        byName[name.lowercase()] ?: RemoteAssetCatalogV1.state.value.effects.firstOrNull {
+            it.name.equals(name, ignoreCase = true)
+        }
+
+    fun inCategory(category: String): List<CreatorEffectPresetV25> =
+        presets.filter { it.category == category } +
+            RemoteAssetCatalogV1.state.value.effects.filter {
+                it.category == category && !byName.containsKey(it.name.lowercase())
+            }
+
+    fun visiblePresetCount(): Int = presets.size +
+        RemoteAssetCatalogV1.state.value.effects.count { !byName.containsKey(it.name.lowercase()) }
 }
 
 fun resolveCreatorEffectsV25(effects: List<NodeEffect>): CreatorEffectVectorV25 {
     var out = CreatorEffectVectorV25()
     effects.asSequence().filter { it.enabled && it.amount > 0f }.forEach { effect ->
         val preset = CreatorEffectCatalogV25.find(effect.name) ?: return@forEach
+        // New clients animate this recipe through CompositeTemplateCatalogV2.
+        // Its small static vector exists only so old catalog parsers can accept
+        // the JSON without dropping every downloaded effect in the file.
+        if (preset.remoteMotion != null) return@forEach
         val a = effect.amount.coerceIn(0f, 1f)
         val v = preset.vector
         out = out.copy(

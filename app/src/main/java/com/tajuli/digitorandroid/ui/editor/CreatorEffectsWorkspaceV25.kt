@@ -41,6 +41,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tajuli.digitorandroid.editor.assets.RemoteAssetCatalogV1
 import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
 import com.tajuli.digitorandroid.editor.model.CompositeTemplateCatalogV2
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
@@ -91,7 +92,8 @@ fun CreatorEffectsWorkspace(
     val faceTrackingCategory = category == "Eyes" || category == "Funny Faces"
     val wrongMotionMedia = (category == CompositeTemplateCatalogV2.VIDEO && clip.isImageV21) ||
         (category == CompositeTemplateCatalogV2.IMAGE && !clip.isImageV21)
-    val categoryPresets = remember(category, clip.isImageV21) {
+    val remoteAssets by RemoteAssetCatalogV1.state.collectAsState()
+    val categoryPresets = remember(category, clip.isImageV21, remoteAssets.revision) {
         if (wrongMotionMedia) emptyList() else CreatorEffectCatalogV25.inCategory(category)
     }
     val nodeEffects = node.visibleEffects()
@@ -111,7 +113,7 @@ fun CreatorEffectsWorkspace(
         ) {
             Text("Effects · ${node.label}", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
-            Text("${CreatorEffectCatalogV25.presets.size} presets · timed timeline bars", fontSize = 7.sp, color = Fx25Muted)
+            Text("${CreatorEffectCatalogV25.visiblePresetCount()} presets · timed timeline bars", fontSize = 7.sp, color = Fx25Muted)
         }
         HorizontalDivider(color = Fx25Divider)
 
@@ -130,6 +132,10 @@ fun CreatorEffectsWorkspace(
                     Text(name, fontSize = 8.sp, color = if (selected) Fx25Accent else Color.White.copy(alpha = .82f))
                 }
             }
+        }
+
+        if (category in CreatorEffectCatalogV25.categories) {
+            RemoteCategoryDownloadControlV2(kind = "effects", folder = category)
         }
 
         if (wrongMotionMedia) {
