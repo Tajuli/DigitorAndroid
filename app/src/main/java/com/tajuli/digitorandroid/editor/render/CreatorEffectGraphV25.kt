@@ -785,9 +785,17 @@ internal class CreatorEffectGraphV25 private constructor(
                         rgb = mix(rgb, heavy / 12.0, clamp(uMotionBlurReveal * 0.96, 0.0, 0.96));
                     }
                     if (uMotionStyle >= 17.5 && uMotionWaveStrength > 0.001) {
-                        float diagonal = vTexCoord.x + vTexCoord.y - 2.0 * uMotionWaveProgress;
-                        float waveBand = exp(-48.0 * diagonal * diagonal);
-                        rgb += vec3(0.035 * waveBand * uMotionWaveStrength);
+                        if (uMotionStyle > 19.5) {
+                            float aspect = uTexelSize.y / max(uTexelSize.x, 0.000001);
+                            vec2 delta = vTexCoord - uRippleCenter;
+                            float dist = length(vec2(delta.x * aspect, delta.y)) - uMotionWaveProgress;
+                            float ring = exp(-155.0 * dist * dist);
+                            rgb += vec3(0.012 * ring * uMotionWaveStrength);
+                        } else {
+                            float diagonal = vTexCoord.x + vTexCoord.y - 2.0 * uMotionWaveProgress;
+                            float waveBand = exp(-48.0 * diagonal * diagonal);
+                            rgb += vec3(0.035 * waveBand * uMotionWaveStrength);
+                        }
                     }
                     rgb = applyEyeEffects(rgb, uv);
                     gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), center.a);
