@@ -42,7 +42,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tajuli.digitorandroid.editor.model.CreatorEffectCatalogV25
-import com.tajuli.digitorandroid.editor.model.MotionTemplateCatalogV1
+import com.tajuli.digitorandroid.editor.model.CompositeTemplateCatalogV2
 import com.tajuli.digitorandroid.editor.model.CutoutAnalysisQualityV47
 import com.tajuli.digitorandroid.editor.model.NodeAnimationDomain
 import com.tajuli.digitorandroid.editor.model.NodeKind
@@ -82,15 +82,15 @@ fun CreatorEffectsWorkspace(
         ?.takeIf { it.clipId == clip.id && it.nodeId == node.id }
         ?.effectId
     var category by remember(clip.id, clip.isImageV21) {
-        mutableStateOf(if (clip.isImageV21) MotionTemplateCatalogV1.IMAGE else MotionTemplateCatalogV1.VIDEO)
+        mutableStateOf(if (clip.isImageV21) CompositeTemplateCatalogV2.IMAGE else CompositeTemplateCatalogV2.VIDEO)
     }
     var bodySettingsExpanded by remember(clip.id) { mutableStateOf(false) }
     var faceTrackingReady by remember(clip.id, clip.uri, clip.sourceInUs, clip.sourceOutUs) {
         mutableStateOf(false)
     }
     val faceTrackingCategory = category == "Eyes" || category == "Funny Faces"
-    val wrongMotionMedia = (category == MotionTemplateCatalogV1.VIDEO && clip.isImageV21) ||
-        (category == MotionTemplateCatalogV1.IMAGE && !clip.isImageV21)
+    val wrongMotionMedia = (category == CompositeTemplateCatalogV2.VIDEO && clip.isImageV21) ||
+        (category == CompositeTemplateCatalogV2.IMAGE && !clip.isImageV21)
     val categoryPresets = remember(category, clip.isImageV21) {
         if (wrongMotionMedia) emptyList() else CreatorEffectCatalogV25.inCategory(category)
     }
@@ -333,8 +333,8 @@ fun CreatorEffectsWorkspace(
                                 )
                                 PreviewProjectRegistry.update(vm.state.value.project)
                             } else {
-                                if (MotionTemplateCatalogV1.find(preset.name) != null) {
-                                    vm.applyMotionTemplateToSelectedNodeV1(preset.name)
+                                if (CompositeTemplateCatalogV2.find(preset.name) != null) {
+                                    vm.applyCompositeTemplateToSelectedNodeV2(preset.name)
                                 } else {
                                     vm.addEffectToSelectedNode(preset.name)
                                 }
