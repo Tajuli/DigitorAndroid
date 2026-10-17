@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.ui.editor
 
+import com.tajuli.digitorandroid.editor.assets.RemoteAssetCatalogV1
 import com.tajuli.digitorandroid.editor.model.TransitionStyleV22
 
 /**
@@ -75,11 +76,23 @@ internal val CAPCUT_TRANSITION_PRESETS_V24: List<CapCutTransitionPresetV24> = li
     CapCutTransitionPresetV24("beat_sync", "Beat Sync", CapCutTransitionCategoryV24.EFFECT, TransitionStyleV22.FLASH),
 )
 
+private fun remoteTransitionPresetsV1(): List<CapCutTransitionPresetV24> =
+    RemoteAssetCatalogV1.state.value.transitions.mapNotNull { remote ->
+        if (CAPCUT_TRANSITION_PRESETS_V24.any { it.id == remote.id }) return@mapNotNull null
+        val category = runCatching { CapCutTransitionCategoryV24.valueOf(remote.category) }
+            .getOrNull() ?: return@mapNotNull null
+        CapCutTransitionPresetV24(remote.id, remote.label, category, remote.engineStyle)
+    }
+
 internal fun presetsForCategoryV24(category: CapCutTransitionCategoryV24): List<CapCutTransitionPresetV24> =
-    CAPCUT_TRANSITION_PRESETS_V24.filter { it.category == category }
+    CAPCUT_TRANSITION_PRESETS_V24.filter { it.category == category } +
+        remoteTransitionPresetsV1().filter { it.category == category }
 
 internal fun presetForIdV24(id: String?): CapCutTransitionPresetV24? =
-    id?.let { key -> CAPCUT_TRANSITION_PRESETS_V24.firstOrNull { it.id == key } }
+    id?.let { key ->
+        CAPCUT_TRANSITION_PRESETS_V24.firstOrNull { it.id == key }
+            ?: remoteTransitionPresetsV1().firstOrNull { it.id == key }
+    }
 
 internal fun defaultPresetForStyleV24(style: TransitionStyleV22): CapCutTransitionPresetV24? =
     CAPCUT_TRANSITION_PRESETS_V24.firstOrNull { it.engineStyle == style }

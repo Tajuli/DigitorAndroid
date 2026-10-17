@@ -1,5 +1,7 @@
 package com.tajuli.digitorandroid.editor.model
 
+import com.tajuli.digitorandroid.editor.assets.RemoteAssetCatalogV1
+
 /**
  * Creator-facing V25 effect library inspired by the effect families commonly used in short-form
  * editors. Names are intentionally generic and the renderer is Digitor's own implementation.
@@ -116,8 +118,19 @@ object CreatorEffectCatalogV25 {
 
     private val byName = presets.associateBy { it.name.lowercase() }
 
-    fun find(name: String): CreatorEffectPresetV25? = byName[name.lowercase()]
-    fun inCategory(category: String): List<CreatorEffectPresetV25> = presets.filter { it.category == category }
+    fun find(name: String): CreatorEffectPresetV25? =
+        byName[name.lowercase()] ?: RemoteAssetCatalogV1.state.value.effects.firstOrNull {
+            it.name.equals(name, ignoreCase = true)
+        }
+
+    fun inCategory(category: String): List<CreatorEffectPresetV25> =
+        presets.filter { it.category == category } +
+            RemoteAssetCatalogV1.state.value.effects.filter {
+                it.category == category && !byName.containsKey(it.name.lowercase())
+            }
+
+    fun visiblePresetCount(): Int = presets.size +
+        RemoteAssetCatalogV1.state.value.effects.count { !byName.containsKey(it.name.lowercase()) }
 }
 
 fun resolveCreatorEffectsV25(effects: List<NodeEffect>): CreatorEffectVectorV25 {

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "presets": [
+    {
+      "id": "cinema_warm_remote",
+      "name": "Cinema Warm",
+      "description": "Soft cinematic highlights",
+      "group": "LOOKS",
+      "defaultIntensity": 0.85,
+      "corrections": {
+        "exposure": 0.06,
+        "contrast": 10,
+        "saturation": 8,
+        "temperature": 13,
+        "highlights": -12,
+        "shadows": 9
+      },
+      "log": {
+        "highlights": {
+          "red": 0.035,
+          "green": 0.014,
+          "blue": -0.018
+        }
+      }
+    },
+    {
+      "id": "misty_blue_remote",
+      "name": "Misty Blue",
+      "description": "Cool gentle pastel tones",
+      "group": "LOOKS",
+      "defaultIntensity": 0.9,
+      "corrections": {
+        "exposure": 0.11,
+        "contrast": -9,
+        "saturation": -4,
+        "temperature": -11,
+        "shadows": 9
+      },
+      "log": {
+        "shadows": {
+          "red": -0.018,
+          "green": 0.008,
+          "blue": 0.032
+        }
+      }
+    }
+  ]
+}

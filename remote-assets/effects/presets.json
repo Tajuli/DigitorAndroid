@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "presets": [
+    {
+      "name": "Aurora Glow",
+      "category": "Basic",
+      "vector": {
+        "glow": 0.58,
+        "blur": 0.13,
+        "warm": 0.12
+      }
+    },
+    {
+      "name": "Retro Drift",
+      "category": "Retro",
+      "vector": {
+        "grain": 0.35,
+        "vignette": 0.3,
+        "warm": 0.24,
+        "scanlines": 0.12
+      }
+    },
+    {
+      "name": "Glitch Wave",
+      "category": "Glitch",
+      "vector": {
+        "wave": 0.55,
+        "rgbSplit": 0.31,
+        "flicker": 0.14
+      }
+    }
+  ]
+}
