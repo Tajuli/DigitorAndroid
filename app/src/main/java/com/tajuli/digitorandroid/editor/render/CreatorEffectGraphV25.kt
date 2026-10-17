@@ -3,6 +3,7 @@ package com.tajuli.digitorandroid.editor.render
 import android.content.Context
 import com.tajuli.digitorandroid.editor.model.*
 import com.tajuli.digitorandroid.editor.processing.EyeTrackStore
+import com.tajuli.digitorandroid.editor.audio.MusicBeatPulseV1
 import android.opengl.GLES20
 import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.util.GlProgram
@@ -51,7 +52,10 @@ internal class CreatorEffectGraphV25 private constructor(
             }
             val hasFx = editableNodes.any { node ->
                 !resolveCreatorEffectsV25(node.visibleEffects()).isIdentity ||
-                    node.visibleEffects().any { it.enabled && it.amount > 0f && CompositeTemplateCatalogV2.find(it.name) != null } ||
+                    node.visibleEffects().any { it.enabled && it.amount > 0f &&
+                        (CompositeTemplateCatalogV2.find(it.name) != null ||
+                            CreatorEffectCatalogV25.find(it.name)?.remoteMotion != null)
+                    } ||
                     node.visibleEffects().any { EyeEffectCatalog.contains(it.name) } ||
                     clip.nodeAnimations.hasAnimation(node.id, NodeAnimationDomain.EFFECTS)
             }
@@ -196,7 +200,17 @@ internal class CreatorEffectGraphV25 private constructor(
                                 currentNode.visibleEffects()
                             }
                             val vector = resolveTimedCreatorEffectsV26(effectsWithTiming, currentClip, sourceUs)
-                            val motion = CompositeTemplateCatalogV2.atSourceTime(effectsWithTiming, currentClip, sourceUs)
+                            val hasBeatMotion = effectsWithTiming.any { effect ->
+                                effect.enabled && effect.amount > 0f &&
+                                    CreatorEffectCatalogV25.find(effect.name)?.remoteMotion != null
+                            }
+                            val beatPulse = if (hasBeatMotion) MusicBeatPulseV1.pulseAt(
+                                context, currentClip, sourceUs,
+                                if (preview) PreviewProjectRegistry.project() else MusicBeatPulseV1.project(),
+                            ) else 0f
+                            val motion = CompositeTemplateCatalogV2.atSourceTime(
+                                effectsWithTiming, currentClip, sourceUs, beatPulse,
+                            )
                             val eyes = resolveEyeEffects(effectsWithTiming, currentClip, sourceUs)
                             val hasActiveEyes = eyePose != null && eyes.any { it != 0f }
                             if (vector.isIdentity && !hasActiveEyes && !motion.active) {
@@ -464,6 +478,9 @@ internal class CreatorEffectGraphV25 private constructor(
             program.setFloatUniform("uMotionWaveProgress", motion.waveProgress)
             program.setFloatUniform("uMotionWaveStrength", motion.waveStrength)
             program.setFloatUniform("uMotionShakeStrength", motion.shakeStrength)
+            program.setFloatsUniform(
+                "uRippleCenter", floatArrayOf(motion.rippleCenterX, motion.rippleCenterY),
+            )
             program.setFloatUniform(
                 "uTime",
                 (sourceUs % 10_000_000L).toFloat() / 1_000_000f,
@@ -582,6 +599,7 @@ internal class CreatorEffectGraphV25 private constructor(
                 uniform float uMotionWaveProgress;
                 uniform float uMotionWaveStrength;
                 uniform float uMotionShakeStrength;
+                uniform vec2 uRippleCenter;
                 varying vec2 vTexCoord;
 
                 float hash21(vec2 p) {
@@ -624,11 +642,25 @@ internal class CreatorEffectGraphV25 private constructor(
                     vec2 p = (uv - vec2(0.5)) / max(uMotionZoom, 1.0) + vec2(0.5);
 
                     if (uMotionWaveStrength > 0.001) {
-                        float diagonal = uv.x + uv.y - 2.0 * uMotionWaveProgress;
-                        float band = exp(-38.0 * diagonal * diagonal);
-                        float ripple = sin(diagonal * 29.0) * band *
-                            0.026 * uMotionWaveStrength;
-                        p += vec2(ripple, -ripple);
+                        if (uMotionStyle > 19.5) {
+                            // Subtle circular ring expanding from a point. Aspect correction
+                            // keeps the ring circular on landscape and portrait video.
+                            float aspect = uTexelSize.y / max(uTexelSize.x, 0.000001);
+                            vec2 delta = uv - uRippleCenter;
+                            float r = length(vec2(delta.x * aspect, delta.y));
+                            float d = r - uMotionWaveProgress;
+                            float band = exp(-155.0 * d * d);
+                            float distortion = sin(d * 74.0) * band *
+                                0.015 * uMotionWaveStrength;
+                            vec2 dir = delta / max(length(delta), 0.0001);
+                            p += dir * distortion;
+                        } else {
+                            float diagonal = uv.x + uv.y - 2.0 * uMotionWaveProgress;
+                            float band = exp(-38.0 * diagonal * diagonal);
+                            float ripple = sin(diagonal * 29.0) * band *
+                                0.026 * uMotionWaveStrength;
+                            p += vec2(ripple, -ripple);
+                        }
                     }
                     if (uMotionShakeStrength > 0.001) {
                         p += vec2(
