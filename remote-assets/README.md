@@ -19,11 +19,10 @@ collisions. Android downloads and caches the three files independently. Updates 
 at most once every six hours while the app is launched; failed checks retry on subsequent
 launches (after one hour). The last good cache is used offline.
 
-## Move to a separate GitHub repository
-The connected GitHub integration currently cannot create repositories. Once a public asset
-repository (for example `Tajuli/Digitor-Assets`) has been created, copy the three folders
-to its root, then change the `BASE_URL` constant in
-`app/src/main/java/com/tajuli/digitorandroid/editor/assets/GithubAssetSyncV1.kt`
-to `https://raw.githubusercontent.com/Tajuli/Digitor-Assets/main`.
-Keep the new repository public for unauthenticated HTTPS downloads.
-No GitHub access token is needed or should be embedded in the app.
+## Dedicated GitHub asset repository
+The public repository is `Tajuli/Digitor-Assets-` (note the trailing hyphen).
+The downloader tries `https://raw.githubusercontent.com/Tajuli/Digitor-Assets-/main` first,
+then this legacy asset path as a migration fallback when the new repository is empty or
+unavailable. Copy the three category folders to the root of the dedicated repo.
+The connected GitHub App requires explicit access to this newly created repository before it
+can write there. Never embed GitHub access tokens inside the Android app.
