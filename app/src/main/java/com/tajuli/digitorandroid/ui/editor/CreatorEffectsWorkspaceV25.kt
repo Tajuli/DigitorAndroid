@@ -452,11 +452,23 @@ fun CreatorEffectsWorkspace(
                 if (selectedEffect == null) {
                     "Tap an effect thumbnail to select it, then adjust its amount here."
                 } else {
-                    "Effect amount control. Duration and timeline controls remain below."
+                    "One strength slider controls the full template. Resize its single FX bar to change duration."
                 },
                 fontSize = 7.sp,
                 color = Fx25Muted,
             )
+            selectedEffect?.let { effect ->
+                CompositeTemplateCatalogV2.find(effect.name)?.let { recipe ->
+                    recipe.stages.forEachIndexed { index, step ->
+                        Text(
+                            "Step " + (index + 1) + " · " + step.layers.joinToString(" + ") { it.effectName },
+                            fontSize = 7.sp,
+                            color = Fx25Muted,
+                            maxLines = 2,
+                        )
+                    }
+                }
+            }
         }
 
         HorizontalDivider(color = Fx25Divider)
