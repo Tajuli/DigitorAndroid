@@ -32,6 +32,8 @@ data class CompositeTemplateFrameV2(
     val waveProgress: Float = 0f,
     val waveStrength: Float = 0f,
     val shakeStrength: Float = 0f,
+    val rippleCenterX: Float = .5f,
+    val rippleCenterY: Float = .5f,
     val layers: List<CompositeEffectLayerV2> = emptyList(),
 ) {
     val active: Boolean get() = style != 0 && amount > 0f
@@ -82,12 +84,78 @@ object CompositeTemplateCatalogV2 {
     fun forCategory(category: String): List<CompositeEffectTemplateV2> =
         presets.filter { it.category == category }
 
+    /** Animation evaluated in output time so speed curves preserve the two-second reveal. */
+    private fun atRemoteMotionTimeV1(
+        effect: NodeEffect,
+        clip: TimelineClip,
+        sourceTimeUs: Long,
+        beatPulse: Float,
+    ): CompositeTemplateFrameV2 {
+        val recipe = CreatorEffectCatalogV25.find(effect.name)?.remoteMotion
+            ?: return CompositeTemplateFrameV2()
+        val start = effect.resolvedSourceStartUsV26(clip)
+        val elapsedUs = (clip.outputTimeForSource(sourceTimeUs) -
+            clip.outputTimeForSource(start)).coerceAtLeast(0L)
+        val seconds = elapsedUs / 1_000_000f
+        val amount = effect.amount.coerceIn(0f, 1f)
+        val revealT = (seconds / recipe.blurSeconds).coerceIn(0f, 1f)
+        val revealEase = revealT * revealT * (3f - 2f * revealT)
+        val blur = (1f - revealEase) * recipe.blurStrength * amount
+        // Small continuous push / pull with no abrupt jumps at cycle boundaries.
+        val zoomCycle = sin(2.0 * PI * seconds / recipe.zoomPeriodSeconds)
+        val zoom = 1f + amount * (0.024f +
+            recipe.zoomStrength * ((1f + zoomCycle.toFloat()) * .5f))
+        var waveProgress = 0f
+        var waveStrength = 0f
+        var cx = .5f
+        var cy = .5f
+        if (seconds >= recipe.blurSeconds) {
+            val afterReveal = seconds - recipe.blurSeconds
+            val interval = recipe.rippleIntervalSeconds
+            val slot = floor(afterReveal / interval).toInt()
+            val inSlot = afterReveal - slot * interval
+            // A rare, soft point-origin expanding circular wave; most frames stay clean.
+            val waveAge = inSlot - .70f
+            if (waveAge in 0f..1.35f) {
+                val phase = (waveAge / 1.35f).coerceIn(0f, 1f)
+                waveProgress = phase * 1.25f
+                waveStrength = (sin(PI * phase).toFloat().coerceAtLeast(0f) *
+                    recipe.rippleStrength * amount)
+            }
+            cx = when (slot % 3) { 0 -> .33f; 1 -> .62f; else -> .47f }
+            cy = when (slot % 3) { 0 -> .38f; 1 -> .57f; else -> .68f }
+        }
+        return CompositeTemplateFrameV2(
+            style = 20,
+            amount = amount,
+            elapsedSeconds = seconds,
+            zoomScale = zoom,
+            blurReveal = blur,
+            waveProgress = waveProgress,
+            waveStrength = waveStrength,
+            shakeStrength = recipe.shakeStrength * beatPulse.coerceIn(0f, 1f) * amount,
+            rippleCenterX = cx,
+            rippleCenterY = cy,
+            layers = if (blur > .001f) listOf(
+                CompositeEffectLayerV2("Blur", blur * .28f)
+            ) else emptyList(),
+        )
+    }
+
     /** Pure frame schedule shared by GPU preview/export and the CPU rendering fallback. */
     fun atSourceTime(
         effects: List<NodeEffect>,
         clip: TimelineClip,
         sourceTimeUs: Long,
+        beatPulse: Float = 0f,
     ): CompositeTemplateFrameV2 {
+        val remote = effects.lastOrNull {
+            CreatorEffectCatalogV25.find(it.name)?.remoteMotion != null &&
+                it.activeAtSourceTimeV26(clip, sourceTimeUs)
+        }
+        if (remote != null) return atRemoteMotionTimeV1(
+            remote, clip, sourceTimeUs, beatPulse
+        )
         val chosen = effects.lastOrNull { effect ->
             val template = find(effect.name)
             template != null &&
