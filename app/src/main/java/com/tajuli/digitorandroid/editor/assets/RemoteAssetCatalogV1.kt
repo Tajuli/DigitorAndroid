@@ -100,6 +100,13 @@ object RemoteAssetCatalogV1 {
                 else -> error("Unsupported catalog")
             }.copy(revision = current.revision + 1L)
         }.getOrNull() ?: return false
+        // Historical flat install API is used by tests/legacy callers only.
+        // Ensure test resets cannot leave hidden per-category maps behind.
+        when (kind) {
+            "effects" -> effectFolders.clear()
+            "filters" -> filterFolders.clear()
+            "transitions" -> transitionFolders.clear()
+        }
         updates.value = next
         return true
     }

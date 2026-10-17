@@ -122,6 +122,27 @@ class RemoteAssetCatalogV1Test {
     }
 
     @Test
+    fun categoryFilesRequireMatchingFoldersAndKnownBeautyOperations() {
+        val motion = """{"schemaVersion":1,"presets":[
+          {"name":"Only Motion","category":"Motion","vector":{"wave":0.18}}
+        ]}"""
+        assertTrue(RemoteAssetCatalogV1.isValidFolder("effects", "Motion", motion))
+        assertFalse(RemoteAssetCatalogV1.isValidFolder("effects", "Eyes", motion))
+        assertFalse(RemoteAssetCatalogV1.isValidFolder("effects", "../Motion", motion))
+        assertTrue(RemoteAssetCatalogV1.installFolder("effects", "Motion", motion))
+        assertTrue(CreatorEffectCatalogV25.inCategory("Motion").any { it.name == "Only Motion" })
+        val beauty = """{"schemaVersion":1,"presets":[{
+          "id":"remote_rose_v2","name":"Remote Rose","description":"Subtle skin",
+          "group":"BEAUTY","beautyWeights":{"skinSmooth":0.35},
+          "defaultIntensity":0.5
+        }]}"""
+        assertTrue(RemoteAssetCatalogV1.isValidFolder("filters", "Beauty", beauty))
+        assertFalse(RemoteAssetCatalogV1.isValidFolder("filters", "Looks", beauty))
+        val unsafe = beauty.replace("skinSmooth", "arbitraryShader")
+        assertFalse(RemoteAssetCatalogV1.isValidFolder("filters", "Beauty", unsafe))
+    }
+
+    @Test
     fun oldSchemaIsRejected() {
         assertFalse(RemoteAssetCatalogV1.isValid("filters",
             """{"schemaVersion":3,"presets":[]}"""))

@@ -134,7 +134,9 @@ fun CreatorEffectsWorkspace(
             }
         }
 
-        RemoteCategoryDownloadControlV2(kind = "effects", folder = category)
+        if (category in CreatorEffectCatalogV25.categories) {
+            RemoteCategoryDownloadControlV2(kind = "effects", folder = category)
+        }
 
         if (wrongMotionMedia) {
             Text(
