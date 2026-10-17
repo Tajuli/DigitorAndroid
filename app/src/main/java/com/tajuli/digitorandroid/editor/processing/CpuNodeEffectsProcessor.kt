@@ -1,5 +1,6 @@
 package com.tajuli.digitorandroid.editor.processing
 
+import com.tajuli.digitorandroid.editor.audio.MusicBeatPulseV1
 import com.tajuli.digitorandroid.editor.model.ColorNode
 import com.tajuli.digitorandroid.editor.model.CompositeTemplateCatalogV2
 import com.tajuli.digitorandroid.editor.model.resolveTimedCreatorEffectsV26
@@ -111,7 +112,11 @@ class CpuNodeEffectsProcessor(
         val sharpen = vector.sharpen
         val glow = vector.glow
         val grain = vector.grain
-        val motion = CpuMotionTemplateV1.from(CompositeTemplateCatalogV2.atSourceTime(effects, clip, sourceTimeUs))
+        val motion = CpuMotionTemplateV1.from(
+            CompositeTemplateCatalogV2.atSourceTime(
+                effects, clip, sourceTimeUs, MusicBeatPulseV1.cachedPulse(clip, sourceTimeUs),
+            )
+        )
         val reveal = motion.blurReveal.coerceIn(0f, 1f)
         val heavyRadiusX = (width * .035f * (.32f + .68f * reveal)).toInt().coerceAtLeast(1)
         val heavyRadiusY = (height * .035f * (.32f + .68f * reveal)).toInt().coerceAtLeast(1)

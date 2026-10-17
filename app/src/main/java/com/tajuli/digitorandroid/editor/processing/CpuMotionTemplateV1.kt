@@ -4,6 +4,7 @@ import com.tajuli.digitorandroid.editor.model.CompositeTemplateFrameV2
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * CPU fallback for the signature Video/Image Effect.
@@ -30,12 +31,26 @@ internal class CpuMotionTemplateV1 private constructor(
         var mappedV = (v - .5f) / frame.zoomScale + .5f + shakeY
 
         if (frame.waveStrength > .001f) {
-            val diagonal = u + v - 2f * frame.waveProgress
-            val band = exp((-38f * diagonal * diagonal).toDouble()).toFloat()
-            val ripple = sin((diagonal * 29f).toDouble()).toFloat() * band *
-                .026f * frame.waveStrength
-            mappedU += ripple
-            mappedV -= ripple
+            if (frame.style == 20) {
+                val dx = u - frame.rippleCenterX
+                val dy = v - frame.rippleCenterY
+                val aspect = width.toFloat() / height.coerceAtLeast(1)
+                val radius = sqrt(dx * dx * aspect * aspect + dy * dy)
+                val distance = radius - frame.waveProgress
+                val band = exp((-155f * distance * distance).toDouble()).toFloat()
+                val shift = sin((distance * 74f).toDouble()).toFloat() * band *
+                    .015f * frame.waveStrength
+                val length = sqrt(dx * dx + dy * dy).coerceAtLeast(.0001f)
+                mappedU += dx / length * shift
+                mappedV += dy / length * shift
+            } else {
+                val diagonal = u + v - 2f * frame.waveProgress
+                val band = exp((-38f * diagonal * diagonal).toDouble()).toFloat()
+                val ripple = sin((diagonal * 29f).toDouble()).toFloat() * band *
+                    .026f * frame.waveStrength
+                mappedU += ripple
+                mappedV -= ripple
+            }
         }
         val sx = (mappedU.coerceIn(.001f, .999f) * width).toInt().coerceIn(0, width - 1)
         val sy = (mappedV.coerceIn(.001f, .999f) * height).toInt().coerceIn(0, height - 1)
@@ -43,7 +58,7 @@ internal class CpuMotionTemplateV1 private constructor(
     }
 
     fun grade(rgb: FloatArray, px: Int, py: Int, width: Int, height: Int) {
-        if (frame.waveStrength <= .001f) return
+        if (frame.waveStrength <= .001f || frame.style == 20) return
         val u = (px + .5f) / width
         val v = (py + .5f) / height
         val diagonal = u + v - 2f * frame.waveProgress

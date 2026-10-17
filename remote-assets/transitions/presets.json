@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "presets": [
+    {
+      "id": "cinematic_slide",
+      "label": "Cinematic Slide",
+      "category": "CAMERA",
+      "engineStyle": "PUSH_LEFT"
+    },
+    {
+      "id": "gentle_zoom",
+      "label": "Gentle Zoom",
+      "category": "CAMERA",
+      "engineStyle": "ZOOM_IN"
+    },
+    {
+      "id": "soft_dissolve",
+      "label": "Soft Dissolve",
+      "category": "BASIC",
+      "engineStyle": "CROSS_DISSOLVE"
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 package com.tajuli.digitorandroid.editor.model
 
+import com.tajuli.digitorandroid.editor.assets.RemoteAssetCatalogV1
+
 import kotlin.math.abs
 
 /**
@@ -147,8 +149,14 @@ val CREATOR_FILTERS_V36: List<CreatorFilterPresetV36> = listOf(
     ),
 )
 
+fun allCreatorFilterPresetsV36(): List<CreatorFilterPresetV36> =
+    CREATOR_FILTERS_V36 + RemoteAssetCatalogV1.state.value.filters.filter { remote ->
+        CREATOR_FILTERS_V36.none { it.id == remote.id }
+    }
+
 fun creatorFilterPresetV36(id: String): CreatorFilterPresetV36? =
     CREATOR_FILTERS_V36.firstOrNull { it.id == id }
+        ?: RemoteAssetCatalogV1.state.value.filters.firstOrNull { it.id == id }
 
 fun creatorFilterMarkerNameV36(id: String): String = CREATOR_FILTER_MARKER_PREFIX_V36 + id
 

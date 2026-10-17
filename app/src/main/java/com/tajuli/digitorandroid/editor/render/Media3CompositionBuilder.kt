@@ -1,6 +1,7 @@
 package com.tajuli.digitorandroid.editor.render
 
 import com.tajuli.digitorandroid.editor.model.*
+import com.tajuli.digitorandroid.editor.audio.MusicBeatPulseV1
 import android.os.Build
 import androidx.media3.common.C
 import androidx.media3.common.Effect
@@ -102,6 +103,7 @@ class Media3CompositionBuilder(
         project: TimelineProject,
         maxLongEdge: Int = 720,
     ): Composition {
+        MusicBeatPulseV1.useProject(project)
         val problems = project.validate()
         require(problems.isEmpty()) { problems.joinToString("; ") }
 
@@ -168,6 +170,7 @@ class Media3CompositionBuilder(
     }
 
     private fun buildExport(project: TimelineProject): Composition {
+        MusicBeatPulseV1.useProject(project)
         val problems = project.validate()
         require(problems.isEmpty()) { problems.joinToString("; ") }
 
@@ -352,6 +355,7 @@ class Media3CompositionBuilder(
     }
 
     private fun buildPreviewInternal(project: TimelineProject): Composition {
+        MusicBeatPulseV1.useProject(project)
         val problems = project.validate()
         require(problems.isEmpty()) { problems.joinToString("; ") }
 
