@@ -5,6 +5,7 @@ import com.google.gson.JsonParser
 import com.tajuli.digitorandroid.editor.model.ColorWheelValue
 import com.tajuli.digitorandroid.editor.model.CreatorEffectPresetV25
 import com.tajuli.digitorandroid.editor.model.CreatorEffectVectorV25
+import com.tajuli.digitorandroid.editor.model.RemoteMotionRecipeV1
 import com.tajuli.digitorandroid.editor.model.CreatorFilterGroupV36
 import com.tajuli.digitorandroid.editor.model.CreatorFilterPresetV36
 import com.tajuli.digitorandroid.editor.model.LogWheels
@@ -113,6 +114,22 @@ internal fun parseEffectsV1(json: String): List<CreatorEffectPresetV25> =
         val category = entry.requiredTextV1("category")
         require(category in allowedEffectCategoriesV1)
         val vector = entry.optionalObjectV1("vector")
+        val motion = entry.get("motion")?.let { raw ->
+            require(raw.isJsonObject) { "Invalid motion" }
+            val spec = raw.asJsonObject
+            val type = spec.requiredTextV1("type")
+            require(type == "BEAT_CIRCLE_V1") { "Unsupported motion engine" }
+            RemoteMotionRecipeV1(
+                type = type,
+                blurSeconds = spec.numberV1("blurSeconds", 0.5f, 5f, 2f),
+                blurStrength = spec.numberV1("blurStrength", 0.05f, 1f, .9f),
+                shakeStrength = spec.numberV1("shakeStrength", 0f, .5f, .16f),
+                zoomStrength = spec.numberV1("zoomStrength", 0f, .08f, .018f),
+                zoomPeriodSeconds = spec.numberV1("zoomPeriodSeconds", 4f, 30f, 10f),
+                rippleStrength = spec.numberV1("rippleStrength", 0f, .4f, .17f),
+                rippleIntervalSeconds = spec.numberV1("rippleIntervalSeconds", 2f, 12f, 4.8f),
+            )
+        }
         CreatorEffectPresetV25(
             name = name,
             category = category,
@@ -133,7 +150,12 @@ internal fun parseEffectsV1(json: String): List<CreatorEffectPresetV25> =
                 warm = vector.numberV1("warm", -1f, 1.5f),
                 denoise = vector.numberV1("denoise", 0f, 1.5f),
             ),
-        ).also { require(!it.vector.isIdentity) { "Effect recipe must change the image" } }
+            remoteMotion = motion,
+        ).also {
+            require(!it.vector.isIdentity || it.remoteMotion != null) {
+                "Effect recipe must change the image"
+            }
+        }
     }.also { require(it.map { p -> p.name.lowercase() }.distinct().size == it.size) }
 
 private fun JsonObject.wheelV1(): ColorWheelValue = ColorWheelValue(
