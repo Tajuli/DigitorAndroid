@@ -7,6 +7,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import com.tajuli.digitorandroid.editor.model.PreviewTransformClock
 import com.tajuli.digitorandroid.editor.model.TimelineClip
@@ -16,11 +17,14 @@ import com.tajuli.digitorandroid.editor.preview.DavinciFramePreviewEngine
 import com.tajuli.digitorandroid.editor.preview.MultitrackAudioPreviewEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collect
 
 internal class EditorPlaybackController(initialDurationUs: Long) {
     var isPlaying by mutableStateOf(false)
     var cursorUs by mutableStateOf(0L)
     var previewStatus by mutableStateOf<String?>(null)
+    var seekRevision by mutableStateOf(0L)
 
     internal var previousProjectDurationUs = initialDurationUs
     internal var playAnchorCursorUs = 0L
@@ -40,6 +44,7 @@ internal class EditorPlaybackController(initialDurationUs: Long) {
     ): Long {
         val target = requestUs.coerceIn(0L, project.durationUs.coerceAtLeast(0L))
         cursorUs = target
+        seekRevision++
         if (hasAudio && audioPreviewReady) {
             runCatching { audioPreview.seekTo(target / 1000L) }
         }
@@ -96,9 +101,23 @@ internal fun EditorPlaybackEffects(
     controller: EditorPlaybackController,
 ) {
     val currentProject by rememberUpdatedState(project)
-    LaunchedEffect(project, controller.cursorUs, hasVideo, controller.isPlaying) {
+    LaunchedEffect(project, hasVideo, controller.isPlaying) {
         if (hasVideo) {
             previewEngine.submit(project, controller.cursorUs, controller.isPlaying)
+        }
+    }
+
+    LaunchedEffect(controller.seekRevision) {
+        if (hasVideo && controller.isPlaying && controller.seekRevision > 0L) {
+            previewEngine.submit(project, controller.cursorUs, true, forceSeek = true)
+        }
+    }
+
+    LaunchedEffect(project, hasVideo, controller.isPlaying) {
+        if (hasVideo && !controller.isPlaying) {
+            snapshotFlow { controller.cursorUs }
+                .distinctUntilChanged()
+                .collect { previewEngine.submit(project, it, false) }
         }
     }
 
@@ -157,6 +176,9 @@ internal fun EditorPlaybackEffects(
                     (SystemClock.elapsedRealtime() - controller.playAnchorRealtimeMs) * 1000L
             }.coerceIn(0L, durationUs)
 
+            if (hasAudio && audioPreviewReady) {
+                previewEngine.updateAudioMasterPosition(nextUs)
+            }
             controller.cursorUs = nextUs
             if (durationUs > 0L && nextUs >= durationUs) {
                 runCatching { audioPreview.pause() }
