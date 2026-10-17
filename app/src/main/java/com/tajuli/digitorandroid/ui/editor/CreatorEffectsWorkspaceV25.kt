@@ -144,7 +144,7 @@ fun CreatorEffectsWorkspace(
 
         if (category == CompositeTemplateCatalogV2.VIDEO || category == CompositeTemplateCatalogV2.IMAGE) {
             Text(
-                "COMBO TEMPLATES · one tap = multiple effects + three animated stages · drag the FX timeline bar to time the whole edit",
+                "SIGNATURE MOTION · 2s blur → 5s wave → 5s double shake → repeat · slow zoom throughout",
                 color = Fx25Accent,
                 fontSize = 8.sp,
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
@@ -384,7 +384,7 @@ fun CreatorEffectsWorkspace(
                     )
                     CompositeTemplateCatalogV2.find(preset.name)?.let { recipe ->
                         Text(
-                            "COMBO · " + recipe.stages.size + " animated steps",
+                            "ONE TEMPLATE · repeating timed sequence",
                             fontSize = 7.sp,
                             color = Fx25Accent,
                             maxLines = 1,
@@ -461,7 +461,8 @@ fun CreatorEffectsWorkspace(
                 CompositeTemplateCatalogV2.find(effect.name)?.let { recipe ->
                     recipe.stages.forEachIndexed { index, step ->
                         Text(
-                            "Step " + (index + 1) + " · " + step.layers.joinToString(" + ") { it.effectName },
+                            "Step " + (index + 1) + " · " + step.startSeconds + "–" + step.endSeconds +
+                                "s · " + step.label,
                             fontSize = 7.sp,
                             color = Fx25Muted,
                             maxLines = 2,
