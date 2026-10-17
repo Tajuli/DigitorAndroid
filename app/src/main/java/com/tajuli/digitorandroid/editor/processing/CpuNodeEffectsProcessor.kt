@@ -105,11 +105,6 @@ class CpuNodeEffectsProcessor(
         sourceTimeUs: Long,
     ) {
         val effects = node.visibleEffects()
-        fun amount(name: String): Float = effects
-            .firstOrNull { it.name.equals(name, ignoreCase = true) && it.enabled }
-            ?.amount
-            ?.coerceIn(0f, 1f)
-            ?: 0f
 
         val vector = resolveTimedCreatorEffectsV26(effects, clip, sourceTimeUs)
         val blur = vector.blur
@@ -117,6 +112,9 @@ class CpuNodeEffectsProcessor(
         val glow = vector.glow
         val grain = vector.grain
         val motion = CpuMotionTemplateV1.from(CompositeTemplateCatalogV2.atSourceTime(effects, clip, sourceTimeUs))
+        val reveal = motion.blurReveal.coerceIn(0f, 1f)
+        val heavyRadiusX = (width * .035f * (.32f + .68f * reveal)).toInt().coerceAtLeast(1)
+        val heavyRadiusY = (height * .035f * (.32f + .68f * reveal)).toInt().coerceAtLeast(1)
         val radius = (1f + blur * 4f + glow * 2f).toInt().coerceIn(1, 7)
         val frameSeed = ((sourceTimeUs / 33_333L).toInt() * 31) xor node.id.hashCode()
         val stripe = (height / workerCount).coerceAtLeast(1)
@@ -167,6 +165,26 @@ class CpuNodeEffectsProcessor(
                             val weight = .55f + .45f * (1f - abs(luma * 2f - 1f))
                             val delta = noise * grain * .10f * weight
                             for (channel in 0..2) out[channel] += delta
+                        }
+
+                        if (reveal > .001f) {
+                            // Approximate the same 12-tap heavy blur as GPU for CPU-only exports.
+                            val heavy = FloatArray(3) { channel -> centerRgb[channel] * 2f }
+                            val offsets = arrayOf(
+                                heavyRadiusX to 0, -heavyRadiusX to 0,
+                                0 to heavyRadiusY, 0 to -heavyRadiusY,
+                                heavyRadiusX to heavyRadiusY, -heavyRadiusX to -heavyRadiusY,
+                                heavyRadiusX to -heavyRadiusY, -heavyRadiusX to heavyRadiusY,
+                                (heavyRadiusX * 1.7f).toInt() to (heavyRadiusY * 1.7f).toInt(),
+                                -(heavyRadiusX * 1.7f).toInt() to -(heavyRadiusY * 1.7f).toInt(),
+                            )
+                            offsets.forEach { (ox, oy) ->
+                                val sampleRgb = rgb(sample(source, width, height, sx + ox, sy + oy))
+                                for (channel in 0..2) heavy[channel] += sampleRgb[channel]
+                            }
+                            for (channel in 0..2) {
+                                out[channel] += (heavy[channel] / 12f - out[channel]) * reveal * .96f
+                            }
                         }
 
                         if (motion.echo > 0f) {
