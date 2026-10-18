@@ -14,6 +14,7 @@ import androidx.media3.common.VideoFrameProcessor
 import androidx.media3.common.VideoGraph
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.MultipleInputVideoGraph
+import androidx.media3.effect.Presentation
 import com.tajuli.digitorandroid.editor.model.TimelineClip
 import com.tajuli.digitorandroid.editor.model.TimelineProject
 import com.tajuli.digitorandroid.editor.model.TimelineTrack
@@ -21,7 +22,7 @@ import com.tajuli.digitorandroid.editor.model.transitionPairsV22
 import java.io.Closeable
 import java.util.concurrent.Executor
 
-/** Maximum final-surface size for realtime editing. Export always keeps project resolution. */
+/** Upper preview tier. Devices can select 360p or 540p to reduce live compositor work. */
 internal const val REALTIME_PREVIEW_LONG_EDGE = 720
 
 /**
@@ -38,11 +39,9 @@ internal const val REALTIME_PREVIEW_LONG_EDGE = 720
  * path instead of the raw-code path and could stall before the first rendered frame. The render core
  * now treats the prepared layer format as the single source of truth for realtime graph metadata.
  *
- * IMPORTANT: the compositor keeps the full project canvas. Overlay scale/position semantics in
- * Media3 are relative to that canvas; shrinking the compositor itself made a scale=1 source larger
- * than the canvas and therefore looked zoomed/cropped. Only the final viewer Surface is reduced to
- * at most 720 px on the long edge. Source decoding, color/spatial effects and compositor geometry
- * therefore stay export-compatible, and the final presentation is simply downsampled for display.
+ * Realtime preview bounds the compositor to 720 px on its long edge. Each input is downscaled to
+ * the same fraction of the project canvas after its source effects, so Media3's normalized overlay
+ * placement and scale remain unchanged. Export uses its independent full-resolution graph.
  *
  * V36 uses [SharedVideoPipeline.compositedPreviewEffectsFor] here rather than the static byte-parity
  * snapshot. The realtime chain deliberately keeps creator/beauty stages resident so a filter tap or
@@ -72,6 +71,21 @@ internal class DigitorRenderCore(
     private val previewOutputSize = resolvePreviewOutputSize(project, REALTIME_PREVIEW_LONG_EDGE)
     private val previewOutputWidth = previewOutputSize.first
     private val previewOutputHeight = previewOutputSize.second
+
+    private fun previewInputSize(index: Int): Pair<Int, Int> = resolvePreviewInputSize(
+        sourceWidth = layers[index].format.width,
+        sourceHeight = layers[index].format.height,
+        projectWidth = project.width,
+        projectHeight = project.height,
+        previewWidth = previewOutputWidth,
+        previewHeight = previewOutputHeight,
+    )
+
+    private fun previewDownscaleEffect(index: Int) = Presentation.createForWidthAndHeight(
+        previewInputSize(index).first,
+        previewInputSize(index).second,
+        Presentation.LAYOUT_SCALE_TO_FIT,
+    )
 
     /**
      * Use exactly the format prepared next to MediaCodec in DavinciFramePreviewEngine. The decoder
@@ -126,12 +140,12 @@ internal class DigitorRenderCore(
             }
         }
 
-        // Keep compositor geometry on the exact project canvas. The SurfaceInfo below owns the
-        // realtime 720p presentation size, so a scale=1 clip no longer gets cropped/zoomed.
+        // Downscale inputs and canvas by the same project-relative factor. This preserves normalized
+        // clip geometry while reducing per-pixel compositor blending and output-surface work.
         graph.setCompositorSettings(
             ResolveVideoCompositorSettings(
-                outputWidth = project.width,
-                outputHeight = project.height,
+                outputWidth = previewOutputWidth,
+                outputHeight = previewOutputHeight,
                 videoTracks = layers.map { it.track },
                 livePreview = true,
                 inputsV22 = compositorInputs,
@@ -146,7 +160,9 @@ internal class DigitorRenderCore(
                 index,
                 VideoFrameProcessor.INPUT_TYPE_SURFACE,
                 renderFormats[index],
-                nativeRetimeEffects(layer.clip, live = true) + SharedVideoPipeline.compositedPreviewEffectsFor(layer.clip),
+                nativeRetimeEffects(layer.clip, live = true) +
+                    SharedVideoPipeline.compositedPreviewEffectsFor(layer.clip) +
+                    previewDownscaleEffect(index),
                 layer.clip.timelineStartUs - layer.clip.sourceInUs,
             )
         }
@@ -168,7 +184,8 @@ internal class DigitorRenderCore(
                 Format.Builder().setSampleMimeType(MimeTypes.IMAGE_RAW)
                     .setWidth(bitmap.width).setHeight(bitmap.height)
                     .setColorInfo(ColorInfo.SRGB_BT709_FULL).build(),
-                SharedVideoPipeline.compositedPreviewEffectsFor(layers[inputIndex].clip), 0L)
+                SharedVideoPipeline.compositedPreviewEffectsFor(layers[inputIndex].clip) +
+                    previewDownscaleEffect(inputIndex), 0L)
             bitmapRegistered[inputIndex] = true
         }
         return graph.queueInputBitmap(inputIndex, bitmap, timestamp)
