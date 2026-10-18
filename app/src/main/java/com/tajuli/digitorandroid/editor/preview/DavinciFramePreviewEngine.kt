@@ -181,7 +181,7 @@ class DavinciFramePreviewEngine(
         }
     }
 
-    private val playbackPump = object : Runnable {
+    private val playbackPump: Runnable = object : Runnable {
         override fun run() {
             if (closed.get() || exportSuspended.get() || !playing) return
             val active = session ?: return
@@ -220,7 +220,7 @@ class DavinciFramePreviewEngine(
         }
     }
 
-    private val playbackFrameCallback = Choreographer.FrameCallback {
+    private val playbackFrameCallback: Choreographer.FrameCallback = Choreographer.FrameCallback {
         playbackPump.run()
     }
 
