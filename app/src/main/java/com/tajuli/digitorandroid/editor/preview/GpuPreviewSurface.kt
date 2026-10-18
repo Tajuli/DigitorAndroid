@@ -27,7 +27,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,6 +54,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
 /** Direct display surface for the editor GPU preview. */
@@ -172,13 +172,18 @@ fun GpuPreviewSurface(
         // Keep one decode in flight. Keying produceState on fallbackLocalUs canceled slow native
         // retriever work every 33 ms during playback, so the fallback only completed after pause.
         // Conflate targets while a decode runs; after it completes, render the newest playhead.
-        snapshotFlow {
-            if (softwareFallbackActive && !exportActive) {
-                (previewClock.localUs / fallbackFrameStepUs) * fallbackFrameStepUs
-            } else {
-                0L
+        // Read the clock from its StateFlow directly. Capturing the delegated Compose value in
+        // snapshotFlow freezes it at the producer's first composition; because these effect keys
+        // remain unchanged during playback, software fallback then rendered the same frame until
+        // play/pause restarted the producer.
+        PreviewTransformClock.flow
+            .map { snapshot ->
+                if (softwareFallbackActive && !exportActive) {
+                    (snapshot.localUs / fallbackFrameStepUs) * fallbackFrameStepUs
+                } else {
+                    0L
+                }
             }
-        }
             .distinctUntilChanged()
             .conflate()
             .collect { localUs ->

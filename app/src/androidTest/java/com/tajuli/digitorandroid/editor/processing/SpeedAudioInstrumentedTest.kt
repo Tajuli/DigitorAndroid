@@ -90,14 +90,39 @@ class SpeedAudioInstrumentedTest {
         val preview = com.tajuli.digitorandroid.editor.preview.DavinciFramePreviewEngine(context)
         try {
             preview.attachSurface(reader.surface)
-            preview.submit(project, 0L, true)
+            // Match the editor's common state: a paused seek has already painted a frame before
+            // the user taps Play. This separates a broken initial surface/session from a playback
+            // pump that fails to advance the already-visible preview.
+            preview.submit(project, 0L, false)
             withTimeout(10_000L) {
-                while ((preview.frame.value?.timelineUs ?: 0L) < 300_000L || presentedFrames.get() < 5) {
+                while (preview.frame.value == null || presentedFrames.get() == 0) {
                     kotlinx.coroutines.delay(10L)
                 }
             }
-            assertTrue("Preview frame PTS must advance while transport is playing", preview.frame.value!!.timelineUs >= 300_000L)
-            assertTrue("Viewer Surface must receive multiple frames during playback", presentedFrames.get() >= 5)
+            val pausedPtsUs = preview.frame.value!!.timelineUs
+            val pausedSurfaceFrames = presentedFrames.get()
+
+            preview.submit(project, 0L, true)
+            withTimeout(10_000L) {
+                while ((preview.frame.value?.timelineUs ?: pausedPtsUs) < 300_000L) {
+                    kotlinx.coroutines.delay(10L)
+                }
+            }
+            assertTrue(
+                "Preview PTS did not advance during playback (paused=$pausedPtsUs, " +
+                    "playing=${preview.frame.value?.timelineUs})",
+                (preview.frame.value?.timelineUs ?: pausedPtsUs) >= 300_000L,
+            )
+            withTimeout(5_000L) {
+                while (presentedFrames.get() < pausedSurfaceFrames + 5) {
+                    kotlinx.coroutines.delay(10L)
+                }
+            }
+            assertTrue(
+                "Viewer Surface did not receive new playback frames " +
+                    "(paused=$pausedSurfaceFrames, playing=${presentedFrames.get()})",
+                presentedFrames.get() >= pausedSurfaceFrames + 5,
+            )
         } finally {
             preview.close()
             reader.close()
