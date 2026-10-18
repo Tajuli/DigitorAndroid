@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
+import android.view.Choreographer
 import android.view.Surface
 import androidx.media3.common.ColorInfo
 import androidx.media3.common.Format
@@ -143,6 +144,7 @@ class DavinciFramePreviewEngine(
     private val renderThread = HandlerThread("DigitorMediaCodecPreview").apply { start() }
     private val handler = Handler(renderThread.looper)
     private val renderExecutor = Executor { runnable -> handler.post(runnable) }
+    private var playbackChoreographer: Choreographer? = null
 
     private var previewSurface: Surface? = null
     private var session: PreviewSession? = null
@@ -159,6 +161,7 @@ class DavinciFramePreviewEngine(
     val frame: StateFlow<Frame?> = mutableFrame.asStateFlow()
 
     init {
+        handler.post { playbackChoreographer = Choreographer.getInstance() }
         PreviewExportCoordinator.register(this)
     }
 
@@ -205,9 +208,20 @@ class DavinciFramePreviewEngine(
                 return
             }
             if (playing && !closed.get() && !exportSuspended.get()) {
-                handler.postDelayed(this, PLAYBACK_PUMP_MS)
+                val choreographer = playbackChoreographer
+                if (choreographer != null) {
+                    choreographer.postFrameCallback(playbackFrameCallback)
+                } else {
+                    // Choreographer initialization is queued first on the render Looper. Keep a
+                    // bounded fallback for unusual platform failures so playback cannot stall.
+                    handler.postDelayed(this, PLAYBACK_PUMP_FALLBACK_MS)
+                }
             }
         }
+    }
+
+    private val playbackFrameCallback = Choreographer.FrameCallback {
+        playbackPump.run()
     }
 
     private val legacyPauseWatchdog = object : Runnable {
@@ -448,7 +462,7 @@ class DavinciFramePreviewEngine(
             }
             playing = true
             if (!wasPlaying || request.forceSeek || sessionChanged) {
-                handler.removeCallbacks(playbackPump)
+                cancelPlaybackPump()
                 handler.post(playbackPump)
             }
         } else {
@@ -491,7 +505,12 @@ class DavinciFramePreviewEngine(
 
     private fun stopPlayback() {
         playing = false
+        cancelPlaybackPump()
+    }
+
+    private fun cancelPlaybackPump() {
         handler.removeCallbacks(playbackPump)
+        playbackChoreographer?.removeFrameCallback(playbackFrameCallback)
     }
 
     private fun buildSession(
@@ -1048,7 +1067,7 @@ class DavinciFramePreviewEngine(
 
     private companion object {
         const val TAG = "DigitorSharedPreview"
-        const val PLAYBACK_PUMP_MS = 8L
+        const val PLAYBACK_PUMP_FALLBACK_MS = 16L
         const val TOPOLOGY_CHECK_INTERVAL_NS = 16_000_000L
         const val PAUSED_FRAME_RETRY_MS = 8L
         const val AUDIO_MASTER_STALE_NS = 250_000_000L
