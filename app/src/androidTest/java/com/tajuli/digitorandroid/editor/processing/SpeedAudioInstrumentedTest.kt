@@ -56,6 +56,89 @@ class SpeedAudioInstrumentedTest {
         program.release()
     }
 
+    @Test fun playbackWithoutAudioKeepsPresentingAdvancingFrames() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val input = File(context.cacheDir, "preview-playback-input.mp4")
+        CpuAvcEncoder(64, 64, 30, input).use { encoder ->
+            repeat(45) { frame ->
+                val red = (frame * 5).coerceAtMost(255)
+                val color = android.graphics.Color.rgb(red, 80, 220 - red / 2)
+                encoder.encodeFrame(IntArray(64 * 64) { color }, frame * 1_000_000L / 30)
+            }
+            encoder.finish()
+        }
+
+        val clip = TimelineClip(
+            uri = Uri.fromFile(input).toString(),
+            label = "preview playback",
+            timelineStartUs = 0L,
+            sourceInUs = 0L,
+            sourceOutUs = 1_500_000L,
+        )
+        val project = TimelineProject(
+            width = 64,
+            height = 64,
+            frameRate = 30,
+            tracks = listOf(TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(clip))),
+        )
+        val reader = android.media.ImageReader.newInstance(64, 64, android.graphics.PixelFormat.RGBA_8888, 3)
+        val presentedFrames = java.util.concurrent.atomic.AtomicInteger(0)
+        val handlerThread = android.os.HandlerThread("PreviewPlaybackTest").apply { start() }
+        reader.setOnImageAvailableListener({ source ->
+            source.acquireLatestImage()?.use { presentedFrames.incrementAndGet() }
+        }, android.os.Handler(handlerThread.looper))
+        val preview = com.tajuli.digitorandroid.editor.preview.DavinciFramePreviewEngine(context)
+        try {
+            preview.attachSurface(reader.surface)
+            // Match the editor's common state: a paused seek has already painted a frame before
+            // the user taps Play. This separates a broken initial surface/session from a playback
+            // pump that fails to advance the already-visible preview.
+            preview.submit(project, 0L, false)
+            val pausedFrameReady = kotlinx.coroutines.withTimeoutOrNull(30_000L) {
+                while (preview.frame.value == null || presentedFrames.get() == 0) {
+                    kotlinx.coroutines.delay(10L)
+                }
+                true
+            }
+            assertTrue(
+                "Paused frame did not reach the viewer (frame=${preview.frame.value}, " +
+                    "surfaceFrames=${presentedFrames.get()})",
+                pausedFrameReady == true,
+            )
+            val pausedPtsUs = preview.frame.value!!.timelineUs
+            val pausedSurfaceFrames = presentedFrames.get()
+
+            preview.submit(project, 0L, true)
+            val playbackPtsAdvanced = kotlinx.coroutines.withTimeoutOrNull(30_000L) {
+                while ((preview.frame.value?.timelineUs ?: pausedPtsUs) < 300_000L) {
+                    kotlinx.coroutines.delay(10L)
+                }
+                true
+            }
+            assertTrue(
+                "Preview PTS did not advance during playback (paused=$pausedPtsUs, " +
+                    "playing=${preview.frame.value?.timelineUs}, surfaceFrames=${presentedFrames.get()})",
+                playbackPtsAdvanced == true,
+            )
+            val playbackFramesPresented = kotlinx.coroutines.withTimeoutOrNull(15_000L) {
+                while (presentedFrames.get() < pausedSurfaceFrames + 5) {
+                    kotlinx.coroutines.delay(10L)
+                }
+                true
+            }
+            assertTrue(
+                "Viewer Surface did not receive new playback frames " +
+                    "(paused=$pausedSurfaceFrames, playing=${presentedFrames.get()})",
+                playbackFramesPresented == true,
+            )
+        } finally {
+            preview.close()
+            reader.close()
+            handlerThread.quitSafely()
+            input.delete()
+        }
+    }
+
     private fun verifyActivePreviewExport(speed: Float) = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val input = File(context.cacheDir, "active-preview-input.mp4")

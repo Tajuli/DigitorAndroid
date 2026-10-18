@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
+import android.view.Choreographer
 import android.view.Surface
 import androidx.media3.common.ColorInfo
 import androidx.media3.common.Format
@@ -69,6 +70,7 @@ class DavinciFramePreviewEngine(
         val project: TimelineProject,
         val timelineUs: Long,
         val isPlaying: Boolean,
+        val forceSeek: Boolean = false,
         val revision: Long,
         val startedNs: Long = System.nanoTime(),
     )
@@ -131,6 +133,8 @@ class DavinciFramePreviewEngine(
     private val mutableFrame = MutableStateFlow<Frame?>(null)
     private val resumeProject = AtomicReference<TimelineProject?>(null)
     private val resumeTimelineUs = AtomicLong(0L)
+    private val audioMasterTimelineUs = AtomicLong(Long.MIN_VALUE)
+    private val audioMasterRealtimeNs = AtomicLong(0L)
 
     private val legacyLastSubmitNs = AtomicLong(0L)
     private val legacyLastTimelineUs = AtomicLong(Long.MIN_VALUE)
@@ -140,6 +144,7 @@ class DavinciFramePreviewEngine(
     private val renderThread = HandlerThread("DigitorMediaCodecPreview").apply { start() }
     private val handler = Handler(renderThread.looper)
     private val renderExecutor = Executor { runnable -> handler.post(runnable) }
+    private var playbackChoreographer: Choreographer? = null
 
     private var previewSurface: Surface? = null
     private var session: PreviewSession? = null
@@ -150,10 +155,13 @@ class DavinciFramePreviewEngine(
     private var lastRequestedTimelineUs = Long.MIN_VALUE
     private var lastProjectRef: TimelineProject? = null
     private var latestRequestStartedNs = 0L
+    private val frameScheduler = PreviewFrameScheduler()
+    private var lastTopologyCheckNs = 0L
 
     val frame: StateFlow<Frame?> = mutableFrame.asStateFlow()
 
     init {
+        handler.post { playbackChoreographer = Choreographer.getInstance() }
         PreviewExportCoordinator.register(this)
     }
 
@@ -173,20 +181,47 @@ class DavinciFramePreviewEngine(
         }
     }
 
-    private val playbackPump = object : Runnable {
+    private val playbackPump: Runnable = object : Runnable {
         override fun run() {
             if (closed.get() || exportSuspended.get() || !playing) return
             val active = session ?: return
             runCatching {
-                active.pumpPlayback(currentPlaybackTimelineUs())
+                val timelineUs = currentPlaybackTimelineUs()
+                val project = lastProjectRef
+                val nowNs = System.nanoTime()
+                if (project != null && nowNs - lastTopologyCheckNs >= TOPOLOGY_CHECK_INTERVAL_NS) {
+                    lastTopologyCheckNs = nowNs
+                    val wantedLayers = activeLayerSpecsAt(project, timelineUs)
+                    if (sessionKey(project, wantedLayers) != active.key && wantedLayers.isNotEmpty()) {
+                        handleRequest(Request(
+                            project = project,
+                            timelineUs = timelineUs,
+                            isPlaying = true,
+                            revision = revision.incrementAndGet(),
+                        ))
+                        return
+                    }
+                }
+                active.pumpPlayback(timelineUs, frameScheduler)
             }.onFailure {
                 failPreview("playback", it)
                 return
             }
             if (playing && !closed.get() && !exportSuspended.get()) {
-                handler.postDelayed(this, PLAYBACK_PUMP_MS)
+                val choreographer = playbackChoreographer
+                if (choreographer != null) {
+                    choreographer.postFrameCallback(playbackFrameCallback)
+                } else {
+                    // Choreographer initialization is queued first on the render Looper. Keep a
+                    // bounded fallback for unusual platform failures so playback cannot stall.
+                    handler.postDelayed(this, PLAYBACK_PUMP_FALLBACK_MS)
+                }
             }
         }
+    }
+
+    private val playbackFrameCallback: Choreographer.FrameCallback = Choreographer.FrameCallback {
+        playbackPump.run()
     }
 
     private val legacyPauseWatchdog = object : Runnable {
@@ -216,6 +251,13 @@ class DavinciFramePreviewEngine(
             session?.core?.setOutputSurface(previewSurface)
             session?.retryPausedSubmission()
         }
+    }
+
+    /** Supplies a sampled audio clock without submitting a new seek or restarting the decode pump. */
+    fun updateAudioMasterPosition(timelineUs: Long) {
+        if (closed.get() || !playing) return
+        audioMasterTimelineUs.set(timelineUs.coerceAtLeast(0L))
+        audioMasterRealtimeNs.set(System.nanoTime())
     }
 
     fun detachSurface(surface: Surface) {
@@ -338,7 +380,7 @@ class DavinciFramePreviewEngine(
         }
     }
 
-    fun submit(project: TimelineProject, timelineUs: Long, isPlaying: Boolean) {
+    fun submit(project: TimelineProject, timelineUs: Long, isPlaying: Boolean, forceSeek: Boolean = false) {
         if (closed.get()) return
         val safeTimelineUs = timelineUs.coerceIn(0L, project.durationUs.coerceAtLeast(0L))
         PreviewProjectRegistry.update(project)
@@ -350,6 +392,7 @@ class DavinciFramePreviewEngine(
             project = project,
             timelineUs = safeTimelineUs,
             isPlaying = isPlaying,
+            forceSeek = forceSeek,
             revision = revision.incrementAndGet(),
         )
         pendingRequest.set(request)
@@ -407,22 +450,21 @@ class DavinciFramePreviewEngine(
 
         if (request.isPlaying) {
             val wasPlaying = playing
-            val transportDriftUs = if (wasPlaying) {
-                abs(currentPlaybackTimelineUs() - request.timelineUs)
-            } else {
-                Long.MAX_VALUE
+            val restartTransport = !wasPlaying || request.forceSeek
+            if (restartTransport) {
+                playAnchorTimelineUs = request.timelineUs
+                playAnchorNs = System.nanoTime()
+                frameScheduler.reset(request.timelineUs, playAnchorNs)
             }
-
-            playAnchorTimelineUs = request.timelineUs
-            playAnchorNs = System.nanoTime()
-
-            if (!wasPlaying || sessionChanged || transportDriftUs > HARD_RESYNC_US) {
+            if (restartTransport || sessionChanged) {
                 throwIfExternalSuspendRequested()
                 active.resetForPlayback(request.timelineUs)
             }
             playing = true
-            handler.removeCallbacks(playbackPump)
-            handler.post(playbackPump)
+            if (!wasPlaying || request.forceSeek || sessionChanged) {
+                cancelPlaybackPump()
+                handler.post(playbackPump)
+            }
         } else {
             val wasPlaying = playing
             stopPlayback()
@@ -450,13 +492,25 @@ class DavinciFramePreviewEngine(
     }
 
     private fun currentPlaybackTimelineUs(): Long {
+        val audioSampleNs = audioMasterRealtimeNs.get()
+        if (playing && audioSampleNs != 0L) {
+            val ageNs = System.nanoTime() - audioSampleNs
+            if (ageNs in 0L..AUDIO_MASTER_STALE_NS) {
+                return audioMasterTimelineUs.get() + ageNs / 1_000L
+            }
+        }
         if (playAnchorNs == 0L) return playAnchorTimelineUs
         return playAnchorTimelineUs + (System.nanoTime() - playAnchorNs) / 1_000L
     }
 
     private fun stopPlayback() {
         playing = false
+        cancelPlaybackPump()
+    }
+
+    private fun cancelPlaybackPump() {
         handler.removeCallbacks(playbackPump)
+        playbackChoreographer?.removeFrameCallback(playbackFrameCallback)
     }
 
     private fun buildSession(
@@ -695,9 +749,9 @@ class DavinciFramePreviewEngine(
             smoothSources.forEach { it.reset(timelineUs, playing = true) }
         }
 
-        fun pumpPlayback(timelineUs: Long) {
+        fun pumpPlayback(timelineUs: Long, scheduler: PreviewFrameScheduler) {
             sources.forEach { source -> source.feedInput(MAX_INPUT_PER_PUMP) }
-            sources.forEach { source -> source.drainPlayback(timelineUs, core) }
+            sources.forEach { source -> source.drainPlayback(timelineUs, core, scheduler) }
             smoothSources.forEach { it.pump(timelineUs, core) }
         }
 
@@ -873,13 +927,23 @@ class DavinciFramePreviewEngine(
             return didWork
         }
 
-        fun drainPlayback(timelineUs: Long, core: DigitorRenderCore) {
+        fun drainPlayback(timelineUs: Long, core: DigitorRenderCore, scheduler: PreviewFrameScheduler) {
             heldPlaybackOutput?.let { held ->
                 val heldTimelineUs = sourceToTimelineUs(clip, held.presentationTimeUs)
-                if (heldTimelineUs <= timelineUs + PLAYBACK_LEAD_US &&
+                if (heldTimelineUs <= timelineUs &&
+                    scheduler.isTooLate(heldTimelineUs, System.nanoTime())
+                ) {
+                    codec.releaseOutputBuffer(held.index, false)
+                    heldPlaybackOutput = null
+                } else if (heldTimelineUs <= timelineUs &&
                     core.pendingInputFrames(inputIndex) < MAX_GRAPH_PENDING_FRAMES &&
                     core.registerInputFrame(inputIndex)
                 ) {
+                    // Keep the decoder's media PTS on the Media3 input Surface. The timestamp
+                    // overload replaces that PTS with a monotonic clock value; Media3 then treats
+                    // the clock value as composition time and its graph can stop producing frames.
+                    // We schedule by deciding when to release, while Surface presentation uses
+                    // the original decoder PTS.
                     codec.releaseOutputBuffer(held.index, true)
                     heldPlaybackOutput = null
                 } else {
@@ -912,7 +976,12 @@ class DavinciFramePreviewEngine(
                         }
 
                         val outputTimelineUs = sourceToTimelineUs(clip, sourceUs)
-                        if (outputTimelineUs > timelineUs + PLAYBACK_LEAD_US ||
+                        if (scheduler.isTooLate(outputTimelineUs, System.nanoTime())) {
+                            codec.releaseOutputBuffer(outputIndex, false)
+                            if (isEos) outputEos = true
+                            continue
+                        }
+                        if (outputTimelineUs > timelineUs ||
                             core.pendingInputFrames(inputIndex) >= MAX_GRAPH_PENDING_FRAMES ||
                             !core.registerInputFrame(inputIndex)
                         ) {
@@ -920,6 +989,8 @@ class DavinciFramePreviewEngine(
                             return
                         }
 
+                        // Preserve the frame's original media PTS for Media3's graph. Scheduling is
+                        // handled above by withholding output until its timeline deadline.
                         codec.releaseOutputBuffer(outputIndex, true)
                         playbackFloorSourceUs = Long.MIN_VALUE
                         if (isEos) outputEos = true
@@ -996,10 +1067,10 @@ class DavinciFramePreviewEngine(
 
     private companion object {
         const val TAG = "DigitorSharedPreview"
-        const val PLAYBACK_PUMP_MS = 4L
+        const val PLAYBACK_PUMP_FALLBACK_MS = 16L
+        const val TOPOLOGY_CHECK_INTERVAL_NS = 16_000_000L
         const val PAUSED_FRAME_RETRY_MS = 8L
-        const val PLAYBACK_LEAD_US = 120_000L
-        const val HARD_RESYNC_US = 500_000L
+        const val AUDIO_MASTER_STALE_NS = 250_000_000L
         const val MAX_GRAPH_PENDING_FRAMES = 4
         const val MAX_INPUT_PER_PUMP = 8
         const val MAX_OUTPUT_PER_PUMP = 12

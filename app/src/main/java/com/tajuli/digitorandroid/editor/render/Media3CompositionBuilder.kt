@@ -73,6 +73,31 @@ internal fun resolvePreviewOutputSize(
     return width to height
 }
 
+/**
+ * Scales each compositor input by the same factor as the virtual project canvas. This lets the
+ * realtime compositor blend at preview resolution without changing normalized clip placement,
+ * zoom, rotation, or crop. Source effects run before this final downscale.
+ */
+internal fun resolvePreviewInputSize(
+    sourceWidth: Int,
+    sourceHeight: Int,
+    projectWidth: Int,
+    projectHeight: Int,
+    previewWidth: Int,
+    previewHeight: Int,
+): Pair<Int, Int> {
+    val safeProjectWidth = projectWidth.coerceAtLeast(2)
+    val safeProjectHeight = projectHeight.coerceAtLeast(2)
+    val scale = minOf(
+        previewWidth.coerceAtLeast(2).toFloat() / safeProjectWidth,
+        previewHeight.coerceAtLeast(2).toFloat() / safeProjectHeight,
+        1f,
+    )
+    val width = (sourceWidth.coerceAtLeast(2) * scale).roundToInt().evenAtLeastTwo()
+    val height = (sourceHeight.coerceAtLeast(2) * scale).roundToInt().evenAtLeastTwo()
+    return width to height
+}
+
 private fun Int.evenAtLeastTwo(): Int {
     val safe = coerceAtLeast(2)
     return if (safe % 2 == 0) safe else (safe - 1).coerceAtLeast(2)
