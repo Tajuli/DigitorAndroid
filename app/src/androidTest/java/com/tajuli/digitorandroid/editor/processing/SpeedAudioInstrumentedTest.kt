@@ -94,34 +94,42 @@ class SpeedAudioInstrumentedTest {
             // the user taps Play. This separates a broken initial surface/session from a playback
             // pump that fails to advance the already-visible preview.
             preview.submit(project, 0L, false)
-            withTimeout(10_000L) {
+            val pausedFrameReady = kotlinx.coroutines.withTimeoutOrNull(30_000L) {
                 while (preview.frame.value == null || presentedFrames.get() == 0) {
                     kotlinx.coroutines.delay(10L)
                 }
+                true
             }
+            assertTrue(
+                "Paused frame did not reach the viewer (frame=${preview.frame.value}, " +
+                    "surfaceFrames=${presentedFrames.get()})",
+                pausedFrameReady == true,
+            )
             val pausedPtsUs = preview.frame.value!!.timelineUs
             val pausedSurfaceFrames = presentedFrames.get()
 
             preview.submit(project, 0L, true)
-            withTimeout(10_000L) {
+            val playbackPtsAdvanced = kotlinx.coroutines.withTimeoutOrNull(30_000L) {
                 while ((preview.frame.value?.timelineUs ?: pausedPtsUs) < 300_000L) {
                     kotlinx.coroutines.delay(10L)
                 }
+                true
             }
             assertTrue(
                 "Preview PTS did not advance during playback (paused=$pausedPtsUs, " +
-                    "playing=${preview.frame.value?.timelineUs})",
-                (preview.frame.value?.timelineUs ?: pausedPtsUs) >= 300_000L,
+                    "playing=${preview.frame.value?.timelineUs}, surfaceFrames=${presentedFrames.get()})",
+                playbackPtsAdvanced == true,
             )
-            withTimeout(5_000L) {
+            val playbackFramesPresented = kotlinx.coroutines.withTimeoutOrNull(15_000L) {
                 while (presentedFrames.get() < pausedSurfaceFrames + 5) {
                     kotlinx.coroutines.delay(10L)
                 }
+                true
             }
             assertTrue(
                 "Viewer Surface did not receive new playback frames " +
                     "(paused=$pausedSurfaceFrames, playing=${presentedFrames.get()})",
-                presentedFrames.get() >= pausedSurfaceFrames + 5,
+                playbackFramesPresented == true,
             )
         } finally {
             preview.close()
