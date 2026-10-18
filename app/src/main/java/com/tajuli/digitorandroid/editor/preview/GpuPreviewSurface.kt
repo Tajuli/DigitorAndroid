@@ -27,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,12 +52,17 @@ import kotlin.math.abs
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 
 /** Direct display surface for the editor GPU preview. */
 @Composable
 fun GpuPreviewSurface(
     engine: DavinciFramePreviewEngine,
+    isPlaying: Boolean = false,
+    onSoftwareFallbackChanged: (Boolean) -> Unit = {},
     qualifierPickerActive: Boolean = false,
     onQualifierColorSample: ((Float, Float, Float) -> Unit)? = null,
     modifier: Modifier = Modifier,
@@ -146,48 +152,63 @@ fun GpuPreviewSurface(
     } else {
         0L
     }
+    val fallbackRenderLongEdge = if (isPlaying) SOFTWARE_PLAYBACK_PREVIEW_LONG_EDGE else SOFTWARE_PREVIEW_LONG_EDGE
     val fallbackBitmap by produceState<Bitmap?>(
         initialValue = null,
         softwareFallbackActive,
         exportActive,
         project,
         fallbackClip?.id,
-        fallbackLocalUs,
         fallbackClip?.nodeGraph,
         fallbackClip?.colorGrade,
         fallbackClip?.nodeAnimations?.revision,
+        isPlaying,
     ) {
         val clip = fallbackClip
         if (exportActive || !softwareFallbackActive || clip == null) {
             value = null
             return@produceState
         }
-        val sourceUs = clip.sourceTimeForOutput(fallbackLocalUs)
-            .coerceIn(clip.sourceInUs, clip.sourceOutUs.coerceAtLeast(clip.sourceInUs))
-
-        if (value == null) {
-            val fastFrame = withContext(Dispatchers.Default) {
-                SoftwarePreviewRenderer.render(
-                    context = context.applicationContext,
-                    clip = clip,
-                    sourceTimeUs = sourceUs,
-                    maxLongEdge = FAST_PLACEHOLDER_LONG_EDGE,
-                    closestSyncOnly = true,
-                )
+        // Keep one decode in flight. Keying produceState on fallbackLocalUs canceled slow native
+        // retriever work every 33 ms during playback, so the fallback only completed after pause.
+        // Conflate targets while a decode runs; after it completes, render the newest playhead.
+        snapshotFlow {
+            if (softwareFallbackActive && !exportActive) {
+                (previewClock.localUs / fallbackFrameStepUs) * fallbackFrameStepUs
+            } else {
+                0L
             }
-            if (fastFrame != null) value = fastFrame
         }
+            .distinctUntilChanged()
+            .conflate()
+            .collect { localUs ->
+                val sourceUs = clip.sourceTimeForOutput(localUs)
+                    .coerceIn(clip.sourceInUs, clip.sourceOutUs.coerceAtLeast(clip.sourceInUs))
 
-        val exactFrame = withContext(Dispatchers.Default) {
-            SoftwarePreviewRenderer.render(
-                context = context.applicationContext,
-                clip = clip,
-                sourceTimeUs = sourceUs,
-                maxLongEdge = SOFTWARE_PREVIEW_LONG_EDGE,
-                closestSyncOnly = false,
-            )
-        }
-        if (exactFrame != null) value = exactFrame
+                if (value == null) {
+                    val fastFrame = withContext(Dispatchers.Default) {
+                        SoftwarePreviewRenderer.render(
+                            context = context.applicationContext,
+                            clip = clip,
+                            sourceTimeUs = sourceUs,
+                            maxLongEdge = FAST_PLACEHOLDER_LONG_EDGE,
+                            closestSyncOnly = true,
+                        )
+                    }
+                    if (fastFrame != null) value = fastFrame
+                }
+
+                val exactFrame = withContext(Dispatchers.Default) {
+                    SoftwarePreviewRenderer.render(
+                        context = context.applicationContext,
+                        clip = clip,
+                        sourceTimeUs = sourceUs,
+                        maxLongEdge = fallbackRenderLongEdge,
+                        closestSyncOnly = false,
+                    )
+                }
+                if (exactFrame != null) value = exactFrame
+            }
     }
 
     DisposableEffect(fallbackBitmap) {
@@ -256,6 +277,10 @@ fun GpuPreviewSurface(
         val softwareFrame = fallbackBitmap
         val showingSoftwareFrame =
             !exportActive && softwareFallbackActive && !gpuFrameFresh && softwareFrame != null && !softwareFrame.isRecycled
+
+        LaunchedEffect(showingSoftwareFrame) {
+            onSoftwareFallbackChanged(showingSoftwareFrame)
+        }
 
         if (showingSoftwareFrame && softwareFrame != null) {
             val transform = fallbackClip?.transform?.evaluate(fallbackLocalUs)
@@ -350,6 +375,7 @@ private const val GPU_FRAME_FRESH_TOLERANCE_US = 180_000L
 private const val STALE_FRAME_FALLBACK_US = 250_000L
 private const val FAST_PLACEHOLDER_LONG_EDGE = 480
 private const val SOFTWARE_PREVIEW_LONG_EDGE = REALTIME_PREVIEW_LONG_EDGE
+private const val SOFTWARE_PLAYBACK_PREVIEW_LONG_EDGE = 360
 private const val PICKER_SAMPLE_RADIUS_PX = 7
 private const val PICKER_RING_RADIUS_DP = 20f
 private val PREVIEW_PASTEBOARD_GRAY = Color(0xFF222226)

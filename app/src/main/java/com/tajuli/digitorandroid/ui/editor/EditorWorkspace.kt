@@ -325,6 +325,19 @@ internal fun EditorWorkspaceScreen(
                 project = state.project,
                 previewEngine = previewEngine,
                 frame = previewFrame,
+                isPlaying = playback.isPlaying,
+                onSoftwareFallbackChanged = { usingFallback ->
+                    if (usingFallback) {
+                        playback.previewStatus = "Preview: software fallback"
+                    } else if (playback.previewStatus == "Preview: software fallback") {
+                        val frame = previewFrame
+                        playback.previewStatus = if (frame == null) {
+                            "Preview: GPU preparing…"
+                        } else {
+                            "GPU ${formatTimelineTime(frame.timelineUs)} · ${frame.activeLayerCount}L"
+                        }
+                    }
+                },
                 hasVideo = hasVideo,
                 activeVideoClip = previewClip,
                 activeLayerCount = activeVideoClips.size,

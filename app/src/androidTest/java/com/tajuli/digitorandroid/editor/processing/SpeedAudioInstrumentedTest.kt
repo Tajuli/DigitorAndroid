@@ -56,6 +56,56 @@ class SpeedAudioInstrumentedTest {
         program.release()
     }
 
+    @Test fun playbackWithoutAudioKeepsPresentingAdvancingFrames() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val input = File(context.cacheDir, "preview-playback-input.mp4")
+        CpuAvcEncoder(64, 64, 30, input).use { encoder ->
+            repeat(45) { frame ->
+                val red = (frame * 5).coerceAtMost(255)
+                val color = android.graphics.Color.rgb(red, 80, 220 - red / 2)
+                encoder.encodeFrame(IntArray(64 * 64) { color }, frame * 1_000_000L / 30)
+            }
+            encoder.finish()
+        }
+
+        val clip = TimelineClip(
+            uri = Uri.fromFile(input).toString(),
+            label = "preview playback",
+            timelineStartUs = 0L,
+            sourceInUs = 0L,
+            sourceOutUs = 1_500_000L,
+        )
+        val project = TimelineProject(
+            width = 64,
+            height = 64,
+            frameRate = 30,
+            tracks = listOf(TimelineTrack(name = "V1", kind = TrackKind.VIDEO, clips = listOf(clip))),
+        )
+        val reader = android.media.ImageReader.newInstance(64, 64, android.graphics.PixelFormat.RGBA_8888, 3)
+        val presentedFrames = java.util.concurrent.atomic.AtomicInteger(0)
+        val handlerThread = android.os.HandlerThread("PreviewPlaybackTest").apply { start() }
+        reader.setOnImageAvailableListener({ source ->
+            source.acquireLatestImage()?.use { presentedFrames.incrementAndGet() }
+        }, android.os.Handler(handlerThread.looper))
+        val preview = com.tajuli.digitorandroid.editor.preview.DavinciFramePreviewEngine(context)
+        try {
+            preview.attachSurface(reader.surface)
+            preview.submit(project, 0L, true)
+            withTimeout(10_000L) {
+                while ((preview.frame.value?.timelineUs ?: 0L) < 300_000L || presentedFrames.get() < 5) {
+                    kotlinx.coroutines.delay(10L)
+                }
+            }
+            assertTrue("Preview frame PTS must advance while transport is playing", preview.frame.value!!.timelineUs >= 300_000L)
+            assertTrue("Viewer Surface must receive multiple frames during playback", presentedFrames.get() >= 5)
+        } finally {
+            preview.close()
+            reader.close()
+            handlerThread.quitSafely()
+            input.delete()
+        }
+    }
+
     private fun verifyActivePreviewExport(speed: Float) = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val input = File(context.cacheDir, "active-preview-input.mp4")

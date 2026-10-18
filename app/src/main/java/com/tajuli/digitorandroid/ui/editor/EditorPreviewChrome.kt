@@ -141,6 +141,8 @@ internal fun EditorFramePreview(
     project: TimelineProject,
     previewEngine: DavinciFramePreviewEngine,
     frame: DavinciFramePreviewEngine.Frame?,
+    isPlaying: Boolean,
+    onSoftwareFallbackChanged: (Boolean) -> Unit,
     hasVideo: Boolean,
     activeVideoClip: TimelineClip?,
     activeLayerCount: Int,
@@ -157,6 +159,8 @@ internal fun EditorFramePreview(
         if (hasVideo) {
             GpuPreviewSurface(
                 engine = previewEngine,
+                isPlaying = isPlaying,
+                onSoftwareFallbackChanged = onSoftwareFallbackChanged,
                 qualifierPickerActive = qualifierPickerActive && activeVideoClip != null,
                 onQualifierColorSample = onPickColor,
                 modifier = Modifier.fillMaxSize(),
@@ -164,8 +168,6 @@ internal fun EditorFramePreview(
             val fallbackBitmap = frame?.bitmap
             if (fallbackBitmap != null && !fallbackBitmap.isRecycled) {
                 Image(bitmap = fallbackBitmap.asImageBitmap(), contentDescription = "CPU fallback preview", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-            } else if (frame == null) {
-                Text("Preparing GPU preview…", color = Color.White.copy(alpha = .55f), fontSize = 11.sp)
             }
             if (activeVideoClip == null) {
                 Text("No video at cursor · overlays/audio can continue", color = Color.White.copy(alpha = .55f), fontSize = 11.sp, modifier = Modifier.background(Color.Black.copy(alpha = .62f), RoundedCornerShape(5.dp)).padding(horizontal = 9.dp, vertical = 6.dp))
