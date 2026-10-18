@@ -911,16 +911,21 @@ class DavinciFramePreviewEngine(
         fun drainPlayback(timelineUs: Long, core: DigitorRenderCore, scheduler: PreviewFrameScheduler) {
             heldPlaybackOutput?.let { held ->
                 val heldTimelineUs = sourceToTimelineUs(clip, held.presentationTimeUs)
-                if (heldTimelineUs <= timelineUs + PLAYBACK_LEAD_US &&
+                if (heldTimelineUs <= timelineUs &&
                     scheduler.isTooLate(heldTimelineUs, System.nanoTime())
                 ) {
                     codec.releaseOutputBuffer(held.index, false)
                     heldPlaybackOutput = null
-                } else if (heldTimelineUs <= timelineUs + PLAYBACK_LEAD_US &&
+                } else if (heldTimelineUs <= timelineUs &&
                     core.pendingInputFrames(inputIndex) < MAX_GRAPH_PENDING_FRAMES &&
                     core.registerInputFrame(inputIndex)
                 ) {
-                    codec.releaseOutputBuffer(held.index, scheduler.presentationTimeNs(heldTimelineUs))
+                    // Keep the decoder's media PTS on the Media3 input Surface. The timestamp
+                    // overload replaces that PTS with a monotonic clock value; Media3 then treats
+                    // the clock value as composition time and its graph can stop producing frames.
+                    // We schedule by deciding when to release, while Surface presentation uses
+                    // the original decoder PTS.
+                    codec.releaseOutputBuffer(held.index, true)
                     heldPlaybackOutput = null
                 } else {
                     return
@@ -957,7 +962,7 @@ class DavinciFramePreviewEngine(
                             if (isEos) outputEos = true
                             continue
                         }
-                        if (outputTimelineUs > timelineUs + PLAYBACK_LEAD_US ||
+                        if (outputTimelineUs > timelineUs ||
                             core.pendingInputFrames(inputIndex) >= MAX_GRAPH_PENDING_FRAMES ||
                             !core.registerInputFrame(inputIndex)
                         ) {
@@ -965,7 +970,9 @@ class DavinciFramePreviewEngine(
                             return
                         }
 
-                        codec.releaseOutputBuffer(outputIndex, scheduler.presentationTimeNs(outputTimelineUs))
+                        // Preserve the frame's original media PTS for Media3's graph. Scheduling is
+                        // handled above by withholding output until its timeline deadline.
+                        codec.releaseOutputBuffer(outputIndex, true)
                         playbackFloorSourceUs = Long.MIN_VALUE
                         if (isEos) outputEos = true
                     }
@@ -1044,7 +1051,6 @@ class DavinciFramePreviewEngine(
         const val PLAYBACK_PUMP_MS = 8L
         const val TOPOLOGY_CHECK_INTERVAL_NS = 16_000_000L
         const val PAUSED_FRAME_RETRY_MS = 8L
-        const val PLAYBACK_LEAD_US = 120_000L
         const val AUDIO_MASTER_STALE_NS = 250_000_000L
         const val MAX_GRAPH_PENDING_FRAMES = 4
         const val MAX_INPUT_PER_PUMP = 8
